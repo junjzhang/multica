@@ -100,6 +100,9 @@ func (c *Client) postDaemonMailboxJSON(ctx context.Context, workspaceID, path st
 	if workspaceID != "" {
 		headers.Set("X-Workspace-ID", workspaceID)
 	}
+	if c.mailboxDaemonID != "" {
+		headers.Set("X-Multica-Daemon-ID", c.mailboxDaemonID)
+	}
 	return c.postJSONWithHeaders(ctx, path, headers, reqBody, respBody)
 }
 

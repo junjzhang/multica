@@ -457,6 +457,7 @@ func mailboxAckIsPermanent(err error) bool {
 
 // runMailboxDelivery starts the delivery loop as part of the daemon lifecycle.
 func (d *Daemon) runMailboxDelivery(ctx context.Context) {
+	d.client.mailboxDaemonID = d.cfg.DaemonID
 	loop := newMailboxDeliveryLoop(d.client, newPaseoCliTransport(), d.allWorkspaceIDs, d.cfg.DaemonID, d.logger)
 	if err := loop.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		d.logger.Warn("mailbox delivery loop stopped", "error", err)

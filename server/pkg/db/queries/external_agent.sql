@@ -69,6 +69,12 @@ SELECT EXISTS (
     SELECT 1 FROM agent_runtime WHERE workspace_id = $1 AND daemon_id = $2
 ) AS exists;
 
+-- name: WorkspaceDaemonOwnedByUser :one
+SELECT EXISTS (
+    SELECT 1 FROM agent_runtime
+    WHERE workspace_id = @workspace_id AND daemon_id = @daemon_id AND owner_id = @owner_user_id
+) AS exists;
+
 -- name: CreateExternalAgentToken :one
 INSERT INTO external_agent_token (
     id, agent_id, workspace_id, owner_user_id, token_hash, expires_at

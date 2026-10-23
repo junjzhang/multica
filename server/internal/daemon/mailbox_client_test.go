@@ -20,6 +20,9 @@ func TestClaimMailboxUsesDaemonEndpointAndDecodesLease(t *testing.T) {
 		if r.Header.Get("X-Workspace-ID") != "ws-1" {
 			t.Errorf("workspace header = %q", r.Header.Get("X-Workspace-ID"))
 		}
+		if r.Header.Get("X-Multica-Daemon-ID") != "daemon-1" {
+			t.Error("mailbox claim lost the daemon selector")
+		}
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatal(err)
 		}
@@ -36,6 +39,7 @@ func TestClaimMailboxUsesDaemonEndpointAndDecodesLease(t *testing.T) {
 	defer srv.Close()
 	client := NewClient(srv.URL)
 	client.SetToken("daemon-token")
+	client.mailboxDaemonID = "daemon-1"
 
 	claims, err := client.ClaimMailbox(context.Background(), "ws-1", 7)
 	if err != nil {
@@ -64,6 +68,9 @@ func TestAckMailboxUsesLeaseTokenAndClassifiesConflict(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/daemon/mailbox/msg-1/ack" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
+		if r.Header.Get("X-Multica-Daemon-ID") != "daemon-1" {
+			t.Error("mailbox ack lost the daemon selector")
+		}
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
@@ -77,6 +84,7 @@ func TestAckMailboxUsesLeaseTokenAndClassifiesConflict(t *testing.T) {
 	defer srv.Close()
 	client := NewClient(srv.URL)
 	client.SetToken("daemon-token")
+	client.mailboxDaemonID = "daemon-1"
 
 	message, err := client.AckMailbox(context.Background(), "ws-1", "msg-1", MailboxAckRequest{
 		DeliveryToken: "lease-1",

@@ -54,7 +54,7 @@ WHERE m.workspace_id = @workspace_id
   AND a.execution_kind = 'external'
   AND a.archived_at IS NULL
   AND s.owner_user_id = @owner_user_id
-  AND (@daemon_id::text = '' OR s.daemon_id = @daemon_id)
+  AND s.daemon_id = @daemon_id
   AND (
     (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
     OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
@@ -94,7 +94,7 @@ WHERE id = @id
   AND delivery_status = 'leased'
   AND lease_token_hash = @lease_token_hash
   AND lease_expires_at > now()
-  AND (@daemon_id::text = '' OR lease_owner = @daemon_id)
+  AND lease_owner = @daemon_id
 RETURNING *;
 
 -- name: AckAgentMailboxProcessing :one

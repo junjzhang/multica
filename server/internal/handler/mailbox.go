@@ -248,9 +248,8 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 }
 
 // daemonMailboxContext resolves the verified daemon identity for claim/ack.
-// mdt_ requests carry workspace, daemon and owner in the auth context. PAT/JWT
-// daemons carry only the human, so the workspace comes from the request
-// selector and messages are narrowed to sessions that human registered.
+// Device tokens carry the daemon identity. User credentials require a selector
+// whose ownership is checked in the selected workspace.
 func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (workspaceID string, wsUUID pgtype.UUID, daemonID string, ownerID string, ok bool) {
 	if r.Header.Get("X-Actor-Source") == "external_agent" || strings.HasPrefix(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), auth.ExternalAgentTokenPrefix) {
 		writeError(w, http.StatusForbidden, "external agent credentials cannot use daemon mailbox endpoints")
@@ -284,6 +283,29 @@ func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (
 	}); err != nil {
 		writeError(w, http.StatusForbidden, "daemon owner is not a member of this workspace")
 		return "", pgtype.UUID{}, "", "", false
+	}
+	selector := strings.TrimSpace(r.Header.Get("X-Multica-Daemon-ID"))
+	if daemonID != "" && selector != "" && selector != daemonID {
+		writeError(w, http.StatusForbidden, "daemon selector does not match the credential")
+		return "", pgtype.UUID{}, "", "", false
+	}
+	if daemonID == "" {
+		if selector == "" {
+			writeError(w, http.StatusBadRequest, "X-Multica-Daemon-ID is required with user credentials")
+			return "", pgtype.UUID{}, "", "", false
+		}
+		owned, err := h.Queries.WorkspaceDaemonOwnedByUser(r.Context(), db.WorkspaceDaemonOwnedByUserParams{
+			WorkspaceID: wsUUID, DaemonID: pgtype.Text{String: selector, Valid: true}, OwnerUserID: parseUUID(ownerID),
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to verify daemon ownership")
+			return "", pgtype.UUID{}, "", "", false
+		}
+		if !owned {
+			writeError(w, http.StatusForbidden, "daemon is not owned by this user in this workspace")
+			return "", pgtype.UUID{}, "", "", false
+		}
+		daemonID = selector
 	}
 	return workspaceID, wsUUID, daemonID, ownerID, true
 }
@@ -348,7 +370,7 @@ func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 		leased, err := qtx.LeaseMailboxMessage(r.Context(), db.LeaseMailboxMessageParams{
 			ID:             id,
 			LeaseTokenHash: pgtype.Text{String: auth.HashToken(token), Valid: true},
-			LeaseOwner:     pgtype.Text{String: leaseOwnerValue(daemonID, ownerID), Valid: true},
+			LeaseOwner:     pgtype.Text{String: daemonID, Valid: true},
 			LeaseExpiresAt: pgtype.Timestamptz{Time: leaseExpires, Valid: true},
 		})
 		if err != nil {
@@ -383,13 +405,6 @@ func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
-}
-
-func leaseOwnerValue(daemonID, ownerID string) string {
-	if daemonID != "" {
-		return daemonID
-	}
-	return "owner:" + ownerID
 }
 
 func generateMailboxDeliveryToken() (string, error) {
@@ -487,9 +502,7 @@ func (h *Handler) AckDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 	if req.Status == "retry" {
 		nextAttempt = pgtype.Timestamptz{Time: retryBackoff(message.Attempts), Valid: true}
 	}
-	// A user-credential daemon (PAT/JWT) has no stable daemon id; the delivery
-	// token still fences the lease. An mdt_ daemon must also match the lease
-	// owner recorded at claim time.
+	// Both device credentials and owner-verified selectors fence the lease.
 	updated, err := h.Queries.AckAgentMailboxDelivery(r.Context(), db.AckAgentMailboxDeliveryParams{
 		ID:             messageID,
 		WorkspaceID:    wsUUID,
@@ -498,7 +511,7 @@ func (h *Handler) AckDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 		LastError:      pgtype.Text{String: sanitizeMailboxDiagnostic(req.Error), Valid: req.Error != ""},
 		NextAttemptAt:  nextAttempt,
 		LeaseTokenHash: pgtype.Text{String: auth.HashToken(req.DeliveryToken), Valid: true},
-		DaemonID:       daemonID,
+		DaemonID:       pgtype.Text{String: daemonID, Valid: true},
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

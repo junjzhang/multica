@@ -474,6 +474,56 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	}
 }
 
+func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	first, _, owner := externalAgentFixture(t, "First host recipient", "daemon-first")
+	second, _, _ := externalAgentFixture(t, "Second host recipient", "daemon-second")
+	dbfx.Exec(t, `UPDATE agent SET owner_id=$1 WHERE id=$2`, owner, second)
+	dbfx.Exec(t, `UPDATE external_agent_session SET owner_user_id=$1 WHERE agent_id=$2`, owner, second)
+	dbfx.Runtime(t, "First delivery daemon", testutil.Cols{"daemon_id": "daemon-first", "owner_id": owner})
+	dbfx.Runtime(t, "Second delivery daemon", testutil.Cols{"daemon_id": "daemon-second", "owner_id": owner})
+	dbfx.Runtime(t, "Foreign delivery daemon", testutil.Cols{"daemon_id": "daemon-foreign"})
+	issue := dbfx.Issue(t, "daemon selection")
+	for _, recipient := range []string{first, second} {
+		comment := dbfx.Comment(t, issue, "request")
+		dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{
+			"workspace_id": testWorkspaceID, "issue_id": issue, "comment_id": comment,
+			"recipient_agent_id": recipient, "sender_type": "member", "sender_id": testUserID,
+		})
+	}
+	claim := func(selector string) *httptest.ResponseRecorder {
+		r := newRequest(http.MethodPost, "/api/daemon/mailbox/claim", map[string]any{"limit": 10})
+		r.Header.Set("X-User-ID", owner)
+		r.Header.Set("X-Multica-Daemon-ID", selector)
+		w := httptest.NewRecorder()
+		testHandler.ClaimDaemonMailbox(w, r)
+		return w
+	}
+	if w := claim(""); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing daemon selector must not claim every host: %d %s", w.Code, w.Body.String())
+	}
+	if w := claim("daemon-foreign"); w.Code != http.StatusForbidden {
+		t.Fatalf("unowned daemon selector: %d %s", w.Code, w.Body.String())
+	}
+	for _, tc := range []struct{ daemon, recipient string }{{"daemon-first", first}, {"daemon-second", second}} {
+		w := claim(tc.daemon)
+		if w.Code != http.StatusOK {
+			t.Fatalf("claim %s: %d %s", tc.daemon, w.Code, w.Body.String())
+		}
+		var result struct {
+			Messages []daemonMailboxClaimItem `json:"messages"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Messages) != 1 || result.Messages[0].Message.RecipientAgentID != tc.recipient {
+			t.Fatalf("claim crossed daemon binding: %+v", result.Messages)
+		}
+	}
+}
+
 // TestMailboxProcessingAckIsMonotonic pins unread -> read -> handled and the
 // rule that read can never undo handled.
 func TestMailboxProcessingAckIsMonotonic(t *testing.T) {

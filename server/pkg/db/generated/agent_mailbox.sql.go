@@ -27,7 +27,7 @@ WHERE id = $5
   AND delivery_status = 'leased'
   AND lease_token_hash = $7
   AND lease_expires_at > now()
-  AND ($8::text = '' OR lease_owner = $8)
+  AND lease_owner = $8
 RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at
 `
 
@@ -39,7 +39,7 @@ type AckAgentMailboxDeliveryParams struct {
 	ID             pgtype.UUID        `json:"id"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
 	LeaseTokenHash pgtype.Text        `json:"lease_token_hash"`
-	DaemonID       string             `json:"daemon_id"`
+	DaemonID       pgtype.Text        `json:"daemon_id"`
 }
 
 // The token and daemon fence this ack to the exact lease that claimed the
@@ -582,7 +582,7 @@ WHERE m.workspace_id = $1
   AND a.execution_kind = 'external'
   AND a.archived_at IS NULL
   AND s.owner_user_id = $2
-  AND ($3::text = '' OR s.daemon_id = $3)
+  AND s.daemon_id = $3
   AND (
     (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
     OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())

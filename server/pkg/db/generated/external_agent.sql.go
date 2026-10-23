@@ -472,3 +472,23 @@ func (q *Queries) WorkspaceDaemonExists(ctx context.Context, arg WorkspaceDaemon
 	err := row.Scan(&exists)
 	return exists, err
 }
+
+const workspaceDaemonOwnedByUser = `-- name: WorkspaceDaemonOwnedByUser :one
+SELECT EXISTS (
+    SELECT 1 FROM agent_runtime
+    WHERE workspace_id = $1 AND daemon_id = $2 AND owner_id = $3
+) AS exists
+`
+
+type WorkspaceDaemonOwnedByUserParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+	OwnerUserID pgtype.UUID `json:"owner_user_id"`
+}
+
+func (q *Queries) WorkspaceDaemonOwnedByUser(ctx context.Context, arg WorkspaceDaemonOwnedByUserParams) (bool, error) {
+	row := q.db.QueryRow(ctx, workspaceDaemonOwnedByUser, arg.WorkspaceID, arg.DaemonID, arg.OwnerUserID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
