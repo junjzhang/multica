@@ -1617,8 +1617,9 @@ export const IssueSchema = z.object({
         const parsed = AgentSchema.safeParse(item);
         return parsed.success ? [parsed.data] : [];
       }),
-    ),
-  mailbox_deliveries: MailboxMessageListSchema,
+    )
+    .optional(),
+  mailbox_deliveries: MailboxMessageListSchema.optional(),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

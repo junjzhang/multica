@@ -1,3 +1,7 @@
+import { QueryClient } from "@tanstack/react-query";
+import { onIssueUpdated } from "../issues/ws-updaters";
+import { issueKeys } from "../issues/queries";
+import type { Issue } from "../types";
 import { describe, expect, it } from "vitest";
 import {
   AgentListSchema,
@@ -99,12 +103,12 @@ describe("AgentSchema WORK-9 fields", () => {
 });
 
 describe("IssueSchema external collaboration projection", () => {
-  it("defaults additive collaboration fields for an older server", () => {
+  it("preserves omitted collaboration fields for partial snapshots and older servers", () => {
     const parsed = IssueSchema.parse(baseIssue);
     expect(parsed.coordinator).toBeUndefined();
     expect(parsed.merge_authorization).toBeUndefined();
-    expect(parsed.external_participants).toEqual([]);
-    expect(parsed.mailbox_deliveries).toEqual([]);
+    expect(parsed).not.toHaveProperty("external_participants");
+    expect(parsed).not.toHaveProperty("mailbox_deliveries");
   });
 
   it("parses coordinator, external participants and delivery/processing independently", () => {
@@ -244,4 +248,33 @@ describe("dispatch_kind parsing", () => {
       "run",
     ]);
   });
+});
+
+
+it("preserves collaboration detail across partial events and accepts explicit clears", () => {
+  const qc = new QueryClient();
+  const key = issueKeys.detail(baseIssue.workspace_id, baseIssue.id);
+  const detail = IssueSchema.parse({
+    ...baseIssue,
+    coordinator: { type: "agent", id: externalAgent.id },
+    merge_authorization: { allowed: true },
+    external_participants: [externalAgent],
+    mailbox_deliveries: [],
+  });
+  qc.setQueryData(key, detail);
+  onIssueUpdated(qc, baseIssue.workspace_id, IssueSchema.parse({ ...baseIssue, title: "Renamed" }));
+  const after = qc.getQueryData<Issue>(key);
+  expect(after?.title).toBe("Renamed");
+  expect(after?.coordinator).toEqual(detail.coordinator);
+  expect(after?.merge_authorization).toEqual(detail.merge_authorization);
+  expect(after?.external_participants).toEqual(detail.external_participants);
+  onIssueUpdated(qc, baseIssue.workspace_id, IssueSchema.parse({
+    ...baseIssue, coordinator: null, merge_authorization: { allowed: false },
+    external_participants: [], mailbox_deliveries: [],
+  }));
+  const cleared = qc.getQueryData<Issue>(key);
+  expect(cleared?.coordinator).toBeNull();
+  expect(cleared?.merge_authorization?.allowed).toBe(false);
+  expect(cleared?.external_participants).toEqual([]);
+  expect(cleared?.mailbox_deliveries).toEqual([]);
 });

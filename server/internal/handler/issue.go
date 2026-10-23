@@ -107,23 +107,13 @@ type IssueResponse struct {
 	// SourceContext is detail-only. List, board, search, and children responses
 	// deliberately omit the potentially large immutable snapshot.
 	SourceContext *sourceContextDetailResponse `json:"source_context,omitempty"`
-	// Coordinator is the fixed escalation owner for this issue. It is set from
-	// the dispatch actor on create or by an explicit coordinator update, and is
-	// never changed by participant mentions or reassignment. Null when the
-	// issue predates the field and no explicit coordinator was recorded.
-	Coordinator *IssueCoordinatorResponse `json:"coordinator"`
-	// MergeAuthorization records the human-granted merge policy. Absent on an
-	// issue means disallowed; this stores policy only and is not an executor.
-	MergeAuthorization IssueMergeAuthorizationResponse `json:"merge_authorization"`
-	// ExternalParticipants is the server projection of external agents that
-	// authored, created, own or coordinate this issue. Always emitted (empty
-	// slice when none) so clients can render participants without inferring
-	// them from one comments page.
-	ExternalParticipants []AgentResponse `json:"external_participants"`
-	// MailboxDeliveries is a bounded recent projection (50) of mailbox
-	// requests on this issue. Complete history is the mailbox API's keyset
-	// pagination.
-	MailboxDeliveries []MailboxMessageResponse `json:"mailbox_deliveries"`
+	// Unloaded collaboration fields are omitted so partial snapshots preserve
+	// detail caches. Coordinator's outer pointer distinguishes omission from
+	// an authoritative null; non-nil collection pointers may clear to [].
+	Coordinator          **IssueCoordinatorResponse       `json:"coordinator,omitempty"`
+	MergeAuthorization   *IssueMergeAuthorizationResponse `json:"merge_authorization,omitempty"`
+	ExternalParticipants *[]AgentResponse                 `json:"external_participants,omitempty"`
+	MailboxDeliveries    *[]MailboxMessageResponse        `json:"mailbox_deliveries,omitempty"`
 	// duplicateOfIssueID is the raw mark, kept off the wire; see DuplicateOf.
 	duplicateOfIssueID pgtype.UUID
 }
@@ -160,15 +150,6 @@ func mergeAuthorizationResponse(i db.Issue) IssueMergeAuthorizationResponse {
 		TargetBranch:  textToPtr(i.MergeTargetBranch),
 		GrantedBy:     uuidToPtr(i.MergeGrantedBy),
 		GrantedAt:     timestampToPtr(i.MergeGrantedAt),
-	}
-}
-
-func emptyIssueExternalProjection(resp *IssueResponse) {
-	if resp.ExternalParticipants == nil {
-		resp.ExternalParticipants = []AgentResponse{}
-	}
-	if resp.MailboxDeliveries == nil {
-		resp.MailboxDeliveries = []MailboxMessageResponse{}
 	}
 }
 
@@ -530,6 +511,8 @@ func (h *Handler) fillDuplicateOf(ctx context.Context, wsID pgtype.UUID, resp *I
 }
 
 func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
+	coordinator := coordinatorResponse(i.CoordinatorType, i.CoordinatorID)
+	authorization := mergeAuthorizationResponse(i)
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	// Built-ins map to public categories without a catalog lookup. A custom
 	// status is filled by endpoints that resolve the workspace catalog.
@@ -538,36 +521,34 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		statusCategory = i.Status
 	}
 	return IssueResponse{
-		ID:                   uuidToString(i.ID),
-		WorkspaceID:          uuidToString(i.WorkspaceID),
-		Number:               i.Number,
-		Identifier:           identifier,
-		Title:                i.Title,
-		Description:          textToPtr(i.Description),
-		Status:               i.Status,
-		StatusCategory:       statusCategory,
-		Priority:             i.Priority,
-		AssigneeType:         textToPtr(i.AssigneeType),
-		AssigneeID:           uuidToPtr(i.AssigneeID),
-		CreatorType:          i.CreatorType,
-		CreatorID:            uuidToString(i.CreatorID),
-		ParentIssueID:        uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:            uuidToPtr(i.ProjectID),
-		Position:             i.Position,
-		Stage:                int4ToPtr(i.Stage),
-		StartDate:            dateToPtr(i.StartDate),
-		DueDate:              dateToPtr(i.DueDate),
-		CreatedAt:            timestampToString(i.CreatedAt),
-		UpdatedAt:            timestampToString(i.UpdatedAt),
-		Revision:             i.Revision,
-		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
-		Metadata:             parseIssueMetadata(i.Metadata),
-		Properties:           parseIssueProperties(i.Properties),
-		Coordinator:          coordinatorResponse(i.CoordinatorType, i.CoordinatorID),
-		MergeAuthorization:   mergeAuthorizationResponse(i),
-		ExternalParticipants: []AgentResponse{},
-		MailboxDeliveries:    []MailboxMessageResponse{},
+		ID:                 uuidToString(i.ID),
+		WorkspaceID:        uuidToString(i.WorkspaceID),
+		Number:             i.Number,
+		Identifier:         identifier,
+		Title:              i.Title,
+		Description:        textToPtr(i.Description),
+		Status:             i.Status,
+		StatusCategory:     statusCategory,
+		Priority:           i.Priority,
+		AssigneeType:       textToPtr(i.AssigneeType),
+		AssigneeID:         uuidToPtr(i.AssigneeID),
+		CreatorType:        i.CreatorType,
+		CreatorID:          uuidToString(i.CreatorID),
+		ParentIssueID:      uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:          uuidToPtr(i.ProjectID),
+		Position:           i.Position,
+		Stage:              int4ToPtr(i.Stage),
+		StartDate:          dateToPtr(i.StartDate),
+		DueDate:            dateToPtr(i.DueDate),
+		CreatedAt:          timestampToString(i.CreatedAt),
+		UpdatedAt:          timestampToString(i.UpdatedAt),
+		Revision:           i.Revision,
+		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
+		Metadata:           parseIssueMetadata(i.Metadata),
+		Properties:         parseIssueProperties(i.Properties),
+		Coordinator:        &coordinator,
+		MergeAuthorization: &authorization,
 	}
 }
 
@@ -580,35 +561,32 @@ func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueRespons
 	}
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:                   uuidToString(i.ID),
-		WorkspaceID:          uuidToString(i.WorkspaceID),
-		Number:               i.Number,
-		Identifier:           identifier,
-		Title:                i.Title,
-		Description:          textToPtr(i.Description),
-		Status:               i.Status,
-		StatusCategory:       statusCategory,
-		Priority:             i.Priority,
-		AssigneeType:         textToPtr(i.AssigneeType),
-		AssigneeID:           uuidToPtr(i.AssigneeID),
-		CreatorType:          i.CreatorType,
-		CreatorID:            uuidToString(i.CreatorID),
-		ParentIssueID:        uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:            uuidToPtr(i.ProjectID),
-		Position:             i.Position,
-		Stage:                int4ToPtr(i.Stage),
-		StartDate:            dateToPtr(i.StartDate),
-		DueDate:              dateToPtr(i.DueDate),
-		CreatedAt:            timestampToString(i.CreatedAt),
-		UpdatedAt:            timestampToString(i.UpdatedAt),
-		Revision:             i.Revision,
-		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
-		Metadata:             parseIssueMetadata(i.Metadata),
-		Properties:           parseIssueProperties(i.Properties),
-		MergeAuthorization:   IssueMergeAuthorizationResponse{},
-		ExternalParticipants: []AgentResponse{},
-		MailboxDeliveries:    []MailboxMessageResponse{},
+		ID:                 uuidToString(i.ID),
+		WorkspaceID:        uuidToString(i.WorkspaceID),
+		Number:             i.Number,
+		Identifier:         identifier,
+		Title:              i.Title,
+		Description:        textToPtr(i.Description),
+		Status:             i.Status,
+		StatusCategory:     statusCategory,
+		Priority:           i.Priority,
+		AssigneeType:       textToPtr(i.AssigneeType),
+		AssigneeID:         uuidToPtr(i.AssigneeID),
+		CreatorType:        i.CreatorType,
+		CreatorID:          uuidToString(i.CreatorID),
+		ParentIssueID:      uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:          uuidToPtr(i.ProjectID),
+		Position:           i.Position,
+		Stage:              int4ToPtr(i.Stage),
+		StartDate:          dateToPtr(i.StartDate),
+		DueDate:            dateToPtr(i.DueDate),
+		CreatedAt:          timestampToString(i.CreatedAt),
+		UpdatedAt:          timestampToString(i.UpdatedAt),
+		Revision:           i.Revision,
+		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
+		Metadata:           parseIssueMetadata(i.Metadata),
+		Properties:         parseIssueProperties(i.Properties),
 	}
 }
 
@@ -653,35 +631,32 @@ func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueRes
 	}
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:                   uuidToString(i.ID),
-		WorkspaceID:          uuidToString(i.WorkspaceID),
-		Number:               i.Number,
-		Identifier:           identifier,
-		Title:                i.Title,
-		Description:          textToPtr(i.Description),
-		Status:               i.Status,
-		StatusCategory:       statusCategory,
-		Priority:             i.Priority,
-		AssigneeType:         textToPtr(i.AssigneeType),
-		AssigneeID:           uuidToPtr(i.AssigneeID),
-		CreatorType:          i.CreatorType,
-		CreatorID:            uuidToString(i.CreatorID),
-		ParentIssueID:        uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:            uuidToPtr(i.ProjectID),
-		Position:             i.Position,
-		Stage:                int4ToPtr(i.Stage),
-		StartDate:            dateToPtr(i.StartDate),
-		DueDate:              dateToPtr(i.DueDate),
-		CreatedAt:            timestampToString(i.CreatedAt),
-		UpdatedAt:            timestampToString(i.UpdatedAt),
-		Revision:             i.Revision,
-		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
-		Metadata:             parseIssueMetadata(i.Metadata),
-		Properties:           parseIssueProperties(i.Properties),
-		MergeAuthorization:   IssueMergeAuthorizationResponse{},
-		ExternalParticipants: []AgentResponse{},
-		MailboxDeliveries:    []MailboxMessageResponse{},
+		ID:                 uuidToString(i.ID),
+		WorkspaceID:        uuidToString(i.WorkspaceID),
+		Number:             i.Number,
+		Identifier:         identifier,
+		Title:              i.Title,
+		Description:        textToPtr(i.Description),
+		Status:             i.Status,
+		StatusCategory:     statusCategory,
+		Priority:           i.Priority,
+		AssigneeType:       textToPtr(i.AssigneeType),
+		AssigneeID:         uuidToPtr(i.AssigneeID),
+		CreatorType:        i.CreatorType,
+		CreatorID:          uuidToString(i.CreatorID),
+		ParentIssueID:      uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:          uuidToPtr(i.ProjectID),
+		Position:           i.Position,
+		Stage:              int4ToPtr(i.Stage),
+		StartDate:          dateToPtr(i.StartDate),
+		DueDate:            dateToPtr(i.DueDate),
+		CreatedAt:          timestampToString(i.CreatedAt),
+		UpdatedAt:          timestampToString(i.UpdatedAt),
+		Revision:           i.Revision,
+		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
+		Metadata:           parseIssueMetadata(i.Metadata),
+		Properties:         parseIssueProperties(i.Properties),
 	}
 }
 
@@ -1310,6 +1285,9 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 			IssueResponse: issueToResponse(sr.issue, prefix),
 			MatchSource:   sr.matchSource,
 		}
+		// Search scans a partial row without collaboration columns.
+		sir.Coordinator = nil
+		sir.MergeAuthorization = nil
 		fillSearch(&sir.IssueResponse)
 		// Always populate comment snippet when a matching comment exists
 		if sr.matchedCommentContent != "" {

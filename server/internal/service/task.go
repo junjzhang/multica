@@ -7937,10 +7937,6 @@ func IssueToMap(issue db.Issue, issuePrefix string) map[string]any {
 			"granted_by":     util.UUIDToPtr(issue.MergeGrantedBy),
 			"granted_at":     util.TimestampToPtr(issue.MergeGrantedAt),
 		},
-		// Detail projections. Background task maps keep the empty defaults;
-		// the HTTP detail endpoint fills them from the issue-wide projection.
-		"external_participants": []any{},
-		"mailbox_deliveries":    []any{},
 	}
 }
 

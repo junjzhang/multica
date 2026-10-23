@@ -597,7 +597,7 @@ func TestIssueCoordinatorAndMergePolicy(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
 		t.Fatalf("decode create: %v", err)
 	}
-	if created.Coordinator == nil || created.Coordinator.Type != "member" || created.Coordinator.ID != testUserID {
+	if created.Coordinator == nil || *created.Coordinator == nil || (*created.Coordinator).Type != "member" || (*created.Coordinator).ID != testUserID {
 		t.Fatalf("coordinator = %+v, want member/%s", created.Coordinator, testUserID)
 	}
 	if created.MergeAuthorization.Allowed {
@@ -620,7 +620,7 @@ func TestIssueCoordinatorAndMergePolicy(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&updated); err != nil {
 		t.Fatalf("decode coordinator update: %v", err)
 	}
-	if updated.Coordinator == nil || updated.Coordinator.Type != "agent" || updated.Coordinator.ID != agentID {
+	if updated.Coordinator == nil || *updated.Coordinator == nil || (*updated.Coordinator).Type != "agent" || (*updated.Coordinator).ID != agentID {
 		t.Fatalf("coordinator = %+v, want agent/%s", updated.Coordinator, agentID)
 	}
 	if updated.Revision <= created.Revision {

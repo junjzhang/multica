@@ -37,7 +37,7 @@ func TestIssueCoordinatorMemberUsesUserIdentity(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
 		t.Fatalf("decode created issue: %v", err)
 	}
-	if created.Coordinator == nil || created.Coordinator.Type != "member" || created.Coordinator.ID != memberID {
+	if created.Coordinator == nil || *created.Coordinator == nil || (*created.Coordinator).Type != "member" || (*created.Coordinator).ID != memberID {
 		t.Fatalf("create coordinator = %+v, want member/%s", created.Coordinator, memberID)
 	}
 
@@ -54,7 +54,7 @@ func TestIssueCoordinatorMemberUsesUserIdentity(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&updated); err != nil {
 		t.Fatalf("decode updated issue: %v", err)
 	}
-	if updated.Coordinator == nil || updated.Coordinator.Type != "member" || updated.Coordinator.ID != testUserID {
+	if updated.Coordinator == nil || *updated.Coordinator == nil || (*updated.Coordinator).Type != "member" || (*updated.Coordinator).ID != testUserID {
 		t.Fatalf("update coordinator = %+v, want member/%s", updated.Coordinator, testUserID)
 	}
 	var storedType, storedID string
@@ -194,6 +194,9 @@ func TestExternalAgentRegistrationUsesMemberAccess(t *testing.T) {
 	if created.ExecutionKind != "external" || created.ExternalSession == nil {
 		t.Fatalf("registered agent = kind %q session %+v, want external with session", created.ExecutionKind, created.ExternalSession)
 	}
+	dbfx.Cleanup(t, `DELETE FROM agent WHERE id = $1`, created.ID)
+	dbfx.Cleanup(t, `DELETE FROM external_agent_session WHERE agent_id = $1`, created.ID)
+	dbfx.Cleanup(t, `DELETE FROM external_agent_token WHERE agent_id = $1`, created.ID)
 	var ownerID string
 	if err := testPool.QueryRow(context.Background(), `SELECT owner_id FROM agent WHERE id = $1`, created.ID).Scan(&ownerID); err != nil {
 		t.Fatalf("read agent owner: %v", err)

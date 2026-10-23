@@ -156,17 +156,16 @@ func (h *Handler) applyExternalIssueUpdate(w http.ResponseWriter, r *http.Reques
 }
 
 // projectIssueExternalState fills the server-computed participant and mailbox
-// projections on a detail/create/update response. Failures degrade to empty
-// projections rather than failing an otherwise successful issue read.
+// projections on a detail/create/update response. Failed projections stay
+// omitted rather than falsely clearing previously loaded client state.
 func (h *Handler) projectIssueExternalState(ctx context.Context, issue db.Issue, resp *IssueResponse) {
 	if resp == nil {
 		return
 	}
-	resp.ExternalParticipants = []AgentResponse{}
 	if participants, err := h.Queries.ListIssueExternalParticipants(ctx, db.ListIssueExternalParticipantsParams{
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     issue.ID,
-	}); err == nil && len(participants) > 0 {
+	}); err == nil {
 		ids := make([]pgtype.UUID, 0, len(participants))
 		for _, a := range participants {
 			ids = append(ids, a.ID)
@@ -178,19 +177,18 @@ func (h *Handler) projectIssueExternalState(ctx context.Context, issue db.Issue,
 			ar.ExternalSession = sessions[ar.ID]
 			out = append(out, ar)
 		}
-		resp.ExternalParticipants = out
+		resp.ExternalParticipants = &out
 	}
-	resp.MailboxDeliveries = []MailboxMessageResponse{}
 	if deliveries, err := h.Queries.ListIssueMailboxDeliveries(ctx, db.ListIssueMailboxDeliveriesParams{
 		IssueID:     issue.ID,
 		WorkspaceID: issue.WorkspaceID,
-	}); err == nil && len(deliveries) > 0 {
+	}); err == nil {
 		sources := h.externalSessionsByID(ctx, mailboxSourceSessionIDs(deliveries))
 		out := make([]MailboxMessageResponse, 0, len(deliveries))
 		for _, delivery := range deliveries {
 			out = append(out, mailboxMessageToResponse(delivery, sources[uuidToString(delivery.SourceSessionID)]))
 		}
-		resp.MailboxDeliveries = out
+		resp.MailboxDeliveries = &out
 	}
 }
 
