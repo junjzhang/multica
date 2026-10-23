@@ -26,7 +26,7 @@ A disagreement is escalated by mentioning the coordinator with the disputed deci
 - The mailbox UUID is the host idempotency key. Notification text contains stable workspace, issue, comment, and recipient references; mutable titles and comment bodies are fetched by the recipient. Editing a comment cannot change a retry's payload fingerprint.
 - A known busy host retains the request for a later attempt. A known pre-send dependency error is retryable. An ambiguous outcome is reported rather than blindly rerun. A terminal local result survives server acknowledgement failure and is re-acknowledged without another host send.
 
-Issue detail includes external participants, session links, and recent delivery receipts. Partial list/search/event payloads omit fields they did not load. Explicit `null`, `[]`, and `allowed:false` remain authoritative clearing values.
+Issue detail includes external participants, session links, and recent delivery receipts. The workspace-scoped `issue_mailbox:changed` event invalidates only the affected issue detail after committed mailbox changes; it carries no issue snapshot and does not trigger execution. Partial list/search/event payloads omit fields they did not load. Explicit `null`, `[]`, and `allowed:false` remain authoritative clearing values.
 
 ## Register an existing session
 

@@ -1611,15 +1611,14 @@ export const IssueSchema = z.object({
   merge_authorization: IssueMergeAuthorizationSchema.optional().catch(undefined),
   external_participants: z
     .array(z.unknown())
-    .catch([])
     .transform((items) =>
       items.flatMap((item) => {
         const parsed = AgentSchema.safeParse(item);
         return parsed.success ? [parsed.data] : [];
       }),
     )
-    .optional(),
-  mailbox_deliveries: MailboxMessageListSchema.optional(),
+    .optional().catch(undefined),
+  mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

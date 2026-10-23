@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // MailboxMessageResponse is the frozen mailbox DTO. The body and reply
@@ -243,6 +244,7 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to acknowledge mailbox message")
 		return
 	}
+	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
 	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
 	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
 }
@@ -404,6 +406,13 @@ func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to commit mailbox claim")
 		return
 	}
+	issues := make(map[string]struct{})
+	for _, item := range items {
+		issues[item.Message.IssueID] = struct{}{}
+	}
+	for issueID := range issues {
+		h.publishMailboxChanged(wsUUID, issueID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
 }
 
@@ -419,7 +428,9 @@ func generateMailboxDeliveryToken() (string, error) {
 // an issue is renamed or its discussion is edited between delivery attempts.
 func renderMailboxNotification(m db.AgentMailboxMessage) string {
 	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
-		"Use this session's registered external identity to read the issue and original comment. Do not fall back to the user's personal identity. "+
+		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n"+
+		"Read: multica --profile <registered-external-profile> issue get %[3]s --output json\n"+
+		"Read comments: multica --profile <registered-external-profile> issue comment list %[3]s --output json\n"+
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
 		uuidToString(m.ID), uuidToString(m.WorkspaceID), uuidToString(m.IssueID), uuidToString(m.CommentID), uuidToString(m.RecipientAgentID))
 }
@@ -506,6 +517,7 @@ func (h *Handler) AckDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to acknowledge delivery")
 		return
 	}
+	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
 	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
 	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
 }
@@ -563,5 +575,14 @@ func (h *Handler) createMailboxDeliveries(ctx context.Context, issue db.Issue, c
 		}
 		out[uuidToString(agent.ID)] = created
 	}
+	if len(out) > 0 {
+		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
+	}
 	return out
+}
+
+// Mailbox state has its own lifecycle; invalidation avoids applying an issue
+// snapshot with an unrelated revision or waking an issue workflow.
+func (h *Handler) publishMailboxChanged(workspaceID pgtype.UUID, issueID string) {
+	h.publish(protocol.EventIssueMailboxChanged, uuidToString(workspaceID), "system", "", map[string]any{"issue_id": issueID})
 }

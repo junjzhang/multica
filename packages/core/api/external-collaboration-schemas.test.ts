@@ -176,7 +176,7 @@ describe("IssueSchema external collaboration projection", () => {
     });
     expect(parsed.id).toBe(baseIssue.id);
     expect(parsed.coordinator).toBeUndefined();
-    expect(parsed.external_participants).toEqual([]);
+    expect(parsed.external_participants).toBeUndefined();
     expect(parsed.mailbox_deliveries).toEqual([]);
   });
 });

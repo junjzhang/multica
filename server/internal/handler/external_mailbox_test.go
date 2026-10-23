@@ -7,13 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // externalAgentFixture registers one external identity the same way the
@@ -346,6 +349,7 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	ctx := context.Background()
 	recipient, _, ownerID := externalAgentFixture(t, "Mailbox Recipient", "daemon-claim")
 	issueID := dbfx.Issue(t, "mailbox fencing")
+	changes := recordMailboxChanges(issueID)
 	commentID := dbfx.Comment(t, issueID, "please review the change")
 
 	create := func() db.AgentMailboxMessage {
@@ -423,6 +427,9 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if claimed[0].ExternalSession.SessionID == "" || claimed[0].Content == "" {
 		t.Fatalf("claim missing session/content: %+v", claimed[0])
 	}
+	if changes() != 1 {
+		t.Fatal("claim must notify the issue detail")
+	}
 	messageID := claimed[0].Message.ID
 	token := claimed[0].DeliveryToken
 
@@ -430,10 +437,16 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if code := ack("daemon-other", ownerID, messageID, token, "delivered"); code != http.StatusConflict {
 		t.Fatalf("foreign daemon ack status = %d, want 409", code)
 	}
+	if changes() != 1 {
+		t.Fatal("rejected ack must not publish a change")
+	}
 	if code := ack("daemon-claim", ownerID, messageID, token, "retry"); code != http.StatusOK {
 		t.Fatalf("retry ack status = %d, want 200", code)
 	}
 
+	if changes() != 2 {
+		t.Fatal("delivery ack must notify the issue detail")
+	}
 	// A retry returns the message to pending with bounded backoff; after the
 	// backoff elapses it is claimable again.
 	var retryStatus string
@@ -538,6 +551,7 @@ func TestMailboxProcessingAckIsMonotonic(t *testing.T) {
 	ctx := context.Background()
 	agentID, _, _ := externalAgentFixture(t, "Mailbox Ack", "daemon-ack")
 	issueID := dbfx.Issue(t, "mailbox ack")
+	changes := recordMailboxChanges(issueID)
 	commentID := dbfx.Comment(t, issueID, "read me")
 	msg, err := testHandler.Queries.CreateAgentMailboxMessage(ctx, db.CreateAgentMailboxMessageParams{
 		WorkspaceID:      parseUUID(testWorkspaceID),
@@ -566,6 +580,9 @@ func TestMailboxProcessingAckIsMonotonic(t *testing.T) {
 	}
 	if got := ack("read"); got.ProcessingStatus != "read" {
 		t.Fatalf("after read = %s, want read", got.ProcessingStatus)
+	}
+	if changes() != 1 {
+		t.Fatal("processing ack must notify the issue detail")
 	}
 	if got := ack("handled"); got.ProcessingStatus != "handled" {
 		t.Fatalf("after handled = %s, want handled", got.ProcessingStatus)
@@ -861,4 +878,15 @@ func TestExternalAgentTokenCannotUseDaemonEndpoints(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("daemon endpoint with mea_ token = %d, want 403: %s", w.Code, w.Body.String())
 	}
+}
+
+func recordMailboxChanges(issueID string) func() int32 {
+	var count atomic.Int32
+	testHandler.Bus.Subscribe(protocol.EventIssueMailboxChanged, func(e events.Event) {
+		payload, ok := e.Payload.(map[string]any)
+		if ok && e.WorkspaceID == testWorkspaceID && payload["issue_id"] == issueID {
+			count.Add(1)
+		}
+	})
+	return count.Load
 }
