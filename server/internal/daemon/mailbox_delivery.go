@@ -15,13 +15,6 @@ const (
 	defaultMailboxClaimLimit   = 5
 	defaultMailboxPollInterval = 5 * time.Second
 
-	// mailboxTerminalAckRetention bounds how long a decided outcome is kept
-	// when its lease was superseded before the ack reached the server. A live
-	// message is re-leased well inside this window; a longer gap means the
-	// message was resolved or deleted elsewhere, so the marker must not
-	// accumulate forever.
-	mailboxTerminalAckRetention = 10 * time.Minute
-
 	mailboxErrorAgentBusy       = "agent_busy"
 	mailboxErrorHostUnreachable = "paseo_daemon_unreachable"
 	mailboxErrorLeaseExpired    = "lease_expired"
@@ -95,10 +88,8 @@ type mailboxPendingAck struct {
 	// terminal prevents a second host delivery when the prior outcome was
 	// already accepted or is ambiguous. The ack itself may still be retried.
 	terminal bool
-	// awaitingLeaseSince is set when the server fenced this terminal ack off
-	// with 409: a newer lease exists. The decided outcome is kept and re-acked
-	// under that lease without sending to the host again.
-	awaitingLeaseSince time.Time
+	// Keep a fenced terminal outcome until a new lease allows its acknowledgement.
+	awaitingLease bool
 }
 
 type mailboxDeliveryLoop struct {
@@ -171,16 +162,11 @@ func (m *mailboxDeliveryLoop) deliverOnce(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	now := m.now()
 	for messageID, pending := range m.pending {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if !pending.awaitingLeaseSince.IsZero() {
-			if now.Sub(pending.awaitingLeaseSince) > mailboxTerminalAckRetention {
-				delete(m.pending, messageID)
-				m.logger.Warn("dropping unconfirmed mailbox terminal ack after retention", "message_id", messageID)
-			}
+		if pending.awaitingLease {
 			continue
 		}
 		m.retryPendingAck(ctx, messageID)
@@ -244,7 +230,7 @@ func (m *mailboxDeliveryLoop) handleClaim(ctx context.Context, claim MailboxClai
 			pending.WorkspaceID = claim.WorkspaceID
 			pending.DeliveryToken = claim.DeliveryToken
 			pending.Ack.DeliveryToken = claim.DeliveryToken
-			pending.awaitingLeaseSince = time.Time{}
+			pending.awaitingLease = false
 			m.pending[messageID] = pending
 			m.retryPendingAck(ctx, messageID)
 			return nil
@@ -390,7 +376,7 @@ func (m *mailboxDeliveryLoop) queueAck(ctx context.Context, claim MailboxClaim, 
 
 func (m *mailboxDeliveryLoop) retryPendingAck(ctx context.Context, messageID string) {
 	pending, ok := m.pending[messageID]
-	if !ok || !pending.awaitingLeaseSince.IsZero() || ctx.Err() != nil {
+	if !ok || pending.awaitingLease || ctx.Err() != nil {
 		return
 	}
 	_, err := m.client.AckMailbox(ctx, pending.WorkspaceID, messageID, pending.Ack)
@@ -403,7 +389,7 @@ func (m *mailboxDeliveryLoop) retryPendingAck(ctx context.Context, messageID str
 		if pending.terminal {
 			// Preserve the decided outcome and wait for the next claim's token.
 			// The next handleClaim re-acks it without delivering again.
-			pending.awaitingLeaseSince = m.now()
+			pending.awaitingLease = true
 			m.pending[messageID] = pending
 			m.logger.Info("mailbox lease was superseded before ack; terminal outcome will be re-acked under the next lease", "message_id", messageID)
 			return

@@ -298,7 +298,7 @@ func TestMailboxDeliveryStaleTerminalAckIsReackedUnderNewLease(t *testing.T) {
 			if len(loop.pending) != 1 {
 				t.Fatalf("terminal ack was dropped after 409: pending = %d", len(loop.pending))
 			}
-			if pending := loop.pending[claim1.Message.ID]; pending.awaitingLeaseSince.IsZero() {
+			if pending := loop.pending[claim1.Message.ID]; !pending.awaitingLease {
 				t.Fatalf("terminal ack is not waiting for a fresh lease: %+v", pending)
 			}
 			if err := loop.deliverOnce(context.Background()); err != nil {
@@ -345,14 +345,17 @@ func TestMailboxDeliveryDeletedMessageDropsTerminalAck(t *testing.T) {
 	}
 }
 
-func TestMailboxDeliveryExpiresUnconfirmedTerminalAck(t *testing.T) {
+func TestMailboxDeliveryRetainsTerminalAckAcrossLongOutage(t *testing.T) {
 	claim := testMailboxClaim("lease-1")
+	newClaim := testMailboxClaim("lease-2")
+	now := time.Now()
+	newClaim.LeaseExpiresAt = now.Add(25 * time.Hour).Format(time.RFC3339)
 	client := &fakeMailboxClient{
-		claims:  [][]MailboxClaim{{claim}},
+		claims:  [][]MailboxClaim{{claim}, nil, {newClaim}},
 		ackErrs: []error{&requestError{StatusCode: http.StatusConflict, Body: "lease superseded"}},
 	}
-	loop := newTestMailboxLoop(client, &fakeMailboxTransport{})
-	now := time.Now()
+	transport := &fakeMailboxTransport{}
+	loop := newTestMailboxLoop(client, transport)
 	loop.now = func() time.Time { return now }
 
 	if err := loop.deliverOnce(context.Background()); err != nil {
@@ -362,12 +365,18 @@ func TestMailboxDeliveryExpiresUnconfirmedTerminalAck(t *testing.T) {
 		t.Fatalf("pending = %d, want 1", len(loop.pending))
 	}
 
-	loop.now = func() time.Time { return now.Add(mailboxTerminalAckRetention + time.Second) }
+	loop.now = func() time.Time { return now.Add(24 * time.Hour) }
 	if err := loop.deliverOnce(context.Background()); err != nil {
 		t.Fatalf("deliverOnce after retention: %v", err)
 	}
-	if len(loop.pending) != 0 {
-		t.Fatalf("unconfirmed terminal ack grew without bound: %+v", loop.pending)
+	if len(loop.pending) != 1 {
+		t.Fatalf("elapsed time lost a terminal outcome: %+v", loop.pending)
+	}
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.deliveries) != 1 || len(loop.pending) != 0 {
+		t.Fatalf("reclaim must acknowledge without re-delivery: deliveries=%d pending=%d", len(transport.deliveries), len(loop.pending))
 	}
 }
 

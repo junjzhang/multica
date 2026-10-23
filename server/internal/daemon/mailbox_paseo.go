@@ -110,15 +110,6 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 			Err:     err,
 		}
 	}
-	if err := os.Chmod(promptPath, 0o600); err != nil {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnavailable,
-			Code:    "prompt_file_unavailable",
-			Message: "could not restrict the private prompt file for mailbox delivery",
-			Err:     err,
-		}
-	}
-
 	args := []string{
 		"send", session.SessionID,
 		"--if-idle",
@@ -162,14 +153,9 @@ func (t *paseoCliTransport) verifyHost(ctx context.Context, hostID string) error
 	if hostID == "" {
 		return &MailboxDeliveryError{Kind: MailboxDeliveryFailed, Code: "missing_host_id", Message: "external session has no Paseo host identity"}
 	}
-	stdout, stderr, err := t.run(ctx, t.bin, "status", "--json")
+	stdout, _, err := t.run(ctx, t.bin, "status", "--json")
 	if err != nil {
-		outcome := classifyPaseoRunError(ctx, stderr, err)
-		var failure *MailboxDeliveryError
-		if errors.As(outcome, &failure) && failure.Kind == MailboxDeliveryOutcomeUnknown {
-			return &MailboxDeliveryError{Kind: MailboxDeliveryUnavailable, Code: "paseo_host_probe_failed", Message: "Paseo host could not be verified before delivery", Err: err}
-		}
-		return outcome
+		return &MailboxDeliveryError{Kind: MailboxDeliveryUnavailable, Code: "paseo_host_probe_failed", Message: "Paseo host could not be verified before delivery", Err: err}
 	}
 	var status struct {
 		ServerID string `json:"serverId"`
@@ -272,25 +258,12 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 }
 
 func parsePaseoErrorCode(stderr []byte) (string, bool) {
-	body := bytes.TrimSpace(stderr)
-	if len(body) == 0 {
+	var envelope paseoErrorEnvelope
+	if err := json.Unmarshal(stderr, &envelope); err != nil || envelope.Error == nil {
 		return "", false
 	}
-	candidates := [][]byte{body}
-	if start := strings.Index(string(body), "{"); start > 0 {
-		candidates = append(candidates, body[start:])
-	}
-	for _, candidate := range candidates {
-		var envelope paseoErrorEnvelope
-		if err := json.Unmarshal(candidate, &envelope); err != nil || envelope.Error == nil {
-			continue
-		}
-		code := strings.TrimSpace(envelope.Error.Code)
-		if code != "" {
-			return code, true
-		}
-	}
-	return "", false
+	code := strings.TrimSpace(envelope.Error.Code)
+	return code, code != ""
 }
 
 // unsupportedIfIdleCLI recognizes the argument-parser rejection of a CLI that

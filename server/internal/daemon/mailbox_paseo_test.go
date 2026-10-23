@@ -36,6 +36,22 @@ func TestPaseoDeliveryRejectsDifferentHostBeforeSending(t *testing.T) {
 	}
 }
 
+func TestPaseoHostProbeFailureRemainsRetryable(t *testing.T) {
+	sent := false
+	transport := &paseoCliTransport{bin: "paseo", run: func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "status" {
+			return nil, []byte(`{"error":{"code":"DAEMON_REQUEST_TIMEOUT","message":"timeout"}}`), &exec.ExitError{}
+		}
+		sent = true
+		return nil, nil, nil
+	}}
+	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "request")
+	var failure *MailboxDeliveryError
+	if !errors.As(err, &failure) || !mailboxDeliveryRetryable(failure.Kind) || sent {
+		t.Fatalf("read-only probe failure must retry without sending: err=%v sent=%v", err, sent)
+	}
+}
+
 func paseoRunner(t *testing.T, stdout, stderr string, runErr error) paseoCommandRunner {
 	t.Helper()
 	return func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
