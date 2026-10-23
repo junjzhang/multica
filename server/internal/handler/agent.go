@@ -131,15 +131,25 @@ type AgentResponse struct {
 	// members infer another member's integration footprint. Redacted to
 	// `nil` + `composio_toolkit_allowlist_redacted=true` for non-owners,
 	// mirroring the existing mcp_config redaction contract.
-	ComposioToolkitAllowlist         []string               `json:"composio_toolkit_allowlist,omitempty"`
-	ComposioToolkitAllowlistRedacted bool                   `json:"composio_toolkit_allowlist_redacted,omitempty"`
-	OwnerID                          *string                `json:"owner_id"`
-	Skills                           []AgentSkillSummary    `json:"skills"`
-	DisabledRuntimeSkills            []DisabledRuntimeSkill `json:"disabled_runtime_skills"`
-	CreatedAt                        string                 `json:"created_at"`
-	UpdatedAt                        string                 `json:"updated_at"`
-	ArchivedAt                       *string                `json:"archived_at"`
-	ArchivedBy                       *string                `json:"archived_by"`
+	ComposioToolkitAllowlist         []string `json:"composio_toolkit_allowlist,omitempty"`
+	ComposioToolkitAllowlistRedacted bool     `json:"composio_toolkit_allowlist_redacted,omitempty"`
+	OwnerID                          *string  `json:"owner_id"`
+	// ExecutionKind distinguishes a Multica-managed agent from one whose
+	// execution lives in a host session (Paseo). Missing/unknown on the wire
+	// is treated as managed by old clients; runtime_bound=false alone still
+	// means "managed agent waiting for a runtime".
+	ExecutionKind string `json:"execution_kind"`
+	// ExternalSession is the concrete host session behind an external agent.
+	// Null for managed agents. host_id is the Paseo server/connection id (not
+	// a hostname) and session_id is the Paseo agent id (not the underlying
+	// Codex thread id).
+	ExternalSession       *ExternalSessionResponse `json:"external_session"`
+	Skills                []AgentSkillSummary      `json:"skills"`
+	DisabledRuntimeSkills []DisabledRuntimeSkill   `json:"disabled_runtime_skills"`
+	CreatedAt             string                   `json:"created_at"`
+	UpdatedAt             string                   `json:"updated_at"`
+	ArchivedAt            *string                  `json:"archived_at"`
+	ArchivedBy            *string                  `json:"archived_by"`
 }
 
 // runtimeConfigGatewayTokenMask is the placeholder the API substitutes for
@@ -207,6 +217,10 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 	// owner-only gate below can decide.
 	composioAllowlist := a.ComposioToolkitAllowlist
 
+	executionKind := a.ExecutionKind
+	if executionKind == "" {
+		executionKind = "managed"
+	}
 	return AgentResponse{
 		ID:                       uuidToString(a.ID),
 		WorkspaceID:              uuidToString(a.WorkspaceID),
@@ -235,6 +249,8 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 		ServiceTier:              a.ServiceTier.String,
 		ComposioToolkitAllowlist: composioAllowlist,
 		OwnerID:                  uuidToPtr(a.OwnerID),
+		ExecutionKind:            executionKind,
+		ExternalSession:          nil,
 		Skills:                   []AgentSkillSummary{},
 		DisabledRuntimeSkills:    decodeDisabledRuntimeSkills(a.DisabledRuntimeSkills),
 		CreatedAt:                timestampToString(a.CreatedAt),
@@ -1190,6 +1206,13 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load agent invocation targets")
 		return
 	}
+	agentIDs := make([]pgtype.UUID, 0, len(agents))
+	for _, a := range agents {
+		if a.ExecutionKind == "external" {
+			agentIDs = append(agentIDs, a.ID)
+		}
+	}
+	externalSessions := h.externalSessionsByAgent(r.Context(), agentIDs)
 	visible := make([]AgentResponse, 0, len(agents))
 	for _, a := range agents {
 		targets := targetsByAgent[uuidToString(a.ID)]
@@ -1199,6 +1222,7 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp := h.agentToResponse(a)
+		resp.ExternalSession = externalSessions[resp.ID]
 		// The map is keyed by runtime, and active + archived agents may share one.
 		// Keep the archived guard here as well as in the loader so an active sibling
 		// cannot leak its projection onto an archived response.
@@ -1255,6 +1279,7 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := h.agentToResponse(agent)
+	h.attachExternalSession(r.Context(), &resp)
 	viewerRole := ""
 	if member, ok := ctxMember(r.Context()); ok {
 		viewerRole = member.Role
@@ -2457,6 +2482,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.agentToResponse(updated)
+	h.attachExternalSession(r.Context(), &resp)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, updated.ID); err != nil {
 		slog.Warn("update agent: load invocation targets for response failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to load agent invocation targets")

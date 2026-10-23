@@ -114,7 +114,6 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 	// Effective preserves built-in behavior and resolves custom terminal categories
 	// so moving to done/closed cannot start work.
 	currentStatus := issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, issue.Status)
-	prevStatus := issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, in.PrevStatus)
 
 	// Triage is stricter than the backlog parking lot: backlog defers a run,
 	// Triage refuses one outright (MUL-7189 §2.3). Deciding it here is what
@@ -128,29 +127,24 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		return IssueRunTrigger{}, false
 	}
 
-	var source RunEnqueueSource
-	switch {
-	case in.IsCreate || in.AssigneeChanged:
-		// Backlog is the parking lot: assigning into backlog never starts a run.
-		if currentStatus == "backlog" {
-			return IssueRunTrigger{}, false
-		}
-		source = RunSourceAssign
-	case in.StatusChanged && prevStatus == "backlog" &&
-		currentStatus != "backlog" &&
-		currentStatus != "done" && currentStatus != "cancelled":
-		if probe.IsSelfLoop != nil && probe.IsSelfLoop() {
-			return IssueRunTrigger{}, false
-		}
-		source = RunSourceStatus
-	default:
+	// Only an explicit assignment (including an issue create that names an
+	// assignee) is a launch action. Status/workflow transitions are display
+	// state: leaving backlog, entering Review, or a project workflow handing
+	// the issue to a step's handler never starts a run. Work reaches the next
+	// actor through an explicit @mention, or through an explicit rerun.
+	if !in.IsCreate && !in.AssigneeChanged {
 		return IssueRunTrigger{}, false
 	}
+	if currentStatus == "backlog" {
+		// Backlog is the parking lot: assigning into backlog never starts a run.
+		return IssueRunTrigger{}, false
+	}
+	source := RunSourceAssign
 
 	switch issue.AssigneeType.String {
 	case "agent":
 		agent, err := s.Queries.GetAgent(ctx, issue.AssigneeID)
-		if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
+		if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid || agent.ExecutionKind == "external" {
 			return IssueRunTrigger{}, false
 		}
 		if !canAccess(agent) {

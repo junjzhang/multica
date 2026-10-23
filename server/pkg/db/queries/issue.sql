@@ -182,10 +182,11 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    stage, properties, last_activity_at, id
+    stage, properties, last_activity_at, id, coordinator_type, coordinator_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('stage'), COALESCE(sqlc.narg('properties')::jsonb, '{}'::jsonb), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+    sqlc.narg('stage'), COALESCE(sqlc.narg('properties')::jsonb, '{}'::jsonb), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()),
+    sqlc.narg('coordinator_type'), sqlc.narg('coordinator_id')
 ) RETURNING *;
 
 -- name: GetIssueByNumber :one
@@ -253,7 +254,34 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
             WHEN i.status = 'cancelled' AND COALESCE(sqlc.narg('status')::text, i.status) = 'cancelled'
                 THEN i.duplicate_of_issue_id
             ELSE NULL
-        END AS next_duplicate_of_issue_id
+        END AS next_duplicate_of_issue_id,
+        -- Coordinator changes are explicit: absent inputs preserve the stored
+        -- value, and the new value participates in did_change so it bumps the
+        -- native revision like every other issue field.
+        COALESCE(sqlc.narg('coordinator_type')::text, i.coordinator_type) AS next_coordinator_type,
+        COALESCE(sqlc.narg('coordinator_id')::uuid, i.coordinator_id) AS next_coordinator_id,
+        -- Merge policy is written only when the caller supplied it. The flag
+        -- distinguishes "leave untouched" from an explicit disallow.
+        CASE WHEN sqlc.arg('merge_authorization_set')::boolean
+            THEN sqlc.arg('merge_allowed')::boolean
+            ELSE i.merge_allowed
+        END AS next_merge_allowed,
+        CASE WHEN sqlc.arg('merge_authorization_set')::boolean
+            THEN sqlc.narg('merge_repository_url')::text
+            ELSE i.merge_repository_url
+        END AS next_merge_repository_url,
+        CASE WHEN sqlc.arg('merge_authorization_set')::boolean
+            THEN sqlc.narg('merge_target_branch')::text
+            ELSE i.merge_target_branch
+        END AS next_merge_target_branch,
+        CASE WHEN sqlc.arg('merge_authorization_set')::boolean
+            THEN sqlc.narg('merge_granted_by')::uuid
+            ELSE i.merge_granted_by
+        END AS next_merge_granted_by,
+        CASE WHEN sqlc.arg('merge_authorization_set')::boolean
+            THEN sqlc.narg('merge_granted_at')::timestamptz
+            ELSE i.merge_granted_at
+        END AS next_merge_granted_at
     FROM issue AS i
     WHERE i.id = $1
       AND (sqlc.narg('expected_revision')::bigint IS NULL OR i.revision = sqlc.narg('expected_revision')::bigint)
@@ -264,22 +292,30 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
         ROW(
             title, description, status, priority, assignee_type, assignee_id,
             position, start_date, due_date, parent_issue_id, project_id, stage,
-            duplicate_of_issue_id
+            duplicate_of_issue_id, coordinator_type, coordinator_id,
+            merge_allowed, merge_repository_url, merge_target_branch,
+            merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
             next_title, next_description, next_status, next_priority,
             next_assignee_type, next_assignee_id, next_position, next_start_date,
             next_due_date, next_parent_issue_id, next_project_id, next_stage,
-            next_duplicate_of_issue_id
+            next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
+            next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
+            next_merge_granted_by, next_merge_granted_at
         ) AS did_change,
         ROW(
             title, description, status, priority, assignee_type, assignee_id,
             start_date, due_date, parent_issue_id, project_id, stage,
-            duplicate_of_issue_id
+            duplicate_of_issue_id, coordinator_type, coordinator_id,
+            merge_allowed, merge_repository_url, merge_target_branch,
+            merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
             next_title, next_description, next_status, next_priority,
             next_assignee_type, next_assignee_id, next_start_date, next_due_date,
             next_parent_issue_id, next_project_id, next_stage,
-            next_duplicate_of_issue_id
+            next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
+            next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
+            next_merge_granted_by, next_merge_granted_at
         ) AS did_activity
     FROM candidate
 )
@@ -297,6 +333,13 @@ UPDATE issue AS i SET
     project_id = changed.next_project_id,
     stage = changed.next_stage,
     duplicate_of_issue_id = changed.next_duplicate_of_issue_id,
+    coordinator_type = changed.next_coordinator_type,
+    coordinator_id = changed.next_coordinator_id,
+    merge_allowed = changed.next_merge_allowed,
+    merge_repository_url = changed.next_merge_repository_url,
+    merge_target_branch = changed.next_merge_target_branch,
+    merge_granted_by = changed.next_merge_granted_by,
+    merge_granted_at = changed.next_merge_granted_at,
     revision = i.revision + changed.did_change::integer,
     last_activity_at = CASE WHEN changed.did_activity
         THEN GREATEST(COALESCE(i.last_activity_at, i.updated_at), now())
@@ -410,10 +453,12 @@ INSERT INTO issue (
     workspace_id, title, description, status, priority,
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
-    origin_type, origin_id, stage, properties, last_activity_at, id
+    origin_type, origin_id, stage, properties, last_activity_at, id,
+    coordinator_type, coordinator_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), COALESCE(sqlc.narg('properties')::jsonb, '{}'::jsonb), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+    sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), COALESCE(sqlc.narg('properties')::jsonb, '{}'::jsonb), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()),
+    sqlc.narg('coordinator_type'), sqlc.narg('coordinator_id')
 ) RETURNING *;
 
 -- name: LockIssueDuplicateKey :exec

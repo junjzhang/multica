@@ -103,6 +103,10 @@ type CommentTriggerOutcome struct {
 	TargetID   string             `json:"target_id"`
 	Status     DispatchStatus     `json:"status"` // queued | coalesced | deferred | blocked
 	ReasonCode DispatchReasonCode `json:"reason_code"`
+	// DispatchKind distinguishes a native run from a mailbox delivery.
+	// Absent means "run" for old servers/clients; an external target always
+	// carries "mailbox" so it can never be mistaken for a managed run.
+	DispatchKind string `json:"dispatch_kind,omitempty"`
 }
 
 func commentToResponse(c db.Comment, reactions []ReactionResponse, attachments []AttachmentResponse) CommentResponse {
@@ -1448,6 +1452,9 @@ type CommentTriggerAgentResponse struct {
 	AvatarURL *string `json:"avatar_url,omitempty"`
 	Source    string  `json:"source"`
 	Reason    string  `json:"reason"`
+	// DispatchKind is "mailbox" for an external-session target; absent means a
+	// native run.
+	DispatchKind string `json:"dispatch_kind,omitempty"`
 }
 
 type commentAgentTriggerSource string
@@ -1598,6 +1605,26 @@ func (h *Handler) PreviewCommentTriggers(w http.ResponseWriter, r *http.Request)
 	}
 	for _, trigger := range triggers {
 		resp.Agents = append(resp.Agents, h.commentAgentTriggerToResponse(trigger))
+	}
+	// External targets are collaboration requests delivered to a host
+	// session; surface them in the preview as mailbox, never as a run.
+	for _, target := range targets {
+		if target.MailboxAgent == nil {
+			continue
+		}
+		agent := target.MailboxAgent
+		source := string(commentTriggerSourceMentionAgent)
+		if target.TargetType == "squad" {
+			source = string(commentTriggerSourceMentionSquadLeader)
+		}
+		resp.Agents = append(resp.Agents, CommentTriggerAgentResponse{
+			ID:           uuidToString(agent.ID),
+			Name:         agent.Name,
+			AvatarURL:    h.resolveAvatarURLPtr(textToPtr(agent.AvatarUrl)),
+			Source:       source,
+			Reason:       "This request will be saved in the agent's session mailbox.",
+			DispatchKind: "mailbox",
+		})
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1980,7 +2007,60 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 	for agentID, result := range steered {
 		enqueued[agentID] = result
 	}
-	return commentTriggerOutcomes(targets, enqueued)
+	nativeTargets, mailboxTargets := splitMailboxTargets(targets, suppressAgentIDs)
+	delivered := h.createMailboxDeliveries(ctx, issue, comment, mailboxTargets, actorType, actorID)
+	outcomes := commentTriggerOutcomes(nativeTargets, enqueued)
+	return append(outcomes, mailboxTriggerOutcomes(mailboxTargets, delivered)...)
+}
+
+// splitMailboxTargets partitions explicit mentions into native-run targets and
+// mailbox targets, applying the author's suppress_agent_ids choice to both.
+func splitMailboxTargets(targets []commentMentionTarget, suppressAgentIDs []pgtype.UUID) (native, mailbox []commentMentionTarget) {
+	suppressed := make(map[string]struct{}, len(suppressAgentIDs))
+	for _, id := range suppressAgentIDs {
+		if id.Valid {
+			suppressed[uuidToString(id)] = struct{}{}
+		}
+	}
+	for _, t := range targets {
+		if t.MailboxAgent != nil {
+			if _, skip := suppressed[uuidToString(t.MailboxAgent.ID)]; skip {
+				continue
+			}
+			mailbox = append(mailbox, t)
+			continue
+		}
+		native = append(native, t)
+	}
+	return native, mailbox
+}
+
+// mailboxTriggerOutcomes reports each explicit external target. queued means
+// "request persisted in the mailbox", never "run started"; dispatch_kind
+// mailbox keeps it visually distinct from a managed run. A persistence failure
+// is reported as blocked/internal_error instead of silently claiming success.
+func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered map[string]db.AgentMailboxMessage) []CommentTriggerOutcome {
+	if len(targets) == 0 {
+		return nil
+	}
+	out := make([]CommentTriggerOutcome, 0, len(targets))
+	for _, t := range targets {
+		if t.MailboxAgent == nil {
+			continue
+		}
+		status, reason := DispatchQueued, ReasonQueued
+		if _, ok := delivered[uuidToString(t.MailboxAgent.ID)]; !ok {
+			status, reason = DispatchBlocked, ReasonInternalError
+		}
+		out = append(out, CommentTriggerOutcome{
+			TargetType:   t.TargetType,
+			TargetID:     t.TargetID,
+			Status:       status,
+			ReasonCode:   reason,
+			DispatchKind: "mailbox",
+		})
+	}
+	return out
 }
 
 // noteBlockedRuntimeTargets leaves one system comment per agent refused for an
@@ -2256,6 +2336,9 @@ func commentTriggerOutcomes(targets []commentMentionTarget, enqueued map[string]
 func commentBlockedTargetOutcomes(targets []commentMentionTarget) []CommentTriggerOutcome {
 	var blocked []CommentTriggerOutcome
 	for _, t := range targets {
+		if t.MailboxAgent != nil {
+			continue
+		}
 		if t.Status == DispatchBlocked {
 			blocked = append(blocked, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: t.Status, ReasonCode: t.ReasonCode})
 		}
@@ -2662,65 +2745,16 @@ func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issu
 	if hasAgentOrSquadMention(mentions) {
 		return h.resolveMentionedAgentCommentTriggers(ctx, issue, mentions, actorType, actorID, opts)
 	}
-	if util.HasMentionAll(mentions) {
-		return nil, nil
-	}
-	if hasMemberMention(mentions) {
-		return nil, nil
-	}
-
-	if actorType != "member" {
-		// Agent-authored comments do not participate in the member-driven
-		// conversation routing (parent-author / thread-root continuation) or
-		// the member assignee fallback. Worker-result comments retain the
-		// leader→worker→leader loop: the assigned squad is resolved from the
-		// issue (MUL-3879), while a guest squad is resolved from the exact
-		// covered leader delegation (GH-8301). Explicit @agent / @squad mentions
-		// are already handled above, so neither fallback double-enqueues a
-		// mentioned target.
-		if actorType == "agent" {
-			if triggers, handled := h.routeGuestSquadLeaderFallback(ctx, issue, parentComment, actorID, opts); handled {
-				return triggers, nil
-			}
-		}
-		if issue.AssigneeType.Valid && issue.AssigneeType.String == "squad" {
-			if trigger, ok := h.routeAssignedSquadLeaderFallback(ctx, issue, actorType, actorID, opts); ok {
-				trigger.NonLeaderAgentReply = actorType == "agent" && actorID != uuidToString(trigger.Agent.ID)
-				return []commentAgentTrigger{trigger}, nil
-			}
-		}
-		return nil, nil
-	}
-
-	// A deleted parent no longer speaks for its agent author (#8296).
-	if parentComment != nil && parentComment.AuthorType == "agent" && !parentComment.DeletedAt.Valid {
-		trigger, ok := h.routeReplyToParentAuthor(ctx, issue, parentComment, actorType, actorID, opts)
-		if !ok {
-			return nil, nil
-		}
-		return []commentAgentTrigger{trigger}, nil
-	}
-
-	if parentComment != nil {
-		triggers, handled := h.routeThreadRootOwners(ctx, issue, parentComment, actorID, opts)
-		if handled {
-			if len(triggers) == 0 {
-				return nil, nil
-			}
-			return triggers, nil
-		}
-		// A plain member-to-member reply must not start the issue assignee just
-		// because the thread has no agent owner. Explicit mentions and existing
-		// conversation owners were already resolved above. The same holds for a
-		// reply under a deleted comment: it is still a reply, not a new request.
-		if parentComment.AuthorType == "member" || parentComment.DeletedAt.Valid {
-			return nil, nil
-		}
-	}
-
-	if trigger, ok := h.routeAssigneeFallback(ctx, issue, actorType, actorID, opts); ok {
-		return []commentAgentTrigger{trigger}, nil
-	}
+	// EXPLICIT @ IS THE ONLY COMMENT TRIGGER. Replies, thread continuation,
+	// assignee fallback and worker-result leader wake-ups are discussion, not
+	// requests, and must never start a run. Status changes are display-only too
+	// (see service.WillEnqueueRun); a handoff becomes work when someone
+	// explicitly mentions the next actor.
+	//
+	// This is why the routing helpers below (routeReplyToParentAuthor,
+	// routeThreadRootOwners, routeAssigneeFallback, the squad fallbacks) are
+	// no longer called from here. They remain for reference/tests but are not
+	// an execution path.
 	return nil, nil
 }
 
@@ -3083,8 +3117,12 @@ type commentMentionTarget struct {
 	TargetType  string // "agent" | "squad"
 	TargetID    string
 	ExecAgentID string
-	Status      DispatchStatus
-	ReasonCode  DispatchReasonCode
+	// MailboxAgent is set when the explicit target is an external agent (or a
+	// squad led by one). Such a target never enqueues a native run; the
+	// trigger path persists a mailbox message instead.
+	MailboxAgent *db.Agent
+	Status       DispatchStatus
+	ReasonCode   DispatchReasonCode
 	// unusable carries the refused agent and its verdict for the reasons that
 	// need a durable trace (runtime_unusable or runtime_access_denied). Internal
 	// to the handler:
@@ -3214,6 +3252,12 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 				blockTarget("squad", m.ID, ReasonTargetUnavailable)
 				continue
 			}
+			if agent.ExecutionKind == "external" {
+				// External execution lives in the host session: persist the
+				// request in the leader's mailbox instead of faking a run.
+				addTarget(commentMentionTarget{TargetType: "squad", TargetID: m.ID, MailboxAgent: &agent})
+				continue
+			}
 			// Same shared verdict as the direct-agent branch below.
 			if verdict, err := service.AgentReadiness(ctx, h.runtimeLookup(obsmetrics.RuntimeLookupSourceComment), agent); err == nil && verdict.Blocked() {
 				blockUnusableTarget("squad", m.ID, agent, verdict)
@@ -3266,6 +3310,12 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 		}
 		if agent.ArchivedAt.Valid {
 			blockTarget("agent", m.ID, ReasonTargetUnavailable)
+			continue
+		}
+		if agent.ExecutionKind == "external" {
+			// Explicit mention of an external agent = one durable mailbox
+			// message. No runtime, no task, no managed run.
+			addTarget(commentMentionTarget{TargetType: "agent", TargetID: m.ID, MailboxAgent: &agent})
 			continue
 		}
 		// One readiness verdict for every admission path (service.AgentReadiness).
@@ -3823,6 +3873,11 @@ func (h *Handler) deleteComment(ctx context.Context, commentID, workspaceID pgty
 		CommentID:   target.ID,
 		WorkspaceID: target.WorkspaceID,
 	}); err != nil {
+		return out, err
+	}
+
+	// A mailbox request whose body is gone must not stay claimable.
+	if err := qtx.DeleteAgentMailboxMessagesForComment(ctx, target.ID); err != nil {
 		return out, err
 	}
 

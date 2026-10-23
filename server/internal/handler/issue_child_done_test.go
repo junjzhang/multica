@@ -664,7 +664,9 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 	if stage2Status != "todo" {
 		t.Fatalf("Stage 2 status = %q, want todo", stage2Status)
 	}
-	if got := countPendingTasksForAgent(t, stage2.ID, sq.LeaderID); got != 1 {
-		t.Fatalf("promoted Stage 2 queued %d leader tasks, want 1", got)
+	// Promoting the parked child is a status-only transition; the barrier wake
+	// above is the leader's cue, and a status change starts no run of its own.
+	if got := countPendingTasksForAgent(t, stage2.ID, sq.LeaderID); got != 0 {
+		t.Fatalf("promoted Stage 2 queued %d leader tasks, want 0", got)
 	}
 }

@@ -107,8 +107,69 @@ type IssueResponse struct {
 	// SourceContext is detail-only. List, board, search, and children responses
 	// deliberately omit the potentially large immutable snapshot.
 	SourceContext *sourceContextDetailResponse `json:"source_context,omitempty"`
+	// Coordinator is the fixed escalation owner for this issue. It is set from
+	// the dispatch actor on create or by an explicit coordinator update, and is
+	// never changed by participant mentions or reassignment. Null when the
+	// issue predates the field and no explicit coordinator was recorded.
+	Coordinator *IssueCoordinatorResponse `json:"coordinator"`
+	// MergeAuthorization records the human-granted merge policy. Absent on an
+	// issue means disallowed; this stores policy only and is not an executor.
+	MergeAuthorization IssueMergeAuthorizationResponse `json:"merge_authorization"`
+	// ExternalParticipants is the server projection of external agents that
+	// authored, created, own or coordinate this issue. Always emitted (empty
+	// slice when none) so clients can render participants without inferring
+	// them from one comments page.
+	ExternalParticipants []AgentResponse `json:"external_participants"`
+	// MailboxDeliveries is a bounded recent projection (50) of mailbox
+	// requests on this issue. Complete history is the mailbox API's keyset
+	// pagination.
+	MailboxDeliveries []MailboxMessageResponse `json:"mailbox_deliveries"`
 	// duplicateOfIssueID is the raw mark, kept off the wire; see DuplicateOf.
 	duplicateOfIssueID pgtype.UUID
+}
+
+// IssueCoordinatorResponse names the fixed coordinator without resolving a
+// display name, so the projection stays valid when the entity is archived.
+type IssueCoordinatorResponse struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// IssueMergeAuthorizationResponse is the stored merge policy. granted_by/at are
+// server-set from the authenticated human; an external caller can never claim
+// them.
+type IssueMergeAuthorizationResponse struct {
+	Allowed       bool    `json:"allowed"`
+	RepositoryURL *string `json:"repository_url"`
+	TargetBranch  *string `json:"target_branch"`
+	GrantedBy     *string `json:"granted_by"`
+	GrantedAt     *string `json:"granted_at"`
+}
+
+func coordinatorResponse(t pgtype.Text, id pgtype.UUID) *IssueCoordinatorResponse {
+	if !t.Valid || !id.Valid {
+		return nil
+	}
+	return &IssueCoordinatorResponse{Type: t.String, ID: uuidToString(id)}
+}
+
+func mergeAuthorizationResponse(i db.Issue) IssueMergeAuthorizationResponse {
+	return IssueMergeAuthorizationResponse{
+		Allowed:       i.MergeAllowed,
+		RepositoryURL: textToPtr(i.MergeRepositoryUrl),
+		TargetBranch:  textToPtr(i.MergeTargetBranch),
+		GrantedBy:     uuidToPtr(i.MergeGrantedBy),
+		GrantedAt:     timestampToPtr(i.MergeGrantedAt),
+	}
+}
+
+func emptyIssueExternalProjection(resp *IssueResponse) {
+	if resp.ExternalParticipants == nil {
+		resp.ExternalParticipants = []AgentResponse{}
+	}
+	if resp.MailboxDeliveries == nil {
+		resp.MailboxDeliveries = []MailboxMessageResponse{}
+	}
 }
 
 // IssueRefResponse names another issue inside a response: enough to render
@@ -477,32 +538,36 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		statusCategory = i.Status
 	}
 	return IssueResponse{
-		ID:                 uuidToString(i.ID),
-		WorkspaceID:        uuidToString(i.WorkspaceID),
-		Number:             i.Number,
-		Identifier:         identifier,
-		Title:              i.Title,
-		Description:        textToPtr(i.Description),
-		Status:             i.Status,
-		StatusCategory:     statusCategory,
-		Priority:           i.Priority,
-		AssigneeType:       textToPtr(i.AssigneeType),
-		AssigneeID:         uuidToPtr(i.AssigneeID),
-		CreatorType:        i.CreatorType,
-		CreatorID:          uuidToString(i.CreatorID),
-		ParentIssueID:      uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:          uuidToPtr(i.ProjectID),
-		Position:           i.Position,
-		Stage:              int4ToPtr(i.Stage),
-		StartDate:          dateToPtr(i.StartDate),
-		DueDate:            dateToPtr(i.DueDate),
-		CreatedAt:          timestampToString(i.CreatedAt),
-		UpdatedAt:          timestampToString(i.UpdatedAt),
-		Revision:           i.Revision,
-		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
-		Metadata:           parseIssueMetadata(i.Metadata),
-		Properties:         parseIssueProperties(i.Properties),
+		ID:                   uuidToString(i.ID),
+		WorkspaceID:          uuidToString(i.WorkspaceID),
+		Number:               i.Number,
+		Identifier:           identifier,
+		Title:                i.Title,
+		Description:          textToPtr(i.Description),
+		Status:               i.Status,
+		StatusCategory:       statusCategory,
+		Priority:             i.Priority,
+		AssigneeType:         textToPtr(i.AssigneeType),
+		AssigneeID:           uuidToPtr(i.AssigneeID),
+		CreatorType:          i.CreatorType,
+		CreatorID:            uuidToString(i.CreatorID),
+		ParentIssueID:        uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:            uuidToPtr(i.ProjectID),
+		Position:             i.Position,
+		Stage:                int4ToPtr(i.Stage),
+		StartDate:            dateToPtr(i.StartDate),
+		DueDate:              dateToPtr(i.DueDate),
+		CreatedAt:            timestampToString(i.CreatedAt),
+		UpdatedAt:            timestampToString(i.UpdatedAt),
+		Revision:             i.Revision,
+		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
+		Metadata:             parseIssueMetadata(i.Metadata),
+		Properties:           parseIssueProperties(i.Properties),
+		Coordinator:          coordinatorResponse(i.CoordinatorType, i.CoordinatorID),
+		MergeAuthorization:   mergeAuthorizationResponse(i),
+		ExternalParticipants: []AgentResponse{},
+		MailboxDeliveries:    []MailboxMessageResponse{},
 	}
 }
 
@@ -515,32 +580,35 @@ func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueRespons
 	}
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:                 uuidToString(i.ID),
-		WorkspaceID:        uuidToString(i.WorkspaceID),
-		Number:             i.Number,
-		Identifier:         identifier,
-		Title:              i.Title,
-		Description:        textToPtr(i.Description),
-		Status:             i.Status,
-		StatusCategory:     statusCategory,
-		Priority:           i.Priority,
-		AssigneeType:       textToPtr(i.AssigneeType),
-		AssigneeID:         uuidToPtr(i.AssigneeID),
-		CreatorType:        i.CreatorType,
-		CreatorID:          uuidToString(i.CreatorID),
-		ParentIssueID:      uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:          uuidToPtr(i.ProjectID),
-		Position:           i.Position,
-		Stage:              int4ToPtr(i.Stage),
-		StartDate:          dateToPtr(i.StartDate),
-		DueDate:            dateToPtr(i.DueDate),
-		CreatedAt:          timestampToString(i.CreatedAt),
-		UpdatedAt:          timestampToString(i.UpdatedAt),
-		Revision:           i.Revision,
-		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
-		Metadata:           parseIssueMetadata(i.Metadata),
-		Properties:         parseIssueProperties(i.Properties),
+		ID:                   uuidToString(i.ID),
+		WorkspaceID:          uuidToString(i.WorkspaceID),
+		Number:               i.Number,
+		Identifier:           identifier,
+		Title:                i.Title,
+		Description:          textToPtr(i.Description),
+		Status:               i.Status,
+		StatusCategory:       statusCategory,
+		Priority:             i.Priority,
+		AssigneeType:         textToPtr(i.AssigneeType),
+		AssigneeID:           uuidToPtr(i.AssigneeID),
+		CreatorType:          i.CreatorType,
+		CreatorID:            uuidToString(i.CreatorID),
+		ParentIssueID:        uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:            uuidToPtr(i.ProjectID),
+		Position:             i.Position,
+		Stage:                int4ToPtr(i.Stage),
+		StartDate:            dateToPtr(i.StartDate),
+		DueDate:              dateToPtr(i.DueDate),
+		CreatedAt:            timestampToString(i.CreatedAt),
+		UpdatedAt:            timestampToString(i.UpdatedAt),
+		Revision:             i.Revision,
+		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
+		Metadata:             parseIssueMetadata(i.Metadata),
+		Properties:           parseIssueProperties(i.Properties),
+		MergeAuthorization:   IssueMergeAuthorizationResponse{},
+		ExternalParticipants: []AgentResponse{},
+		MailboxDeliveries:    []MailboxMessageResponse{},
 	}
 }
 
@@ -585,32 +653,35 @@ func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueRes
 	}
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	return IssueResponse{
-		ID:                 uuidToString(i.ID),
-		WorkspaceID:        uuidToString(i.WorkspaceID),
-		Number:             i.Number,
-		Identifier:         identifier,
-		Title:              i.Title,
-		Description:        textToPtr(i.Description),
-		Status:             i.Status,
-		StatusCategory:     statusCategory,
-		Priority:           i.Priority,
-		AssigneeType:       textToPtr(i.AssigneeType),
-		AssigneeID:         uuidToPtr(i.AssigneeID),
-		CreatorType:        i.CreatorType,
-		CreatorID:          uuidToString(i.CreatorID),
-		ParentIssueID:      uuidToPtr(i.ParentIssueID),
-		duplicateOfIssueID: duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
-		ProjectID:          uuidToPtr(i.ProjectID),
-		Position:           i.Position,
-		Stage:              int4ToPtr(i.Stage),
-		StartDate:          dateToPtr(i.StartDate),
-		DueDate:            dateToPtr(i.DueDate),
-		CreatedAt:          timestampToString(i.CreatedAt),
-		UpdatedAt:          timestampToString(i.UpdatedAt),
-		Revision:           i.Revision,
-		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
-		Metadata:           parseIssueMetadata(i.Metadata),
-		Properties:         parseIssueProperties(i.Properties),
+		ID:                   uuidToString(i.ID),
+		WorkspaceID:          uuidToString(i.WorkspaceID),
+		Number:               i.Number,
+		Identifier:           identifier,
+		Title:                i.Title,
+		Description:          textToPtr(i.Description),
+		Status:               i.Status,
+		StatusCategory:       statusCategory,
+		Priority:             i.Priority,
+		AssigneeType:         textToPtr(i.AssigneeType),
+		AssigneeID:           uuidToPtr(i.AssigneeID),
+		CreatorType:          i.CreatorType,
+		CreatorID:            uuidToString(i.CreatorID),
+		ParentIssueID:        uuidToPtr(i.ParentIssueID),
+		duplicateOfIssueID:   duplicateOfPointer(i.Status, i.DuplicateOfIssueID),
+		ProjectID:            uuidToPtr(i.ProjectID),
+		Position:             i.Position,
+		Stage:                int4ToPtr(i.Stage),
+		StartDate:            dateToPtr(i.StartDate),
+		DueDate:              dateToPtr(i.DueDate),
+		CreatedAt:            timestampToString(i.CreatedAt),
+		UpdatedAt:            timestampToString(i.UpdatedAt),
+		Revision:             i.Revision,
+		LastActivityAt:       timestampToNanoPtr(i.LastActivityAt),
+		Metadata:             parseIssueMetadata(i.Metadata),
+		Properties:           parseIssueProperties(i.Properties),
+		MergeAuthorization:   IssueMergeAuthorizationResponse{},
+		ExternalParticipants: []AgentResponse{},
+		MailboxDeliveries:    []MailboxMessageResponse{},
 	}
 }
 
@@ -2483,6 +2554,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	detailLabels := h.labelsByIssue(r.Context(), issue.WorkspaceID, []pgtype.UUID{issue.ID})[uuidToString(issue.ID)]
 	if detailLabels == nil {
 		detailLabels = []LabelResponse{}
@@ -3063,6 +3135,9 @@ type CreateIssueRequest struct {
 	OriginID   *string `json:"origin_id,omitempty"`
 
 	AllowDuplicate bool `json:"allow_duplicate,omitempty"`
+	// Coordinator optionally records an explicit coordinator. When omitted the
+	// create derives it from the dispatch actor.
+	Coordinator *IssueCoordinatorInput `json:"coordinator,omitempty"`
 }
 
 // UnmarshalJSON rejects duplicate object members before Go's ordinary map
@@ -3365,6 +3440,20 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	// Determine creator identity: agent (via X-Agent-ID header) or member.
 	creatorType, actualCreatorID := h.resolveActor(r, creatorID, workspaceID)
 
+	// An explicit coordinator is validated now so a bad reference never fails
+	// the create after the issue row exists. Otherwise the service derives it
+	// from the dispatch actor.
+	var coordinatorType pgtype.Text
+	var coordinatorID pgtype.UUID
+	if req.Coordinator != nil {
+		var coordMsg string
+		coordinatorType, coordinatorID, coordMsg = h.validateCoordinator(r.Context(), workspaceID, *req.Coordinator)
+		if coordMsg != "" {
+			writeError(w, http.StatusBadRequest, coordMsg)
+			return
+		}
+	}
+
 	// Optional origin stamping (quick-create / autopilot). Only the
 	// allowed origin types are accepted; anything else is rejected so a
 	// rogue caller can't mint arbitrary origin labels. Both fields must
@@ -3449,32 +3538,35 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
-		WorkspaceID:    wsUUID,
-		Title:          req.Title,
-		Description:    ptrToText(req.Description),
-		Status:         status,
-		Priority:       priority,
-		AssigneeType:   assigneeType,
-		AssigneeID:     assigneeID,
-		CreatorType:    creatorType,
-		CreatorID:      parseUUID(actualCreatorID),
-		ParentIssueID:  parentIssueID,
-		ProjectID:      projectID,
-		StartDate:      startDate,
-		DueDate:        dueDate,
-		OriginType:     originType,
-		OriginID:       originID,
-		Stage:          ptrToInt4(req.Stage),
-		AttachmentIDs:  attachmentIDs,
-		LabelIDs:       labelIDs,
-		Properties:     properties,
-		AllowDuplicate: req.AllowDuplicate,
+		WorkspaceID:     wsUUID,
+		Title:           req.Title,
+		Description:     ptrToText(req.Description),
+		Status:          status,
+		Priority:        priority,
+		AssigneeType:    assigneeType,
+		AssigneeID:      assigneeID,
+		CreatorType:     creatorType,
+		CreatorID:       parseUUID(actualCreatorID),
+		ParentIssueID:   parentIssueID,
+		ProjectID:       projectID,
+		StartDate:       startDate,
+		DueDate:         dueDate,
+		OriginType:      originType,
+		OriginID:        originID,
+		Stage:           ptrToInt4(req.Stage),
+		AttachmentIDs:   attachmentIDs,
+		LabelIDs:        labelIDs,
+		Properties:      properties,
+		AllowDuplicate:  req.AllowDuplicate,
+		CoordinatorType: coordinatorType,
+		CoordinatorID:   coordinatorID,
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
 		Platform:         func() string { p, _, _ := middleware.ClientMetadataFromContext(r.Context()); return p }(),
 		BroadcastPayload: func(issue db.Issue, atts []db.Attachment, labels []db.IssueLabel) map[string]any {
 			payload := issueToResponse(issue, prefix)
+			h.projectIssueExternalState(r.Context(), issue, &payload)
 			// The event other tabs receive must carry the category too — filling
 			// only the HTTP response below is too late for them, and a create
 			// they cannot bucket forces a full refetch. Shares one filler with
@@ -3537,6 +3629,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 	resp := issueToResponse(issue, prefix)
 	fillCreated(&resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	resp.Attachments = buildAttachmentResponses(res.Attachments)
 	// Echo the authoritative labels attached in the create transaction. Always
 	// non-nil (empty slice when none) so a newer client can tell the backend
@@ -3601,6 +3694,12 @@ type UpdateIssueRequest struct {
 	// no explicit null. Write-only: read the relation back from
 	// GET /api/issues/{id}/duplicates. Not accepted by batch updates.
 	DuplicateOfIssueID *string `json:"duplicate_of_issue_id,omitempty"`
+	// Coordinator is an explicit coordinator change. Participant mentions and
+	// execution reassignment never write it.
+	Coordinator *IssueCoordinatorInput `json:"coordinator,omitempty"`
+	// MergeAuthorization is a human-only policy grant/revoke. granted_by and
+	// granted_at are server-set and cannot be supplied by the caller.
+	MergeAuthorization *MergeAuthorizationInput `json:"merge_authorization,omitempty"`
 }
 
 func mergeIssueChannelMediaDescription(current, incoming string, base *string, attachments []db.Attachment) string {
@@ -3827,6 +3926,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the actor once: coordinator/merge validation and the trigger
+	// probe below must agree on who is writing.
+	actorType, actorID := h.resolveActor(r, userID, workspaceID)
+
 	// Pre-fill nullable fields (bare sqlc.narg) with current values
 	params := db.UpdateIssueParams{
 		SourceTaskID:  h.wakeupSourceTaskID(r),
@@ -3840,6 +3943,9 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		Stage:         prevIssue.Stage,
 		// Checked against the locked rows in updateIssueWithStatusGuard.
 		DuplicateOfIssueID: duplicateOfID,
+	}
+	if !h.applyExternalIssueUpdate(w, r, &req, rawFields, &params, userID, workspaceID) {
+		return
 	}
 	if req.ExpectedRevision != nil {
 		if *req.ExpectedRevision < 1 {
@@ -4081,16 +4187,21 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine actor identity: agent (via X-Agent-ID header) or member.
-	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	h.advanceRunStep(r.Context(), callerRun, prevIssue, issue)
 
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
 	slog.Info("issue updated", append(logger.RequestAttrs(r), "issue_id", id, "workspace_id", workspaceID)...)
+	h.recordIssueExternalUpdateActivity(r.Context(), prevIssue, issue, actorType, actorID)
 
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	assigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil || handoff != nil) &&
+		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
+	// Only an explicitly supplied assignee launches work. A workflow handoff
+	// that happens to move the owner is a state transition, not an assignment
+	// command.
+	explicitAssigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil) &&
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := (req.Status != nil || params.Status.Valid) && prevIssue.Status != issue.Status
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
@@ -4118,7 +4229,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		service.IssueTriggerInput{
 			Issue:              issue,
 			PrevStatus:         prevIssue.Status,
-			AssigneeChanged:    assigneeChanged || handoff != nil,
+			AssigneeChanged:    explicitAssigneeChanged,
 			StatusChanged:      statusChanged,
 			EnteredHandoffStep: handoff != nil,
 		},
@@ -4540,6 +4651,11 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 		} else if !errors.Is(contextErr, pgx.ErrNoRows) {
 			return issueDeleteResult{}, fmt.Errorf("load issue source context for delete: %w", contextErr)
 		}
+		// Mailbox rows have no foreign key; remove them with the issue so a
+		// deleted request cannot be claimed against a missing target.
+		if err := qtx.DeleteAgentMailboxMessagesForIssue(ctx, issue.ID); err != nil {
+			return issueDeleteResult{}, err
+		}
 		if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("delete issue: %w", err)
 		}
@@ -4904,6 +5020,8 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		fillBatch(&resp)
 		assigneeChanged := (req.Updates.AssigneeType != nil || req.Updates.AssigneeID != nil || handoff != nil) &&
 			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
+		explicitAssigneeChanged := (req.Updates.AssigneeType != nil || req.Updates.AssigneeID != nil) &&
+			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 		statusChanged := (req.Updates.Status != nil || params.Status.Valid) && prevIssue.Status != issue.Status
 		priorityChanged := req.Updates.Priority != nil && prevIssue.Priority != issue.Priority
 		projectChanged := req.Updates.ProjectID != nil && uuidToString(prevIssue.ProjectID) != uuidToString(issue.ProjectID)
@@ -4913,7 +5031,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			service.IssueTriggerInput{
 				Issue:              issue,
 				PrevStatus:         prevIssue.Status,
-				AssigneeChanged:    assigneeChanged || handoff != nil,
+				AssigneeChanged:    explicitAssigneeChanged,
 				StatusChanged:      statusChanged,
 				EnteredHandoffStep: handoff != nil,
 			},
