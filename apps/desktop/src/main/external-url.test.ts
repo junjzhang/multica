@@ -6,7 +6,7 @@ vi.mock("electron", () => ({
 }));
 
 import { shell } from "electron";
-import { isSafeExternalHttpUrl, openExternalSafely } from "./external-url";
+import { isSafeExternalHttpUrl, isSafePaseoSessionUrl, openExternalSafely } from "./external-url";
 
 describe("isSafeExternalHttpUrl", () => {
   it("allows http and https URLs", () => {
@@ -52,6 +52,51 @@ describe("isSafeExternalHttpUrl", () => {
     expect(isSafeExternalHttpUrl(" ")).toBe(false);
     expect(isSafeExternalHttpUrl("not a url")).toBe(false);
     expect(isSafeExternalHttpUrl("http://")).toBe(false);
+  });
+});
+
+
+describe("isSafePaseoSessionUrl", () => {
+  it("accepts only the exact canonical session path", () => {
+    expect(isSafePaseoSessionUrl("paseo://h/server-1/agent/agent-1")).toBe(true);
+    expect(isSafePaseoSessionUrl("paseo://h/srv%20one/agent/ag%20ent")).toBe(true);
+    expect(isSafePaseoSessionUrl("paseo://h/srv%2Fone/agent/ag%2Fent")).toBe(true);
+  });
+
+  it("rejects credentials, query, fragment, extra paths and other hosts", () => {
+    for (const url of [
+      "paseo://user:pass@h/server-1/agent/agent-1",
+      "paseo://h/server-1/agent/agent-1?x=1",
+      "paseo://h/server-1/agent/agent-1#frag",
+      "paseo://h/server-1/agent/agent-1/extra",
+      "paseo://evil/server-1/agent/agent-1",
+      "paseo://h/server-1/agent/",
+      "paseo://h/../agent/agent-1",
+      "paseo://H/server-1/agent/agent-1",
+      "PASEO://h/server-1/agent/agent-1",
+      "https://h/server-1/agent/agent-1",
+      "paseo://h/server-1/agent/agent-1\n",
+    ]) {
+      expect(isSafePaseoSessionUrl(url)).toBe(false);
+    }
+  });
+});
+
+describe("openExternalSafely custom-scheme gate", () => {
+  beforeEach(() => {
+    vi.mocked(shell.openExternal).mockClear();
+  });
+
+  it("opens a validated Paseo session locator", () => {
+    openExternalSafely("paseo://h/server-1/agent/agent-1");
+    expect(shell.openExternal).toHaveBeenCalledWith("paseo://h/server-1/agent/agent-1");
+  });
+
+  it("still blocks a malformed Paseo URL and every other custom scheme", () => {
+    openExternalSafely("paseo://evil/server-1/agent/agent-1");
+    openExternalSafely("paseo://h/server-1/agent/agent-1?x=1");
+    openExternalSafely("myapp://open");
+    expect(shell.openExternal).not.toHaveBeenCalled();
   });
 });
 

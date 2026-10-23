@@ -1074,6 +1074,7 @@ const TimelineEntrySchema = z.object({
   reactions: z.array(ReactionSchema).optional(),
   attachments: z.array(AttachmentSchema).optional(),
   source_task_id: z.string().nullable().optional(),
+  dispatch_kind: z.string().optional().catch(undefined),
   supplements: CommentSupplementReceiptsSchema,
   supplement_task_id: z.string().optional().catch(undefined),
   supplement_status: z.enum(["pending", "delivering", "delivered", "failed"]).optional().catch(undefined),
@@ -1212,6 +1213,107 @@ export const EMPTY_CREATE_FEEDBACK_RESPONSE: CreateFeedbackResponse = {
   created_at: "",
 };
 
+export const ExternalSessionSchema = z.object({
+  provider: z.string().default(""),
+  host_id: z.string().default(""),
+  session_id: z.string().default(""),
+  display_name: z.string().default(""),
+  url: z.string().nullable().default(null),
+  daemon_id: z.string().default(""),
+}).loose();
+
+const AgentInvocationTargetSchema = z.object({
+  target_type: z.string().default("workspace"),
+  target_id: z.string().nullable().default(null),
+}).loose();
+
+const AgentSkillSummarySchema = z.object({
+  id: z.string().default(""),
+  name: z.string().default(""),
+  description: z.string().default(""),
+  enabled: z.boolean().optional().catch(undefined),
+}).loose();
+
+/**
+ * Lenient Agent response schema. Additive WORK-9 fields default to legacy
+ * managed behavior: a missing execution_kind means managed, and an unknown
+ * one stays in the payload for agentExecutionKind to reject safely.
+ */
+export const AgentSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string().default(""),
+  runtime_id: z.string().default(""),
+  runtime_bound: z.boolean().optional().catch(undefined),
+  runtime_availability: z.enum(["online", "unstable", "offline"]).optional().catch(undefined),
+  execution_kind: z.string().optional().catch(undefined),
+  external_session: ExternalSessionSchema.nullable().optional().catch(undefined),
+  name: z.string().default(""),
+  description: z.string().default(""),
+  instructions: z.string().default(""),
+  avatar_url: z.string().nullable().default(null),
+  runtime_mode: z.enum(["local", "cloud"]).catch("local"),
+  runtime_config: z.record(z.string(), z.unknown()).default({}),
+  custom_args: z.array(z.string()).default([]),
+  visibility: z.enum(["workspace", "private"]).catch("private"),
+  permission_mode: z.enum(["private", "public_to"]).catch("private"),
+  invocation_targets: z.array(AgentInvocationTargetSchema).default([]),
+  status: z.enum(["idle", "working", "blocked", "error", "offline"]).catch("offline"),
+  max_concurrent_tasks: z.number().default(1),
+  model: z.string().default(""),
+  owner_id: z.string().nullable().default(null),
+  skills: z.array(AgentSkillSummarySchema).default([]),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+  archived_at: z.string().nullable().default(null),
+  archived_by: z.string().nullable().default(null),
+}).loose();
+
+/** Drop one malformed list item without hiding the other agents. */
+export const AgentListSchema = z.array(z.unknown())
+  .catch([])
+  .transform((items) =>
+    items.flatMap((item) => {
+      const parsed = AgentSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  );
+
+const IssueCoordinatorSchema = z.object({
+  type: z.string().default("member"),
+  id: z.string(),
+}).loose();
+
+const IssueMergeAuthorizationSchema = z.object({
+  allowed: z.boolean().default(false),
+  repository_url: z.string().nullable().default(null),
+  target_branch: z.string().nullable().default(null),
+  granted_by: z.string().nullable().default(null),
+  granted_at: z.string().nullable().default(null),
+}).loose();
+
+export const MailboxMessageSchema = z.object({
+  id: z.string(),
+  issue_id: z.string().default(""),
+  comment_id: z.string().default(""),
+  recipient_agent_id: z.string().default(""),
+  source_session: ExternalSessionSchema.nullable().default(null).catch(null),
+  delivery_status: z.enum(["pending", "leased", "delivered", "failed", "unknown"]).catch("unknown"),
+  processing_status: z.enum(["unread", "read", "handled", "unknown"]).catch("unknown"),
+  created_at: z.string().default(""),
+  delivered_at: z.string().nullable().default(null),
+  last_error: z.string().nullable().default(null),
+}).loose();
+
+/** Drop malformed deliveries instead of failing the whole issue response. */
+export const MailboxMessageListSchema = z.array(z.unknown())
+  .catch([])
+  .transform((items) =>
+    items.flatMap((item) => {
+      const parsed = MailboxMessageSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  );
+
 export const CommentSchema = z.object({
   id: z.string(),
   issue_id: z.string(),
@@ -1226,6 +1328,7 @@ export const CommentSchema = z.object({
   updated_at: z.string(),
   revision: z.number().int().positive().optional(),
   source_task_id: z.string().nullable().optional(),
+  dispatch_kind: z.string().optional().catch(undefined),
   supplements: CommentSupplementReceiptsSchema,
   supplement_task_id: z.string().optional().catch(undefined),
   supplement_status: z.enum(["pending", "delivering", "delivered", "failed"]).optional().catch(undefined),
@@ -1264,6 +1367,7 @@ const CommentTriggerPreviewAgentSchema = z.object({
   avatar_url: z.string().optional(),
   source: z.string().default(""),
   reason: z.string().default(""),
+  dispatch_kind: z.string().optional().catch(undefined),
 }).loose();
 
 // Per-target outcome of an explicit @agent / @squad mention (MUL-4525 §2).
@@ -1274,6 +1378,7 @@ export const CommentTriggerOutcomeSchema = z.object({
   target_id: z.string(),
   status: z.string().default(""),
   reason_code: z.string().default(""),
+  dispatch_kind: z.string().optional().catch(undefined),
 }).loose();
 
 export const CommentTriggerPreviewSchema = z.object({
@@ -1479,6 +1584,20 @@ export const IssueSchema = z.object({
   // Detail-only and potentially large. A malformed additive field must not
   // erase an otherwise usable issue returned by a mixed-version server.
   source_context: IssueSourceContextSchema.optional().catch(undefined),
+  // WORK-9 additive collaboration fields. Each degrades independently so one
+  // malformed projection never blanks the issue/list.
+  coordinator: IssueCoordinatorSchema.nullable().optional().catch(undefined),
+  merge_authorization: IssueMergeAuthorizationSchema.optional().catch(undefined),
+  external_participants: z
+    .array(z.unknown())
+    .catch([])
+    .transform((items) =>
+      items.flatMap((item) => {
+        const parsed = AgentSchema.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    ),
+  mailbox_deliveries: MailboxMessageListSchema,
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({
