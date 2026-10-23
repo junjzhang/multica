@@ -20,11 +20,30 @@ func paseoTestSession() ExternalSession {
 	}
 }
 
+func TestPaseoDeliveryRejectsDifferentHostBeforeSending(t *testing.T) {
+	sent := false
+	transport := &paseoCliTransport{bin: "paseo", run: func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "status" {
+			return []byte(`{"serverId":"another-host"}`), nil, nil
+		}
+		sent = true
+		return []byte(`{"agentId":"paseo-agent-1","status":"sent"}`), nil, nil
+	}}
+	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "private request")
+	var deliveryErr *MailboxDeliveryError
+	if !errors.As(err, &deliveryErr) || deliveryErr.Code != "paseo_host_mismatch" || sent {
+		t.Fatalf("wrong host must reject before send: error=%v sent=%v", err, sent)
+	}
+}
+
 func paseoRunner(t *testing.T, stdout, stderr string, runErr error) paseoCommandRunner {
 	t.Helper()
-	return func(_ context.Context, name string, _ ...string) ([]byte, []byte, error) {
+	return func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
 		if name != "paseo" {
 			t.Errorf("command = %q, want paseo", name)
+		}
+		if args[0] == "status" {
+			return []byte(`{"serverId":"host-1"}`), nil, nil
 		}
 		return []byte(stdout), []byte(stderr), runErr
 	}
@@ -36,6 +55,9 @@ func TestPaseoDeliveryUsesFrozenIfIdleContract(t *testing.T) {
 	run := func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
 		if name != "paseo" {
 			t.Errorf("command = %q", name)
+		}
+		if args[0] == "status" {
+			return []byte(`{"serverId":"host-1"}`), nil, nil
 		}
 		wantPrefix := []string{"send", "paseo-agent-1", "--if-idle", "--message-id", "mailbox-1", "--prompt-file"}
 		if len(args) < len(wantPrefix)+3 {
@@ -177,12 +199,16 @@ func TestPaseoDeliveryMissingBinaryIsActionableDependencyError(t *testing.T) {
 }
 
 func TestPaseoDeliveryInterruptedByDaemonStopIsAmbiguous(t *testing.T) {
-	run := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run := func(ctx context.Context, _ string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "status" {
+			return []byte(`{"serverId":"host-1"}`), nil, nil
+		}
+		cancel()
 		return nil, nil, ctx.Err()
 	}
 	transport := &paseoCliTransport{bin: "paseo", run: run}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	_, err := transport.Deliver(ctx, paseoTestSession(), "mailbox-1", "prompt")
 	var typed *MailboxDeliveryError
 	if !errors.As(err, &typed) || typed.Kind != MailboxDeliveryOutcomeUnknown {
@@ -191,7 +217,10 @@ func TestPaseoDeliveryInterruptedByDaemonStopIsAmbiguous(t *testing.T) {
 }
 
 func TestPaseoDeliveryTimeoutIsAmbiguous(t *testing.T) {
-	run := func(ctx context.Context, _ string, _ ...string) ([]byte, []byte, error) {
+	run := func(ctx context.Context, _ string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "status" {
+			return []byte(`{"serverId":"host-1"}`), nil, nil
+		}
 		<-ctx.Done()
 		return nil, nil, ctx.Err()
 	}

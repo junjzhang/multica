@@ -72,6 +72,15 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 			Message: "mailbox claim has no external session id",
 		}
 	}
+	deliveryCtx := ctx
+	if t.timeout > 0 {
+		var cancel context.CancelFunc
+		deliveryCtx, cancel = context.WithTimeout(ctx, t.timeout)
+		defer cancel()
+	}
+	if err := t.verifyHost(deliveryCtx, session.HostID); err != nil {
+		return "", err
+	}
 
 	promptFile, err := os.CreateTemp("", "multica-mailbox-*.md")
 	if err != nil {
@@ -108,13 +117,6 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 			Message: "could not restrict the private prompt file for mailbox delivery",
 			Err:     err,
 		}
-	}
-
-	deliveryCtx := ctx
-	if t.timeout > 0 {
-		var cancel context.CancelFunc
-		deliveryCtx, cancel = context.WithTimeout(ctx, t.timeout)
-		defer cancel()
 	}
 
 	args := []string{
@@ -154,6 +156,31 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 		}
 	}
 	return fmt.Sprintf("paseo:%s:%s", session.SessionID, messageID), nil
+}
+
+func (t *paseoCliTransport) verifyHost(ctx context.Context, hostID string) error {
+	if hostID == "" {
+		return &MailboxDeliveryError{Kind: MailboxDeliveryFailed, Code: "missing_host_id", Message: "external session has no Paseo host identity"}
+	}
+	stdout, stderr, err := t.run(ctx, t.bin, "status", "--json")
+	if err != nil {
+		outcome := classifyPaseoRunError(ctx, stderr, err)
+		var failure *MailboxDeliveryError
+		if errors.As(outcome, &failure) && failure.Kind == MailboxDeliveryOutcomeUnknown {
+			return &MailboxDeliveryError{Kind: MailboxDeliveryUnavailable, Code: "paseo_host_probe_failed", Message: "Paseo host could not be verified before delivery", Err: err}
+		}
+		return outcome
+	}
+	var status struct {
+		ServerID string `json:"serverId"`
+	}
+	if err := json.Unmarshal(stdout, &status); err != nil || status.ServerID == "" {
+		return &MailboxDeliveryError{Kind: MailboxDeliveryUnsupported, Code: "paseo_host_identity_unavailable", Message: "Paseo status did not provide a server identity; no request was sent"}
+	}
+	if status.ServerID != hostID {
+		return &MailboxDeliveryError{Kind: MailboxDeliveryFailed, Code: "paseo_host_mismatch", Message: "registered Paseo host differs from the local daemon; no request was sent"}
+	}
+	return nil
 }
 
 func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) error {
