@@ -382,7 +382,7 @@ func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load external session")
 			return
 		}
-		content := h.renderMailboxNotification(r.Context(), leased)
+		content := renderMailboxNotification(leased)
 		var source *ExternalSessionResponse
 		if leased.SourceSessionID.Valid {
 			if row, err := qtx.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
@@ -415,28 +415,13 @@ func generateMailboxDeliveryToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// renderMailboxNotification is the text the host injects into the original
-// session. It points at the issue and comment and never carries credentials.
-func (h *Handler) renderMailboxNotification(ctx context.Context, m db.AgentMailboxMessage) string {
-	issue, err := h.Queries.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{
-		ID:          m.IssueID,
-		WorkspaceID: m.WorkspaceID,
-	})
-	if err != nil {
-		return fmt.Sprintf("Mailbox request %s is no longer available (issue deleted).", uuidToString(m.ID))
-	}
-	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
-	identifier := prefix + "-" + strconv.Itoa(int(issue.Number))
-	comment, err := h.Queries.GetComment(ctx, m.CommentID)
-	body := ""
-	if err == nil {
-		body = comment.Content
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Mailbox request on %s: %s\n", identifier, issue.Title)
-	fmt.Fprintf(&b, "Issue ID: %s\nComment ID: %s\nRequest:\n%s\n\n", uuidToString(issue.ID), uuidToString(m.CommentID), body)
-	b.WriteString("Reply by commenting on the issue. Mention the requester or coordinator explicitly if they need to act; a plain reply does not start anyone.")
-	return b.String()
+// Stable references keep the host's idempotency fingerprint unchanged when
+// an issue is renamed or its discussion is edited between delivery attempts.
+func renderMailboxNotification(m db.AgentMailboxMessage) string {
+	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
+		"Use this session's registered external identity to read the issue and original comment. Do not fall back to the user's personal identity. "+
+		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
+		uuidToString(m.ID), uuidToString(m.WorkspaceID), uuidToString(m.IssueID), uuidToString(m.CommentID), uuidToString(m.RecipientAgentID))
 }
 
 type ackDaemonMailboxRequest struct {

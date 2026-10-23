@@ -444,9 +444,14 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		t.Fatalf("retry delivery status = %s, want pending", retryStatus)
 	}
 	dbfx.Exec(t, `UPDATE agent_mailbox_message SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, messageID)
+	dbfx.Exec(t, `UPDATE issue SET title = 'Renamed while delivery retries' WHERE id = $1`, issueID)
+	dbfx.Exec(t, `UPDATE comment SET content = 'Updated discussion' WHERE id = $1`, commentID)
 	_, reclaimed := claim("daemon-claim", ownerID)
 	if len(reclaimed) != 1 {
 		t.Fatalf("reclaimed = %+v, want 1", reclaimed)
+	}
+	if reclaimed[0].Content != claimed[0].Content {
+		t.Fatal("retry changed the payload for the same host idempotency key")
 	}
 	newToken := reclaimed[0].DeliveryToken
 	if newToken == token {
