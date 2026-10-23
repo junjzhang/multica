@@ -1,11 +1,8 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -99,37 +96,11 @@ func (c *Client) AckMailbox(ctx context.Context, workspaceID, messageID string, 
 // membership, so the header is part of the request contract rather than an
 // override.
 func (c *Client) postDaemonMailboxJSON(ctx context.Context, workspaceID, path string, reqBody, respBody any) error {
-	data, err := json.Marshal(reqBody)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
+	headers := http.Header{}
 	if workspaceID != "" {
-		req.Header.Set("X-Workspace-ID", workspaceID)
+		headers.Set("X-Workspace-ID", workspaceID)
 	}
-	c.setIdentityHeaders(req)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &requestError{Method: http.MethodPost, Path: path, StatusCode: resp.StatusCode, Body: string(bytes.TrimSpace(data))}
-	}
-	if respBody == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(respBody)
+	return c.postJSONWithHeaders(ctx, path, headers, reqBody, respBody)
 }
 
 func mailboxLeaseExpired(raw string, now time.Time) (bool, error) {
