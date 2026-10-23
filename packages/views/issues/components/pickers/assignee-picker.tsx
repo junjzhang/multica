@@ -5,7 +5,10 @@ import { Lock, UserMinus } from "lucide-react";
 import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@multica/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
-import { isAgentRuntimeBound } from "@multica/core/agents";
+import {
+  agentExecutionKind,
+  agentNeedsRuntime,
+} from "@multica/core/agents/execution-kind";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -141,11 +144,19 @@ function AssigneePickerImpl({
   const filteredSquads = squads
     .filter((s) => !s.archived_at && (s.name.toLowerCase().includes(query) || matchesPinyin(s.name, query)))
     .sort((a, b) => getFreq("squad", b.id) - getFreq("squad", a.id));
-  const runnableAgentIds = new Set(
-    agents
-      .filter((agent) => !agent.archived_at && isAgentRuntimeBound(agent))
-      .map((agent) => agent.id),
+  // Execution boundary per agent, not mere runtime presence: an external
+  // identity needs no runtime and keeps its session presentation, an unknown
+  // kind exposes no executable action, and a managed agent without a runtime
+  // keeps its real repair signal.
+  const liveAgentsById = new Map(
+    agents.filter((agent) => !agent.archived_at).map((agent) => [agent.id, agent]),
   );
+  const agentActionState = (agent: Agent) => {
+    const kind = agentExecutionKind(agent);
+    if (kind === "unknown") return "unsupported" as const;
+    if (kind === "external") return "ready" as const;
+    return agentNeedsRuntime(agent) ? ("needs-runtime" as const) : ("ready" as const);
+  };
 
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
@@ -230,8 +241,9 @@ function AssigneePickerImpl({
                   ? memberRole
                   : null,
             });
-            const runtimeBound = isAgentRuntimeBound(a);
-            const allowed = decision.allowed && runtimeBound;
+            const actionState = agentActionState(a);
+            const kind = agentExecutionKind(a);
+            const allowed = decision.allowed && actionState === "ready";
             return (
               <PickerItem
                 key={a.id}
@@ -240,9 +252,11 @@ function AssigneePickerImpl({
                 tooltip={
                   !decision.allowed
                     ? decision.message
-                    : !runtimeBound
-                      ? t(($) => $.pickers.assignee.agent_runtime_required)
-                      : undefined
+                    : actionState === "unsupported"
+                      ? t(($) => $.pickers.assignee.agent_execution_unsupported)
+                      : actionState === "needs-runtime"
+                        ? t(($) => $.pickers.assignee.agent_runtime_required)
+                        : undefined
                 }
                 onClick={() => {
                   if (!allowed) return;
@@ -255,6 +269,13 @@ function AssigneePickerImpl({
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
                 <span className={`truncate ${allowed ? "" : "text-muted-foreground"}`}>{a.name}</span>
+                {kind === "external" && (
+                  <span className="min-w-0 truncate text-micro text-muted-foreground">
+                    {a.external_session?.display_name ||
+                      a.external_session?.session_id ||
+                      t(($) => $.pickers.assignee.agent_external_session)}
+                  </span>
+                )}
                 {a.visibility === "private" && (
                   <Lock className="ml-auto h-3 w-3 text-muted-foreground" />
                 )}
@@ -269,19 +290,23 @@ function AssigneePickerImpl({
       {filteredSquads.length > 0 && (
         <PickerSection label={t(($) => $.pickers.assignee.squads_group)}>
           {filteredSquads.map((s) => {
-            const runtimeBound = runnableAgentIds.has(s.leader_id);
+            const leader = liveAgentsById.get(s.leader_id);
+            const actionState = leader ? agentActionState(leader) : "unsupported";
+            const squadAllowed = !!leader && actionState === "ready";
             return (
               <PickerItem
                 key={s.id}
                 selected={isSelected("squad", s.id)}
-                disabled={!runtimeBound}
+                disabled={!squadAllowed}
                 tooltip={
-                  runtimeBound
+                  squadAllowed
                     ? undefined
-                    : t(($) => $.pickers.assignee.squad_runtime_required)
+                    : actionState === "unsupported"
+                      ? t(($) => $.pickers.assignee.squad_execution_unsupported)
+                      : t(($) => $.pickers.assignee.squad_runtime_required)
                 }
                 onClick={() => {
-                  if (!runtimeBound) return;
+                  if (!squadAllowed) return;
                   onUpdate({
                     assignee_type: "squad",
                     assignee_id: s.id,

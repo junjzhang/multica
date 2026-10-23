@@ -597,6 +597,7 @@
     "trigger_blocked_runtime_unusable": "이 대상의 CLI를 해당 기기에서 실행할 수 없습니다 — 그 기기에서 다시 설치하세요",
     "trigger_blocked_runtime_profile_missing": "이 대상의 CLI에 해당 기기의 런타임 프로필이 없습니다 — 그 기기에서 설치하세요",
     "trigger_blocked_agent_runtime_required": "이 대상에 런타임이 없습니다 — 실행하려면 런타임을 연결하세요",
+    "trigger_blocked_agent_execution_unsupported": "이 대상의 실행 유형을 확인할 수 없어 실행할 수 없습니다",
     "trigger_blocked_runtime_access_denied": "이 대상의 에이전트는 비공개 런타임에서 실행할 수 없습니다 — 런타임을 공개로 변경하거나, 소유자가 사용할 수 있는 런타임으로 에이전트를 다시 연결/복사하세요",
     "trigger_blocked_generic": "이 대상은 트리거되지 않습니다",
     "trigger_blocked_short_invocation_not_allowed": "찾을 수 없음 또는 권한 없음",
@@ -605,6 +606,7 @@
     "trigger_blocked_short_runtime_unusable": "CLI 실행 불가",
     "trigger_blocked_short_runtime_profile_missing": "런타임 프로필 없음",
     "trigger_blocked_short_agent_runtime_required": "런타임 필요",
+    "trigger_blocked_short_agent_execution_unsupported": "지원되지 않는 실행 유형",
     "trigger_blocked_short_runtime_access_denied": "런타임 접근 거부",
     "trigger_blocked_short_generic": "트리거 안 됨",
     "send_reply_failed": "답글을 보내지 못했습니다",
@@ -919,7 +921,10 @@
       "agents_group": "에이전트",
       "squads_group": "스쿼드",
       "agent_runtime_required": "작업을 할당하기 전에 이 에이전트에 런타임을 연결하세요",
-      "squad_runtime_required": "작업을 할당하기 전에 이 스쿼드의 리더에 런타임을 연결하세요"
+      "agent_execution_unsupported": "지원되지 않는 실행 유형",
+      "agent_external_session": "외부 세션",
+      "squad_runtime_required": "작업을 할당하기 전에 이 스쿼드의 리더에 런타임을 연결하세요",
+      "squad_execution_unsupported": "이 스쿼드 리더의 실행 유형은 지원되지 않습니다"
     },
     "start_date": {
       "trigger_label": "시작일",

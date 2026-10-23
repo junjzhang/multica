@@ -72,6 +72,9 @@
     "you": "あなた",
     "archived": "アーカイブ済み",
     "needs_runtime": "ランタイム未設定",
+    "external": "外部",
+    "execution_unknown": "未対応の実行タイプ",
+    "external_session_unavailable": "セッション情報を取得できません",
     "no_description": "説明なし",
     "fallback_runtime_cloud": "クラウド",
     "fallback_runtime_local": "ローカル",
@@ -130,6 +133,7 @@
     "try_again": "再試行",
     "archived_banner": "このエージェントはアーカイブされています。割り当てやメンションはできません。",
     "runtime_required_banner": "このエージェントの設定と履歴は保持されていますが、実行するにはランタイムを設定する必要があります。",
+    "execution_unknown_banner": "このエージェントの実行タイプを判別できないため、実行操作は無効です。",
     "bind_runtime": "ランタイムを設定",
     "restore": "復元",
     "archive_dialog_title": "エージェントをアーカイブしますか？",
@@ -705,6 +709,7 @@
     "composio_switch_hint": "ご注意 — このエージェントは Composio アプリが有効です。共有すると、アクセス権を持つ全員がこのエージェントを通じてこれらのアプリを利用できます。"
   },
   "profile_card": {
+    "session_label": "外部セッション",
     "unavailable": "エージェントを利用できません",
     "detail_link": "詳細 →",
     "runtime_label": "ランタイム",

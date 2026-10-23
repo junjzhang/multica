@@ -80,6 +80,9 @@
     "you": "나",
     "archived": "보관됨",
     "needs_runtime": "런타임 필요",
+    "external": "외부",
+    "execution_unknown": "지원되지 않는 실행 유형",
+    "external_session_unavailable": "세션 정보를 사용할 수 없음",
     "no_description": "설명 없음",
     "fallback_runtime_cloud": "클라우드",
     "fallback_runtime_local": "로컬",
@@ -138,6 +141,7 @@
     "try_again": "다시 시도",
     "archived_banner": "보관된 에이전트입니다. 할당하거나 멘션할 수 없습니다.",
     "runtime_required_banner": "이 에이전트의 설정과 기록은 보존되었지만 실행하려면 런타임을 연결해야 합니다.",
+    "execution_unknown_banner": "이 에이전트의 실행 유형을 확인할 수 없어 실행 작업을 사용할 수 없습니다.",
     "bind_runtime": "런타임 연결",
     "restore": "복원",
     "archive_dialog_title": "에이전트를 보관할까요?",
@@ -713,6 +717,7 @@
     "composio_switch_hint": "참고 — 이 에이전트에는 Composio 앱이 활성화되어 있습니다. 공유하면 접근 권한이 있는 모든 사람이 이 에이전트를 통해 해당 앱을 사용할 수 있습니다."
   },
   "profile_card": {
+    "session_label": "외부 세션",
     "unavailable": "에이전트를 사용할 수 없습니다",
     "detail_link": "자세히 →",
     "runtime_label": "런타임",

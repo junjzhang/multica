@@ -597,6 +597,7 @@
     "trigger_blocked_runtime_unusable": "この対象の CLI はそのマシンで実行できません — そのマシンで再インストールしてください",
     "trigger_blocked_runtime_profile_missing": "この対象の CLI はそのマシンでランタイム プロファイルが不足しています — そのマシンでインストールしてください",
     "trigger_blocked_agent_runtime_required": "この対象にはランタイムがありません — 実行するにはバインドしてください",
+    "trigger_blocked_agent_execution_unsupported": "この対象の実行タイプを判別できないため実行できません",
     "trigger_blocked_runtime_access_denied": "この対象のエージェントはプライベートランタイムで実行できません — ランタイムを公開にするか、所有者が利用できるランタイムへエージェントを再設定/コピーしてください",
     "trigger_blocked_generic": "この対象はトリガーされません",
     "trigger_blocked_short_invocation_not_allowed": "未検出または権限なし",
@@ -605,6 +606,7 @@
     "trigger_blocked_short_runtime_unusable": "CLI を実行できません",
     "trigger_blocked_short_runtime_profile_missing": "ランタイム プロファイル未導入",
     "trigger_blocked_short_agent_runtime_required": "ランタイム未設定",
+    "trigger_blocked_short_agent_execution_unsupported": "未対応の実行タイプ",
     "trigger_blocked_short_runtime_access_denied": "ランタイムアクセス拒否",
     "trigger_blocked_short_generic": "トリガーされません",
     "send_reply_failed": "返信を送信できませんでした",
@@ -919,7 +921,10 @@
       "agents_group": "エージェント",
       "squads_group": "スクワッド",
       "agent_runtime_required": "作業を割り当てる前に、このエージェントにランタイムをバインドしてください",
-      "squad_runtime_required": "作業を割り当てる前に、このスクワッドのリーダーにランタイムをバインドしてください"
+      "agent_execution_unsupported": "未対応の実行タイプ",
+      "agent_external_session": "外部セッション",
+      "squad_runtime_required": "作業を割り当てる前に、このスクワッドのリーダーにランタイムをバインドしてください",
+      "squad_execution_unsupported": "このスクワッドのリーダーの実行タイプは未対応です"
     },
     "start_date": {
       "trigger_label": "開始日",
