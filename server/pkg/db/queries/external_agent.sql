@@ -61,14 +61,6 @@ SET display_name = @display_name,
 WHERE agent_id = @agent_id
 RETURNING *;
 
--- name: WorkspaceDaemonExists :one
--- An external session may only name a daemon this workspace has actually
--- registered. The claim path additionally pins the session to the daemon/owner
--- it was registered for.
-SELECT EXISTS (
-    SELECT 1 FROM agent_runtime WHERE workspace_id = $1 AND daemon_id = $2
-) AS exists;
-
 -- name: WorkspaceDaemonOwnedByUser :one
 SELECT EXISTS (
     SELECT 1 FROM agent_runtime

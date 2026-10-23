@@ -452,27 +452,6 @@ func (q *Queries) UpdateExternalAgentSessionProfile(ctx context.Context, arg Upd
 	return i, err
 }
 
-const workspaceDaemonExists = `-- name: WorkspaceDaemonExists :one
-SELECT EXISTS (
-    SELECT 1 FROM agent_runtime WHERE workspace_id = $1 AND daemon_id = $2
-) AS exists
-`
-
-type WorkspaceDaemonExistsParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	DaemonID    pgtype.Text `json:"daemon_id"`
-}
-
-// An external session may only name a daemon this workspace has actually
-// registered. The claim path additionally pins the session to the daemon/owner
-// it was registered for.
-func (q *Queries) WorkspaceDaemonExists(ctx context.Context, arg WorkspaceDaemonExistsParams) (bool, error) {
-	row := q.db.QueryRow(ctx, workspaceDaemonExists, arg.WorkspaceID, arg.DaemonID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const workspaceDaemonOwnedByUser = `-- name: WorkspaceDaemonOwnedByUser :one
 SELECT EXISTS (
     SELECT 1 FROM agent_runtime

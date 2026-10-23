@@ -218,19 +218,27 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
+	if link != nil {
+		parsed, _ := url.Parse(*link)
+		if parsed.Path != "/"+session.HostID+"/agent/"+session.SessionID {
+			writeError(w, http.StatusBadRequest, "external_session.url does not match its host and session")
+			return
+		}
+	}
 	session.URL = link
 	displayName := sanitizeExternalDisplayName(session.DisplayName, name)
 
-	daemonOK, err := h.Queries.WorkspaceDaemonExists(r.Context(), db.WorkspaceDaemonExistsParams{
+	daemonOK, err := h.Queries.WorkspaceDaemonOwnedByUser(r.Context(), db.WorkspaceDaemonOwnedByUserParams{
 		WorkspaceID: wsUUID,
 		DaemonID:    pgtype.Text{String: session.DaemonID, Valid: true},
+		OwnerUserID: parseUUID(ownerID),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to validate daemon_id")
 		return
 	}
 	if !daemonOK {
-		writeError(w, http.StatusBadRequest, "external_session.daemon_id is not a registered daemon in this workspace")
+		writeError(w, http.StatusBadRequest, "external_session.daemon_id must be owned by the registering user in this workspace")
 		return
 	}
 

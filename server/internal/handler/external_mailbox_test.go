@@ -733,7 +733,7 @@ func TestExternalAgentRegistrationAndTokens(t *testing.T) {
 			"host_id":      "host-" + suffix,
 			"session_id":   "session-" + suffix,
 			"display_name": "Registered Session",
-			"url":          "paseo://h/server-1/agent/session-" + suffix,
+			"url":          "paseo://h/host-" + suffix + "/agent/session-" + suffix,
 			"daemon_id":    daemonID,
 		},
 	}
