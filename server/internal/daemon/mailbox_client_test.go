@@ -52,6 +52,9 @@ func TestClaimMailboxUsesDaemonEndpointAndDecodesLease(t *testing.T) {
 		claim.ExternalSession.SessionID != "paseo-agent-1" || claim.Content != "Please review." {
 		t.Fatalf("claim = %+v", claim)
 	}
+	if claim.WorkspaceID != "ws-1" {
+		t.Fatalf("claim workspace id = %q, want the request selector", claim.WorkspaceID)
+	}
 }
 
 func TestAckMailboxUsesLeaseTokenAndClassifiesConflict(t *testing.T) {

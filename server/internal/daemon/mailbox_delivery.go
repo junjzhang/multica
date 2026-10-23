@@ -12,14 +12,23 @@ import (
 const (
 	// Five claims at a bounded per-delivery timeout stay inside the server's
 	// two-minute lease even in the pathological all-timeouts case.
-	defaultMailboxClaimLimit    = 5
-	defaultMailboxPollInterval  = 5 * time.Second
+	defaultMailboxClaimLimit   = 5
+	defaultMailboxPollInterval = 5 * time.Second
+
+	// mailboxTerminalAckRetention bounds how long a decided outcome is kept
+	// when its lease was superseded before the ack reached the server. A live
+	// message is re-leased well inside this window; a longer gap means the
+	// message was resolved or deleted elsewhere, so the marker must not
+	// accumulate forever.
+	mailboxTerminalAckRetention = 10 * time.Minute
+
 	mailboxErrorAgentBusy       = "agent_busy"
 	mailboxErrorHostUnreachable = "paseo_daemon_unreachable"
 	mailboxErrorLeaseExpired    = "lease_expired"
 	mailboxErrorOutcomeUnknown  = "agent_request_outcome_unknown"
 	mailboxErrorUnsupported     = "paseo_dependency_unsupported"
 	mailboxErrorDeliveryFailed  = "paseo_delivery_failed"
+	mailboxErrorDaemonMismatch  = "daemon_mismatch"
 )
 
 // MailboxDeliveryErrorKind classifies a host delivery outcome. The distinction
@@ -37,7 +46,9 @@ const (
 	// MailboxDeliveryUnavailable means the host could not be reached. Retry later.
 	MailboxDeliveryUnavailable
 	// MailboxDeliveryUnsupported means the installed host/CLI does not support
-	// atomic if-idle delivery. Never fall back to ordinary send.
+	// atomic if-idle delivery. The request was never sent, so it stays queued
+	// until the dependency is installed or upgraded. Never fall back to
+	// ordinary send.
 	MailboxDeliveryUnsupported
 	// MailboxDeliveryOutcomeUnknown means the request may have been accepted.
 	// It must not be replayed without a host receipt.
@@ -84,12 +95,17 @@ type mailboxPendingAck struct {
 	// terminal prevents a second host delivery when the prior outcome was
 	// already accepted or is ambiguous. The ack itself may still be retried.
 	terminal bool
+	// awaitingLeaseSince is set when the server fenced this terminal ack off
+	// with 409: a newer lease exists. The decided outcome is kept and re-acked
+	// under that lease without sending to the host again.
+	awaitingLeaseSince time.Time
 }
 
 type mailboxDeliveryLoop struct {
 	client       mailboxDeliveryClient
 	transport    MailboxHostTransport
 	workspaces   func() []string
+	daemonID     string
 	logger       *slog.Logger
 	now          func() time.Time
 	claimLimit   int
@@ -97,7 +113,7 @@ type mailboxDeliveryLoop struct {
 	pending      map[string]mailboxPendingAck
 }
 
-func newMailboxDeliveryLoop(client mailboxDeliveryClient, transport MailboxHostTransport, workspaces func() []string, logger *slog.Logger) *mailboxDeliveryLoop {
+func newMailboxDeliveryLoop(client mailboxDeliveryClient, transport MailboxHostTransport, workspaces func() []string, daemonID string, logger *slog.Logger) *mailboxDeliveryLoop {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -108,6 +124,7 @@ func newMailboxDeliveryLoop(client mailboxDeliveryClient, transport MailboxHostT
 		client:       client,
 		transport:    transport,
 		workspaces:   workspaces,
+		daemonID:     daemonID,
 		logger:       logger,
 		now:          time.Now,
 		claimLimit:   defaultMailboxClaimLimit,
@@ -154,9 +171,17 @@ func (m *mailboxDeliveryLoop) deliverOnce(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for messageID := range m.pending {
+	now := m.now()
+	for messageID, pending := range m.pending {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if !pending.awaitingLeaseSince.IsZero() {
+			if now.Sub(pending.awaitingLeaseSince) > mailboxTerminalAckRetention {
+				delete(m.pending, messageID)
+				m.logger.Warn("dropping unconfirmed mailbox terminal ack after retention", "message_id", messageID)
+			}
+			continue
 		}
 		m.retryPendingAck(ctx, messageID)
 	}
@@ -167,17 +192,17 @@ func (m *mailboxDeliveryLoop) deliverOnce(ctx context.Context) error {
 		}
 		claims, err := m.client.ClaimMailbox(ctx, workspaceID, m.claimLimit)
 		if err != nil {
-			if isMailboxEndpointMissing(err) {
-				m.logger.Info("server has no mailbox delivery endpoint; mailbox delivery disabled for this daemon session")
-				return errMailboxDeliveryUnsupported
-			}
 			if ctx.Err() == nil {
-				m.logger.Warn("mailbox claim failed", "workspace_id", workspaceID, "error", err)
+				// A workspace-scoped 404 (removed workspace or lost membership)
+				// or a server without the endpoint must not stop delivery for
+				// every other workspace.
+				if mailboxStatus(err) == http.StatusNotFound {
+					m.logger.Debug("mailbox claim unavailable for workspace; skipping", "workspace_id", workspaceID, "error", err)
+				} else {
+					m.logger.Warn("mailbox claim failed", "workspace_id", workspaceID, "error", err)
+				}
 			}
 			continue
-		}
-		for i := range claims {
-			claims[i].WorkspaceID = workspaceID
 		}
 		for _, claim := range claims {
 			if ctx.Err() != nil {
@@ -185,7 +210,7 @@ func (m *mailboxDeliveryLoop) deliverOnce(ctx context.Context) error {
 			}
 			if err := m.handleClaim(ctx, claim); err != nil {
 				m.logger.Warn("mailbox delivery failed",
-					"workspace_id", workspaceID,
+					"workspace_id", claim.WorkspaceID,
 					"message_id", claim.Message.ID,
 					"recipient_agent_id", claim.Message.RecipientAgentID,
 					"error", err)
@@ -194,8 +219,6 @@ func (m *mailboxDeliveryLoop) deliverOnce(ctx context.Context) error {
 	}
 	return nil
 }
-
-var errMailboxDeliveryUnsupported = errors.New("mailbox delivery endpoint is not supported by this server")
 
 func (m *mailboxDeliveryLoop) handleClaim(ctx context.Context, claim MailboxClaim) error {
 	messageID := claim.Message.ID
@@ -209,22 +232,41 @@ func (m *mailboxDeliveryLoop) handleClaim(ctx context.Context, claim MailboxClai
 		return errors.New("mailbox claim has no external session id")
 	}
 
-	pending, hasPending := m.pending[messageID]
-	if hasPending && pending.DeliveryToken != claim.DeliveryToken {
-		// A later lease supersedes the pending one. Never send the stale token;
-		// a terminal outcome stays terminal so an ambiguous request is not
-		// replayed under the new lease.
-		delete(m.pending, messageID)
+	if pending, ok := m.pending[messageID]; ok {
 		if pending.terminal {
+			if pending.DeliveryToken == claim.DeliveryToken {
+				// The outcome is already decided and its ack is still pending.
+				return nil
+			}
+			// A later lease supersedes the pending one. Never send the stale
+			// token, and never deliver again: a decided or ambiguous outcome is
+			// final. Re-ack it under the new lease instead.
 			pending.WorkspaceID = claim.WorkspaceID
 			pending.DeliveryToken = claim.DeliveryToken
 			pending.Ack.DeliveryToken = claim.DeliveryToken
+			pending.awaitingLeaseSince = time.Time{}
 			m.pending[messageID] = pending
 			m.retryPendingAck(ctx, messageID)
 			return nil
 		}
+		// Non-terminal outcomes are known no-effect, so a new lease may safely
+		// attempt delivery again.
+		delete(m.pending, messageID)
 	}
-	if hasPending && m.pending[messageID].terminal {
+
+	if claim.ExternalSession.DaemonID != m.daemonID {
+		// The claim is not bound to this authenticated daemon. Delivering could
+		// send to a session another daemon owns, so report it as not delivered
+		// and let the server re-bind or re-lease.
+		m.logger.Warn("mailbox claim is bound to another daemon; not delivering",
+			"message_id", messageID,
+			"claim_daemon_id", claim.ExternalSession.DaemonID,
+			"daemon_id", m.daemonID)
+		m.queueAck(ctx, claim, MailboxAckRequest{
+			DeliveryToken: claim.DeliveryToken,
+			Status:        mailboxAckRetry,
+			Error:         mailboxErrorDaemonMismatch,
+		}, false)
 		return nil
 	}
 
@@ -264,47 +306,65 @@ func (m *mailboxDeliveryLoop) recordDeliveryError(ctx context.Context, claim Mai
 		}
 	}
 
-	switch typed.Kind {
-	case MailboxDeliveryBusy:
+	if mailboxDeliveryRetryable(typed.Kind) {
 		m.queueAck(ctx, claim, MailboxAckRequest{
 			DeliveryToken: claim.DeliveryToken,
 			Status:        mailboxAckRetry,
-			Error:         mailboxErrorAgentBusy,
+			Error:         mailboxRetryReason(typed),
 		}, false)
-		return nil
-	case MailboxDeliveryUnavailable:
-		m.queueAck(ctx, claim, MailboxAckRequest{
-			DeliveryToken: claim.DeliveryToken,
-			Status:        mailboxAckRetry,
-			Error:         mailboxErrorHostUnreachable,
-		}, false)
-		return nil
-	case MailboxDeliveryUnsupported:
-		m.queueAck(ctx, claim, MailboxAckRequest{
-			DeliveryToken: claim.DeliveryToken,
-			Status:        mailboxAckFailed,
-			Error:         mailboxErrorUnsupported + ": upgrade Paseo to a version that supports atomic if-idle delivery",
-		}, true)
-		return nil
-	case MailboxDeliveryOutcomeUnknown:
-		m.queueAck(ctx, claim, MailboxAckRequest{
-			DeliveryToken: claim.DeliveryToken,
-			Status:        mailboxAckFailed,
-			Error:         mailboxErrorOutcomeUnknown + ": not retried automatically to avoid duplicate work",
-		}, true)
-		return nil
-	default:
-		code := typed.Code
-		if code == "" {
-			code = mailboxErrorDeliveryFailed
-		}
-		m.queueAck(ctx, claim, MailboxAckRequest{
-			DeliveryToken: claim.DeliveryToken,
-			Status:        mailboxAckFailed,
-			Error:         code,
-		}, true)
 		return nil
 	}
+	m.queueAck(ctx, claim, MailboxAckRequest{
+		DeliveryToken: claim.DeliveryToken,
+		Status:        mailboxAckFailed,
+		Error:         mailboxTerminalReason(typed),
+	}, true)
+	return nil
+}
+
+// mailboxDeliveryRetryable is the only behavior that matters: a request known
+// not to have reached the host can be retried, while an accepted or ambiguous
+// outcome is terminal. Busy, unreachable, and unsupported dependencies all
+// happen before the host accepts a request.
+func mailboxDeliveryRetryable(kind MailboxDeliveryErrorKind) bool {
+	switch kind {
+	case MailboxDeliveryBusy, MailboxDeliveryUnavailable, MailboxDeliveryUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+func mailboxRetryReason(typed *MailboxDeliveryError) string {
+	switch typed.Kind {
+	case MailboxDeliveryBusy:
+		return mailboxErrorAgentBusy
+	case MailboxDeliveryUnavailable:
+		return mailboxErrorHostUnreachable
+	default:
+		reason := typed.Code
+		if reason == "" {
+			reason = mailboxErrorUnsupported
+		}
+		if typed.Message != "" {
+			reason += ": " + typed.Message
+		}
+		return reason
+	}
+}
+
+func mailboxTerminalReason(typed *MailboxDeliveryError) string {
+	if typed.Kind == MailboxDeliveryOutcomeUnknown {
+		return mailboxErrorOutcomeUnknown + ": not retried automatically to avoid duplicate work"
+	}
+	reason := typed.Code
+	if reason == "" {
+		reason = mailboxErrorDeliveryFailed
+	}
+	if typed.Message != "" {
+		reason += ": " + typed.Message
+	}
+	return reason
 }
 
 // queueAck records the ack locally, then tries it once. A failed attempt stays
@@ -330,10 +390,7 @@ func (m *mailboxDeliveryLoop) queueAck(ctx context.Context, claim MailboxClaim, 
 
 func (m *mailboxDeliveryLoop) retryPendingAck(ctx context.Context, messageID string) {
 	pending, ok := m.pending[messageID]
-	if !ok {
-		return
-	}
-	if ctx.Err() != nil {
+	if !ok || !pending.awaitingLeaseSince.IsZero() || ctx.Err() != nil {
 		return
 	}
 	_, err := m.client.AckMailbox(ctx, pending.WorkspaceID, messageID, pending.Ack)
@@ -341,23 +398,34 @@ func (m *mailboxDeliveryLoop) retryPendingAck(ctx context.Context, messageID str
 		delete(m.pending, messageID)
 		return
 	}
-	if mailboxAckIsStale(err) {
+	switch {
+	case mailboxAckIsStale(err):
+		if pending.terminal {
+			// Preserve the decided outcome and wait for the next claim's token.
+			// The next handleClaim re-acks it without delivering again.
+			pending.awaitingLeaseSince = m.now()
+			m.pending[messageID] = pending
+			m.logger.Info("mailbox lease was superseded before ack; terminal outcome will be re-acked under the next lease", "message_id", messageID)
+			return
+		}
 		delete(m.pending, messageID)
-		m.logger.Info("mailbox lease was superseded before ack; dropping stale ack", "message_id", messageID)
-		return
-	}
-	if mailboxAckIsPermanent(err) {
+		m.logger.Info("mailbox lease was superseded before a known no-effect ack; dropping stale ack", "message_id", messageID)
+	case mailboxAckIsGone(err):
+		delete(m.pending, messageID)
+		m.logger.Warn("mailbox message no longer exists; dropping ack", "message_id", messageID)
+	case mailboxAckIsPermanent(err):
 		delete(m.pending, messageID)
 		m.logger.Warn("mailbox ack rejected permanently", "message_id", messageID, "error", err)
-		return
+	default:
+		m.logger.Debug("mailbox ack delayed; will retry", "message_id", messageID, "error", err)
 	}
-	m.logger.Debug("mailbox ack delayed; will retry", "message_id", messageID, "error", err)
 }
 
 // flushPendingAcksOnStop makes one bounded attempt to persist terminal outcomes
 // that were already decided but not yet acknowledged. Without it, a daemon stop
 // would let the server re-lease a delivered or ambiguous message and cause a
-// blind replay on the next start.
+// blind replay on the next start. Acks waiting for a newer lease cannot make
+// progress here and are left for the next run.
 func (m *mailboxDeliveryLoop) flushPendingAcksOnStop() {
 	if len(m.pending) == 0 {
 		return
@@ -372,28 +440,28 @@ func (m *mailboxDeliveryLoop) flushPendingAcksOnStop() {
 	}
 }
 
-func isMailboxEndpointMissing(err error) bool {
+func mailboxStatus(err error) int {
 	var reqErr *requestError
 	if !errors.As(err, &reqErr) {
-		return false
+		return 0
 	}
-	return reqErr.StatusCode == http.StatusNotFound
+	return reqErr.StatusCode
 }
 
+// mailboxAckIsStale reports a lease-fencing conflict. The message still exists
+// and a newer lease owns it.
 func mailboxAckIsStale(err error) bool {
-	var reqErr *requestError
-	if !errors.As(err, &reqErr) {
-		return false
-	}
-	return reqErr.StatusCode == http.StatusConflict || reqErr.StatusCode == http.StatusNotFound
+	return mailboxStatus(err) == http.StatusConflict
+}
+
+// mailboxAckIsGone reports that the message or its workspace no longer exists.
+// Retrying the ack can never succeed.
+func mailboxAckIsGone(err error) bool {
+	return mailboxStatus(err) == http.StatusNotFound
 }
 
 func mailboxAckIsPermanent(err error) bool {
-	var reqErr *requestError
-	if !errors.As(err, &reqErr) {
-		return false
-	}
-	switch reqErr.StatusCode {
+	switch mailboxStatus(err) {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusUnprocessableEntity:
 		return true
 	default:
@@ -402,13 +470,9 @@ func mailboxAckIsPermanent(err error) bool {
 }
 
 // runMailboxDelivery starts the delivery loop as part of the daemon lifecycle.
-// A server without the endpoint disables the loop for this process rather than
-// retrying every tick.
 func (d *Daemon) runMailboxDelivery(ctx context.Context) {
-	loop := newMailboxDeliveryLoop(d.client, newPaseoCliTransport(), d.allWorkspaceIDs, d.logger)
-	if err := loop.run(ctx); err != nil &&
-		!errors.Is(err, context.Canceled) &&
-		!errors.Is(err, errMailboxDeliveryUnsupported) {
+	loop := newMailboxDeliveryLoop(d.client, newPaseoCliTransport(), d.allWorkspaceIDs, d.cfg.DaemonID, d.logger)
+	if err := loop.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		d.logger.Warn("mailbox delivery loop stopped", "error", err)
 	}
 }

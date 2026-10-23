@@ -112,11 +112,12 @@ func testMailboxClaim(token string) MailboxClaim {
 		DeliveryToken:  token,
 		LeaseExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339),
 		Content:        "Please review issue WORK-1.",
+		WorkspaceID:    "ws-1",
 	}
 }
 
 func newTestMailboxLoop(client *fakeMailboxClient, transport *fakeMailboxTransport) *mailboxDeliveryLoop {
-	return newMailboxDeliveryLoop(client, transport, func() []string { return []string{"ws-1"} }, nil)
+	return newMailboxDeliveryLoop(client, transport, func() []string { return []string{"ws-1"} }, "daemon-1", nil)
 }
 
 func TestMailboxDeliveryDeliversIdleMessageAndAcksReceipt(t *testing.T) {
@@ -208,6 +209,29 @@ func TestMailboxDeliveryOfflineStaysQueued(t *testing.T) {
 	}
 }
 
+func TestMailboxDeliveryRejectsClaimBoundToAnotherDaemon(t *testing.T) {
+	for _, daemonID := range []string{"daemon-2", ""} {
+		t.Run("daemon_id="+daemonID, func(t *testing.T) {
+			claim := testMailboxClaim("lease-1")
+			claim.ExternalSession.DaemonID = daemonID
+			client := &fakeMailboxClient{claims: [][]MailboxClaim{{claim}}}
+			transport := &fakeMailboxTransport{}
+			loop := newTestMailboxLoop(client, transport)
+
+			if err := loop.deliverOnce(context.Background()); err != nil {
+				t.Fatalf("deliverOnce: %v", err)
+			}
+			if len(transport.deliveries) != 0 {
+				t.Fatalf("delivered a claim bound to another daemon: %+v", transport.deliveries)
+			}
+			if len(client.ackCalls) != 1 || client.ackCalls[0].ack.Status != mailboxAckRetry ||
+				client.ackCalls[0].ack.Error != mailboxErrorDaemonMismatch {
+				t.Fatalf("acks = %+v", client.ackCalls)
+			}
+		})
+	}
+}
+
 func TestMailboxDeliveryDelayedAckDoesNotResend(t *testing.T) {
 	claim := testMailboxClaim("lease-1")
 	client := &fakeMailboxClient{
@@ -237,11 +261,75 @@ func TestMailboxDeliveryDelayedAckDoesNotResend(t *testing.T) {
 	}
 }
 
-func TestMailboxDeliveryStaleLeaseAckIsDropped(t *testing.T) {
+func TestMailboxDeliveryStaleTerminalAckIsReackedUnderNewLease(t *testing.T) {
+	tests := []struct {
+		name       string
+		deliverErr error
+		wantStatus string
+		wantError  string
+	}{
+		{name: "delivered", wantStatus: mailboxAckDelivered},
+		{
+			name:       "ambiguous outcome",
+			deliverErr: &MailboxDeliveryError{Kind: MailboxDeliveryOutcomeUnknown, Code: mailboxErrorOutcomeUnknown},
+			wantStatus: mailboxAckFailed,
+			wantError:  mailboxErrorOutcomeUnknown,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			claim1 := testMailboxClaim("lease-1")
+			claim2 := testMailboxClaim("lease-2")
+			client := &fakeMailboxClient{
+				claims: [][]MailboxClaim{{claim1}, {claim2}},
+				ackErrs: []error{
+					&requestError{StatusCode: http.StatusConflict, Body: "lease superseded"},
+				},
+			}
+			transport := &fakeMailboxTransport{}
+			if tc.deliverErr != nil {
+				transport.errs = []error{tc.deliverErr}
+			}
+			loop := newTestMailboxLoop(client, transport)
+
+			if err := loop.deliverOnce(context.Background()); err != nil {
+				t.Fatalf("round 1: %v", err)
+			}
+			if len(loop.pending) != 1 {
+				t.Fatalf("terminal ack was dropped after 409: pending = %d", len(loop.pending))
+			}
+			if pending := loop.pending[claim1.Message.ID]; pending.awaitingLeaseSince.IsZero() {
+				t.Fatalf("terminal ack is not waiting for a fresh lease: %+v", pending)
+			}
+			if err := loop.deliverOnce(context.Background()); err != nil {
+				t.Fatalf("round 2: %v", err)
+			}
+
+			if len(transport.deliveries) != 1 {
+				t.Fatalf("terminal outcome was replayed: deliveries = %d, want 1", len(transport.deliveries))
+			}
+			if len(client.ackCalls) != 2 {
+				t.Fatalf("acks = %d, want 2", len(client.ackCalls))
+			}
+			last := client.ackCalls[len(client.ackCalls)-1].ack
+			if last.DeliveryToken != "lease-2" || last.Status != tc.wantStatus {
+				t.Fatalf("re-ack = %+v, want token lease-2 status %s", last, tc.wantStatus)
+			}
+			if tc.wantError != "" && !strings.Contains(last.Error, tc.wantError) {
+				t.Fatalf("re-ack error = %q, want %q", last.Error, tc.wantError)
+			}
+			if len(loop.pending) != 0 {
+				t.Fatalf("pending = %d, want 0", len(loop.pending))
+			}
+		})
+	}
+}
+
+func TestMailboxDeliveryDeletedMessageDropsTerminalAck(t *testing.T) {
 	claim := testMailboxClaim("lease-1")
 	client := &fakeMailboxClient{
 		claims:  [][]MailboxClaim{{claim}},
-		ackErrs: []error{&requestError{StatusCode: http.StatusConflict, Body: "lease superseded"}},
+		ackErrs: []error{&requestError{StatusCode: http.StatusNotFound, Body: "message not found"}},
 	}
 	transport := &fakeMailboxTransport{}
 	loop := newTestMailboxLoop(client, transport)
@@ -249,11 +337,37 @@ func TestMailboxDeliveryStaleLeaseAckIsDropped(t *testing.T) {
 	if err := loop.deliverOnce(context.Background()); err != nil {
 		t.Fatalf("deliverOnce: %v", err)
 	}
-	if len(client.ackCalls) != 1 {
-		t.Fatalf("acks = %d, want 1", len(client.ackCalls))
+	if len(loop.pending) != 0 {
+		t.Fatalf("deleted message kept a terminal ack forever: %+v", loop.pending)
+	}
+	if len(transport.deliveries) != 1 {
+		t.Fatalf("deliveries = %d, want 1", len(transport.deliveries))
+	}
+}
+
+func TestMailboxDeliveryExpiresUnconfirmedTerminalAck(t *testing.T) {
+	claim := testMailboxClaim("lease-1")
+	client := &fakeMailboxClient{
+		claims:  [][]MailboxClaim{{claim}},
+		ackErrs: []error{&requestError{StatusCode: http.StatusConflict, Body: "lease superseded"}},
+	}
+	loop := newTestMailboxLoop(client, &fakeMailboxTransport{})
+	now := time.Now()
+	loop.now = func() time.Time { return now }
+
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatalf("deliverOnce: %v", err)
+	}
+	if len(loop.pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(loop.pending))
+	}
+
+	loop.now = func() time.Time { return now.Add(mailboxTerminalAckRetention + time.Second) }
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatalf("deliverOnce after retention: %v", err)
 	}
 	if len(loop.pending) != 0 {
-		t.Fatalf("stale ack was kept for retry: %+v", loop.pending)
+		t.Fatalf("unconfirmed terminal ack grew without bound: %+v", loop.pending)
 	}
 }
 
@@ -328,23 +442,37 @@ func TestMailboxDeliveryAmbiguousOutcomeIsNotReplayed(t *testing.T) {
 	}
 }
 
-func TestMailboxDeliveryUnsupportedDependencyFailsClearly(t *testing.T) {
+func TestMailboxDeliveryDependencyErrorStaysRetryable(t *testing.T) {
 	claim := testMailboxClaim("lease-1")
-	client := &fakeMailboxClient{claims: [][]MailboxClaim{{claim}}}
+	client := &fakeMailboxClient{claims: [][]MailboxClaim{{claim}, {testMailboxClaim("lease-2")}}}
 	transport := &fakeMailboxTransport{errs: []error{
-		&MailboxDeliveryError{Kind: MailboxDeliveryUnsupported, Code: mailboxErrorUnsupported},
+		&MailboxDeliveryError{Kind: MailboxDeliveryUnsupported, Code: "paseo_cli_unavailable", Message: "install Paseo and confirm `paseo` is on PATH"},
 	}}
 	loop := newTestMailboxLoop(client, transport)
 
 	if err := loop.deliverOnce(context.Background()); err != nil {
-		t.Fatalf("deliverOnce: %v", err)
+		t.Fatalf("round 1: %v", err)
 	}
 	if len(client.ackCalls) != 1 {
 		t.Fatalf("acks = %d", len(client.ackCalls))
 	}
-	ack := client.ackCalls[0].ack
-	if ack.Status != mailboxAckFailed || !strings.Contains(ack.Error, "upgrade Paseo") {
-		t.Fatalf("ack = %+v", ack)
+	if ack := client.ackCalls[0].ack; ack.Status != mailboxAckRetry || !strings.Contains(ack.Error, "install Paseo") {
+		t.Fatalf("dependency ack = %+v, want a retry with an actionable reason", ack)
+	}
+	if len(loop.pending) != 0 {
+		t.Fatalf("known no-effect dependency error kept a terminal ack: %+v", loop.pending)
+	}
+
+	// Installing or upgrading the dependency must let every still-pending
+	// request deliver without manual cleanup.
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatalf("round 2: %v", err)
+	}
+	if len(client.ackCalls) != 2 || client.ackCalls[1].ack.Status != mailboxAckDelivered {
+		t.Fatalf("acks after upgrade = %+v", client.ackCalls)
+	}
+	if len(transport.deliveries) != 2 {
+		t.Fatalf("deliveries = %d, want retry attempt plus delivery", len(transport.deliveries))
 	}
 }
 
@@ -399,15 +527,42 @@ func TestMailboxDeliveryStopsWithDaemonContext(t *testing.T) {
 	}
 }
 
-func TestMailboxDeliveryDisablesOnOldServer(t *testing.T) {
+func TestMailboxDeliveryContinuesAfterWorkspaceNotFound(t *testing.T) {
+	claim := testMailboxClaim("lease-2")
+	claim.WorkspaceID = "ws-2"
+	client := &fakeMailboxClient{
+		claims:    [][]MailboxClaim{{claim}},
+		claimErrs: []error{&requestError{StatusCode: http.StatusNotFound, Body: `{"error":"workspace not found"}`}},
+	}
+	transport := &fakeMailboxTransport{}
+	loop := newMailboxDeliveryLoop(client, transport,
+		func() []string { return []string{"ws-1", "ws-2"} }, "daemon-1", nil)
+
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatalf("deliverOnce: %v", err)
+	}
+	if len(client.claimWorkspaces) != 2 || client.claimWorkspaces[0] != "ws-1" || client.claimWorkspaces[1] != "ws-2" {
+		t.Fatalf("claim workspaces = %v, want both workspaces", client.claimWorkspaces)
+	}
+	if len(transport.deliveries) != 1 {
+		t.Fatalf("deliveries = %d, want the second workspace delivered", len(transport.deliveries))
+	}
+	if len(client.ackCalls) != 1 || client.ackCalls[0].ack.Status != mailboxAckDelivered {
+		t.Fatalf("acks = %+v", client.ackCalls)
+	}
+	if len(client.ackWorkspaces) != 1 || client.ackWorkspaces[0] != "ws-2" {
+		t.Fatalf("ack workspaces = %v", client.ackWorkspaces)
+	}
+}
+
+func TestMailboxDeliveryMissingWorkspaceDoesNotStopLoop(t *testing.T) {
 	client := &fakeMailboxClient{claimErrs: []error{
-		&requestError{StatusCode: http.StatusNotFound, Body: "not found"},
+		&requestError{StatusCode: http.StatusNotFound, Body: `{"error":"workspace not found"}`},
 	}}
 	loop := newTestMailboxLoop(client, &fakeMailboxTransport{})
 
-	err := loop.run(context.Background())
-	if !errors.Is(err, errMailboxDeliveryUnsupported) {
-		t.Fatalf("err = %v, want errMailboxDeliveryUnsupported", err)
+	if err := loop.deliverOnce(context.Background()); err != nil {
+		t.Fatalf("deliverOnce: %v", err)
 	}
 	if client.claimCalls != 1 {
 		t.Fatalf("claims = %d, want 1", client.claimCalls)
