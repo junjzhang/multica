@@ -61,16 +61,20 @@ describe("AgentSchema WORK-9 fields", () => {
     expect(parsed.external_session).toBeUndefined();
   });
 
-  it("unknown execution_kind survives parsing but stays non-executable", () => {
+  it("keeps an unknown execution_kind non-executable", () => {
     const parsed = AgentSchema.parse({ id: "agent-1", execution_kind: "future_kind" });
-    expect(parsed.execution_kind).toBe("future_kind");
     expect(agentExecutionKind(parsed)).toBe("unknown");
   });
 
-  it("degrades a malformed execution_kind to managed instead of external", () => {
-    const parsed = AgentSchema.parse({ id: "agent-1", execution_kind: 42 });
-    expect(parsed.execution_kind).toBeUndefined();
-    expect(agentExecutionKind(parsed)).toBe("managed");
+  it.each([
+    ["null", null],
+    ["empty", ""],
+    ["a number", 42],
+    ["an object", { kind: "managed" }],
+  ])("never degrades a present %s execution_kind to managed", (_label, value) => {
+    const parsed = AgentSchema.parse({ id: "agent-1", execution_kind: value });
+    expect(parsed.execution_kind).toBe("unknown");
+    expect(agentExecutionKind(parsed)).toBe("unknown");
   });
 
   it("carries external session identity and defaults missing session fields", () => {
@@ -194,6 +198,23 @@ describe("dispatch_kind parsing", () => {
     expect(parsed.blocked[0]?.dispatch_kind).toBe("mailbox");
   });
 
+  it("never turns a present malformed dispatch_kind into a native run", () => {
+    const parsed = CommentTriggerPreviewSchema.parse({
+      agents: [
+        { id: "agent-1", name: "Null", dispatch_kind: null },
+        { id: "agent-2", name: "Empty", dispatch_kind: "" },
+        { id: "agent-3", name: "Number", dispatch_kind: 42 },
+        { id: "agent-4", name: "Omitted" },
+      ],
+    });
+    expect(parsed.agents.map((agent) => mentionDispatchKind(agent.dispatch_kind))).toEqual([
+      "unknown",
+      "unknown",
+      "unknown",
+      "run",
+    ]);
+  });
+
   it("keeps dispatch_kind additive on comments and timeline entries", () => {
     const comment = CommentSchema.parse({
       id: "c-1", issue_id: "i-1", author_type: "agent", author_id: "a-1",
@@ -205,5 +226,22 @@ describe("dispatch_kind parsing", () => {
       { type: "comment", id: "c-1", actor_type: "agent", actor_id: "a-1", created_at: "x", dispatch_kind: "mailbox" },
     ]);
     expect(timeline[0]?.dispatch_kind).toBe("mailbox");
+  });
+
+  it("keeps malformed comment and timeline dispatches non-executable", () => {
+    const comment = CommentSchema.parse({
+      id: "c-1", issue_id: "i-1", author_type: "agent", author_id: "a-1",
+      content: "hi", type: "comment", parent_id: null, created_at: "x", updated_at: "x",
+      dispatch_kind: null,
+    });
+    expect(mentionDispatchKind(comment.dispatch_kind)).toBe("unknown");
+    const timeline = TimelineEntriesSchema.parse([
+      { type: "comment", id: "c-1", actor_type: "agent", actor_id: "a-1", created_at: "x", dispatch_kind: 42 },
+      { type: "comment", id: "c-2", actor_type: "agent", actor_id: "a-1", created_at: "x" },
+    ]);
+    expect(timeline.map((entry) => mentionDispatchKind(entry.dispatch_kind))).toEqual([
+      "unknown",
+      "run",
+    ]);
   });
 });

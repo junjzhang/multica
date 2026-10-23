@@ -1056,6 +1056,16 @@ const CommentSupplementReceiptsSchema = z.array(z.unknown()).optional().catch(un
     return parsed.success ? [parsed.data] : [];
   }));
 
+/**
+ * WORK-9 dispatch of an explicit mention. Only an ABSENT field is the legacy
+ * native run; a present null, empty or malformed value carries no executable
+ * meaning and must not be guessed into one.
+ */
+const DispatchKindSchema = z.unknown().transform((value): string | undefined => {
+  if (value === undefined) return undefined;
+  return value === "run" || value === "mailbox" ? value : "unknown";
+});
+
 const TimelineEntrySchema = z.object({
   type: z.string(),
   id: z.string(),
@@ -1074,7 +1084,7 @@ const TimelineEntrySchema = z.object({
   reactions: z.array(ReactionSchema).optional(),
   attachments: z.array(AttachmentSchema).optional(),
   source_task_id: z.string().nullable().optional(),
-  dispatch_kind: z.string().optional().catch(undefined),
+  dispatch_kind: DispatchKindSchema,
   supplements: CommentSupplementReceiptsSchema,
   supplement_task_id: z.string().optional().catch(undefined),
   supplement_status: z.enum(["pending", "delivering", "delivered", "failed"]).optional().catch(undefined),
@@ -1235,9 +1245,20 @@ const AgentSkillSummarySchema = z.object({
 }).loose();
 
 /**
+ * WORK-9 execution boundary. Only an ABSENT field predates the field and
+ * keeps the existing managed behavior; a present null, empty or malformed
+ * value is not executable by either boundary and maps to the sentinel
+ * `unknown` that agentExecutionKind already rejects.
+ */
+const ExecutionKindSchema = z.unknown().transform((value): string | undefined => {
+  if (value === undefined) return undefined;
+  return value === "managed" || value === "external" ? value : "unknown";
+});
+
+/**
  * Lenient Agent response schema. Additive WORK-9 fields default to legacy
- * managed behavior: a missing execution_kind means managed, and an unknown
- * one stays in the payload for agentExecutionKind to reject safely.
+ * managed behavior: a missing execution_kind means managed, and a present but
+ * unrecognized one stays non-executable.
  */
 export const AgentSchema = z.object({
   id: z.string(),
@@ -1245,7 +1266,7 @@ export const AgentSchema = z.object({
   runtime_id: z.string().default(""),
   runtime_bound: z.boolean().optional().catch(undefined),
   runtime_availability: z.enum(["online", "unstable", "offline"]).optional().catch(undefined),
-  execution_kind: z.string().optional().catch(undefined),
+  execution_kind: ExecutionKindSchema,
   external_session: ExternalSessionSchema.nullable().optional().catch(undefined),
   name: z.string().default(""),
   description: z.string().default(""),
@@ -1328,7 +1349,7 @@ export const CommentSchema = z.object({
   updated_at: z.string(),
   revision: z.number().int().positive().optional(),
   source_task_id: z.string().nullable().optional(),
-  dispatch_kind: z.string().optional().catch(undefined),
+  dispatch_kind: DispatchKindSchema,
   supplements: CommentSupplementReceiptsSchema,
   supplement_task_id: z.string().optional().catch(undefined),
   supplement_status: z.enum(["pending", "delivering", "delivered", "failed"]).optional().catch(undefined),
@@ -1367,7 +1388,7 @@ const CommentTriggerPreviewAgentSchema = z.object({
   avatar_url: z.string().optional(),
   source: z.string().default(""),
   reason: z.string().default(""),
-  dispatch_kind: z.string().optional().catch(undefined),
+  dispatch_kind: DispatchKindSchema,
 }).loose();
 
 // Per-target outcome of an explicit @agent / @squad mention (MUL-4525 §2).
@@ -1378,7 +1399,7 @@ export const CommentTriggerOutcomeSchema = z.object({
   target_id: z.string(),
   status: z.string().default(""),
   reason_code: z.string().default(""),
-  dispatch_kind: z.string().optional().catch(undefined),
+  dispatch_kind: DispatchKindSchema,
 }).loose();
 
 export const CommentTriggerPreviewSchema = z.object({

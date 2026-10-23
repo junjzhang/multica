@@ -53,6 +53,11 @@ describe("agentExecutionKind", () => {
     expect(agentExecutionKind(agent({ execution_kind: "remote" }))).toBe("unknown");
     expect(isExternalAgent(agent({ execution_kind: "remote" }))).toBe(false);
   });
+
+  it("does not treat a present null or empty kind as the legacy managed default", () => {
+    expect(agentExecutionKind(agent({ execution_kind: null as unknown as string }))).toBe("unknown");
+    expect(agentExecutionKind(agent({ execution_kind: "" }))).toBe("unknown");
+  });
 });
 
 describe("agentNeedsRuntime", () => {
@@ -69,10 +74,14 @@ describe("agentNeedsRuntime", () => {
 });
 
 describe("mentionDispatchKind", () => {
-  it("defaults an omitted dispatch to a native run", () => {
+  it("defaults only an omitted dispatch to a native run", () => {
     expect(mentionDispatchKind(undefined)).toBe("run");
-    expect(mentionDispatchKind("")).toBe("run");
     expect(mentionDispatchKind("run")).toBe("run");
+  });
+
+  it("does not treat a present null or empty dispatch as a native run", () => {
+    expect(mentionDispatchKind(null)).toBe("unknown");
+    expect(mentionDispatchKind("")).toBe("unknown");
   });
 
   it("recognizes mailbox delivery and rejects unknown values as neither", () => {

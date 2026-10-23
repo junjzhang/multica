@@ -11,8 +11,11 @@ export type AgentExecutionKindState = "managed" | "external" | "unknown";
 export function agentExecutionKind(
   agent: Pick<Agent, "execution_kind"> | null | undefined,
 ): AgentExecutionKindState {
-  const kind = agent?.execution_kind;
-  if (kind == null || kind === "") return "managed";
+  if (!agent) return "unknown";
+  const kind = agent.execution_kind;
+  // Only an omitted field is the legacy managed default. A present null,
+  // empty or unrecognized value carries no execution boundary at all.
+  if (kind === undefined) return "managed";
   if (kind === "managed" || kind === "external") return kind;
   return "unknown";
 }
@@ -49,7 +52,8 @@ export function agentNeedsRuntime(
 export type MentionDispatchKind = "run" | "mailbox" | "unknown";
 
 export function mentionDispatchKind(kind: string | null | undefined): MentionDispatchKind {
-  if (kind == null || kind === "") return "run";
+  // Only an omitted field predates dispatch_kind and means a native run.
+  if (kind === undefined) return "run";
   if (kind === "run" || kind === "mailbox") return kind;
   return "unknown";
 }
