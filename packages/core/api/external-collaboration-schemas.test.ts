@@ -1,3 +1,4 @@
+import { parseWithFallback } from "./schema";
 import { QueryClient } from "@tanstack/react-query";
 import { onIssueUpdated } from "../issues/ws-updaters";
 import { issueKeys } from "../issues/queries";
@@ -252,9 +253,16 @@ describe("dispatch_kind parsing", () => {
 
 
 it("preserves collaboration detail across partial events and accepts explicit clears", () => {
+  const parseIssue = (data: unknown) => {
+    const issue = parseWithFallback<Issue | undefined>(data, IssueSchema, undefined, {
+      endpoint: "issue:updated",
+    });
+    if (!issue) throw new Error("Invalid issue fixture");
+    return issue;
+  };
   const qc = new QueryClient();
   const key = issueKeys.detail(baseIssue.workspace_id, baseIssue.id);
-  const detail = IssueSchema.parse({
+  const detail = parseIssue({
     ...baseIssue,
     coordinator: { type: "agent", id: externalAgent.id },
     merge_authorization: { allowed: true },
@@ -262,13 +270,13 @@ it("preserves collaboration detail across partial events and accepts explicit cl
     mailbox_deliveries: [],
   });
   qc.setQueryData(key, detail);
-  onIssueUpdated(qc, baseIssue.workspace_id, IssueSchema.parse({ ...baseIssue, title: "Renamed" }));
+  onIssueUpdated(qc, baseIssue.workspace_id, parseIssue({ ...baseIssue, title: "Renamed" }));
   const after = qc.getQueryData<Issue>(key);
   expect(after?.title).toBe("Renamed");
   expect(after?.coordinator).toEqual(detail.coordinator);
   expect(after?.merge_authorization).toEqual(detail.merge_authorization);
   expect(after?.external_participants).toEqual(detail.external_participants);
-  onIssueUpdated(qc, baseIssue.workspace_id, IssueSchema.parse({
+  onIssueUpdated(qc, baseIssue.workspace_id, parseIssue({
     ...baseIssue, coordinator: null, merge_authorization: { allowed: false },
     external_participants: [], mailbox_deliveries: [],
   }));
