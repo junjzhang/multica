@@ -166,7 +166,11 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin"); !ok {
+	// Registering one's own host session is ordinary member work, like
+	// creating a native agent. Management and token issuance keep their
+	// existing owner/admin gate (canManageAgent); this endpoint grants no
+	// authority over another member's agents.
+	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin", "member"); !ok {
 		return
 	}
 
@@ -435,13 +439,15 @@ func (h *Handler) CreateExternalAgentToken(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
-	// The credential acts with the minting human's authority; the auth path
-	// re-checks their membership on every request.
+	// The credential acts with the AGENT OWNER's authority, never the minting
+	// admin's. An owner/admin may rotate another member's credential, but that
+	// must not lend the admin's identity or invocation rights to the external
+	// session; the auth path re-checks the owner's membership every request.
 	created, err := h.Queries.CreateExternalAgentToken(r.Context(), db.CreateExternalAgentTokenParams{
 		ID:          dbid.NewV7(),
 		AgentID:     agent.ID,
 		WorkspaceID: agent.WorkspaceID,
-		OwnerUserID: parseUUID(requestUserID(r)),
+		OwnerUserID: agent.OwnerID,
 		TokenHash:   auth.HashToken(raw),
 		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
 	})

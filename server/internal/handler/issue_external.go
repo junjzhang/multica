@@ -45,8 +45,14 @@ func (h *Handler) validateCoordinator(ctx context.Context, workspaceID string, i
 		if err != nil {
 			return pgtype.Text{}, pgtype.UUID{}, "invalid workspace"
 		}
-		member, err := h.Queries.GetMember(ctx, memberID)
-		if err != nil || member.WorkspaceID != wsUUID {
+		// A member coordinator is addressed by USER id, matching the default
+		// (the creating member's user id) and the CLI's --coordinator value.
+		// Resolve membership by (user, workspace); a member row id is a
+		// different identity and would store a value clients cannot resolve.
+		if _, err := h.Queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+			UserID:      memberID,
+			WorkspaceID: wsUUID,
+		}); err != nil {
 			return pgtype.Text{}, pgtype.UUID{}, "coordinator is not a member of this workspace"
 		}
 		return pgtype.Text{String: "member", Valid: true}, memberID, ""

@@ -4228,9 +4228,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:              issue,
-			PrevStatus:         prevIssue.Status,
 			AssigneeChanged:    explicitAssigneeChanged,
-			StatusChanged:      statusChanged,
 			EnteredHandoffStep: handoff != nil,
 		},
 		h.issueTriggerWriteProbe(r, actorType, actorID, issue),
@@ -4404,11 +4402,11 @@ func (h *Handler) validateAssigneePair(ctx context.Context, r *http.Request, wor
 	}
 }
 
-// shouldEnqueueAgentTask returns true when an issue creation or assignment
-// should trigger the assigned agent. Backlog issues are skipped — backlog
-// acts as a parking lot where issues can be pre-assigned without immediately
-// triggering execution. Moving out of backlog is handled separately in
-// UpdateIssue.
+// shouldEnqueueAgentTask returns true when an issue creation or explicit
+// assignment should trigger the assigned agent. Backlog issues are skipped —
+// backlog acts as a parking lot where issues can be pre-assigned without
+// immediately triggering execution. A later status or workflow transition is
+// display-only; the next actor starts work through an explicit mention or rerun.
 func (h *Handler) shouldEnqueueAgentTask(ctx context.Context, issue db.Issue) bool {
 	// Only the fixed backlog key parks work; custom unstarted statuses do not.
 	// An issue in Triage is not parked but refused: it produces no run from any
@@ -4417,78 +4415,6 @@ func (h *Handler) shouldEnqueueAgentTask(ctx context.Context, issue db.Issue) bo
 		return false
 	}
 	return h.isAgentAssigneeReady(ctx, issue)
-}
-
-// shouldEnqueueAssigneeFallback returns true when comment routing can fall back
-// to the issue's assigned agent. Fires for any status — comments are
-// conversational and can happen at any stage, including after completion
-// (e.g. follow-up questions on a done issue).
-//
-// Mirrors the private-agent gate that resolveMentionedAgentCommentTriggers applies on the
-// @mention path: once an owner/admin assigns a private agent to an issue, the
-// agent's UUID is "welded" onto the issue and remains visible to every member
-// who can view it. Without this check any of those members could dispatch a new
-// task to the private agent simply by commenting (#3300).
-func (h *Handler) shouldEnqueueAssigneeFallback(ctx context.Context, issue db.Issue, actorType, actorID string, opts commentTriggerComputeOptions) bool {
-	_, hasPending, ok := h.assigneeFallbackAgent(ctx, issue, actorType, actorID, opts)
-	return ok && !hasPending
-}
-
-func (h *Handler) assigneeFallbackAgent(ctx context.Context, issue db.Issue, actorType, actorID string, opts commentTriggerComputeOptions) (db.Agent, bool, bool) {
-	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "agent" || !issue.AssigneeID.Valid {
-		return db.Agent{}, false, false
-	}
-	agent, err := h.Queries.GetAgent(ctx, issue.AssigneeID)
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
-		return db.Agent{}, false, false
-	}
-	if !h.canInvokeAgent(ctx, agent, actorType, actorID, opts.OriginatorUserID, uuidToString(issue.WorkspaceID)) {
-		return db.Agent{}, false, false
-	}
-	// Coalescing queue: pending is still a valid route target, but callers
-	// that actually enqueue tasks use this flag to avoid piling on duplicates.
-	hasPending, err := h.hasPendingTaskForIssueAndAgent(ctx, issue.ID, issue.AssigneeID, opts)
-	if err != nil {
-		return db.Agent{}, false, false
-	}
-	return agent, hasPending, true
-}
-
-// isAgentRunningOnIssue reports whether the calling agent's current task
-// (identified by X-Task-ID) is running for the exact issue being promoted.
-// That is the only true self-loop on backlog→active: the agent flipping
-// the same issue its own task is executing for would immediately re-enqueue
-// itself, complete the run, flip again, and so on.
-//
-// Same-agent cross-issue handoff (Agent A finishing a task on issue I1 then
-// promoting issue I2 — even when I2 is also assigned to A) is NOT a loop
-// and must fire; that is the documented serial sub-task chain. Member
-// actors never match.
-//
-// X-Task-ID is guaranteed to be present and consistent when actorType is
-// "agent": resolveActor demotes the actor to "member" otherwise (handler.go
-// resolveActor). We still recheck defensively — a future caller could pass
-// agent identity through a different path.
-func (h *Handler) isAgentRunningOnIssue(r *http.Request, actorType string, issue db.Issue) bool {
-	if actorType != "agent" {
-		return false
-	}
-	taskIDStr := r.Header.Get("X-Task-ID")
-	if taskIDStr == "" {
-		return false
-	}
-	taskUUID, err := util.ParseUUID(taskIDStr)
-	if err != nil {
-		return false
-	}
-	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
-	if err != nil {
-		return false
-	}
-	if !task.IssueID.Valid {
-		return false
-	}
-	return uuidToString(task.IssueID) == uuidToString(issue.ID)
 }
 
 // isAgentAssigneeReady checks if an issue is assigned to an active agent
@@ -5030,9 +4956,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 			service.IssueTriggerInput{
 				Issue:              issue,
-				PrevStatus:         prevIssue.Status,
 				AssigneeChanged:    explicitAssigneeChanged,
-				StatusChanged:      statusChanged,
 				EnteredHandoffStep: handoff != nil,
 			},
 			h.issueTriggerWriteProbe(r, actorType, actorID, issue),
