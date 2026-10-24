@@ -5386,11 +5386,16 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		for _, want := range []string{
 			"side-effecting actions",
 			"enqueues a new run for that agent",
-			// Notifying FOLLOWERS is a false need: delivery already happens.
-			// Scoped to followers on purpose — for a non-follower, a mention
-			// IS how they find out (Elon's review catch on #7245).
-			"followers of the issue already see your comment",
+			// Notifying FOLLOWERS is a false need: delivery already happens in
+			// the GUI. Scoped to followers on purpose — for a non-follower, a
+			// mention IS how they find out (Elon's review catch on #7245).
+			"followers of the issue already see your comment in the GUI",
 			"completion notifications are platform-owned",
+			// GUI visibility is not Inbox delivery for routine child activity,
+			// so answering a human still needs an explicit mention.
+			"routine sub-issue activity may create no human Inbox notification",
+			"when your comment answers a human's question, @-mention that person",
+			"so the reply reaches their Inbox",
 			// The one real function, with its scope.
 			"pulls someone into work they are not doing yet",
 			// The reference fact (MUL-6528): @-as-attribution ("per @X's

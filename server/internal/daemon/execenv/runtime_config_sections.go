@@ -731,9 +731,11 @@ func writeMentions(b *strings.Builder) {
 	// The notify caveat is scoped to FOLLOWERS on
 	// purpose — for a human who does not follow the issue, a mention is
 	// exactly how they find out, and that escalation must stay available
-	// (Elon's review catch on #7245). The cost asymmetry line is what breaks
-	// the ambiguous middle.
-	b.WriteString("A mention pulls someone into work they are not doing yet: escalate to a human owner, hand another agent a concrete new sub-task, loop someone in because the user asked. It is not needed merely to notify — followers of the issue already see your comment, and completion notifications are platform-owned. Nor is it how a name is written — crediting a decision or citing someone's earlier point is prose about them, not work for them; the link form dispatches whoever it names, so a reference stays plain text. A thank-you / sign-off / FYI mention of another agent enqueues a paid run whose only possible reply is another courtesy; a missed mention costs one follow-up ask, a stray one costs a run. Silence ends conversations.\n\n")
+	// (Elon's review catch on #7245). Routine child activity can be visible in
+	// the GUI without creating a human Inbox row, so answering a human's
+	// question still needs an explicit mention. The cost asymmetry line is what
+	// breaks the ambiguous middle.
+	b.WriteString("A mention pulls someone into work they are not doing yet: escalate to a human owner, hand another agent a concrete new sub-task, loop someone in because the user asked. It is not needed merely to notify — followers of the issue already see your comment in the GUI, and completion notifications are platform-owned, but routine sub-issue activity may create no human Inbox notification; when your comment answers a human's question, @-mention that person so the reply reaches their Inbox. Nor is it how a name is written — crediting a decision or citing someone's earlier point is prose about them, not work for them; the link form dispatches whoever it names, so a reference stays plain text. A thank-you / sign-off / FYI mention of another agent enqueues a paid run whose only possible reply is another courtesy; a missed mention costs one follow-up ask, a stray one costs a run. Silence ends conversations.\n\n")
 	b.WriteString("Only an explicit @ is a handoff. An ordinary comment, a reply, or a read receipt starts no run, and a status change is display state rather than a request. When your result needs the leader, coordinator, or next executor to act, @-mention that agent in the result comment. Address a next-action handoff to the registered recipient: a managed agent gets a dispatched run, an external session gets one mailbox request. A coordinator with no registered identity is not woken, and a child's `done` wakes its parent's assignee by stage — reach any other coordinator with an explicit mention.\n\n")
 }
 
