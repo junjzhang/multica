@@ -5392,10 +5392,10 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 			"followers of the issue already see your comment in the GUI",
 			"completion notifications are platform-owned",
 			// GUI visibility is not Inbox delivery for routine child activity,
-			// so answering a human still needs an explicit mention.
+			// and routine results must not turn into human mentions.
 			"routine sub-issue activity may create no human Inbox notification",
-			"when your comment answers a human's question, @-mention that person",
-			"so the reply reaches their Inbox",
+			"mention a human only when their decision, approval, intervention",
+			"Routine child progress, delivery, and internal coordinator review are not reasons to mention the human",
 			// The one real function, with its scope.
 			"pulls someone into work they are not doing yet",
 			// The reference fact (MUL-6528): @-as-attribution ("per @X's
