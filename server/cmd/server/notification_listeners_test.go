@@ -9,6 +9,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -1712,6 +1713,91 @@ func TestNotification_ChildHumanHandoffsStayLoud(t *testing.T) {
 		if item.Type != "status_changed" {
 			t.Fatalf("handoff row type = %q, want status_changed", item.Type)
 		}
+	}
+}
+
+// TestNotification_ChildNonRoutineStatusesStayLoud pins the quiet child rule to
+// its positive whitelist. Only in_progress, in_review, done and custom done
+// statuses are routine; cancelling, reopening or parking a child keeps the old
+// notification behavior, so a creator watcher still gets an Inbox row and the
+// corresponding inbox:new event.
+func TestNotification_ChildNonRoutineStatusesStayLoud(t *testing.T) {
+	for _, status := range []string{issuestatus.Cancelled, issuestatus.Todo, issuestatus.Backlog} {
+		t.Run(status, func(t *testing.T) {
+			queries := db.New(testPool)
+			bus := newNotificationBus(t, queries)
+			_, childID := createNotificationChild(t)
+
+			creatorID := createNotificationWatcher(t, "child-nonroutine-"+status)
+			addTestSubscriber(t, childID, "member", creatorID, "creator")
+
+			inboxEvents := 0
+			bus.Subscribe(protocol.EventInboxNew, func(events.Event) { inboxEvents++ })
+
+			publishStatusChange(bus, childID, status, issuestatus.InProgress)
+
+			items := inboxItemsForRecipient(t, queries, creatorID)
+			if len(items) != 1 || items[0].Type != "status_changed" {
+				t.Fatalf("creator got %d row(s) for child status %q, want one status_changed", len(items), status)
+			}
+			if inboxEvents != 1 {
+				t.Fatalf("published %d inbox:new event(s) for child status %q, want 1", inboxEvents, status)
+			}
+		})
+	}
+}
+
+// TestNotification_ChildCustomStatusQuietingFollowsDoneCategory: a custom done
+// status is the workspace's own name for success and stays quiet; custom closed
+// and unstarted statuses are not routine and must not be swallowed by the
+// quiet rule.
+func TestNotification_ChildCustomStatusQuietingFollowsDoneCategory(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	creatorID := createNotificationWatcher(t, "child-custom-category")
+	addTestSubscriber(t, childID, "member", creatorID, "creator")
+
+	customShipped := createNotificationCustomStatus(t, issuestatus.CategoryDone)
+	customDropped := createNotificationCustomStatus(t, issuestatus.CategoryClosed)
+	customParked := createNotificationCustomStatus(t, issuestatus.CategoryUnstarted)
+
+	publishStatusChange(bus, childID, customShipped, issuestatus.InProgress)
+	if items := inboxItemsForRecipient(t, queries, creatorID); len(items) != 0 {
+		t.Fatalf("creator got %d row(s) for a custom done status, want 0", len(items))
+	}
+
+	publishStatusChange(bus, childID, customDropped, customShipped)
+	publishStatusChange(bus, childID, customParked, customDropped)
+
+	items := inboxItemsForRecipient(t, queries, creatorID)
+	if len(items) != 2 {
+		t.Fatalf("creator got %d row(s) for custom closed + unstarted statuses, want 2", len(items))
+	}
+	for _, item := range items {
+		if item.Type != "status_changed" {
+			t.Fatalf("custom non-routine row type = %q, want status_changed", item.Type)
+		}
+	}
+}
+
+// TestNotification_ParentManualSubscriptionStillInheritsNonRoutineChildStatus:
+// the quiet rule stops routine child activity from bubbling, not a status that
+// ends the work. A manual parent watcher still learns the child was cancelled.
+func TestNotification_ParentManualSubscriptionStillInheritsNonRoutineChildStatus(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	parentID, childID := createNotificationChild(t)
+
+	parentWatcherID := createNotificationWatcher(t, "parent-manual-cancelled")
+	addTestSubscriber(t, parentID, "member", parentWatcherID, "manual")
+
+	publishStatusChange(bus, childID, issuestatus.Cancelled, issuestatus.InProgress)
+
+	items := inboxItemsForRecipient(t, queries, parentWatcherID)
+	if len(items) != 1 || items[0].Type != "status_changed" {
+		t.Fatalf("parent manual watcher got %d child row(s) after cancel, want one status_changed", len(items))
 	}
 }
 

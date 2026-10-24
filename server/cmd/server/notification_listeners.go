@@ -175,36 +175,42 @@ func routineChildIssue(
 	if notifType != "status_changed" {
 		return &issue
 	}
-	handsToHuman, err := childStatusHandsToHuman(ctx, queries, workspaceID, issueStatus)
+	routine, err := childStatusIsRoutine(ctx, queries, workspaceID, issueStatus)
 	if err != nil {
-		slog.Warn("resolve child status handoff for inbox quieting; delivering",
+		slog.Warn("resolve child status routine for inbox quieting; delivering",
 			"issue_id", issueID, "status", issueStatus, "error", err)
 		return nil
 	}
-	if handsToHuman {
+	if !routine {
 		return nil
 	}
 	return &issue
 }
 
-// childStatusHandsToHuman reports whether a child status still needs a human:
-// blocked and custom started statuses are handoffs; progress, review, success
-// and completion are routine. Unlike issueStatusIsHandoff, in_review and done
-// on a child are routine.
-func childStatusHandsToHuman(
+// childStatusIsRoutine reports whether arriving on a child status is ordinary
+// progress rather than a human handoff. The whitelist is deliberately positive:
+// in_progress, in_review and done — plus custom statuses in the done category,
+// which are the workspace's own names for success — are routine. Every other
+// status keeps the previous notification behavior: todo/backlog return it to
+// the queue, cancelled and custom closed statuses end it, blocked and custom
+// started statuses wait on a person, and a custom unstarted status parks it.
+// Unlike issueStatusIsHandoff, in_review and done on a child are routine; a
+// status that is not provably routine stays loud.
+func childStatusIsRoutine(
 	ctx context.Context,
 	queries *db.Queries,
 	workspaceID pgtype.UUID,
 	status string,
 ) (bool, error) {
+	switch status {
+	case issuestatus.InProgress, issuestatus.InReview, issuestatus.Done:
+		return true, nil
+	}
 	category, err := issuestatus.CategoryWithError(ctx, queries, workspaceID, status)
 	if err != nil {
 		return false, err
 	}
-	if category != issuestatus.CategoryStarted {
-		return false, nil
-	}
-	return status != issuestatus.InProgress && status != issuestatus.InReview, nil
+	return category == issuestatus.CategoryDone, nil
 }
 
 // deliverToSubscriber reports whether a subscriber row should receive this
