@@ -1,9 +1,9 @@
 # Coordinator closure and human Inbox
 
 The coordinator owns closure of delegated work; the human does not track every
-implementer. Routine subagent activity stays observable in the GUI, while the
-human Inbox receives only events that need a human. This is prompt policy and
-Inbox-creation policy: the Issue API's access model, wakeup routing, and shared
+implementer. Routine child activity stays observable in the GUI without
+default Inbox notifications, while human attention signals are preserved. This
+is prompt policy and Inbox-creation policy: the Issue API's access model, wakeup routing, and shared
 workspace events are unchanged.
 
 ## Roles and grants
@@ -22,9 +22,11 @@ workspace events are unchanged.
   (`merge_authorization.allowed`, disallowed by default). Acceptance is not
   merge authorization, and authorization does not replace review or current-head
   CI.
-- **Human.** Owns final product acceptance and the decisions an agent may not
-  make. The coordinator hands a result back by its result comment; it does not
-  mark final acceptance on the human's behalf.
+- **Human.** Keeps decisions outside the existing authorization. The coordinator
+  reports the parent outcome against its delivery contract; an outstanding
+  human acceptance decision is named explicitly. Prior acceptance authority is
+  preserved, and merge is required for closure only when it is part of that
+  contract.
 
 Delivery evidence is the review and validation actually run, plus the revision
 they apply to. Observability in the GUI is not acceptance.
