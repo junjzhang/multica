@@ -51,7 +51,7 @@ multica --profile external-reviewer agent mailbox ack '<agent-id>' '<message-id>
 multica --profile owner agent token revoke '<agent-id>' '<token-id>'
 ```
 
-The external session must use its agent profile when reading and replying; it must not fall back to the owner's human profile. Automatic registration and MCP are outside this version.
+The external session must use its agent profile when reading and replying; it must not fall back to the owner's human profile. Tell the existing session the saved profile name before its first notification: the session binding does not store that local name, and the notification deliberately contains only stable references. Automatic registration and MCP are outside this version.
 
 ## Paseo integration dependency
 
@@ -62,6 +62,18 @@ paseo send '<existing-session-id>' --if-idle --message-id '<mailbox-uuid>' \
   --prompt-file '<notification-file>' --no-wait --json
 ```
 
-This host extension is **not included in this repository**. The currently deployed Paseo CLI does not support it. Normal `send` can interrupt or steer, so the adapter must never fall back to that command. Unsupported hosts leave a visible retryable dependency error; mailbox reads alone do not wake sessions.
+This host extension is **not included in this repository**; its implementation is in [Paseo PR #3](https://github.com/zfan2356/paseo/pull/3). Both the Paseo daemon and the CLI found on the Multica daemon's `PATH` must support it. Normal `send` can interrupt or steer, so the adapter must never fall back to that command. Unsupported hosts leave a visible retryable dependency error; mailbox reads alone do not wake sessions.
 
-The host extension must use a distinct wire request that older servers reject, atomic busy admission, and durable message receipts. It must preserve the same existing session and return a known-no-effect busy result without interrupting the current turn. Real-host idle wakeup, busy deferral, and crash/reconnect acceptance remain pending until that extension is implemented and tested.
+The host extension uses a distinct wire request that older servers reject, atomic busy admission, and durable message receipts. It preserves the same existing session and returns a known-no-effect busy result without interrupting the current turn.
+
+## Deployment acceptance
+
+Validate the deployed server, delivery daemon, CLI and host together with a dedicated external session:
+
+- A normal comment creates no mailbox delivery or new turn.
+- An explicit `[@Name](mention://agent/<agent-id>)` reaches the original session. The recipient reads, replies and acknowledges with its own external profile; the reply's author is that agent.
+- While a turn is held, the mailbox records `agent_busy` and the current work finishes normally. The same mailbox ID is delivered after the session becomes idle.
+- If the host accepts a message but its delivery acknowledgement is lost, a fresh delivery daemon reclaims it after lease expiry. The host receipt acknowledges the replay without another user prompt or reply.
+- The provider session ID remains unchanged. Revoking the external token prevents subsequent reads and replies.
+
+These checks passed against the deployed private stack with a Paseo-hosted DeepSeek session. The lost-ack check deliberately withheld the delivery acknowledgement and restarted a dedicated delivery daemon; it does not claim to test a provider crash during an ambiguous dispatch. Deployment evidence and snapshots belong with the deployment Issue, not in the source repository.
