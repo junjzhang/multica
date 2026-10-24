@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
@@ -923,8 +926,10 @@ func TestNotification_StartDateChanged(t *testing.T) {
 	}
 }
 
-// TestNotification_ParentBubble_StatusChanged verifies that a status_changed
-// event on a sub-issue bubbles to subscribers of the parent issue.
+// TestNotification_ParentBubble_StatusChanged verifies that a HANDOFF status
+// change on a sub-issue bubbles to subscribers of the parent issue. Routine
+// child progress is covered by
+// TestNotification_ParentManualSubscriptionDoesNotInheritRoutineChildActivity.
 func TestNotification_ParentBubble_StatusChanged(t *testing.T) {
 	queries := db.New(testPool)
 	bus := newNotificationBus(t, queries)
@@ -945,7 +950,7 @@ func TestNotification_ParentBubble_StatusChanged(t *testing.T) {
 	})
 
 	// Subscribe a watcher to the parent only — they should hear about
-	// status changes on the sub-issue.
+	// handoff status changes on the sub-issue.
 	addTestSubscriber(t, parentID, "member", parentSubID, "manual")
 
 	bus.Publish(events.Event{
@@ -958,7 +963,7 @@ func TestNotification_ParentBubble_StatusChanged(t *testing.T) {
 				ID:          subID,
 				WorkspaceID: testWorkspaceID,
 				Title:       "sub-issue status bubble",
-				Status:      "done",
+				Status:      "blocked",
 				Priority:    "medium",
 				CreatorType: "member",
 				CreatorID:   testUserID,
@@ -1344,5 +1349,365 @@ func TestNotification_StatusChange_ReopenSurfacesNewTaskFailed(t *testing.T) {
 	}
 	if archived != 1 {
 		t.Fatalf("expected 1 archived task_failed row preserved from prior cycle, got %d", archived)
+	}
+}
+
+// --- Child-issue Inbox quieting -------------------------------------------
+
+// createNotificationWatcher creates a workspace member with a unique email so
+// each test starts with an empty Inbox.
+func createNotificationWatcher(t *testing.T, tag string) string {
+	t.Helper()
+	email := fmt.Sprintf("notif-%s-%d@multica.ai", tag, time.Now().UnixNano())
+	id := createNotificationMember(t, email)
+	t.Cleanup(func() { cleanupTestUser(t, email) })
+	return id
+}
+
+// createNotificationChild creates a parent and a child issue and returns both.
+func createNotificationChild(t *testing.T) (parentID, childID string) {
+	t.Helper()
+	parentID = createTestIssue(t, testWorkspaceID, testUserID)
+	childID = createTestSubIssue(t, testWorkspaceID, testUserID, parentID)
+	t.Cleanup(func() {
+		cleanupInboxForIssue(t, childID)
+		cleanupInboxForIssue(t, parentID)
+		cleanupTestIssue(t, childID)
+		cleanupTestIssue(t, parentID)
+	})
+	return parentID, childID
+}
+
+// createNotificationCustomStatus creates a workspace status in the given
+// lifecycle category, for the custom handoff cases.
+func createNotificationCustomStatus(t *testing.T, category string) string {
+	t.Helper()
+	key := fmt.Sprintf("g%d", time.Now().UnixNano())
+	entry, err := db.New(testPool).CreateIssueStatusEntry(context.Background(), db.CreateIssueStatusEntryParams{
+		WorkspaceID: util.MustParseUUID(testWorkspaceID),
+		Key:         key,
+		Name:        key,
+		Description: "",
+		Category:    category,
+		Color:       "#123456",
+	})
+	if err != nil {
+		t.Fatalf("create custom status %q in %q: %v", key, category, err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue_status WHERE id = $1`, entry.ID)
+	})
+	return entry.Key
+}
+
+func publishNotificationComment(bus *events.Bus, issueID, authorID, content string) {
+	bus.Publish(events.Event{
+		Type:        protocol.EventCommentCreated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     authorID,
+		Payload: map[string]any{
+			"comment": handler.CommentResponse{
+				ID:         "00000000-0000-0000-0000-00000000c0de",
+				IssueID:    issueID,
+				AuthorType: "member",
+				AuthorID:   authorID,
+				Content:    content,
+				Type:       "comment",
+			},
+			"issue_title":  "child routine activity",
+			"issue_status": "todo",
+		},
+	})
+}
+
+func publishNotificationPriorityChange(bus *events.Bus, issueID, status string) {
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     testUserID,
+		Payload: map[string]any{
+			"issue": handler.IssueResponse{
+				ID:          issueID,
+				WorkspaceID: testWorkspaceID,
+				Title:       "child routine activity",
+				Status:      status,
+				Priority:    "high",
+				CreatorType: "member",
+				CreatorID:   testUserID,
+			},
+			"priority_changed": true,
+			"prev_priority":    "medium",
+		},
+	})
+}
+
+func publishNotificationDueDateChange(bus *events.Bus, issueID, status string) {
+	due := "2026-11-01"
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueUpdated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     testUserID,
+		Payload: map[string]any{
+			"issue": handler.IssueResponse{
+				ID:          issueID,
+				WorkspaceID: testWorkspaceID,
+				Title:       "child routine activity",
+				Status:      status,
+				Priority:    "medium",
+				CreatorType: "member",
+				CreatorID:   testUserID,
+				DueDate:     &due,
+			},
+			"due_date_changed": true,
+		},
+	})
+}
+
+func publishNotificationTaskFailed(bus *events.Bus, issueID, agentID string, retryPending bool) {
+	bus.Publish(events.Event{
+		Type:        protocol.EventTaskFailed,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "system",
+		Payload: map[string]any{
+			"task_id":       "00000000-0000-0000-0000-00000000f411",
+			"agent_id":      agentID,
+			"issue_id":      issueID,
+			"status":        "failed",
+			"retry_pending": retryPending,
+		},
+	})
+}
+
+// TestNotification_ChildRoutineActivityStaysQuietForAutomaticWatchers pins the
+// Inbox default for sub-issue activity: creator, commenter and delegated
+// subscriptions keep seeing the GUI/timeline, but routine progress, review,
+// success, comments and field updates create no Inbox row.
+func TestNotification_ChildRoutineActivityStaysQuietForAutomaticWatchers(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	creatorID := createNotificationWatcher(t, "child-creator")
+	commenterID := createNotificationWatcher(t, "child-commenter")
+	delegateID := createNotificationWatcher(t, "child-delegate")
+	addTestSubscriber(t, childID, "member", creatorID, "creator")
+	addTestSubscriber(t, childID, "member", commenterID, "commenter")
+	addTestSubscriber(t, childID, "member", delegateID, "delegated")
+
+	inboxEvents := 0
+	bus.Subscribe(protocol.EventInboxNew, func(events.Event) { inboxEvents++ })
+
+	publishStatusChange(bus, childID, "in_progress", "todo")
+	publishStatusChange(bus, childID, "in_review", "in_progress")
+	publishStatusChange(bus, childID, "done", "in_review")
+	publishNotificationComment(bus, childID, testUserID, "Routine progress.")
+	publishNotificationPriorityChange(bus, childID, "done")
+	publishNotificationDueDateChange(bus, childID, "done")
+
+	for reason, recipientID := range map[string]string{
+		"creator":   creatorID,
+		"commenter": commenterID,
+		"delegated": delegateID,
+	} {
+		if items := inboxItemsForRecipient(t, queries, recipientID); len(items) != 0 {
+			t.Fatalf("%s received %d routine child inbox row(s), want 0", reason, len(items))
+		}
+	}
+	if inboxEvents != 0 {
+		t.Fatalf("published %d inbox:new event(s) for routine child activity, want 0", inboxEvents)
+	}
+}
+
+// TestNotification_ChildManualSubscriptionStillDeliversRoutineActivity: a
+// manual subscription to the exact child is an explicit human opt-in, so it
+// survives the quiet default.
+func TestNotification_ChildManualSubscriptionStillDeliversRoutineActivity(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	manualID := createNotificationWatcher(t, "child-manual")
+	addTestSubscriber(t, childID, "member", manualID, "manual")
+
+	publishStatusChange(bus, childID, "in_review", "in_progress")
+	publishNotificationComment(bus, childID, testUserID, "Routine progress.")
+	publishNotificationPriorityChange(bus, childID, "in_review")
+
+	items := inboxItemsForRecipient(t, queries, manualID)
+	if len(items) != 3 {
+		t.Fatalf("manual child subscriber got %d inbox rows, want 3", len(items))
+	}
+	got := map[string]int{}
+	for _, item := range items {
+		got[item.Type]++
+	}
+	for _, want := range []string{"status_changed", "new_comment", "priority_changed"} {
+		if got[want] != 1 {
+			t.Fatalf("manual child subscriber got %d %q row(s), want 1 (all: %v)", got[want], want, got)
+		}
+	}
+}
+
+// TestNotification_ChildExplicitAssigneeStillReceivesRoutineActivity: the
+// child's explicit human assignee is a direct owner, not a passive watcher.
+func TestNotification_ChildExplicitAssigneeStillReceivesRoutineActivity(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	assigneeID := createNotificationWatcher(t, "child-assignee")
+	addTestSubscriber(t, childID, "member", assigneeID, "assignee")
+
+	publishStatusChange(bus, childID, "in_progress", "todo")
+	publishNotificationComment(bus, childID, testUserID, "Routine progress.")
+
+	items := inboxItemsForRecipient(t, queries, assigneeID)
+	if len(items) != 2 {
+		t.Fatalf("explicit child assignee got %d inbox rows, want 2", len(items))
+	}
+	got := map[string]int{}
+	for _, item := range items {
+		got[item.Type]++
+	}
+	if got["status_changed"] != 1 || got["new_comment"] != 1 {
+		t.Fatalf("explicit child assignee types = %v, want one status_changed and one new_comment", got)
+	}
+}
+
+// TestNotification_ParentManualSubscriptionDoesNotInheritRoutineChildActivity:
+// a manual subscription to the parent is not opt-in to every child. Progress,
+// review and success stay out of the parent watcher's Inbox.
+func TestNotification_ParentManualSubscriptionDoesNotInheritRoutineChildActivity(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	parentID, childID := createNotificationChild(t)
+
+	parentWatcherID := createNotificationWatcher(t, "parent-manual")
+	addTestSubscriber(t, parentID, "member", parentWatcherID, "manual")
+
+	publishStatusChange(bus, childID, "in_review", "in_progress")
+	publishStatusChange(bus, childID, "done", "in_review")
+
+	if items := inboxItemsForRecipient(t, queries, parentWatcherID); len(items) != 0 {
+		t.Fatalf("parent manual watcher inherited %d routine child row(s), want 0", len(items))
+	}
+}
+
+// TestNotification_ChildHumanHandoffsStayLoud: blocked and custom started
+// statuses are handoffs (including possible approval requests) and keep
+// notifying; a custom done status is routine success and stays quiet.
+func TestNotification_ChildHumanHandoffsStayLoud(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	creatorID := createNotificationWatcher(t, "child-handoff-creator")
+	addTestSubscriber(t, childID, "member", creatorID, "creator")
+
+	customGate := createNotificationCustomStatus(t, "started")
+	customShipped := createNotificationCustomStatus(t, "done")
+
+	publishStatusChange(bus, childID, "blocked", "in_progress")
+	publishStatusChange(bus, childID, customGate, "blocked")
+	publishStatusChange(bus, childID, customShipped, "in_progress")
+
+	items := inboxItemsForRecipient(t, queries, creatorID)
+	if len(items) != 2 {
+		t.Fatalf("creator got %d handoff rows, want 2 (blocked + custom started)", len(items))
+	}
+	for _, item := range items {
+		if item.Type != "status_changed" {
+			t.Fatalf("handoff row type = %q, want status_changed", item.Type)
+		}
+	}
+}
+
+// TestNotification_ChildExplicitMentionStillDelivers: a comment on a child is
+// routine for its watchers, but the human addressed by name is not.
+func TestNotification_ChildExplicitMentionStillDelivers(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	creatorID := createNotificationWatcher(t, "child-mention-creator")
+	mentionedID := createNotificationWatcher(t, "child-mentioned")
+	addTestSubscriber(t, childID, "member", creatorID, "creator")
+
+	publishNotificationComment(bus, childID, testUserID,
+		"[@Mentioned](mention://member/"+mentionedID+") please look")
+
+	if items := inboxItemsForRecipient(t, queries, creatorID); len(items) != 0 {
+		t.Fatalf("routine child comment created %d row(s) for the creator, want 0", len(items))
+	}
+	items := inboxItemsForRecipient(t, queries, mentionedID)
+	if len(items) != 1 {
+		t.Fatalf("mentioned human got %d inbox rows, want 1", len(items))
+	}
+	if items[0].Type != "mentioned" {
+		t.Fatalf("mentioned human row type = %q, want mentioned", items[0].Type)
+	}
+}
+
+// TestNotification_ChildFinalFailureDeliversWhileRetryPendingStaysQuiet: an
+// intermediate failure with a retry queued still reaches GUI/event consumers
+// but not the human Inbox; the terminal attempt does both.
+func TestNotification_ChildFinalFailureDeliversWhileRetryPendingStaysQuiet(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	creatorID := createNotificationWatcher(t, "child-failure-creator")
+	addTestSubscriber(t, childID, "member", creatorID, "creator")
+
+	// Forward through the real WS listener so the assertion covers the frame
+	// clients actually receive, not just the in-process event payload.
+	fb := &fakeBroadcaster{}
+	registerListeners(bus, fb)
+	forwarded := func() []map[string]any {
+		t.Helper()
+		var out []map[string]any
+		for _, call := range fb.workspaceCalls {
+			var frame struct {
+				Type    string         `json:"type"`
+				Payload map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(call.msg, &frame); err != nil {
+				t.Fatalf("decode workspace frame: %v", err)
+			}
+			if frame.Type == protocol.EventTaskFailed {
+				out = append(out, frame.Payload)
+			}
+		}
+		return out
+	}
+
+	agentID := "00000000-0000-0000-0000-aaaaaaaaaaaa"
+
+	publishNotificationTaskFailed(bus, childID, agentID, true)
+	if items := inboxItemsForRecipient(t, queries, creatorID); len(items) != 0 {
+		t.Fatalf("retry-pending failure created %d Inbox row(s), want 0", len(items))
+	}
+	first := forwarded()
+	if len(first) != 1 {
+		t.Fatalf("retry-pending failure forwarded to %d event consumers, want 1", len(first))
+	}
+	if retryPending, _ := first[0]["retry_pending"].(bool); !retryPending {
+		t.Fatalf("forwarded payload lost retry_pending=true: %v", first[0])
+	}
+
+	publishNotificationTaskFailed(bus, childID, agentID, false)
+	items := inboxItemsForRecipient(t, queries, creatorID)
+	if len(items) != 1 {
+		t.Fatalf("exhausted child failure created %d Inbox rows, want 1", len(items))
+	}
+	if items[0].Type != "task_failed" || items[0].Severity != "action_required" {
+		t.Fatalf("exhausted failure row = type %q severity %q, want task_failed/action_required",
+			items[0].Type, items[0].Severity)
+	}
+	if got := forwarded(); len(got) != 2 {
+		t.Fatalf("exhausted failure forwarded to %d event consumers, want 2", len(got))
 	}
 }

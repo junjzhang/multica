@@ -569,12 +569,13 @@ func TestIssueStatusIsHandoff(t *testing.T) {
 	})
 }
 
-// TestDelegatedTier_ChildCompletionDeliversExactlyOnce is the case a unit test of
-// deliverToSubscriber alone cannot catch. status_changed bubbles from a child to
-// the parent's subscribers, and the common shape is a human who is BOTH a direct
-// subscriber of the parent and a delegate on the child. They must be told the
-// child finished, and told once — not twice via the bubble, and not zero times.
-func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
+// TestDelegatedTier_ChildRoutineStaysQuietAndHandoffDeliversOnce is the case a
+// unit test of deliverToSubscriber alone cannot catch. status_changed bubbles
+// from a child to the parent's subscribers, and the common shape is a human who
+// is BOTH a direct subscriber of the parent and a delegate on the child.
+// Routine progress, review and success must stay quiet for both paths, while a
+// handoff status must land exactly once — not twice via the bubble.
+func TestDelegatedTier_ChildRoutineStaysQuietAndHandoffDeliversOnce(t *testing.T) {
 	ctx := context.Background()
 	queries := db.New(testPool)
 	bus := events.New()
@@ -635,11 +636,22 @@ func TestDelegatedTier_ChildCompletionDeliversExactlyOnce(t *testing.T) {
 		t.Fatalf("routine child progress reached the inbox %d time(s) — the parent bubble bypassed the tier", n)
 	}
 
-	// Completion delivers, exactly once despite two paths to the same person.
+	// Review and success are routine subagent activity too: the GUI shows them,
+	// the human Inbox does not.
 	notifySubscribers(ctx, queries, bus, childID, "in_review", testWorkspaceID,
 		agentEvent, nil, "status_changed", "info", "child", "", emptyDetails)
+	notifySubscribers(ctx, queries, bus, childID, "done", testWorkspaceID,
+		agentEvent, nil, "status_changed", "info", "child", "", emptyDetails)
+	if n := countInbox(); n != 0 {
+		t.Fatalf("routine child review/success reached the inbox %d time(s), want 0", n)
+	}
+
+	// A handoff (blocked) delivers exactly once despite two paths to the same
+	// person: the delegated child delivery and the parent bubble.
+	notifySubscribers(ctx, queries, bus, childID, "blocked", testWorkspaceID,
+		agentEvent, nil, "status_changed", "info", "child", "", emptyDetails)
 	if n := countInbox(); n != 1 {
-		t.Fatalf("expected exactly 1 inbox row for the child completion, got %d", n)
+		t.Fatalf("expected exactly 1 inbox row for the child handoff, got %d", n)
 	}
 }
 
