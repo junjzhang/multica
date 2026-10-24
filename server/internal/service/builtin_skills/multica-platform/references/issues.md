@@ -233,27 +233,27 @@ archived statuses remain readable via an explicit status filter.
   fires. A later status move changes only the board; explicitly `@`-mention the
   assignee or rerun the issue to start it.
 - **`in_progress` / `in_review`** are agent-managed CLI mutations, not automatic
-  side effects of a task starting or finishing. The runtime brief asks agents to
-  write the state the issue is in whenever their work changes it — not from
-  the trigger type or the run's lifecycle, and not gated on being the
-  assignee. Writes happen whenever the state changes, mid-turn included: a
-  turn that advances the issue's own ask sets `in_progress` as soon as that
-  is known, so the board shows the work while it runs; a blocker is recorded
-  when it is hit; and the turn must not exit with a stale value — delivered
-  the issue's own ask → `in_review`; work continues beyond the turn
-  (dispatched sub-issues, partial delivery) → `in_progress`; stuck →
-  `blocked`. A turn that produces none of the issue's own deliverable —
-  answering a question, consulting on work owned elsewhere — writes nothing
-  at any point. The kind of activity never decides this: research, design,
-  planning, and review all count as the work exactly when they are what the
-  issue asks for (a review-the-PR issue is being worked the moment reviewing
-  starts). Questions, discussion, or acknowledgements never move the status.
+  side effects of a task starting or finishing. Write the state the issue is in
+  whenever the work changes it — not from the trigger type or run lifecycle,
+  and not gated on the assignee. A turn advancing the issue's own ask sets
+  `in_progress` as soon as that is known; record a blocker when hit; and never
+  exit with a stale value — delivered → `in_review`, more underway →
+  `in_progress`, stuck → `blocked`. A turn with none of the issue's own
+  deliverable — answering a question, consulting elsewhere — writes nothing;
+  questions and acknowledgements never move the status. Research, design,
+  planning, and review count as work exactly when the issue asks for them.
   Squad leaders: dispatching members is not delivery — a dispatch turn leaves
-  the parent `in_progress`; an explicit `@` mention or stage-barrier wakeup is
-  what starts the later turn that moves it to `in_review`.
-- **`in_review`** is an accepted issue status. Some workflows use it while a PR
-  is open and awaiting review; moving to it is an explicit mutation.
-- **`done`** on a child issue can wake its parent's assignee (see Stages).
+  the parent `in_progress`; only an explicit `@` mention or stage-barrier
+  wakeup starts the later turn that moves it to `in_review`.
+- **`in_review`** is the implementer's review handoff — delivered, awaiting
+  acceptance; some workflows also use it while a PR is open. It is not `done`:
+  it closes no stage barrier and wakes no parent.
+- **`done`** on a child issue can wake its parent's assignee (see Stages). Only
+  a coordinator the task explicitly authorizes verifies the evidence, records
+  acceptance, and closes the accepted sub-issue; an implementer never accepts
+  its own delivery. Acceptance does not deliver the parent, and merging needs
+  its own grant; a coordinator who is not the parent's assignee is reached by
+  the explicit `@` mention in the delivery comment.
 - **`cancelled`** is a terminal, user-driven decision to close the issue. Like
   `done` it enqueues no new agent work, but it does **not** stop tasks already in
   flight — a run in progress keeps going. To stop a running task, cancel the
