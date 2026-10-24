@@ -18,6 +18,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { agentListOptions, memberListOptions } from "@multica/core/workspace/queries";
 import { projectListOptions } from "@multica/core/projects/queries";
 import { canAssignAgent } from "../../issues/components/pickers/assignee-picker";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { api, dispatchReasonCode } from "@multica/core/api";
 import {
   isAgentRuntimeBound,
@@ -209,7 +210,7 @@ export function ChatWindow() {
   const currentMember = members.find((m) => m.user_id === user?.id);
   const memberRole = currentMember?.role;
   const availableAgents = agents.filter(
-    (a) => !a.archived_at && canAssignAgent(a, user?.id, memberRole),
+    (a) => agentExecutionKind(a) === "managed" && !a.archived_at && canAssignAgent(a, user?.id, memberRole),
   );
 
   // The agent bound to the OPEN session, resolved from the full agent list

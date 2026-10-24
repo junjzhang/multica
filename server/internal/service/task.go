@@ -7917,6 +7917,26 @@ func IssueToMap(issue db.Issue, issuePrefix string) map[string]any {
 		"revision":         issue.Revision,
 		"metadata":         util.JSONObjectOrEmpty(issue.Metadata),
 		"properties":       util.JSONObjectOrEmpty(issue.Properties),
+		// Mirrors handler.IssueResponse.Coordinator: an identity reference or
+		// null. Values, not just keys, must agree with the HTTP rendering.
+		"coordinator": func() any {
+			if !issue.CoordinatorType.Valid || !issue.CoordinatorID.Valid {
+				return nil
+			}
+			return map[string]any{
+				"type": issue.CoordinatorType.String,
+				"id":   util.UUIDToString(issue.CoordinatorID),
+			}
+		}(),
+		// Mirrors handler.IssueResponse.MergeAuthorization. Policy storage
+		// only; no merge executor exists in this fork.
+		"merge_authorization": map[string]any{
+			"allowed":        issue.MergeAllowed,
+			"repository_url": util.TextToPtr(issue.MergeRepositoryUrl),
+			"target_branch":  util.TextToPtr(issue.MergeTargetBranch),
+			"granted_by":     util.UUIDToPtr(issue.MergeGrantedBy),
+			"granted_at":     util.TimestampToPtr(issue.MergeGrantedAt),
+		},
 	}
 }
 

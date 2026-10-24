@@ -5,7 +5,7 @@ Product contracts the runtime brief does not fully encode.
 - [PR linking](#pr-linking)
 - [Reading a linked PR's real state](#reading-a-linked-prs-real-state)
 - [Custom properties: typed workflow state](#custom-properties-typed-workflow-state)
-- [Status changes have server side effects](#status-changes-have-server-side-effects)
+- [Status changes are display state](#status-changes-are-display-state)
 - [Who else is running right now](#who-else-is-running-right-now)
 - [Sub-issues: todo starts work now, backlog parks it](#sub-issues-todo-starts-work-now-backlog-parks-it)
 - [Charts and files in a comment](#charts-and-files-in-a-comment)
@@ -207,10 +207,11 @@ multica issue get <issue-id> --resolve-properties
   property (multi_select, multi_actor, multi_text, multi_url); `value` keeps
   the stored ids / strings.
 
-## Status changes have server side effects
+## Status changes are display state
 
-A status change is not cosmetic — the server enqueues or skips agent work based
-on it. These are the contracts, not advice.
+A status change updates the board; it does not start an agent run. An issue
+write launches work only through an explicit assignment (including creation)
+or rerun. Existing collaboration starts from an explicit `@`-mention.
 
 The rules below name fixed built-in status keys, not category-wide behaviors.
 Custom statuses have only lifecycle semantics: unstarted, started, done
@@ -229,30 +230,30 @@ Archival does not move issues automatically. Historical issues on previously
 archived statuses remain readable via an explicit status filter.
 
 - **`backlog`** parks an agent-assigned issue: the assignee is set but no task
-  fires. Moving `backlog → todo` (or any non-done/non-cancelled status) enqueues
-  the assigned agent then.
+  fires. A later status move changes only the board; explicitly `@`-mention the
+  assignee or rerun the issue to start it.
 - **`in_progress` / `in_review`** are agent-managed CLI mutations, not automatic
-  side effects of a task starting or finishing. The runtime brief asks agents to
-  write the state the issue is in whenever their work changes it — not from
-  the trigger type or the run's lifecycle, and not gated on being the
-  assignee. Writes happen whenever the state changes, mid-turn included: a
-  turn that advances the issue's own ask sets `in_progress` as soon as that
-  is known, so the board shows the work while it runs; a blocker is recorded
-  when it is hit; and the turn must not exit with a stale value — delivered
-  the issue's own ask → `in_review`; work continues beyond the turn
-  (dispatched sub-issues, partial delivery) → `in_progress`; stuck →
-  `blocked`. A turn that produces none of the issue's own deliverable —
-  answering a question, consulting on work owned elsewhere — writes nothing
-  at any point. The kind of activity never decides this: research, design,
-  planning, and review all count as the work exactly when they are what the
-  issue asks for (a review-the-PR issue is being worked the moment reviewing
-  starts). Questions, discussion, or acknowledgements never move the status.
-  Squad leaders: dispatching members is not delivery — a dispatch turn
-  leaves the parent `in_progress`, and it moves to `in_review` only when a
-  later re-trigger confirms the overall goal is met.
-- **`in_review`** is an accepted issue status. Some workflows use it while a PR
-  is open and awaiting review; moving to it is an explicit mutation.
-- **`done`** on a child issue can wake its parent's assignee (see Stages).
+  side effects of a task starting or finishing. Write the state the issue is in
+  whenever the work changes it — not from the trigger type or run lifecycle,
+  and not gated on the assignee. A turn advancing the issue's own ask sets
+  `in_progress` as soon as that is known; record a blocker when hit; and never
+  exit with a stale value — delivered → `in_review`, more underway →
+  `in_progress`, stuck → `blocked`. A turn with none of the issue's own
+  deliverable — answering a question, consulting elsewhere — writes nothing;
+  questions and acknowledgements never move the status. Research, design,
+  planning, and review count as work exactly when the issue asks for them.
+  Squad leaders: dispatching members is not delivery — a dispatch turn leaves
+  the parent `in_progress`; only an explicit `@` mention or stage-barrier
+  wakeup starts the later turn that moves it to `in_review`.
+- **`in_review`** is the implementer's review handoff — delivered, awaiting
+  acceptance; some workflows also use it while a PR is open. It is not `done`:
+  it closes no stage barrier and wakes no parent.
+- **`done`** on a child issue can wake its parent's assignee (see Stages). Only
+  a coordinator the task explicitly authorizes verifies the evidence, records
+  acceptance, and closes the accepted sub-issue; an implementer never accepts
+  its own delivery. Acceptance does not deliver the parent, and merging needs
+  its own grant; a coordinator who is not the parent's assignee is reached by
+  the explicit `@` mention in the delivery comment.
 - **`cancelled`** is a terminal, user-driven decision to close the issue. Like
   `done` it enqueues no new agent work, but it does **not** stop tasks already in
   flight — a run in progress keeps going. To stop a running task, cancel the
@@ -273,9 +274,10 @@ archived statuses remain readable via an explicit status filter.
 - **Failed issue-triggered tasks** may roll an issue from `in_progress` back to
   `todo` when no active task / retry remains — that is the main server-owned
   status write on the agent-run path.
-- **Project workflows** can limit which statuses an issue takes and turn a
-  status change into a handoff to another agent. When the per-turn prompt
-  carries a `[Project workflow]` block, read `references/projects.md`.
+- **Project workflows** can limit which statuses an issue takes; entering a
+  handoff column reassigns the handler but starts no run. To begin the step,
+  explicitly `@`-mention the handler or rerun. The `[Project workflow]` block
+  points at `references/projects.md`.
 
 ## Who else is running right now
 
@@ -321,14 +323,14 @@ Parallel children — all start now:
 multica issue create --title "..." --parent <issue-id> --assignee <agent> --status todo
 ```
 
-Strictly serial children — park later steps, promote one at a time:
+Strictly serial children — park later steps, then start one at a time (a
+status move alone starts nothing):
 
 ```bash
 multica issue create --title "Step 2: ..." --parent <issue-id> --assignee <agent> --status backlog
-multica issue status <child-id> todo   # promote when the previous step is truly done
+multica issue status <child-id> todo   # move out of backlog
+multica issue rerun <child-id>         # start the assignee when the previous step is done
 ```
-
-Creating every serial step as `todo` enqueues the whole chain at once.
 
 ### Stages: order sub-issues into barrier groups
 
@@ -338,12 +340,13 @@ closes while a later stage is waiting** — every sub-issue up to that stage has
 reached a terminal status (`done`/`cancelled`) — and **once more when every
 sub-issue, staged or not, is closed**. A completion that closes nothing is
 silent. A sibling set with **no** stages wakes the parent once, when the *last*
-sub-issue finishes. A parent in `backlog` is not woken; it catches up once it
-leaves backlog. A member assignee gets an inbox notification instead of a run.
+sub-issue finishes. A parent in `backlog` is not woken by that system rule; it
+catches up after leaving backlog. That wake is a configured system mechanism,
+separate from status-triggered execution. A member assignee gets an inbox
+notification instead of a run.
 
-Advancement is agent-driven: the server only detects the closed barrier and
-wakes the parent assignee, who then decides whether to promote the next stage's
-`backlog` sub-issues to `todo`.
+Advancement is agent-driven: the server detects the closed barrier and wakes
+the parent, who explicitly `@`-mentions (or reruns) each next-stage assignee.
 
 ```bash
 # Stage 1 runs now; later stages parked until promoted
@@ -354,12 +357,13 @@ multica issue create --title "Ship"       --parent <id> --assignee <agent> --sta
 ```
 
 When both Stage 1 sub-issues finish you (the parent assignee) are woken by the
-sub-issue wakeup; its `[WAKEUP]` block lists every stage and names the next one.
-Inspect the layout, then promote the next stage:
+sub-issue wakeup, whose `[WAKEUP]` block lists the stages. Inspect the layout,
+then start the next stage explicitly:
 
 ```bash
 multica issue children <parent-id>             # sub-issues grouped by stage
-multica issue status <stage-2-child-id> todo   # promote when its deps are met
+multica issue status <stage-2-child-id> todo   # move out of backlog when its deps are met
+multica issue rerun <stage-2-child-id>         # start the assignee
 ```
 
 `issue children --output json` reports per-stage `done` counts, including custom
@@ -372,9 +376,8 @@ built-in automation behavior. Check `status_category` for `done` / `cancelled`
 (or use the stage counts), not just the concrete `status` key, to recognize
 terminal children.
 
-Read each sub-issue's description before promoting and only promote items whose
-stated dependencies are met; if a description conflicts with the parent's
-breakdown, leave it `backlog` and comment to confirm first.
+Read each sub-issue's description before starting it; if it conflicts with the
+parent's breakdown, leave it `backlog` and comment to confirm first.
 
 ## Charts and files in a comment
 

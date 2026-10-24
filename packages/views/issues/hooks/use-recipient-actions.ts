@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { issueTasksOptions } from "@multica/core/issues/queries";
 import { useCommentComposerStore } from "@multica/core/issues/stores";
+import { mentionDispatchKind } from "@multica/core/agents/execution-kind";
 import {
   agentRunState,
   recipientActions,
@@ -24,6 +25,10 @@ export interface RecipientEntry {
   state: AgentRunState;
   action: RecipientAction;
   actions: RecipientAction[];
+  /** A mailbox target has no native run and no steer/skip choice. */
+  mailbox: boolean;
+  /** An unknown dispatch kind is not executable by either boundary. */
+  unsupported: boolean;
 }
 
 /**
@@ -50,17 +55,22 @@ export function useRecipientActions({
   /** Choices reset when the composer's context changes. */
   resetKey: string;
 }) {
-  // Every comment row mounts this hook for its edit composer, so it reads only
-  // the active runs of its own recipients: with none (the usual idle row) it
-  // neither fetches nor re-renders on unrelated task events.
-  const agentKey = agents.map((agent) => agent.id).join(",");
+  // Mailbox targets never own a native run, so run state is read only for
+  // native recipients. Every comment row mounts this hook for its edit
+  // composer, so with none (the usual idle row) it neither fetches nor
+  // re-renders on unrelated task events.
+  const nativeAgents = useMemo(
+    () => agents.filter((agent) => mentionDispatchKind(agent.dispatch_kind) === "run"),
+    [agents],
+  );
+  const agentKey = nativeAgents.map((agent) => agent.id).join(",");
   const selectActive = useCallback((all: AgentTask[]) => {
     const ids = new Set(agentKey.split(","));
     return all.filter((task) => ids.has(task.agent_id) && ACTIVE_STATUSES.has(task.status));
   }, [agentKey]);
   const { data: tasks = NO_TASKS } = useQuery({
     ...issueTasksOptions(issueId),
-    enabled: !!issueId && agents.length > 0,
+    enabled: !!issueId && nativeAgents.length > 0,
     select: selectActive,
   });
   // The personal default can turn steering off for every composer; it only
@@ -86,6 +96,19 @@ export function useRecipientActions({
   }, [agents]);
 
   const recipients = useMemo<RecipientEntry[]>(() => agents.map((agent) => {
+    const dispatch = mentionDispatchKind(agent.dispatch_kind);
+    if (dispatch !== "run") {
+      return {
+        agent,
+        state: { kind: "idle" },
+        // No native action exists. The placeholder is never applied because
+        // routing and every action control skip non-run entries.
+        action: "start",
+        actions: [],
+        mailbox: dispatch === "mailbox",
+        unsupported: dispatch === "unknown",
+      };
+    }
     const state = agentRunState(tasks, agent.id);
     const opts = {
       canSteer: allowSteer && !hasAttachments,
@@ -97,12 +120,14 @@ export function useRecipientActions({
       state,
       action: resolveRecipientAction(state, chosen[agent.id], opts),
       actions: recipientActions(state, opts),
+      mailbox: false,
+      unsupported: false,
     };
   }), [agents, tasks, chosen, allowSteer, hasAttachments, steerByDefault]);
 
   // A recipient would take this in its running turn, but files cannot go there.
   const attachmentsBlockSteer = allowSteer && hasAttachments && recipients.some((r) =>
-    r.state.kind === "running" && r.state.steerable
+    !r.mailbox && !r.unsupported && r.state.kind === "running" && r.state.steerable
     && (chosen[r.agent.id] === "steer" || (!chosen[r.agent.id] && steerByDefault(r.state.task))));
 
   const setAction = useCallback((agentId: string, action: RecipientAction) => {
@@ -113,9 +138,11 @@ export function useRecipientActions({
     setChosen(NO_CHOICES);
   }, []);
 
-  const routing = useMemo<RecipientRouting>(() => recipientRouting(recipients.map((r) => ({
-    agentId: r.agent.id, action: r.action, state: r.state,
-  }))), [recipients]);
+  const routing = useMemo<RecipientRouting>(() => recipientRouting(recipients
+    .filter((r) => !r.mailbox && !r.unsupported)
+    .map((r) => ({
+      agentId: r.agent.id, action: r.action, state: r.state,
+    }))), [recipients]);
 
   return { recipients, attachmentsBlockSteer, routing, setAction, reset };
 }

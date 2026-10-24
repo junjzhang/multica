@@ -149,6 +149,8 @@ func init() {
 	agentEnvCmd.AddCommand(agentEnvGetCmd)
 	agentEnvCmd.AddCommand(agentEnvSetCmd)
 
+	registerAgentExternalCommandTree()
+
 	// agent list
 	agentListCmd.Flags().String("output", "table", "Output format: table or json")
 	agentListCmd.Flags().Bool("include-archived", false, "Include archived agents")

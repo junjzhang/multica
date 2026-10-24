@@ -107,8 +107,50 @@ type IssueResponse struct {
 	// SourceContext is detail-only. List, board, search, and children responses
 	// deliberately omit the potentially large immutable snapshot.
 	SourceContext *sourceContextDetailResponse `json:"source_context,omitempty"`
+	// Unloaded collaboration fields are omitted so partial snapshots preserve
+	// detail caches. Coordinator's outer pointer distinguishes omission from
+	// an authoritative null; non-nil collection pointers may clear to [].
+	Coordinator          **IssueCoordinatorResponse       `json:"coordinator,omitempty"`
+	MergeAuthorization   *IssueMergeAuthorizationResponse `json:"merge_authorization,omitempty"`
+	ExternalParticipants *[]AgentResponse                 `json:"external_participants,omitempty"`
+	MailboxDeliveries    *[]MailboxMessageResponse        `json:"mailbox_deliveries,omitempty"`
 	// duplicateOfIssueID is the raw mark, kept off the wire; see DuplicateOf.
 	duplicateOfIssueID pgtype.UUID
+}
+
+// IssueCoordinatorResponse names the fixed coordinator without resolving a
+// display name, so the projection stays valid when the entity is archived.
+type IssueCoordinatorResponse struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// IssueMergeAuthorizationResponse is the stored merge policy. granted_by/at are
+// server-set from the authenticated human; an external caller can never claim
+// them.
+type IssueMergeAuthorizationResponse struct {
+	Allowed       bool    `json:"allowed"`
+	RepositoryURL *string `json:"repository_url"`
+	TargetBranch  *string `json:"target_branch"`
+	GrantedBy     *string `json:"granted_by"`
+	GrantedAt     *string `json:"granted_at"`
+}
+
+func coordinatorResponse(t pgtype.Text, id pgtype.UUID) *IssueCoordinatorResponse {
+	if !t.Valid || !id.Valid {
+		return nil
+	}
+	return &IssueCoordinatorResponse{Type: t.String, ID: uuidToString(id)}
+}
+
+func mergeAuthorizationResponse(i db.Issue) IssueMergeAuthorizationResponse {
+	return IssueMergeAuthorizationResponse{
+		Allowed:       i.MergeAllowed,
+		RepositoryURL: textToPtr(i.MergeRepositoryUrl),
+		TargetBranch:  textToPtr(i.MergeTargetBranch),
+		GrantedBy:     uuidToPtr(i.MergeGrantedBy),
+		GrantedAt:     timestampToPtr(i.MergeGrantedAt),
+	}
 }
 
 // IssueRefResponse names another issue inside a response: enough to render
@@ -469,6 +511,8 @@ func (h *Handler) fillDuplicateOf(ctx context.Context, wsID pgtype.UUID, resp *I
 }
 
 func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
+	coordinator := coordinatorResponse(i.CoordinatorType, i.CoordinatorID)
+	authorization := mergeAuthorizationResponse(i)
 	identifier := issuePrefix + "-" + strconv.Itoa(int(i.Number))
 	// Built-ins map to public categories without a catalog lookup. A custom
 	// status is filled by endpoints that resolve the workspace catalog.
@@ -503,6 +547,8 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		LastActivityAt:     timestampToNanoPtr(i.LastActivityAt),
 		Metadata:           parseIssueMetadata(i.Metadata),
 		Properties:         parseIssueProperties(i.Properties),
+		Coordinator:        &coordinator,
+		MergeAuthorization: &authorization,
 	}
 }
 
@@ -1239,6 +1285,9 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 			IssueResponse: issueToResponse(sr.issue, prefix),
 			MatchSource:   sr.matchSource,
 		}
+		// Search scans a partial row without collaboration columns.
+		sir.Coordinator = nil
+		sir.MergeAuthorization = nil
 		fillSearch(&sir.IssueResponse)
 		// Always populate comment snippet when a matching comment exists
 		if sr.matchedCommentContent != "" {
@@ -2483,6 +2532,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	detailLabels := h.labelsByIssue(r.Context(), issue.WorkspaceID, []pgtype.UUID{issue.ID})[uuidToString(issue.ID)]
 	if detailLabels == nil {
 		detailLabels = []LabelResponse{}
@@ -3063,6 +3113,9 @@ type CreateIssueRequest struct {
 	OriginID   *string `json:"origin_id,omitempty"`
 
 	AllowDuplicate bool `json:"allow_duplicate,omitempty"`
+	// Coordinator optionally records an explicit coordinator. When omitted the
+	// create derives it from the dispatch actor.
+	Coordinator *IssueCoordinatorInput `json:"coordinator,omitempty"`
 }
 
 // UnmarshalJSON rejects duplicate object members before Go's ordinary map
@@ -3365,6 +3418,20 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	// Determine creator identity: agent (via X-Agent-ID header) or member.
 	creatorType, actualCreatorID := h.resolveActor(r, creatorID, workspaceID)
 
+	// An explicit coordinator is validated now so a bad reference never fails
+	// the create after the issue row exists. Otherwise the service derives it
+	// from the dispatch actor.
+	var coordinatorType pgtype.Text
+	var coordinatorID pgtype.UUID
+	if req.Coordinator != nil {
+		var coordMsg string
+		coordinatorType, coordinatorID, coordMsg = h.validateCoordinator(r.Context(), workspaceID, *req.Coordinator)
+		if coordMsg != "" {
+			writeError(w, http.StatusBadRequest, coordMsg)
+			return
+		}
+	}
+
 	// Optional origin stamping (quick-create / autopilot). Only the
 	// allowed origin types are accepted; anything else is rejected so a
 	// rogue caller can't mint arbitrary origin labels. Both fields must
@@ -3449,32 +3516,35 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
-		WorkspaceID:    wsUUID,
-		Title:          req.Title,
-		Description:    ptrToText(req.Description),
-		Status:         status,
-		Priority:       priority,
-		AssigneeType:   assigneeType,
-		AssigneeID:     assigneeID,
-		CreatorType:    creatorType,
-		CreatorID:      parseUUID(actualCreatorID),
-		ParentIssueID:  parentIssueID,
-		ProjectID:      projectID,
-		StartDate:      startDate,
-		DueDate:        dueDate,
-		OriginType:     originType,
-		OriginID:       originID,
-		Stage:          ptrToInt4(req.Stage),
-		AttachmentIDs:  attachmentIDs,
-		LabelIDs:       labelIDs,
-		Properties:     properties,
-		AllowDuplicate: req.AllowDuplicate,
+		WorkspaceID:     wsUUID,
+		Title:           req.Title,
+		Description:     ptrToText(req.Description),
+		Status:          status,
+		Priority:        priority,
+		AssigneeType:    assigneeType,
+		AssigneeID:      assigneeID,
+		CreatorType:     creatorType,
+		CreatorID:       parseUUID(actualCreatorID),
+		ParentIssueID:   parentIssueID,
+		ProjectID:       projectID,
+		StartDate:       startDate,
+		DueDate:         dueDate,
+		OriginType:      originType,
+		OriginID:        originID,
+		Stage:           ptrToInt4(req.Stage),
+		AttachmentIDs:   attachmentIDs,
+		LabelIDs:        labelIDs,
+		Properties:      properties,
+		AllowDuplicate:  req.AllowDuplicate,
+		CoordinatorType: coordinatorType,
+		CoordinatorID:   coordinatorID,
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
 		Platform:         func() string { p, _, _ := middleware.ClientMetadataFromContext(r.Context()); return p }(),
 		BroadcastPayload: func(issue db.Issue, atts []db.Attachment, labels []db.IssueLabel) map[string]any {
 			payload := issueToResponse(issue, prefix)
+			h.projectIssueExternalState(r.Context(), issue, &payload)
 			// The event other tabs receive must carry the category too — filling
 			// only the HTTP response below is too late for them, and a create
 			// they cannot bucket forces a full refetch. Shares one filler with
@@ -3537,6 +3607,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 	resp := issueToResponse(issue, prefix)
 	fillCreated(&resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	resp.Attachments = buildAttachmentResponses(res.Attachments)
 	// Echo the authoritative labels attached in the create transaction. Always
 	// non-nil (empty slice when none) so a newer client can tell the backend
@@ -3601,6 +3672,12 @@ type UpdateIssueRequest struct {
 	// no explicit null. Write-only: read the relation back from
 	// GET /api/issues/{id}/duplicates. Not accepted by batch updates.
 	DuplicateOfIssueID *string `json:"duplicate_of_issue_id,omitempty"`
+	// Coordinator is an explicit coordinator change. Participant mentions and
+	// execution reassignment never write it.
+	Coordinator *IssueCoordinatorInput `json:"coordinator,omitempty"`
+	// MergeAuthorization is a human-only policy grant/revoke. granted_by and
+	// granted_at are server-set and cannot be supplied by the caller.
+	MergeAuthorization *MergeAuthorizationInput `json:"merge_authorization,omitempty"`
 }
 
 func mergeIssueChannelMediaDescription(current, incoming string, base *string, attachments []db.Attachment) string {
@@ -3827,6 +3904,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the actor once: coordinator/merge validation and the trigger
+	// probe below must agree on who is writing.
+	actorType, actorID := h.resolveActor(r, userID, workspaceID)
+
 	// Pre-fill nullable fields (bare sqlc.narg) with current values
 	params := db.UpdateIssueParams{
 		SourceTaskID:  h.wakeupSourceTaskID(r),
@@ -3840,6 +3921,9 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		Stage:         prevIssue.Stage,
 		// Checked against the locked rows in updateIssueWithStatusGuard.
 		DuplicateOfIssueID: duplicateOfID,
+	}
+	if !h.applyExternalIssueUpdate(w, r, &req, rawFields, &params, userID, workspaceID) {
+		return
 	}
 	if req.ExpectedRevision != nil {
 		if *req.ExpectedRevision < 1 {
@@ -4081,16 +4165,21 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine actor identity: agent (via X-Agent-ID header) or member.
-	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	h.advanceRunStep(r.Context(), callerRun, prevIssue, issue)
 
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
 	slog.Info("issue updated", append(logger.RequestAttrs(r), "issue_id", id, "workspace_id", workspaceID)...)
+	h.recordIssueExternalUpdateActivity(r.Context(), prevIssue, issue, actorType, actorID)
 
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
+	h.projectIssueExternalState(r.Context(), issue, &resp)
 	assigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil || handoff != nil) &&
+		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
+	// Only an explicitly supplied assignee launches work. A workflow handoff
+	// that happens to move the owner is a state transition, not an assignment
+	// command.
+	explicitAssigneeChanged := (req.AssigneeType != nil || req.AssigneeID != nil) &&
 		(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 	statusChanged := (req.Status != nil || params.Status.Valid) && prevIssue.Status != issue.Status
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
@@ -4117,9 +4206,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:              issue,
-			PrevStatus:         prevIssue.Status,
-			AssigneeChanged:    assigneeChanged || handoff != nil,
-			StatusChanged:      statusChanged,
+			AssigneeChanged:    explicitAssigneeChanged,
 			EnteredHandoffStep: handoff != nil,
 		},
 		h.issueTriggerWriteProbe(r, actorType, actorID, issue),
@@ -4293,11 +4380,11 @@ func (h *Handler) validateAssigneePair(ctx context.Context, r *http.Request, wor
 	}
 }
 
-// shouldEnqueueAgentTask returns true when an issue creation or assignment
-// should trigger the assigned agent. Backlog issues are skipped — backlog
-// acts as a parking lot where issues can be pre-assigned without immediately
-// triggering execution. Moving out of backlog is handled separately in
-// UpdateIssue.
+// shouldEnqueueAgentTask returns true when an issue creation or explicit
+// assignment should trigger the assigned agent. Backlog issues are skipped —
+// backlog acts as a parking lot where issues can be pre-assigned without
+// immediately triggering execution. A later status or workflow transition is
+// display-only; the next actor starts work through an explicit mention or rerun.
 func (h *Handler) shouldEnqueueAgentTask(ctx context.Context, issue db.Issue) bool {
 	// Only the fixed backlog key parks work; custom unstarted statuses do not.
 	// An issue in Triage is not parked but refused: it produces no run from any
@@ -4306,78 +4393,6 @@ func (h *Handler) shouldEnqueueAgentTask(ctx context.Context, issue db.Issue) bo
 		return false
 	}
 	return h.isAgentAssigneeReady(ctx, issue)
-}
-
-// shouldEnqueueAssigneeFallback returns true when comment routing can fall back
-// to the issue's assigned agent. Fires for any status — comments are
-// conversational and can happen at any stage, including after completion
-// (e.g. follow-up questions on a done issue).
-//
-// Mirrors the private-agent gate that resolveMentionedAgentCommentTriggers applies on the
-// @mention path: once an owner/admin assigns a private agent to an issue, the
-// agent's UUID is "welded" onto the issue and remains visible to every member
-// who can view it. Without this check any of those members could dispatch a new
-// task to the private agent simply by commenting (#3300).
-func (h *Handler) shouldEnqueueAssigneeFallback(ctx context.Context, issue db.Issue, actorType, actorID string, opts commentTriggerComputeOptions) bool {
-	_, hasPending, ok := h.assigneeFallbackAgent(ctx, issue, actorType, actorID, opts)
-	return ok && !hasPending
-}
-
-func (h *Handler) assigneeFallbackAgent(ctx context.Context, issue db.Issue, actorType, actorID string, opts commentTriggerComputeOptions) (db.Agent, bool, bool) {
-	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "agent" || !issue.AssigneeID.Valid {
-		return db.Agent{}, false, false
-	}
-	agent, err := h.Queries.GetAgent(ctx, issue.AssigneeID)
-	if err != nil || !agent.RuntimeID.Valid || agent.ArchivedAt.Valid {
-		return db.Agent{}, false, false
-	}
-	if !h.canInvokeAgent(ctx, agent, actorType, actorID, opts.OriginatorUserID, uuidToString(issue.WorkspaceID)) {
-		return db.Agent{}, false, false
-	}
-	// Coalescing queue: pending is still a valid route target, but callers
-	// that actually enqueue tasks use this flag to avoid piling on duplicates.
-	hasPending, err := h.hasPendingTaskForIssueAndAgent(ctx, issue.ID, issue.AssigneeID, opts)
-	if err != nil {
-		return db.Agent{}, false, false
-	}
-	return agent, hasPending, true
-}
-
-// isAgentRunningOnIssue reports whether the calling agent's current task
-// (identified by X-Task-ID) is running for the exact issue being promoted.
-// That is the only true self-loop on backlog→active: the agent flipping
-// the same issue its own task is executing for would immediately re-enqueue
-// itself, complete the run, flip again, and so on.
-//
-// Same-agent cross-issue handoff (Agent A finishing a task on issue I1 then
-// promoting issue I2 — even when I2 is also assigned to A) is NOT a loop
-// and must fire; that is the documented serial sub-task chain. Member
-// actors never match.
-//
-// X-Task-ID is guaranteed to be present and consistent when actorType is
-// "agent": resolveActor demotes the actor to "member" otherwise (handler.go
-// resolveActor). We still recheck defensively — a future caller could pass
-// agent identity through a different path.
-func (h *Handler) isAgentRunningOnIssue(r *http.Request, actorType string, issue db.Issue) bool {
-	if actorType != "agent" {
-		return false
-	}
-	taskIDStr := r.Header.Get("X-Task-ID")
-	if taskIDStr == "" {
-		return false
-	}
-	taskUUID, err := util.ParseUUID(taskIDStr)
-	if err != nil {
-		return false
-	}
-	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
-	if err != nil {
-		return false
-	}
-	if !task.IssueID.Valid {
-		return false
-	}
-	return uuidToString(task.IssueID) == uuidToString(issue.ID)
 }
 
 // isAgentAssigneeReady checks if an issue is assigned to an active agent
@@ -4539,6 +4554,11 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 			}
 		} else if !errors.Is(contextErr, pgx.ErrNoRows) {
 			return issueDeleteResult{}, fmt.Errorf("load issue source context for delete: %w", contextErr)
+		}
+		// Mailbox rows have no foreign key; remove them with the issue so a
+		// deleted request cannot be claimed against a missing target.
+		if err := qtx.DeleteAgentMailboxMessagesForIssue(ctx, issue.ID); err != nil {
+			return issueDeleteResult{}, err
 		}
 		if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("delete issue: %w", err)
@@ -4904,6 +4924,8 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		fillBatch(&resp)
 		assigneeChanged := (req.Updates.AssigneeType != nil || req.Updates.AssigneeID != nil || handoff != nil) &&
 			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
+		explicitAssigneeChanged := (req.Updates.AssigneeType != nil || req.Updates.AssigneeID != nil) &&
+			(prevIssue.AssigneeType.String != issue.AssigneeType.String || uuidToString(prevIssue.AssigneeID) != uuidToString(issue.AssigneeID))
 		statusChanged := (req.Updates.Status != nil || params.Status.Valid) && prevIssue.Status != issue.Status
 		priorityChanged := req.Updates.Priority != nil && prevIssue.Priority != issue.Priority
 		projectChanged := req.Updates.ProjectID != nil && uuidToString(prevIssue.ProjectID) != uuidToString(issue.ProjectID)
@@ -4912,9 +4934,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 			service.IssueTriggerInput{
 				Issue:              issue,
-				PrevStatus:         prevIssue.Status,
-				AssigneeChanged:    assigneeChanged || handoff != nil,
-				StatusChanged:      statusChanged,
+				AssigneeChanged:    explicitAssigneeChanged,
 				EnteredHandoffStep: handoff != nil,
 			},
 			h.issueTriggerWriteProbe(r, actorType, actorID, issue),

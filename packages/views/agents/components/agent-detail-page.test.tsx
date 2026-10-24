@@ -14,12 +14,15 @@ import type { Agent } from "@multica/core/types";
 import { I18nProvider } from "@multica/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
 import enAgents from "../../locales/en/agents.json";
+import enIssues from "../../locales/en/issues.json";
 import {
   NavigationProvider,
   type NavigationAdapter,
 } from "../../navigation";
 
-const TEST_RESOURCES = { en: { common: enCommon, agents: enAgents } };
+const TEST_RESOURCES = {
+  en: { common: enCommon, agents: enAgents, issues: enIssues },
+};
 
 // The DM tests exercise the header action wiring plus the real permission
 // rules (via auth + member fixtures); the tabbed body and avatar/presence
@@ -42,6 +45,10 @@ vi.mock("./agent-overview-pane", () => ({
 }));
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: () => <div>actor-avatar</div>,
+}));
+vi.mock("../../platform", () => ({
+  isDesktopShell: () => false,
+  openExternal: vi.fn(),
 }));
 vi.mock("./agent-presence-indicator", () => ({
   AgentPresenceIndicator: () => null,
@@ -456,6 +463,52 @@ describe("AgentDetailPage DM button", () => {
     expect(
       screen.getByLabelText("Agent actions"),
     ).toBeInTheDocument();
+  });
+
+  it("presents an external session without managed chat, run or rebind actions", async () => {
+    agentsRef.current = [
+      {
+        ...baseAgent,
+        owner_id: "user-1",
+        runtime_id: "",
+        runtime_bound: false,
+        execution_kind: "external",
+        external_session: {
+          provider: "paseo",
+          host_id: "server-1",
+          session_id: "paseo-agent-1",
+          display_name: "Review session",
+          url: "paseo://h/server-1/agent/paseo-agent-1",
+          daemon_id: "daemon-1",
+        },
+      },
+    ];
+    renderPage();
+
+    expect(await screen.findByText("Review session")).toBeInTheDocument();
+    expect(screen.queryByText("Needs a runtime")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/needs a runtime before it can run/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Bind runtime" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "DM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Assign work" })).not.toBeInTheDocument();
+  });
+
+  it("exposes no executable action for an unknown execution kind", async () => {
+    agentsRef.current = [
+      { ...baseAgent, owner_id: "user-1", execution_kind: "future_kind" },
+    ];
+    renderPage();
+
+    expect(
+      await screen.findByText(/execution type is unrecognized/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Unsupported execution type").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Needs a runtime")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "DM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Assign work" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Bind runtime" })).not.toBeInTheDocument();
   });
 
   it("explains an unbound agent and blocks run actions without losing the profile", async () => {

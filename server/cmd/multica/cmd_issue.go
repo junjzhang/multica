@@ -298,6 +298,8 @@ var issueStatusCmd = &cobra.Command{
 		"Built-in keys: backlog, todo, in_progress, in_review, done, blocked, cancelled.\n" +
 		"A workspace may define custom statuses on top of these; their keys are shown in\n" +
 		"Workspace Settings > Issue Statuses, and an unknown value errors with the full list.\n\n" +
+		"A status change only updates the board: it never starts an agent run. To start\n" +
+		"assigned work, explicitly @-mention the assignee in a comment or rerun the issue.\n\n" +
 		"To cancel an issue because it duplicates another, mark it instead of only cancelling:\n" +
 		"  multica issue status <id> cancelled --duplicate-of <original>\n" +
 		"The original then lists it as a duplicate. Moving the issue to any status other\n" +
@@ -642,6 +644,8 @@ func init() {
 	issueCreateCmd.Flags().String("priority", "", "Issue priority")
 	issueCreateCmd.Flags().String("assignee", "", "Assignee name (member, agent, or squad; fuzzy match)")
 	issueCreateCmd.Flags().String("assignee-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
+	issueCreateCmd.Flags().String("coordinator", "", "Coordinator actor name (member or agent; mutually exclusive with --coordinator-id)")
+	issueCreateCmd.Flags().String("coordinator-id", "", "Coordinator actor UUID (member or agent; mutually exclusive with --coordinator)")
 	issueCreateCmd.Flags().String("parent", "", "Parent issue ID")
 	issueCreateCmd.Flags().Int("stage", 0, "Stage ordinal (>=1) grouping this sub-issue into an ordered barrier group under its parent; omit for unstaged. The parent assignee is woken only when every sub-issue in a stage finishes.")
 	issueCreateCmd.Flags().String("project", "", "Project ID")
@@ -664,18 +668,23 @@ func init() {
 	issueUpdateCmd.Flags().String("priority", "", "New priority")
 	issueUpdateCmd.Flags().String("assignee", "", "New assignee name (member, agent, or squad; fuzzy match)")
 	issueUpdateCmd.Flags().String("assignee-id", "", "New assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
+	issueUpdateCmd.Flags().String("coordinator", "", "New coordinator actor name (member or agent)")
+	issueUpdateCmd.Flags().String("coordinator-id", "", "New coordinator actor UUID (member or agent)")
+	issueUpdateCmd.Flags().Bool("merge-allowed", false, "Grant or revoke merge authorization for this issue (human owner/admin only)")
+	issueUpdateCmd.Flags().String("merge-repository-url", "", "Repository URL covered by --merge-allowed")
+	issueUpdateCmd.Flags().String("merge-target-branch", "", "Target branch covered by --merge-allowed")
 	issueUpdateCmd.Flags().String("project", "", "Project ID")
 	issueUpdateCmd.Flags().String("start-date", "", "New start date (calendar day, YYYY-MM-DD; pass empty string to clear)")
 	issueUpdateCmd.Flags().String("due-date", "", "New due date (calendar day, YYYY-MM-DD)")
 	issueUpdateCmd.Flags().String("parent", "", "Parent issue ID (use --parent \"\" to clear)")
 	issueUpdateCmd.Flags().Int("stage", 0, "Stage ordinal (>=1) for this sub-issue; see `issue create --stage`")
 	issueUpdateCmd.Flags().Float64("position", 0, "Ordering position within the board column (lower sorts first); prefer `issue reorder` for relative moves")
-	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run")
+	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run (only an assignee change in the update would start one)")
 	issueUpdateCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID) and cancel it; --status, if given, must be cancelled, and description/attachment changes must go in a separate update")
 	issueUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue status
-	issueStatusCmd.Flags().Bool("no-start", false, "Change status without starting an agent run")
+	issueStatusCmd.Flags().Bool("no-start", false, "Accepted for compatibility; a status change alone never starts an agent run")
 	issueStatusCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID); the status must be cancelled")
 	issueStatusCmd.Flags().String("output", "table", "Output format: table or json")
 
@@ -1538,6 +1547,9 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		body["assignee_type"] = aType
 		body["assignee_id"] = aID
 	}
+	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
+		return err
+	}
 
 	// Quick-create stamp: when the daemon sets MULTICA_QUICK_CREATE_TASK_ID
 	// before invoking the agent, the agent's `multica issue create` call
@@ -1762,6 +1774,12 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 			body["assignee_id"] = aID
 		}
 	}
+	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
+		return err
+	}
+	if err := addMergeAuthorizationFromFlags(cmd, body); err != nil {
+		return err
+	}
 	if cmd.Flags().Changed("parent") {
 		v, _ := cmd.Flags().GetString("parent")
 		if v == "" {
@@ -1794,7 +1812,7 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(body) == 0 && len(attachmentPaths) == 0 {
-		return fmt.Errorf("no fields to update; use flags like --title, --status, --priority, --assignee, etc.")
+		return fmt.Errorf("no fields to update; use flags like --title, --status, --priority, --assignee, --coordinator, or --merge-allowed")
 	}
 	// Validate every path before any upload so an invalid later path cannot
 	// leave earlier files uploaded and unbound.
@@ -3528,6 +3546,70 @@ func pickAssigneeFromFlags(ctx context.Context, client *cli.APIClient, cmd *cobr
 		return t, i, true, nil
 	}
 	return "", "", false, nil
+}
+
+// addCoordinatorFromFlags resolves a member/agent coordinator and writes the
+// request's coordinator object. The two name/id flags are mutually exclusive.
+// The server accepts an explicit coordinator object, not a null clear.
+func addCoordinatorFromFlags(ctx context.Context, client *cli.APIClient, cmd *cobra.Command, body map[string]any) error {
+	nameSet := cmd.Flags().Changed("coordinator")
+	idSet := cmd.Flags().Changed("coordinator-id")
+	if !nameSet && !idSet {
+		return nil
+	}
+	if nameSet && idSet {
+		return fmt.Errorf("--coordinator and --coordinator-id are mutually exclusive")
+	}
+	actorType, actorID, hasCoordinator, err := pickAssigneeFromFlags(ctx, client, cmd, "coordinator", "coordinator-id", memberOrAgentKinds)
+	if err != nil {
+		return fmt.Errorf("resolve coordinator: %w", err)
+	}
+	if !hasCoordinator {
+		return nil
+	}
+	body["coordinator"] = map[string]any{"type": actorType, "id": actorID}
+	return nil
+}
+
+// addMergeAuthorizationFromFlags writes the human grant/revoke payload. A grant
+// must name both the repository and target branch; a revoke clears the scope,
+// so supplying scope flags together with --merge-allowed=false is rejected.
+func addMergeAuthorizationFromFlags(cmd *cobra.Command, body map[string]any) error {
+	allowedSet := cmd.Flags().Changed("merge-allowed")
+	repoSet := cmd.Flags().Changed("merge-repository-url")
+	branchSet := cmd.Flags().Changed("merge-target-branch")
+	if !allowedSet && !repoSet && !branchSet {
+		return nil
+	}
+	if !allowedSet {
+		return fmt.Errorf("--merge-repository-url and --merge-target-branch require --merge-allowed")
+	}
+	allowed := flagBool(cmd, "merge-allowed")
+	if !allowed {
+		if repoSet || branchSet {
+			return fmt.Errorf("--merge-repository-url and --merge-target-branch cannot be combined with --merge-allowed=false")
+		}
+		body["merge_authorization"] = map[string]any{"allowed": false}
+		return nil
+	}
+	repositoryURL := strings.TrimSpace(flagString(cmd, "merge-repository-url"))
+	targetBranch := strings.TrimSpace(flagString(cmd, "merge-target-branch"))
+	if repositoryURL == "" || targetBranch == "" {
+		return fmt.Errorf("--merge-allowed=true requires --merge-repository-url and --merge-target-branch")
+	}
+	parsedRepo, err := url.Parse(repositoryURL)
+	if err != nil || (parsedRepo.Scheme != "https" && parsedRepo.Scheme != "http") || parsedRepo.Host == "" || parsedRepo.User != nil {
+		return fmt.Errorf("--merge-repository-url must be an http(s) repository URL without credentials")
+	}
+	if strings.Contains(targetBranch, "..") {
+		return fmt.Errorf("--merge-target-branch is invalid")
+	}
+	body["merge_authorization"] = map[string]any{
+		"allowed":        true,
+		"repository_url": repositoryURL,
+		"target_branch":  targetBranch,
+	}
+	return nil
 }
 
 func formatAssignee(issue map[string]any, actors actorDisplayLookup) string {
