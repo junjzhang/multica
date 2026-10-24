@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -85,14 +86,73 @@ func TestCursorMcpApprovalKeyMatchesCursorAgentForRemoteServer(t *testing.T) {
 	}
 }
 
+// cursorMcpTestRepo gives Cursor MCP preparation an explicit Git root inside
+// t.TempDir(). The resolver walks up to the nearest ancestor containing .git;
+// without this boundary a bare t.TempDir() can resolve to a host /tmp/.git or
+// ~/.git and write outside the test directory. WorkDir is nested below the
+// root so the fixture also exercises ancestor lookup.
+type cursorMcpTestRepo struct {
+	TempRoot string
+	RepoRoot string
+	WorkDir  string
+}
+
+func newCursorMcpTestRepo(t *testing.T) cursorMcpTestRepo {
+	t.Helper()
+
+	tempRoot := t.TempDir()
+	repoRoot := filepath.Join(tempRoot, "repo")
+	workDir := filepath.Join(repoRoot, "workdir")
+	for _, dir := range []string{workDir, filepath.Join(repoRoot, ".git")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	return cursorMcpTestRepo{TempRoot: tempRoot, RepoRoot: repoRoot, WorkDir: workDir}
+}
+
+func (r cursorMcpTestRepo) projectRoot(t *testing.T) string {
+	t.Helper()
+
+	want := cursorMcpEvalSymlinks(t, r.RepoRoot)
+	got := cursorProjectRoot(r.WorkDir)
+	if got != want {
+		t.Fatalf("cursorProjectRoot(%q) = %q, want explicit Git root %q", r.WorkDir, got, want)
+	}
+	requireCursorMcpPathWithin(t, r.TempRoot, got)
+	return got
+}
+
+func cursorMcpEvalSymlinks(t *testing.T, path string) string {
+	t.Helper()
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("eval symlinks %s: %v", path, err)
+	}
+	return resolved
+}
+
+func requireCursorMcpPathWithin(t *testing.T, root, path string) {
+	t.Helper()
+
+	resolvedRoot := cursorMcpEvalSymlinks(t, root)
+	resolvedPath := cursorMcpEvalSymlinks(t, path)
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil {
+		t.Fatalf("relative path from %s to %s: %v", resolvedRoot, resolvedPath, err)
+	}
+	if rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("path %s escapes temporary root %s (rel %q)", resolvedPath, resolvedRoot, rel)
+	}
+}
+
 func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	manifest := &sidecarManifest{}
 	mcpConfig := json.RawMessage(`{
 		"mcpServers": {
@@ -109,7 +169,9 @@ func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 		t.Fatalf("CursorDataDir = %q, want envRoot/cursor-data", cursorDataDir)
 	}
 
-	rawConfig, err := os.ReadFile(filepath.Join(workDir, ".cursor", "mcp.json"))
+	projectRoot := repo.projectRoot(t)
+	configPath := filepath.Join(projectRoot, ".cursor", "mcp.json")
+	rawConfig, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read .cursor/mcp.json: %v", err)
 	}
@@ -120,11 +182,13 @@ func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 	if len(cfg.McpServers) != 2 {
 		t.Fatalf("mcpServers length = %d, want 2: %s", len(cfg.McpServers), rawConfig)
 	}
-	if mode := filePerm(t, filepath.Join(workDir, ".cursor", "mcp.json")); mode != 0o600 {
+	if mode := filePerm(t, configPath); mode != 0o600 {
 		t.Fatalf(".cursor/mcp.json mode = %#o, want 0600", mode)
 	}
+	if _, err := os.Stat(filepath.Join(workDir, ".cursor")); !os.IsNotExist(err) {
+		t.Fatalf("nested workDir got its own .cursor, stat err=%v", err)
+	}
 
-	projectRoot := cursorProjectRoot(workDir)
 	projectDataDir := filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot))
 	rawApprovals, err := os.ReadFile(filepath.Join(projectDataDir, "mcp-approvals.json"))
 	if err != nil {
@@ -147,6 +211,7 @@ func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(projectDataDir, cursorWorkspaceTrustedFile)); err != nil {
 		t.Fatalf("workspace trust file missing: %v", err)
 	}
+	requireCursorMcpPathWithin(t, envRoot, projectDataDir)
 	if len(manifest.Files) == 0 {
 		t.Fatal("manifest did not record .cursor/mcp.json")
 	}
@@ -155,11 +220,9 @@ func TestPrepareCursorMcpConfigWritesProjectConfigAndApprovals(t *testing.T) {
 func TestPrepareCursorMcpConfigManagedEmptySet(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	cursorDataDir, err := prepareCursorMcpConfig(envRoot, workDir, json.RawMessage(`{"mcpServers":{}}`), "", &sidecarManifest{})
 	if err != nil {
 		t.Fatalf("prepareCursorMcpConfig: %v", err)
@@ -167,8 +230,9 @@ func TestPrepareCursorMcpConfigManagedEmptySet(t *testing.T) {
 	if cursorDataDir == "" {
 		t.Fatal("managed empty mcp_config should still isolate CursorDataDir")
 	}
-	projectRoot := cursorProjectRoot(workDir)
-	rawApprovals, err := os.ReadFile(filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot), "mcp-approvals.json"))
+	projectRoot := repo.projectRoot(t)
+	approvalsPath := filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot), "mcp-approvals.json")
+	rawApprovals, err := os.ReadFile(approvalsPath)
 	if err != nil {
 		t.Fatalf("read mcp-approvals.json: %v", err)
 	}
@@ -179,16 +243,15 @@ func TestPrepareCursorMcpConfigManagedEmptySet(t *testing.T) {
 	if len(approvals) != 0 {
 		t.Fatalf("approvals length = %d, want 0: %v", len(approvals), approvals)
 	}
+	requireCursorMcpPathWithin(t, envRoot, approvalsPath)
 }
 
 func TestPrepareCursorMcpConfigSeedsExplicitAuthSource(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	sourceProjectDir := filepath.Join(envRoot, "source-project")
 	if err := os.MkdirAll(sourceProjectDir, 0o700); err != nil {
 		t.Fatalf("mkdir source project: %v", err)
@@ -202,7 +265,7 @@ func TestPrepareCursorMcpConfigSeedsExplicitAuthSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareCursorMcpConfig: %v", err)
 	}
-	projectRoot := cursorProjectRoot(workDir)
+	projectRoot := repo.projectRoot(t)
 	targetAuth := filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot), cursorMcpAuthFile)
 	data, err := os.ReadFile(targetAuth)
 	if err != nil {
@@ -211,16 +274,15 @@ func TestPrepareCursorMcpConfigSeedsExplicitAuthSource(t *testing.T) {
 	if string(data) != `{"tokens":{"fetch":"secret"}}` {
 		t.Fatalf("seeded auth = %s", data)
 	}
+	requireCursorMcpPathWithin(t, envRoot, targetAuth)
 }
 
 func TestPrepareCursorMcpConfigRemovesPriorAuthOnOptOut(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	sourceProjectDir := filepath.Join(envRoot, "source-project")
 	if err := os.MkdirAll(sourceProjectDir, 0o700); err != nil {
 		t.Fatalf("mkdir source project: %v", err)
@@ -235,7 +297,7 @@ func TestPrepareCursorMcpConfigRemovesPriorAuthOnOptOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareCursorMcpConfig with auth source: %v", err)
 	}
-	projectRoot := cursorProjectRoot(workDir)
+	projectRoot := repo.projectRoot(t)
 	targetAuth := filepath.Join(cursorDataDir, "projects", cursorSlugifyPath(projectRoot), cursorMcpAuthFile)
 	if _, err := os.Stat(targetAuth); err != nil {
 		t.Fatalf("seeded auth missing: %v", err)
@@ -249,16 +311,15 @@ func TestPrepareCursorMcpConfigRemovesPriorAuthOnOptOut(t *testing.T) {
 	if _, err := os.Stat(targetAuth); !os.IsNotExist(err) {
 		t.Fatalf("auth file should be removed after opt-out, stat err=%v", err)
 	}
+	requireCursorMcpPathWithin(t, envRoot, filepath.Dir(targetAuth))
 }
 
 func TestPrepareCursorMcpConfigRejectsArbitraryAuthSourceFile(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	source := filepath.Join(envRoot, "other.json")
 	if err := os.WriteFile(source, []byte(`{"secret":true}`), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
@@ -268,16 +329,22 @@ func TestPrepareCursorMcpConfigRejectsArbitraryAuthSourceFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-mcp-auth source file to fail")
 	}
+
+	// Preparation writes the managed config before it validates the auth
+	// source, so an error path must stay inside the fixture too.
+	projectRoot := repo.projectRoot(t)
+	requireCursorMcpPathWithin(t, envRoot, filepath.Join(projectRoot, ".cursor", "mcp.json"))
+	if _, err := os.Stat(filepath.Join(workDir, ".cursor")); !os.IsNotExist(err) {
+		t.Fatalf("nested workDir got its own .cursor, stat err=%v", err)
+	}
 }
 
 func TestPrepareCursorMcpConfigNilDoesNotTakeOwnership(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	cursorDataDir, err := prepareCursorMcpConfig(envRoot, workDir, nil, "", &sidecarManifest{})
 	if err != nil {
 		t.Fatalf("prepareCursorMcpConfig: %v", err)
@@ -293,15 +360,71 @@ func TestPrepareCursorMcpConfigNilDoesNotTakeOwnership(t *testing.T) {
 func TestPrepareCursorMcpConfigRejectsMalformedConfig(t *testing.T) {
 	t.Parallel()
 
-	envRoot := t.TempDir()
-	workDir := filepath.Join(envRoot, "workdir")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	repo := newCursorMcpTestRepo(t)
+	envRoot := repo.TempRoot
+	workDir := repo.WorkDir
 	_, err := prepareCursorMcpConfig(envRoot, workDir, json.RawMessage(`{"mcpServers":{"bad":42}}`), "", &sidecarManifest{})
 	if err == nil {
 		t.Fatal("expected malformed server config to fail")
 	}
+}
+
+// A .git above the fixture reproduces the escaping shape: without a local Git
+// root the resolver climbs to it. With a temporary root in place, preparation
+// stops at the nearest root and cannot write outside the fixture.
+func TestPrepareCursorMcpConfigStopsAtNearestTemporaryGitRoot(t *testing.T) {
+	t.Parallel()
+
+	tempRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tempRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir simulated ancestor .git: %v", err)
+	}
+	envRoot := filepath.Join(tempRoot, "env")
+	repoRoot := filepath.Join(envRoot, "repo")
+	workDir := filepath.Join(repoRoot, "nested", "workdir")
+	for _, dir := range []string{workDir, filepath.Join(repoRoot, ".git")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	unrooted := filepath.Join(envRoot, "unrooted")
+	if err := os.MkdirAll(unrooted, 0o755); err != nil {
+		t.Fatalf("mkdir unrooted: %v", err)
+	}
+
+	wantAncestor := cursorMcpEvalSymlinks(t, tempRoot)
+	if got := cursorProjectRoot(unrooted); got != wantAncestor {
+		t.Fatalf("cursorProjectRoot without a local .git = %q, want simulated ancestor %q", got, wantAncestor)
+	}
+
+	cursorDataDir, err := prepareCursorMcpConfig(
+		envRoot,
+		workDir,
+		json.RawMessage(`{"mcpServers":{"fetch":{"command":"uvx","args":["mcp-server-fetch"]}}}`),
+		"",
+		&sidecarManifest{},
+	)
+	if err != nil {
+		t.Fatalf("prepareCursorMcpConfig: %v", err)
+	}
+	projectRoot := cursorProjectRoot(workDir)
+	wantRepo := cursorMcpEvalSymlinks(t, repoRoot)
+	if projectRoot != wantRepo {
+		t.Fatalf("cursorProjectRoot(%q) = %q, want nearest temporary root %q", workDir, projectRoot, wantRepo)
+	}
+
+	configPath := filepath.Join(projectRoot, ".cursor", "mcp.json")
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("managed config not written under nearest Git root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tempRoot, ".cursor")); !os.IsNotExist(err) {
+		t.Fatalf("preparation escaped to simulated ancestor .cursor, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".cursor")); !os.IsNotExist(err) {
+		t.Fatalf("preparation wrote into nested workDir, stat err=%v", err)
+	}
+	requireCursorMcpPathWithin(t, tempRoot, configPath)
+	requireCursorMcpPathWithin(t, envRoot, cursorDataDir)
 }
 
 func filePerm(t *testing.T, path string) os.FileMode {
