@@ -59,6 +59,18 @@ func addTestSubscriber(t *testing.T, issueID, userType, userID, reason string) {
 	}
 }
 
+// assignTestIssue sets the issue's authoritative owner without touching
+// subscription reasons, mirroring a reassignment that leaves stale rows.
+func assignTestIssue(t *testing.T, issueID, memberID string) {
+	t.Helper()
+	_, err := testPool.Exec(context.Background(),
+		`UPDATE issue SET assignee_type = 'member', assignee_id = $2 WHERE id = $1`,
+		issueID, memberID)
+	if err != nil {
+		t.Fatalf("assignTestIssue: %v", err)
+	}
+}
+
 // createTestSubIssue inserts an issue with parent_issue_id set and returns its UUID.
 // Picks the next per-workspace number to avoid colliding with the
 // uq_issue_workspace_number unique constraint (parent + sub created in the
@@ -1552,7 +1564,7 @@ func TestNotification_ChildManualSubscriptionStillDeliversRoutineActivity(t *tes
 }
 
 // TestNotification_ChildExplicitAssigneeStillReceivesRoutineActivity: the
-// child's explicit human assignee is a direct owner, not a passive watcher.
+// child's current human assignee is a direct owner, not a passive watcher.
 func TestNotification_ChildExplicitAssigneeStillReceivesRoutineActivity(t *testing.T) {
 	queries := db.New(testPool)
 	bus := newNotificationBus(t, queries)
@@ -1560,20 +1572,98 @@ func TestNotification_ChildExplicitAssigneeStillReceivesRoutineActivity(t *testi
 
 	assigneeID := createNotificationWatcher(t, "child-assignee")
 	addTestSubscriber(t, childID, "member", assigneeID, "assignee")
+	assignTestIssue(t, childID, assigneeID)
 
 	publishStatusChange(bus, childID, "in_progress", "todo")
 	publishNotificationComment(bus, childID, testUserID, "Routine progress.")
 
 	items := inboxItemsForRecipient(t, queries, assigneeID)
 	if len(items) != 2 {
-		t.Fatalf("explicit child assignee got %d inbox rows, want 2", len(items))
+		t.Fatalf("current child assignee got %d inbox rows, want 2", len(items))
 	}
 	got := map[string]int{}
 	for _, item := range items {
 		got[item.Type]++
 	}
 	if got["status_changed"] != 1 || got["new_comment"] != 1 {
-		t.Fatalf("explicit child assignee types = %v, want one status_changed and one new_comment", got)
+		t.Fatalf("current child assignee types = %v, want one status_changed and one new_comment", got)
+	}
+}
+
+// TestNotification_ChildRoutineActivityReachesExistingWatcherAfterAssignment:
+// assignment is authoritative even when the subscription reason predates it
+// and AddIssueSubscriber leaves that reason unchanged.
+func TestNotification_ChildRoutineActivityReachesExistingWatcherAfterAssignment(t *testing.T) {
+	for _, reason := range []string{"creator", "commenter"} {
+		t.Run(reason, func(t *testing.T) {
+			queries := db.New(testPool)
+			bus := newNotificationBus(t, queries)
+			_, childID := createNotificationChild(t)
+
+			assigneeID := createNotificationWatcher(t, "child-assigned-"+reason)
+			addTestSubscriber(t, childID, "member", assigneeID, reason)
+			assignTestIssue(t, childID, assigneeID)
+			if _, err := queries.AddIssueSubscriber(context.Background(), db.AddIssueSubscriberParams{
+				IssueID:  util.MustParseUUID(childID),
+				UserType: "member",
+				UserID:   util.MustParseUUID(assigneeID),
+				Reason:   "assignee",
+			}); err != nil {
+				t.Fatalf("add assignee subscriber: %v", err)
+			}
+			var storedReason string
+			if err := testPool.QueryRow(context.Background(),
+				`SELECT reason FROM issue_subscriber WHERE issue_id = $1 AND user_id = $2`,
+				childID, assigneeID).Scan(&storedReason); err != nil {
+				t.Fatalf("read subscriber reason: %v", err)
+			}
+			if storedReason != reason {
+				t.Fatalf("subscriber reason = %q after assignment, want stale %q", storedReason, reason)
+			}
+
+			publishStatusChange(bus, childID, "in_progress", "todo")
+			publishNotificationComment(bus, childID, testUserID, "Routine progress.")
+
+			items := inboxItemsForRecipient(t, queries, assigneeID)
+			if len(items) != 2 {
+				t.Fatalf("%s subscriber assigned later got %d inbox rows, want 2", reason, len(items))
+			}
+			got := map[string]int{}
+			for _, item := range items {
+				got[item.Type]++
+			}
+			if got["status_changed"] != 1 || got["new_comment"] != 1 {
+				t.Fatalf("%s subscriber assigned later types = %v, want one status_changed and one new_comment", reason, got)
+			}
+		})
+	}
+}
+
+// TestNotification_ChildRoutineActivitySkipsFormerAssignee: reassignment
+// leaves the old assignee's subscription reason stale; only the current owner
+// receives routine activity.
+func TestNotification_ChildRoutineActivitySkipsFormerAssignee(t *testing.T) {
+	queries := db.New(testPool)
+	bus := newNotificationBus(t, queries)
+	_, childID := createNotificationChild(t)
+
+	formerID := createNotificationWatcher(t, "child-former-assignee")
+	addTestSubscriber(t, childID, "member", formerID, "assignee")
+	assignTestIssue(t, childID, formerID)
+
+	currentID := createNotificationWatcher(t, "child-current-assignee")
+	addTestSubscriber(t, childID, "member", currentID, "commenter")
+	assignTestIssue(t, childID, currentID)
+
+	publishStatusChange(bus, childID, "in_progress", "todo")
+	publishNotificationComment(bus, childID, testUserID, "Routine progress.")
+	publishNotificationPriorityChange(bus, childID, "in_progress")
+
+	if items := inboxItemsForRecipient(t, queries, formerID); len(items) != 0 {
+		t.Fatalf("former assignee got %d routine child inbox rows, want 0", len(items))
+	}
+	if items := inboxItemsForRecipient(t, queries, currentID); len(items) != 3 {
+		t.Fatalf("current assignee with stale commenter reason got %d inbox rows, want 3", len(items))
 	}
 }
 

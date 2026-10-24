@@ -139,10 +139,8 @@ func issueStatusIsHandoff(
 	}
 }
 
-// routineChildNotifTypes lists the notifications that are ordinary progress
-// when the issue they describe is a sub-issue. Routine subagent activity stays
-// visible in the GUI and in the issue timeline; it just does not fill a human's
-// Inbox. Root issues are never affected.
+// routineChildNotifTypes are child-issue events that are ordinary progress:
+// visible in the GUI and timeline, but not worth a human Inbox row.
 var routineChildNotifTypes = map[string]bool{
 	"status_changed":     true,
 	"new_comment":        true,
@@ -151,50 +149,48 @@ var routineChildNotifTypes = map[string]bool{
 	"due_date_changed":   true,
 }
 
-// childRoutineActivity reports whether this notification describes routine
-// activity on a CHILD issue, which must not create an Inbox row for automatic
-// watchers. It fails OPEN whenever the facts cannot be resolved — a missing
-// issue row or an unresolvable custom status keeps the old, loud behavior,
-// because a missed handoff strands work while a spare row costs one dismissal.
-func childRoutineActivity(
+// routineChildIssue returns the child issue when this is routine activity on
+// it, and nil otherwise. It fails OPEN: unresolved facts keep the old loud
+// behavior rather than strand a handoff.
+func routineChildIssue(
 	ctx context.Context,
 	queries *db.Queries,
 	workspaceID pgtype.UUID,
 	issueID string,
 	issueStatus string,
 	notifType string,
-) bool {
+) *db.Issue {
 	if !routineChildNotifTypes[notifType] {
-		return false
+		return nil
 	}
 	issue, err := queries.GetIssue(ctx, parseUUID(issueID))
 	if err != nil {
 		slog.Error("resolve child issue for inbox quieting; delivering",
 			"issue_id", issueID, "type", notifType, "error", err)
-		return false
+		return nil
 	}
 	if !issue.ParentIssueID.Valid {
-		return false
+		return nil
 	}
 	if notifType != "status_changed" {
-		return true
+		return &issue
 	}
 	handsToHuman, err := childStatusHandsToHuman(ctx, queries, workspaceID, issueStatus)
 	if err != nil {
 		slog.Warn("resolve child status handoff for inbox quieting; delivering",
 			"issue_id", issueID, "status", issueStatus, "error", err)
-		return false
+		return nil
 	}
-	return !handsToHuman
+	if handsToHuman {
+		return nil
+	}
+	return &issue
 }
 
-// childStatusHandsToHuman reports whether arriving on this status on a CHILD
-// issue still needs a human's attention. Progress, review and success are
-// routine for a sub-issue, so they stay out of the Inbox. Blocked and custom
-// started statuses (an approval request or a review gate) are handoffs and are
-// preserved. This is deliberately NOT issueStatusIsHandoff: done/closed and
-// in_review hand work back to a human on a ROOT issue, but on a child they are
-// exactly the routine progress this rule exists to quiet.
+// childStatusHandsToHuman reports whether a child status still needs a human:
+// blocked and custom started statuses are handoffs; progress, review, success
+// and completion are routine. Unlike issueStatusIsHandoff, in_review and done
+// on a child are routine.
 func childStatusHandsToHuman(
 	ctx context.Context,
 	queries *db.Queries,
@@ -211,27 +207,14 @@ func childStatusHandsToHuman(
 	return status != issuestatus.InProgress && status != issuestatus.InReview, nil
 }
 
-// childRoutineRecipient reports whether a subscriber of a child issue still
-// receives its routine activity. Two explicit human choices survive the quiet
-// default: the child's explicit assignee, and a manual subscription to that
-// exact child. Parent-only subscriptions are deliberately excluded — a manual
-// subscription to the parent is not opt-in to every child.
-func childRoutineRecipient(reason string) bool {
-	return reason == "manual" || reason == "assignee"
-}
-
 // deliverToSubscriber reports whether a subscriber row should receive this
-// notification type. Direct subscriptions (creator / assignee / commenter /
-// mentioned / manual / autopilot) are unchanged — they opted in to this issue,
-// explicitly or by acting on it. Only the delegated tier is narrowed, and only
-// to drop churn: mentions, failures and blocked agents always deliver, routine
-// progress/comments/field updates never do, and a status change delivers only
-// when it is a handoff.
+// notification type. Direct subscriptions are unchanged; only the delegated
+// tier is narrowed to drop churn: mentions, failures and blocked agents always
+// deliver, routine progress never does, and a status change delivers only when
+// it is a handoff.
 //
-// Routine activity on a CHILD issue is narrowed further, and for all automatic
-// reasons rather than just delegated ones — see childRoutineActivity and
-// childRoutineRecipient. That rule lives outside this function because it also
-// governs the parent bubble.
+// Routine child activity is narrowed further for every automatic reason; see
+// routineChildIssue.
 //
 // statusIsHandoff is the resolved issueStatusIsHandoff answer for the issue's
 // current status, so the catalog is read once per notification rather than once
@@ -374,12 +357,9 @@ func archiveStaleTaskFailedInbox(
 // actor and any extra IDs, and creates inbox items for each remaining member
 // subscriber. Publishes an inbox:new event for each notification.
 //
-// Routine activity on a CHILD issue is quiet: automatic watchers and parent
-// subscribers see it in the GUI/timeline only, while the child's explicit
-// assignee and manual subscribers still receive it. If the issue has a parent
-// and the notification type is in the bubble allowlist, parent issue
-// subscribers are also notified for non-routine events (deduplicated against
-// direct subscribers).
+// Routine child activity stays in the GUI/timeline; only the child's current
+// human assignee and manual subscribers get an Inbox row, and it does not
+// bubble to the parent. Other event types keep the existing parent bubble.
 func notifySubscribers(
 	ctx context.Context,
 	queries *db.Queries,
@@ -395,22 +375,20 @@ func notifySubscribers(
 	body string,
 	details []byte,
 ) {
-	quietChildRoutine := childRoutineActivity(ctx, queries, parseUUID(workspaceID),
+	routineChild := routineChildIssue(ctx, queries, parseUUID(workspaceID),
 		issueID, issueStatus, notifType)
 
 	notified, tierSuppressed := notifyIssueSubscribers(ctx, queries, bus,
 		issueID, issueID, issueStatus, workspaceID, e, exclude,
-		notifType, severity, title, body, details, quietChildRoutine)
+		notifType, severity, title, body, details, routineChild)
 
 	// Only a small allowlist of event types bubbles to parent subscribers.
 	if !parentBubbleNotifTypes[notifType] {
 		return
 	}
 
-	// Routine child activity does not bubble: a parent watcher, even a manual
-	// subscriber to the parent, did not opt in to every child's progress. The
-	// child's own manual subscribers and assignee were already served above.
-	if quietChildRoutine {
+	// A parent watcher, even a manual one, did not opt in to every child.
+	if routineChild != nil {
 		return
 	}
 
@@ -449,7 +427,7 @@ func notifySubscribers(
 	parentID := util.UUIDToString(issue.ParentIssueID)
 	notifyIssueSubscribers(ctx, queries, bus,
 		parentID, issueID, issueStatus, workspaceID, e, parentExclude,
-		notifType, severity, title, body, details, false)
+		notifType, severity, title, body, details, nil)
 }
 
 // notifyIssueSubscribers sends inbox notifications to subscribers of
@@ -462,9 +440,8 @@ func notifySubscribers(
 // set into the parent bubble so a suppressed event cannot be re-delivered
 // through an ancestor subscription (see notifySubscribers).
 //
-// quietChildRoutine marks this event as routine progress on a child issue;
-// automatic subscriber reasons are then skipped unless childRoutineRecipient
-// preserves them.
+// routineChild is the child issue for routine child activity; nil otherwise.
+// Its current human assignee and manual subscribers remain eligible.
 func notifyIssueSubscribers(
 	ctx context.Context,
 	queries *db.Queries,
@@ -480,7 +457,7 @@ func notifyIssueSubscribers(
 	title string,
 	body string,
 	details []byte,
-	quietChildRoutine bool,
+	routineChild *db.Issue,
 ) (map[string]bool, map[string]bool) {
 	notified := map[string]bool{}
 	tierSuppressed := map[string]bool{}
@@ -546,11 +523,12 @@ func notifyIssueSubscribers(
 			continue
 		}
 
-		// Routine child activity is quiet by default. Automatic watchers
-		// (creator, commenter, mentioned, delegated) still see it in the GUI,
-		// but only the child's explicit assignee and manual subscribers asked
-		// to be told about it in the Inbox.
-		if quietChildRoutine && !childRoutineRecipient(sub.Reason) {
+		// Routine child activity reaches only its current human assignee and
+		// manual subscribers; other watchers still see it in the GUI.
+		assignedToSubscriber := routineChild != nil &&
+			routineChild.AssigneeType.Valid && routineChild.AssigneeType.String == "member" &&
+			routineChild.AssigneeID.Valid && routineChild.AssigneeID == sub.UserID
+		if routineChild != nil && sub.Reason != "manual" && !assignedToSubscriber {
 			tierSuppressed[subID] = true
 			continue
 		}
@@ -1163,11 +1141,8 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 			return
 		}
 
-		// An automatic retry is already queued. The event still reaches the
-		// WebSocket/GUI (listeners.go forwards it independently), but the
-		// attempt is not yet the human's problem: the retry writes the
-		// eventual outcome, and only an exhausted recovery becomes an
-		// action-required Inbox row.
+		// A retry is queued: keep the event for GUI consumers, but no human
+		// Inbox row until recovery is exhausted.
 		if retryPending, _ := payload["retry_pending"].(bool); retryPending {
 			return
 		}
