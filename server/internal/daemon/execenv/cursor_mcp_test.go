@@ -108,7 +108,9 @@ func newCursorMcpTestRepo(t *testing.T) cursorMcpTestRepo {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
-	return cursorMcpTestRepo{TempRoot: tempRoot, RepoRoot: repoRoot, WorkDir: workDir}
+	repo := cursorMcpTestRepo{TempRoot: tempRoot, RepoRoot: repoRoot, WorkDir: workDir}
+	repo.projectRoot(t)
+	return repo
 }
 
 func (r cursorMcpTestRepo) projectRoot(t *testing.T) string {
