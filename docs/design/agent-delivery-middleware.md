@@ -3,9 +3,9 @@
 This document fixes the smallest production contract for the delivery core
 extracted from the external-agent mailbox. It describes the domain the core
 owns, how it maps onto the existing `agent_mailbox_message` table, and the
-business writes that are now atomic with enqueue. It is not the full event and
-wakeup middleware design; sources, host adapters and scheduling stay outside
-this slice.
+business writes that are now atomic with enqueue, and the first consume loop
+with one host adapter. It is not the full event and wakeup middleware design;
+event sources and generic scheduling stay outside this slice.
 
 Background: [external-agent-mailbox.md](external-agent-mailbox.md).
 
@@ -24,12 +24,21 @@ Implemented here:
   rollback, multi-recipient failure, legacy UUID recovery and legacy-reader
   filtering.
 
-Deliberately unchanged in this slice:
+The follow-up consume slice adds:
 
-- Daemon claim/lease/acknowledgement behavior and its rendered notification.
-- Paseo/host adapters and the external-agent CLI.
+- `delivery.Queue` with the claim/lease/outcome operations the mailbox handler
+  and daemon loop previously open-coded.
+- A generic daemon worker and host contract (`DeliverIfIdle`, `LookupReceipt`)
+  for deliveries with no issue or comment.
+- A dedicated `unknown` delivery state and verify-only reclaims.
+- An optional retry class so a busy session is not treated as a failure.
+
+Deliberately unchanged:
+
+- The frozen mailbox API DTO and its rendered comment notification.
+- The external-agent identity/permission model and session/worktree ownership.
 - `IssueWakeupService`, autopilot scheduling and CI watchers.
-- The frozen mailbox API DTO and the external-agent identity/permission model.
+- Message batching and priority scheduling.
 
 ## Domain
 
@@ -113,9 +122,9 @@ place.
 
 The legacy mailbox list and daemon claim read only
 `source_type='comment'`: their frozen DTO and rendered prompt require an
-issue/comment, and a generic delivery must not fabricate either. Generic rows
-are stored and readable through `GetDelivery`; exposing them to a host is a
-later adapter slice.
+issue/comment, and a generic delivery must not fabricate either. Generic rows are
+read through `GetDelivery` and claimed by the generic daemon entry below, which
+has its own DTO and no issue fields.
 
 ## Atomic comment handoff
 
@@ -142,12 +151,15 @@ Quick actions render an ordinary comment carrying the target mention and use
 the same pre-resolution and transaction boundary, so they inherit the atomic
 behavior without a separate write.
 
-`UpdateComment` uses the same shape for a content edit. It resolves the new
-content's mentions after cancelling tasks built from the old body (the ordering
-the legacy path already used), then writes the new content, the cancellations
-and one delivery per valid external target in one transaction. Strict edits
-(`content_base` / `expected_revision`) and the legacy non-strict edit share
-that boundary; attachment-set edits include the delivery insert too.
+`UpdateComment` keeps the same pre-resolution and delivery boundary but the two
+edit shapes order cancellation differently. A strict edit (`content_base` /
+`expected_revision`) plans triggers first and then takes the conditional update;
+only after that update wins does the transaction cancel tasks built from the old
+body, write the new content and insert one delivery per valid external target. A
+legacy non-strict edit still cancels tasks built from the old body *before* the
+write transaction, so those cancellations are not inside it — only the new
+content and the delivery inserts commit together. Attachment-set edits include
+the delivery insert in the same transaction as well.
 
 A mailbox failure on an edit rolls the content change back, so the response is
 an error and the stored comment still has its old content. Re-saving the same
@@ -156,6 +168,66 @@ instead of silently deduplicating against the already-committed text. A
 multi-recipient edit has the same all-or-nothing boundary as creation, and
 suppressed or permission-blocked targets still store nothing and are reported
 per target after the transaction commits.
+
+## Consuming a generic delivery
+
+Two entries consume the one table and their filters are disjoint, so the same
+row can never be leased twice:
+
+| Entry | Filter | DTO |
+| --- | --- | --- |
+| `POST /api/daemon/mailbox/claim` (legacy) | `source_type = 'comment'` | Frozen `MailboxMessageResponse` + rendered comment notification |
+| `POST /api/daemon/deliveries/claim` (generic) | `source_type <> 'comment'` | `id`, `kind`, `payload`, recipient, bound session, lease and `verify_only` |
+
+`delivery.Queue.Claim` leases for either entry. It takes a per-recipient
+transaction-scoped advisory lock, leases at most one row per recipient session,
+and only leases a row that is still eligible (`pending` due, `leased` expired, or
+`unknown` due). A conditional `UPDATE` re-checks eligibility, so a lost race is a
+no-op. This keeps two workers or daemons from delivering to one session at the
+same time and stops one unreachable recipient from consuming more than one slot.
+The worker runs a bounded number of sessions concurrently; the claim itself is
+the fairness bound, not a priority scheduler.
+
+`delivery.Queue.RecordOutcome` stores the fenced result. The delivery token,
+daemon and unexpired lease fence the write, so a stale or foreign ack matches no
+row. A delayed ack is retried by the worker under the same lease instead of
+causing a second host send.
+
+### Host contract
+
+```text
+DeliverIfIdle(target, delivery) -> host receipt | busy | unavailable | unsupported | rejected | unknown
+LookupReceipt(target, delivery_id) -> accepted | pending | absent | error
+```
+
+Both calls address the exact registered session and the stable delivery id.
+They never create, resume, archive or replace a session, and `DeliverIfIdle` has
+no ordinary-send fallback. The Paseo adapter maps `paseo agent receipt
+<session-id> <delivery-id> --json` onto `LookupReceipt`; an older CLI or host
+that lacks the capability is reported as unsupported, not as an absent receipt.
+
+### Outcomes and retry schedule
+
+| Host result | Stored state | Delay | Next action |
+| --- | --- | --- | --- |
+| accepted | `delivered` | — | terminal; receipt saved |
+| busy | `pending` | 5 seconds | same id delivered again |
+| unreachable / missing capability | `pending` | failure backoff | same id retried; limitation stays in `last_error` |
+| explicit rejection | `failed` | — | terminal; needs a human fix |
+| unknown | `unknown` | failure backoff | receipt lookup only, never a resend |
+
+The failure backoff is `attempts² × 15s`, bounded to 15 seconds … 15 minutes.
+Only a proven no-effect result returns a row to claimable delivery. A row whose
+lease expired without a recorded outcome is ambiguous: on reclaim the worker
+looks up the receipt instead of sending again (the legacy comment projection
+keeps its existing replay behavior because its frozen consumer has no receipt
+path).
+
+An `unknown` row is reclaimed for verification only. `accepted` completes it;
+`pending`, `absent`, an unsupported lookup or a failed lookup all leave it
+unconfirmed with a diagnostic. An absent receipt is explicitly not treated as
+proof of non-execution, and recovery never changes the delivery id, clears the
+receipt, or clears history.
 
 ## Failure rules
 
@@ -167,26 +239,38 @@ per target after the transaction commits.
 | Same key, different content | `ErrConflict`; original row untouched |
 | Generic request with `Refs.CommentID` | Rejected by `Validate`; nothing stored |
 | Unknown delivery ID in the scope | `ErrNotFound` |
-| Stale or foreign lease acknowledgement | Existing fenced ack rejects it; a later lease's result is not overwritten |
-| Ambiguous host result | Existing daemon contract reports it; this slice does not auto-replay it |
+| Stale or foreign lease acknowledgement | Fenced ack rejects it; a later lease's result is not overwritten |
+| Busy session | `pending` with a short retry class; not a failure |
+| Host without if-idle delivery | `pending` with a dependency error; no ordinary-send fallback |
+| Ambiguous host result | `unknown`; receipt lookup only, never a resend |
+| Receipt absent or lookup unsupported | Stays `unknown` with a diagnostic; not replayed |
+| Worker crash after acceptance | Lease expires; the reclaim verifies the original id instead of resending |
 
 ## Rolling upgrade
 
 Old binaries still list and claim without the `source_type='comment'` filter,
-and their `SenderType` scan cannot read a NULL. This slice has no generic
-producer, so they are safe today. Before any generic producer ships, every
-daemon must be on a binary with the read filter (or the fleet must be drained
-first); otherwise an old daemon could claim a generic row and render an
-issue/comment notification that does not exist. Old binaries also continue to
-write comment rows with `source_key = NULL`; the new store recovers those by
-the legacy key, but a row must not be rewritten or backfilled by hand during
-the rollover.
+and their `SenderType` scan cannot read a NULL. No generic producer ships yet,
+so they are safe today. Before one does, every daemon must be on a binary with
+the read filter (or the fleet must be drained first); otherwise an old daemon
+could claim a generic row and render an issue/comment notification that does not
+exist. Old binaries also continue to write comment rows with `source_key = NULL`;
+the new store recovers those by the legacy key, but a row must not be rewritten
+or backfilled by hand during the rollover.
+
+A new daemon can run against a server without the generic claim entry: the
+request returns 404, the worker treats it as "not rolled out yet" and keeps
+serving the legacy mailbox loop. The reverse order is not safe until the fleet
+filter is in place. Old daemons never write `unknown`; the new state is only
+produced by the generic worker, and its migration keeps the old constraint
+values valid.
 
 ## Known gaps
 
-- The daemon does not claim generic (`source_type != 'comment'`) deliveries
-  yet, and no CI watcher produces them.
+- No CI watcher produces generic (`source_type != 'comment'`) deliveries yet;
+  the worker and its claim/outcome entry are ready for one.
 - The mailbox DTO has no generic projection; `GetDelivery` is the internal
-  read path.
-- Broadcast/multi-target fan-out, a second identity system and a separate
-  service/outbox are out of scope.
+  read path and the generic claim DTO is the daemon's.
+- `unknown` rows have no UI recovery action yet; they are visible through
+  `last_error` and `delivery_status`.
+- Broadcast/multi-target fan-out, message batching, a second identity system
+  and a separate service/outbox are out of scope.

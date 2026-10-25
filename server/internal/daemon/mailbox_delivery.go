@@ -297,6 +297,7 @@ func (m *mailboxDeliveryLoop) recordDeliveryError(ctx context.Context, claim Mai
 			DeliveryToken: claim.DeliveryToken,
 			Status:        mailboxAckRetry,
 			Error:         mailboxRetryReason(typed),
+			RetryClass:    mailboxRetryClass(typed.Kind),
 		}, false)
 		return nil
 	}
@@ -318,6 +319,19 @@ func mailboxDeliveryRetryable(kind MailboxDeliveryErrorKind) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// mailboxRetryClass separates a healthy busy session from an unreachable host
+// or a missing capability, so the server can schedule each correctly.
+func mailboxRetryClass(kind MailboxDeliveryErrorKind) string {
+	switch kind {
+	case MailboxDeliveryBusy:
+		return "busy"
+	case MailboxDeliveryUnavailable:
+		return "unavailable"
+	default:
+		return "dependency"
 	}
 }
 
@@ -457,7 +471,6 @@ func mailboxAckIsPermanent(err error) bool {
 
 // runMailboxDelivery starts the delivery loop as part of the daemon lifecycle.
 func (d *Daemon) runMailboxDelivery(ctx context.Context) {
-	d.client.mailboxDaemonID = d.cfg.DaemonID
 	loop := newMailboxDeliveryLoop(d.client, newPaseoCliTransport(), d.allWorkspaceIDs, d.cfg.DaemonID, d.logger)
 	if err := loop.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		d.logger.Warn("mailbox delivery loop stopped", "error", err)

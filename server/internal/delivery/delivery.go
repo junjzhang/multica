@@ -25,6 +25,11 @@ var ErrNotFound = errors.New("delivery not found")
 // from the stored delivery. The caller must not create a second request.
 var ErrConflict = errors.New("delivery idempotency key already used with different content")
 
+// MaxPayloadBytes bounds the immutable notification a host is asked to render.
+// The payload is stored verbatim and becomes a host prompt, so an unreadable
+// size would consume host storage and token budget on every attempt.
+const MaxPayloadBytes = 64 << 10
+
 // Scope isolates deliveries by workspace. A delivery ID is unique globally,
 // but every lookup is scoped so one workspace can never address another's row.
 type Scope struct {
@@ -118,6 +123,9 @@ func (r EnqueueRequest) Validate() error {
 	}
 	if len(bytes.TrimSpace(r.Payload)) == 0 {
 		return errors.New("delivery: payload is required")
+	}
+	if len(r.Payload) > MaxPayloadBytes {
+		return fmt.Errorf("delivery: payload exceeds %d bytes", MaxPayloadBytes)
 	}
 	var value any
 	if err := json.Unmarshal(r.Payload, &value); err != nil {

@@ -91,33 +91,63 @@ WHERE recipient_agent_id = @recipient_agent_id
 ORDER BY created_at ASC, id ASC
 LIMIT @page_limit;
 
--- name: LockClaimableMailboxMessageIDs :many
--- Locks a bounded batch of deliverable messages. The claim is bound to the
--- verified daemon/owner: the recipient must be a live external agent whose
--- session names this daemon and owner, and whose workspace matches. A pending
--- message is claimable at its next attempt; an expired lease is reclaimable so
--- a crashed daemon does not strand the request.
-SELECT m.id
-FROM agent_mailbox_message m
-JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
-JOIN agent a ON a.id = m.recipient_agent_id
-WHERE m.workspace_id = @workspace_id
-  AND m.source_type = 'comment'
-  AND s.workspace_id = @workspace_id
-  AND a.workspace_id = @workspace_id
-  AND a.execution_kind = 'external'
-  AND a.archived_at IS NULL
-  AND s.owner_user_id = @owner_user_id
-  AND s.daemon_id = @daemon_id
-  AND (
-    (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
-    OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
-  )
-ORDER BY m.next_attempt_at ASC, m.created_at ASC
-LIMIT @row_limit
-FOR UPDATE OF m SKIP LOCKED;
+-- name: ListClaimableDeliveryIDs :many
+-- Candidates for one claim round, at most one per recipient session. The
+-- caller leases each candidate in its own transaction; the advisory lock it
+-- takes per recipient serialises concurrent claimants, and the conditional
+-- lease re-check makes a lost race a no-op. An inflated lease is reclaimable so
+-- a crashed worker does not strand a request. An ambiguous row (unknown) is
+-- claimable again only for receipt verification, never for a second send.
+WITH ranked AS (
+    SELECT m.id,
+           m.recipient_agent_id,
+           m.delivery_status,
+           m.next_attempt_at,
+           m.created_at,
+           row_number() OVER (
+               PARTITION BY m.recipient_agent_id
+               ORDER BY m.next_attempt_at ASC, m.created_at ASC, m.id ASC
+           ) AS recipient_rank
+    FROM agent_mailbox_message m
+    JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
+    JOIN agent a ON a.id = m.recipient_agent_id
+    WHERE m.workspace_id = @workspace_id
+      AND (m.source_type = 'comment') = @comment_projection::boolean
+      AND s.workspace_id = @workspace_id
+      AND a.workspace_id = @workspace_id
+      AND a.execution_kind = 'external'
+      AND a.archived_at IS NULL
+      AND s.owner_user_id = @owner_user_id
+      AND s.daemon_id = @daemon_id
+      AND (
+          (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
+          OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
+          OR (m.delivery_status = 'unknown' AND m.next_attempt_at <= now())
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM agent_mailbox_message inflight
+          WHERE inflight.recipient_agent_id = m.recipient_agent_id
+            AND inflight.id <> m.id
+            AND inflight.delivery_status = 'leased'
+            AND inflight.lease_expires_at > now()
+      )
+)
+SELECT id, recipient_agent_id, delivery_status
+FROM ranked
+WHERE recipient_rank = 1
+ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+LIMIT @row_limit;
 
--- name: LeaseMailboxMessage :one
+-- name: TryLockDeliveryRecipient :one
+-- Transaction-scoped advisory lock that serialises claims for one recipient,
+-- so two daemons cannot lease different rows for the same session at once.
+SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('recipient_id')::text, 0)) AS locked;
+
+-- name: LeaseClaimableDelivery :one
+-- Conditional lease: only a row that is still eligible at this instant is
+-- leased. A concurrent claimant that already leased or acknowledged it makes
+-- this a no-op instead of overwriting its lease.
 UPDATE agent_mailbox_message
 SET delivery_status = 'leased',
     lease_token_hash = @lease_token_hash,
@@ -126,19 +156,32 @@ SET delivery_status = 'leased',
     attempts = attempts + 1,
     updated_at = now()
 WHERE id = @id
+  AND workspace_id = @workspace_id
+  AND (
+      (delivery_status = 'pending' AND next_attempt_at <= now())
+      OR (delivery_status = 'leased' AND lease_expires_at <= now())
+      OR (delivery_status = 'unknown' AND next_attempt_at <= now())
+  )
 RETURNING *;
 
--- name: AckAgentMailboxDelivery :one
--- The token and daemon fence this ack to the exact lease that claimed the
--- message. `delivered`/`retry`/`failed` all clear the lease, so a stale ack
--- (or a second ack of the same lease) matches no row and cannot overwrite a
--- later lease.
+-- name: RecordDeliveryOutcome :one
+-- One fenced write for every outcome. The token, daemon and unexpired lease
+-- fence the update: a stale or foreign ack matches no row and cannot overwrite
+-- a later lease. The retry schedule separates a busy host (short fixed delay)
+-- from an unreachable host or a not-yet-confirmed outcome (bounded failure
+-- backoff). Only rows whose prior outcome was a known no-effect return to
+-- claimable delivery; unknown rows are re-claimed for verification.
 UPDATE agent_mailbox_message
-SET delivery_status = CASE WHEN @status = 'retry' THEN 'pending' ELSE @status END,
+SET delivery_status = @status,
     delivered_at = CASE WHEN @status = 'delivered' THEN now() ELSE delivered_at END,
     host_receipt = COALESCE(sqlc.narg('host_receipt'), host_receipt),
     last_error = sqlc.narg('last_error'),
-    next_attempt_at = CASE WHEN @status = 'retry' THEN @next_attempt_at ELSE next_attempt_at END,
+    next_attempt_at = CASE
+        WHEN @status = 'pending' AND @retry_class::text = 'busy' THEN now() + interval '5 seconds'
+        WHEN @status = 'pending' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        WHEN @status = 'unknown' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        ELSE next_attempt_at
+    END,
     lease_token_hash = NULL,
     lease_owner = NULL,
     lease_expires_at = NULL,

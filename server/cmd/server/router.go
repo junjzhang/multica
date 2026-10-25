@@ -1610,6 +1610,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// the handler binds each claim to that verified daemon/workspace/owner.
 		r.Post("/mailbox/claim", h.ClaimDaemonMailbox)
 		r.Post("/mailbox/{messageId}/ack", h.AckDaemonMailbox)
+		// Generic delivery worker. It claims non-comment deliveries only, so it
+		// and the frozen mailbox entry never lease the same row.
+		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
+		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
 
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
