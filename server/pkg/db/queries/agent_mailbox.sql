@@ -20,13 +20,56 @@ SELECT * FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2;
 SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
 
+-- name: CreateDelivery :one
+-- The delivery core's only insert. The unique (workspace_id, recipient_type,
+-- recipient_agent_id, source_type, source_key) index is the idempotency
+-- boundary; a conflicting row returns nothing so the caller can re-read it and
+-- compare the immutable content. issue_id/comment_id/sender_* are the legacy
+-- comment projection; generic deliveries leave them NULL.
+INSERT INTO agent_mailbox_message (
+    id, workspace_id, issue_id, comment_id, recipient_agent_id, recipient_type,
+    source_session_id, sender_type, sender_id, source_type, source_key, kind, payload
+) VALUES (
+    @id, @workspace_id, sqlc.narg('issue_id'), sqlc.narg('comment_id'),
+    @recipient_agent_id, @recipient_type, sqlc.narg('source_session_id'),
+    sqlc.narg('sender_type'), sqlc.narg('sender_id'), @source_type, @source_key,
+    @kind, sqlc.narg('payload')
+)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: GetDelivery :one
+SELECT * FROM agent_mailbox_message WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: GetDeliveryByIdempotencyKey :one
+SELECT * FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id
+  AND recipient_type = @recipient_type
+  AND recipient_agent_id = @recipient_agent_id
+  AND source_type = @source_type
+  AND source_key = @source_key;
+
+-- name: GetLegacyCommentDelivery :one
+-- Rows written before the delivery core (and the old test-only insert path)
+-- have no source_key. The original (recipient_agent_id, comment_id) unique key
+-- remains their identity, so a replay returns the original mailbox UUID instead
+-- of creating a second request.
+SELECT * FROM agent_mailbox_message
+WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
+
 -- name: ListAgentMailboxMessages :many
 -- Keyset pagination in (created_at, id) order. The cursor is opaque to the
 -- client; both halves are bound, so a page boundary can never repeat or skip a
 -- message created in the same millisecond.
+--
+-- Only comment projections are listed: the frozen DTO carries issue_id and
+-- comment_id, and a generic delivery has neither. Old clients keep their exact
+-- view; generic deliveries are read through the delivery core until a separate
+-- projection exists.
 SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id
   AND workspace_id = @workspace_id
+  AND source_type = 'comment'
   AND (
     sqlc.narg('after_created_at')::timestamptz IS NULL
     OR created_at > sqlc.narg('after_created_at')::timestamptz
@@ -49,6 +92,7 @@ FROM agent_mailbox_message m
 JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
 JOIN agent a ON a.id = m.recipient_agent_id
 WHERE m.workspace_id = @workspace_id
+  AND m.source_type = 'comment'
   AND s.workspace_id = @workspace_id
   AND a.workspace_id = @workspace_id
   AND a.execution_kind = 'external'

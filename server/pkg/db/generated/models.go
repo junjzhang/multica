@@ -81,7 +81,7 @@ type AgentMailboxMessage struct {
 	CommentID        pgtype.UUID        `json:"comment_id"`
 	RecipientAgentID pgtype.UUID        `json:"recipient_agent_id"`
 	SourceSessionID  pgtype.UUID        `json:"source_session_id"`
-	SenderType       string             `json:"sender_type"`
+	SenderType       pgtype.Text        `json:"sender_type"`
 	SenderID         pgtype.UUID        `json:"sender_id"`
 	DeliveryStatus   string             `json:"delivery_status"`
 	ProcessingStatus string             `json:"processing_status"`
@@ -95,6 +95,11 @@ type AgentMailboxMessage struct {
 	LastError        pgtype.Text        `json:"last_error"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SourceType       string             `json:"source_type"`
+	SourceKey        pgtype.Text        `json:"source_key"`
+	Kind             string             `json:"kind"`
+	RecipientType    string             `json:"recipient_type"`
+	Payload          []byte             `json:"payload"`
 }
 
 type AgentMcpServer struct {
