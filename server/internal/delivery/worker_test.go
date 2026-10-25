@@ -620,6 +620,41 @@ func TestWorkerRecordsUnusableClaimWithoutCallingHost(t *testing.T) {
 	}
 }
 
+// An unacknowledged delivered result must survive a later unusable claim of the
+// same row: the new lease only changes which token the ack uses.
+func TestWorkerUnusableClaimPreservesPendingDeliveredOutcome(t *testing.T) {
+	client := newFakeOutcomeClient()
+	client.ackErrs = []error{errors.New("network unavailable"), errors.New("network unavailable")}
+	client.claims["ws-1"] = [][]Claim{{testClaim("delivery-1", "session-1", "lease-1")}}
+	host := newFakeHost()
+	worker := newTestWorker(client, host)
+
+	worker.round(context.Background())
+	if host.deliverCount() != 1 || len(worker.pending) != 1 {
+		t.Fatalf("after delivery: deliveries=%d pending=%d, want 1/1", host.deliverCount(), len(worker.pending))
+	}
+
+	// The lease expires and is reclaimed, but the new claim is unusable. The
+	// locally decided delivered result must be re-acked, not overwritten.
+	reclaim := testClaim("delivery-1", "session-1", "lease-2")
+	reclaim.VerifyOnly = true
+	reclaim.ClaimError = "invalid lease_expires_at"
+	client.claims["ws-1"] = [][]Claim{{reclaim}}
+	worker.round(context.Background())
+
+	if host.deliverCount() != 1 || host.receiptCalls != 0 {
+		t.Fatalf("host was called again (deliveries=%d receipts=%d)", host.deliverCount(), host.receiptCalls)
+	}
+	acks := client.ackSnapshot()
+	last := acks[len(acks)-1]
+	if last.request.State != OutcomeDelivered || last.request.LeaseToken != "lease-2" {
+		t.Fatalf("last ack = %+v, want delivered under the new lease", last.request)
+	}
+	if len(worker.pending) != 0 {
+		t.Fatalf("pending = %d, want the decided outcome acknowledged", len(worker.pending))
+	}
+}
+
 func TestVerifyOnlyDependsOnProjection(t *testing.T) {
 	if !verifyOnly(GenericProjection, "leased") {
 		t.Fatal("a reclaimed generic lease must be verification-only")

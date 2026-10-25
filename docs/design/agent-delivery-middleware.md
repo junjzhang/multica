@@ -271,6 +271,7 @@ may change the id, clear the receipt, or resend on a guess.
 | Receipt absent or lookup unsupported | Stays `unknown` with a diagnostic; not replayed |
 | Claim proves the host was not called (missing session, foreign daemon, unusable lease) | `pending` with a dependency retry; neither sent nor parked as `unknown` |
 | Unusable lease on a verification-only reclaim | Stays `unknown` with a diagnostic; never returns to claimable delivery |
+| Unusable claim for a row with a decided but unacknowledged outcome | The decided outcome is re-acked under the new lease; it is not overwritten |
 | Worker crash after acceptance | Lease expires; the reclaim verifies the original id instead of resending |
 
 ## Rolling upgrade
