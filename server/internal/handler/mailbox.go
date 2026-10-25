@@ -18,10 +18,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
-	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -535,50 +535,72 @@ func retryBackoff(attempts int32) time.Time {
 	return time.Now().Add(time.Duration(seconds) * time.Second)
 }
 
-// createMailboxDeliveries persists one request per explicit external mention.
-// Re-delivery of the same comment is idempotent through the unique key.
-func (h *Handler) createMailboxDeliveries(ctx context.Context, issue db.Issue, comment db.Comment, recipients []commentMentionTarget, actorType, actorID string) map[string]db.AgentMailboxMessage {
-	out := map[string]db.AgentMailboxMessage{}
-	var sourceSessionID pgtype.UUID
+// commentMentionDeliveryPayload is the immutable snapshot stored with a
+// comment handoff. It deliberately contains stable references only: the
+// discussion body stays in the native comment and is never copied into a
+// second mutable message.
+type commentMentionDeliveryPayload struct {
+	Schema    string `json:"schema"`
+	IssueID   string `json:"issue_id"`
+	CommentID string `json:"comment_id"`
+}
+
+// enqueueMailboxDeliveries persists one delivery per explicit external mention
+// through the delivery core. q may be a transaction handle: CreateComment
+// passes its write transaction so the comment and every valid handoff commit or
+// roll back together. A persistence failure fails the whole call; the caller
+// decides how to report that, but it must not treat a target as queued.
+func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (map[string]struct{}, error) {
+	out := map[string]struct{}{}
+	if len(recipients) == 0 {
+		return out, nil
+	}
+	var sourceSessionID string
 	if actorType == "agent" {
-		if session, err := h.Queries.GetExternalAgentSessionByAgentID(ctx, parseUUID(actorID)); err == nil {
-			sourceSessionID = session.ID
+		if session, err := q.GetExternalAgentSessionByAgentID(ctx, parseUUID(actorID)); err == nil {
+			sourceSessionID = uuidToString(session.ID)
 		}
+	}
+	store := delivery.NewPostgres(q)
+	payload, err := json.Marshal(commentMentionDeliveryPayload{
+		Schema:    "comment_mention.v1",
+		IssueID:   uuidToString(issue.ID),
+		CommentID: uuidToString(commentID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal comment delivery payload: %w", err)
 	}
 	for _, target := range recipients {
 		if target.MailboxAgent == nil {
 			continue
 		}
 		agent := *target.MailboxAgent
-		created, err := h.Queries.CreateAgentMailboxMessage(ctx, db.CreateAgentMailboxMessageParams{
-			ID:               dbid.NewV7(),
-			WorkspaceID:      issue.WorkspaceID,
-			IssueID:          issue.ID,
-			CommentID:        comment.ID,
-			RecipientAgentID: agent.ID,
-			SourceSessionID:  sourceSessionID,
-			SenderType:       actorType,
-			SenderID:         parseUUID(actorID),
+		_, err := store.Enqueue(ctx, delivery.EnqueueRequest{
+			Scope: delivery.Scope{WorkspaceID: uuidToString(issue.WorkspaceID)},
+			Source: delivery.Source{
+				Type:      "comment",
+				Key:       uuidToString(commentID),
+				ActorType: actorType,
+				ActorID:   actorID,
+				SessionID: sourceSessionID,
+			},
+			Recipient: delivery.Recipient{Type: "agent", ID: uuidToString(agent.ID)},
+			Kind:      "comment_mention",
+			Payload:   payload,
+			Refs: delivery.Refs{
+				IssueID:   uuidToString(issue.ID),
+				CommentID: uuidToString(commentID),
+			},
 		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			existing, getErr := h.Queries.GetAgentMailboxMessageByComment(ctx, db.GetAgentMailboxMessageByCommentParams{
-				RecipientAgentID: agent.ID,
-				CommentID:        comment.ID,
-			})
-			if getErr == nil {
-				out[uuidToString(agent.ID)] = existing
-			}
-			continue
-		}
 		if err != nil {
-			continue
+			// Keep already-persisted recipients in the result. Callers that own a
+			// transaction roll all of them back; the edit path reports the
+			// recipients that did commit instead of claiming every target failed.
+			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", uuidToString(agent.ID), err)
 		}
-		out[uuidToString(agent.ID)] = created
+		out[uuidToString(agent.ID)] = struct{}{}
 	}
-	if len(out) > 0 {
-		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
-	}
-	return out
+	return out, nil
 }
 
 // Mailbox state has its own lifecycle; invalidation avoids applying an issue

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -358,7 +359,7 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 			IssueID:          parseUUID(issueID),
 			CommentID:        parseUUID(commentID),
 			RecipientAgentID: parseUUID(recipient),
-			SenderType:       "member",
+			SenderType:       pgtype.Text{String: "member", Valid: true},
 			SenderID:         parseUUID(testUserID),
 		})
 		if err != nil {
@@ -373,7 +374,7 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		IssueID:          parseUUID(issueID),
 		CommentID:        parseUUID(commentID),
 		RecipientAgentID: parseUUID(recipient),
-		SenderType:       "member",
+		SenderType:       pgtype.Text{String: "member", Valid: true},
 		SenderID:         parseUUID(testUserID),
 	}); err == nil {
 		t.Fatal("duplicate mailbox insert returned a row; unique dedup did not fire")
@@ -558,7 +559,7 @@ func TestMailboxProcessingAckIsMonotonic(t *testing.T) {
 		IssueID:          parseUUID(issueID),
 		CommentID:        parseUUID(commentID),
 		RecipientAgentID: parseUUID(agentID),
-		SenderType:       "member",
+		SenderType:       pgtype.Text{String: "member", Valid: true},
 		SenderID:         parseUUID(testUserID),
 	})
 	if err != nil {

@@ -1477,6 +1477,16 @@ type commentAgentTrigger struct {
 type commentTriggerComputeOptions struct {
 	ThreadCommentID         pgtype.UUID
 	ExcludeTriggerCommentID pgtype.UUID
+	// ThreadRootID lets a pre-write caller name the persisted thread root.
+	// CreateComment resolves triggers before the new comment exists, when
+	// comment_thread_root_id(new_id) is still NULL; the reply's parent thread
+	// root is the only correct scope for pending-task dedup.
+	ThreadRootID pgtype.UUID
+	// NewTopLevelComment marks a comment whose thread does not exist yet. No
+	// task can reference that thread, and a NULL thread id means assignment-
+	// level work, so the pending/active task checks must not run until the
+	// comment is persisted.
+	NewTopLevelComment bool
 	// AuthoringTaskID is the server-trusted task that wrote an agent comment.
 	// It lets a worker result continue the exact guest squad-leader delegation
 	// without guessing from squad membership or the issue assignee.
@@ -1837,8 +1847,21 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	commentID := dbid.NewV7()
+	originatorUserID := h.invokeOriginatorFromRequest(r, authorType, authorID)
+	// Resolve explicit mentions BEFORE the write so a valid external handoff is
+	// persisted by the same transaction as the comment. A comment that commits
+	// without its delivery intent is the gap this slice closes; resolving here
+	// is read-only, so a later write failure leaves no trace.
+	var threadRootID pgtype.UUID
+	if rootComment != nil {
+		threadRootID = rootComment.ID
+	}
+	triggerPlan := h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, authorType, authorID, commentID, threadRootID, sourceTaskID, originatorUserID, suppressAgentIDs, rootComment == nil)
+	var mailboxDelivered map[string]struct{}
+
 	createParams := db.CreateCommentParams{
-		ID:           dbid.NewV7(),
+		ID:           commentID,
 		IssueID:      issue.ID,
 		WorkspaceID:  issue.WorkspaceID,
 		AuthorType:   authorType,
@@ -1897,12 +1920,24 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		if err == nil {
+			mailboxDelivered, err = h.enqueueMailboxDeliveries(r.Context(), qtx, issue, created.ID, triggerPlan.mailboxTargets, authorType, authorID)
+		}
+		if err == nil {
 			err = tx.Commit(r.Context())
 		}
 	} else {
-		created, err = wakeupWrite(h, r, func(q *db.Queries) (db.CreateCommentRow, error) {
-			return q.CreateComment(r.Context(), createParams)
+		written, writeErr := wakeupWrite(h, r, func(q *db.Queries) (commentWriteResult, error) {
+			row, err := q.CreateComment(r.Context(), createParams)
+			if err != nil {
+				return commentWriteResult{}, err
+			}
+			delivered, err := h.enqueueMailboxDeliveries(r.Context(), q, issue, row.ID, triggerPlan.mailboxTargets, authorType, authorID)
+			if err != nil {
+				return commentWriteResult{}, err
+			}
+			return commentWriteResult{Created: row, Delivered: delivered}, nil
 		})
+		created, mailboxDelivered, err = written.Created, written.Delivered, writeErr
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The issue was deleted, possibly while this waited for its row lock.
@@ -1936,11 +1971,14 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// must keep the resolved root in sync.
 	h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(issue.WorkspaceID), authorType, authorID, h.wakeupSourceTaskID(r))
 
-	originatorUserID := h.invokeOriginatorFromRequest(r, authorType, authorID)
-	// The comment is already saved; a blocked mention must not fail the whole
-	// request. Surface the per-target outcomes so the client can show partial
-	// success instead of a silent no-op (MUL-4525 §2).
-	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, parentComment, authorType, authorID, originatorUserID, suppressAgentIDs, steerTaskIDs)
+	if len(mailboxDelivered) > 0 {
+		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
+	}
+
+	// The comment and its valid external handoffs are committed. Resolve the
+	// native runs now; a blocked mention must not fail the saved comment and is
+	// surfaced per target instead (MUL-4525 §2).
+	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered)
 	if len(steerTaskIDs) > 0 {
 		applyCommentSupplements(&resp, h.listCommentSupplements(r.Context(), issue.WorkspaceID, []pgtype.UUID{comment.ID})[uuidToString(comment.ID)])
 	}
@@ -1979,6 +2017,45 @@ func isNoteComment(content string) bool {
 	return strings.EqualFold(firstToken, noteCommentPrefix)
 }
 
+// commentWriteResult is what CreateComment's transaction returns: the row and
+// the mailbox deliveries it persisted atomically with it.
+type commentWriteResult struct {
+	Created   db.CreateCommentRow
+	Delivered map[string]struct{}
+}
+
+// commentTriggerPlan pins the explicit-mention resolution for one comment.
+// CreateComment resolves it before its write so valid external handoffs can be
+// persisted in the comment's transaction; the edit path uses the same resolver
+// through triggerTasksForComment.
+type commentTriggerPlan struct {
+	triggers       []commentAgentTrigger
+	targets        []commentMentionTarget
+	nativeTargets  []commentMentionTarget
+	mailboxTargets []commentMentionTarget
+}
+
+// planCommentTriggers resolves which agents a comment addresses and splits the
+// explicit targets by dispatch kind. It performs reads only; the caller owns
+// persistence.
+func (h *Handler) planCommentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, commentID, threadRootID, authoringTaskID pgtype.UUID, originatorUserID string, suppressAgentIDs []pgtype.UUID, newTopLevel bool) commentTriggerPlan {
+	triggers, targets := h.computeCommentAgentTriggers(ctx, issue, content, parentComment, actorType, actorID, commentTriggerComputeOptions{
+		ExcludeTriggerCommentID: commentID,
+		ThreadRootID:            threadRootID,
+		NewTopLevelComment:      newTopLevel,
+		AuthoringTaskID:         authoringTaskID,
+		OriginatorUserID:        originatorUserID,
+	})
+	triggers = filterSuppressedCommentAgentTriggers(triggers, suppressAgentIDs)
+	nativeTargets, mailboxTargets := splitMailboxTargets(targets, suppressAgentIDs)
+	return commentTriggerPlan{
+		triggers:       triggers,
+		targets:        targets,
+		nativeTargets:  nativeTargets,
+		mailboxTargets: mailboxTargets,
+	}
+}
+
 // triggerTasksForComment resolves and enqueues the comment's agent triggers and
 // returns the per-target outcomes for explicit @agent / @squad mentions
 // (MUL-4525 §2): blocked mentions from resolution plus queued / coalesced /
@@ -1987,26 +2064,43 @@ func isNoteComment(content string) bool {
 //
 // steerTaskIDs are the running turns the author chose: a recipient whose chosen
 // turn is still running receives this comment there instead of a follow-up run.
+//
+// This wrapper is for callers that do not own the comment's write transaction
+// (comment edits). CreateComment uses planCommentTriggers and persists the
+// mailbox rows inside the write transaction instead.
 func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, comment db.Comment, parentComment *db.Comment, actorType, actorID, originatorUserID string, suppressAgentIDs, steerTaskIDs []pgtype.UUID) []CommentTriggerOutcome {
 	if isNoteComment(comment.Content) {
 		return nil
 	}
-	triggers, targets := h.computeCommentAgentTriggers(ctx, issue, comment.Content, parentComment, actorType, actorID, commentTriggerComputeOptions{
-		ExcludeTriggerCommentID: comment.ID,
-		AuthoringTaskID:         comment.SourceTaskID,
-		OriginatorUserID:        originatorUserID,
-	})
-	triggers = filterSuppressedCommentAgentTriggers(triggers, suppressAgentIDs)
-	h.noteBlockedRuntimeTargets(ctx, issue, targets)
-	triggers, steered := h.steerCommentAgentTriggers(ctx, issue, comment, actorType, triggers, steerTaskIDs)
+	plan := h.planCommentTriggers(ctx, issue, comment.Content, parentComment, actorType, actorID, comment.ID, pgtype.UUID{}, comment.SourceTaskID, originatorUserID, suppressAgentIDs, false)
+	var delivered map[string]struct{}
+	if len(plan.mailboxTargets) > 0 {
+		var err error
+		delivered, err = h.enqueueMailboxDeliveries(ctx, h.Queries, issue, comment.ID, plan.mailboxTargets, actorType, actorID)
+		if err != nil {
+			// The edit already committed. A persistence failure is still
+			// reported per target instead of claiming the handoff was saved;
+			// recipients that did commit stay queued.
+			slog.Warn("enqueue mailbox deliveries failed", "error", err, "comment_id", uuidToString(comment.ID))
+		} else if len(delivered) > 0 {
+			h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
+		}
+	}
+	return h.applyCommentTriggers(ctx, issue, comment, actorType, steerTaskIDs, plan, delivered)
+}
+
+// applyCommentTriggers runs the native trigger side after the comment (and any
+// mailbox deliveries) committed. Mailbox outcomes only report what the
+// transaction persisted.
+func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered map[string]struct{}) []CommentTriggerOutcome {
+	h.noteBlockedRuntimeTargets(ctx, issue, plan.targets)
+	triggers, steered := h.steerCommentAgentTriggers(ctx, issue, comment, actorType, plan.triggers, steerTaskIDs)
 	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers)
 	for agentID, result := range steered {
 		enqueued[agentID] = result
 	}
-	nativeTargets, mailboxTargets := splitMailboxTargets(targets, suppressAgentIDs)
-	delivered := h.createMailboxDeliveries(ctx, issue, comment, mailboxTargets, actorType, actorID)
-	outcomes := commentTriggerOutcomes(nativeTargets, enqueued)
-	return append(outcomes, mailboxTriggerOutcomes(mailboxTargets, delivered)...)
+	outcomes := commentTriggerOutcomes(plan.nativeTargets, enqueued)
+	return append(outcomes, mailboxTriggerOutcomes(plan.mailboxTargets, delivered)...)
 }
 
 // splitMailboxTargets partitions explicit mentions into native-run targets and
@@ -2035,7 +2129,7 @@ func splitMailboxTargets(targets []commentMentionTarget, suppressAgentIDs []pgty
 // "request persisted in the mailbox", never "run started"; dispatch_kind
 // mailbox keeps it visually distinct from a managed run. A persistence failure
 // is reported as blocked/internal_error instead of silently claiming success.
-func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered map[string]db.AgentMailboxMessage) []CommentTriggerOutcome {
+func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered map[string]struct{}) []CommentTriggerOutcome {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -2709,9 +2803,13 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) ([]commentAgentTrigger, []commentMentionTarget) {
 	// A persisted comment determines its thread; previews use the parent.
 	// A new top-level preview has no thread yet and cannot merge with a queue.
-	opts.ThreadCommentID = opts.ExcludeTriggerCommentID
-	if !opts.ThreadCommentID.Valid && parentComment != nil {
-		opts.ThreadCommentID = parentComment.ID
+	if opts.ThreadRootID.Valid {
+		opts.ThreadCommentID = opts.ThreadRootID
+	} else {
+		opts.ThreadCommentID = opts.ExcludeTriggerCommentID
+		if !opts.ThreadCommentID.Valid && parentComment != nil {
+			opts.ThreadCommentID = parentComment.ID
+		}
 	}
 
 	if isNoteComment(content) {
@@ -2750,6 +2848,9 @@ func hasAgentOrSquadMention(mentions []util.Mention) bool {
 }
 
 func (h *Handler) hasPendingTaskForIssueAndAgent(ctx context.Context, issueID, agentID pgtype.UUID, opts commentTriggerComputeOptions) (bool, error) {
+	if opts.NewTopLevelComment {
+		return false, nil
+	}
 	if !opts.ThreadCommentID.Valid {
 		return false, nil
 	}
@@ -2910,6 +3011,11 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 			// deferred; otherwise nothing runs → self_trigger_suppressed.
 			if authorType == "agent" && authorID == uuidToString(leaderID) &&
 				h.shouldSuppressSquadLeaderSelfTrigger(ctx, issue.ID, leaderID, squad.ID) {
+				if opts.NewTopLevelComment {
+					// The thread does not exist yet, so no run can cover it.
+					addTarget(commentMentionTarget{TargetType: "squad", TargetID: m.ID, Status: DispatchBlocked, ReasonCode: ReasonSelfTriggerSuppressed})
+					continue
+				}
 				active, activeErr := h.hasActiveTaskForIssueAndAgent(ctx, issue.ID, leaderID, opts.ThreadCommentID)
 				status, reason := decideSuppressedLeaderOutcome(active, activeErr)
 				addTarget(commentMentionTarget{TargetType: "squad", TargetID: m.ID, Status: status, ReasonCode: reason})
