@@ -328,12 +328,153 @@ func TestWakeupExternalPRChecksConditionEnqueuesDelivery(t *testing.T) {
 	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
 		t.Fatalf("same head enqueued %d deliveries, want 1", n)
 	}
-	// A new head with a new outcome is one more notification.
+	// A new head with a new outcome is one more notification, once the host has
+	// taken the earlier one: an undecided notification holds the new input.
+	snapshot("b", "FAILURE")
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("new head overtook an undecided delivery: %d deliveries, want 1", n)
+	}
+	settleWakeupDeliveries(t, f, w.ID)
 	snapshot("b", "FAILURE")
 	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 2 {
 		t.Fatalf("new head enqueued %d deliveries in total, want 2", n)
 	}
 	if !strings.Contains(string(newestWakeupDelivery(t, f, w.ID).Payload), `\"checks\":\"failure\"`) {
 		t.Fatalf("new delivery does not carry the failure")
+	}
+}
+
+// settleWakeupDeliveries records the outcome a host would report, so the next
+// firing may produce a new notification.
+func settleWakeupDeliveries(t *testing.T, f principalFixture, w pgtype.UUID) {
+	t.Helper()
+	f.Exec(t, `UPDATE agent_mailbox_message SET delivery_status='delivered',delivered_at=now()
+		WHERE workspace_id=$1 AND source_type=$2 AND source_key LIKE $3 AND delivery_status<>'delivered'`,
+		f.WorkspaceID, wakeupDeliverySourceType, wakeupDeliveryPattern(w))
+}
+
+// A busy or offline host must not turn every elapsed period into its own model
+// turn. While one notification for the rule is undecided, later firings keep
+// their inputs; after it settles, the scheduler merges them into a single new
+// notification. No managed run is started at any point.
+func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
+	f, s, issue, agent, _ := externalWakeFixture(t)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
+
+	wakeTick(t, f, s, w.ID)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
+		t.Fatalf("first firing deliveries = %d pending, want 1", n)
+	}
+
+	// The host stays busy across three more periods.
+	for period := 0; period < 3; period++ {
+		got := wakeTick(t, f, s, w.ID)
+		if got.FireCount != 1 {
+			t.Fatalf("firing %d: fire_count = %d, a pending notification must hold the inputs", period+2, got.FireCount)
+		}
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("deliveries after three waiting periods = %d, want 1", n)
+	}
+	if n := f.Count(t, `SELECT count(*) FROM issue_wakeup_receipt WHERE wakeup_id=$1 AND processed_at IS NULL`, w.ID); n != 1 {
+		t.Fatalf("unprocessed inputs = %d, want the latest timer input retained", n)
+	}
+	if n := wakeRuns(t, f, w.ID); n != 0 {
+		t.Fatalf("waiting for a delivery started %d managed runs", n)
+	}
+	if n := f.Count(t, `SELECT count(*) FROM agent_mailbox_message WHERE workspace_id=$1 AND recipient_agent_id=$2
+		AND source_type=$3 AND created_at > now()-interval '1 hour'`, f.WorkspaceID, agent, wakeupDeliverySourceType); n != 1 {
+		t.Fatalf("deliveries in the last hour = %d, want at most 1 while waiting", n)
+	}
+
+	// Once the host takes the notification, the next firing delivers the
+	// accumulated input as exactly one more notification.
+	settleWakeupDeliveries(t, f, w.ID)
+	got := wakeTick(t, f, s, w.ID)
+	if got.FireCount != 2 {
+		t.Fatalf("fire_count after the held input was delivered = %d, want 2", got.FireCount)
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 2 {
+		t.Fatalf("deliveries after settling = %d, want 2", n)
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
+		t.Fatalf("pending deliveries after settling = %d, want 1", n)
+	}
+	if n := wakeRuns(t, f, w.ID); n != 0 {
+		t.Fatalf("external target started %d managed runs", n)
+	}
+}
+
+// The same rule-level merge applies to an event burst: a second event that
+// arrives while the first notification is undecided stays an input, not a
+// second notification. The next pass after the delivery settles produces one
+// notification carrying the retained input.
+func TestWakeupExternalEventBurstWaitsForUndeliveredFiring(t *testing.T) {
+	f, s, issue, agent, _ := externalWakeFixture(t)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous",
+		EventTypes: []string{"comment.created"}, Instruction: "Read the new comments"})
+	addReceipt := func(key string) {
+		t.Helper()
+		f.Exec(t, `INSERT INTO issue_wakeup_receipt(id,wakeup_id,revision,event_key,event_type,payload)
+			VALUES (gen_random_uuid(),$1,$2,$3,'comment.created',jsonb_build_object('event_id',$3::text))`, w.ID, w.Revision, key)
+	}
+
+	addReceipt("comment-1")
+	wakeDispatch(t, s, w)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
+		t.Fatalf("first event deliveries = %d pending, want 1", n)
+	}
+
+	addReceipt("comment-2")
+	wakeDispatch(t, s, w)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("a second event while the first is pending made %d deliveries, want 1", n)
+	}
+	if n := f.Count(t, `SELECT count(*) FROM issue_wakeup_receipt WHERE wakeup_id=$1 AND processed_at IS NULL`, w.ID); n != 1 {
+		t.Fatalf("retained inputs = %d, want the second event kept for the next firing", n)
+	}
+	if n := f.Count(t, `SELECT count(*) FROM issue_wakeup WHERE id=$1 AND fire_count=1`, w.ID); n != 1 {
+		t.Fatal("fire_count while waiting is not 1")
+	}
+
+	settleWakeupDeliveries(t, f, w.ID)
+	wakeDispatch(t, s, w)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 2 {
+		t.Fatalf("deliveries after the first settled = %d, want 2", n)
+	}
+	if payload := string(newestWakeupDelivery(t, f, w.ID).Payload); !strings.Contains(payload, "comment-2") {
+		t.Fatalf("second delivery does not carry the retained input: %s", payload)
+	}
+	if n := wakeRuns(t, f, w.ID); n != 0 {
+		t.Fatalf("external target started %d managed runs", n)
+	}
+}
+
+// A host session can disappear after the rule was registered. Dispatching then
+// must not queue a notification nobody can claim: the rule ends with a visible
+// reason and its unaccepted notification is withdrawn.
+func TestWakeupExternalDispatchDisablesWhenSessionDisappears(t *testing.T) {
+	f, s, issue, agent, _ := externalWakeFixture(t)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
+
+	wakeTick(t, f, s, w.ID)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
+		t.Fatalf("pending deliveries before the session disappeared = %d, want 1", n)
+	}
+
+	f.Exec(t, `DELETE FROM external_agent_session WHERE agent_id=$1`, agent)
+	got := wakeTick(t, f, s, w.ID)
+	if got.Enabled || !got.DisabledAt.Valid {
+		t.Fatalf("rule after its session disappeared: enabled=%t disabled_at=%+v", got.Enabled, got.DisabledAt)
+	}
+	if !got.LastError.Valid || !strings.Contains(got.LastError.String, "external host session") {
+		t.Fatalf("rule error = %+v, want the missing host session", got.LastError)
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 0 {
+		t.Fatalf("a rule without a delivery address left %d pending notifications", n)
+	}
+	row := newestWakeupDelivery(t, f, w.ID)
+	if row.DeliveryStatus != "failed" || !row.LastError.Valid || !strings.Contains(row.LastError.String, "host session") {
+		t.Fatalf("withdrawn delivery = status %q error %+v", row.DeliveryStatus, row.LastError)
 	}
 }

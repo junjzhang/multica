@@ -1052,11 +1052,25 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		return tx.Commit(ctx)
 	}
 	authErr := s.authorize(ctx, q, w.WorkspaceID, w.CreatedBy, agent)
+	disableReason := "Wakeup disabled: issue closed or permission unavailable"
+	// The registered host session is the external target's delivery address,
+	// and it can disappear after registration. Queueing then would leave a
+	// notification no host can claim, so the rule ends like one whose target
+	// is no longer allowed to run.
+	if authErr == nil && agent.ID.Valid && agent.ExecutionKind == "external" {
+		if _, err = q.GetExternalAgentSessionByAgentID(ctx, agent.ID); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			authErr = ErrWakeupForbidden
+			disableReason = "Wakeup disabled: external host session is no longer registered"
+		}
+	}
 	if w.DisabledAt.Valid || !active || authErr != nil {
 		if authErr != nil && !errors.Is(authErr, ErrWakeupForbidden) {
 			return authErr
 		}
-		_, err = tx.Exec(ctx, "UPDATE issue_wakeup SET enabled=false,disabled_at=COALESCE(disabled_at,now()),last_error=$2 WHERE id=$1", w.ID, "Wakeup disabled: issue closed or permission unavailable")
+		_, err = tx.Exec(ctx, "UPDATE issue_wakeup SET enabled=false,disabled_at=COALESCE(disabled_at,now()),last_error=$2 WHERE id=$1", w.ID, disableReason)
 		if err != nil {
 			return err
 		}
@@ -1066,7 +1080,7 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		if _, err = q.CancelUnstartedWakeupTasks(ctx, util.UUIDToString(w.ID)); err != nil {
 			return err
 		}
-		if err = withdrawWakeupDeliveries(ctx, q, w, "Wakeup disabled: issue closed or permission unavailable"); err != nil {
+		if err = withdrawWakeupDeliveries(ctx, q, w, disableReason); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1191,6 +1205,33 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		return err
 	}
 	taskExists := err == nil
+	// A managed rule merges a later firing into its waiting run. An external
+	// target has no task, so the merge happens one level up: while a
+	// notification for this rule is still undecided, timers advance and the
+	// inputs stay pending, exactly like a claimed run holding its inputs. The
+	// first pass after the notification settles merges them into one delivery.
+	if !taskExists && agent.ExecutionKind == "external" {
+		var undecided bool
+		if undecided, err = q.HasUndecidedWakeupDelivery(ctx, db.HasUndecidedWakeupDeliveryParams{
+			WorkspaceID:      w.WorkspaceID,
+			RecipientAgentID: w.AgentID,
+			SourcePattern:    wakeupDeliverySourcePattern(w.ID),
+		}); err != nil {
+			return err
+		}
+		if undecided {
+			if err = q.AdvanceIssueWakeup(ctx, db.AdvanceIssueWakeupParams{ID: w.ID, Enabled: w.Enabled, NextFireAt: next,
+				LastError: pgtype.Text{String: "Waiting for the previous wakeup notification to be accepted; new trigger inputs are retained.", Valid: true}}); err != nil {
+				return err
+			}
+			if timedOut {
+				if err = markTimedOut(); err != nil {
+					return err
+				}
+			}
+			return commit()
+		}
+	}
 	receipts, err := q.ListPendingWakeupReceipts(ctx, db.ListPendingWakeupReceiptsParams{WakeupID: w.ID, Revision: w.Revision})
 	if err != nil {
 		return err
@@ -1331,7 +1372,12 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 			} else {
 				var recent int64
 				if agent.ExecutionKind == "external" {
-					recent, err = countRecentWakeupDeliveries(ctx, tx, w, now.Add(-time.Hour))
+					recent, err = q.CountRecentWakeupDeliveries(ctx, db.CountRecentWakeupDeliveriesParams{
+						WorkspaceID:      w.WorkspaceID,
+						RecipientAgentID: w.AgentID,
+						SourcePattern:    wakeupDeliverySourcePattern(w.ID),
+						Since:            pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+					})
 				} else {
 					recent, err = q.CountRecentWakeupTasks(ctx, db.CountRecentWakeupTasksParams{WakeupID: util.UUIDToString(w.ID), IssueID: w.IssueID, Since: pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true}})
 				}
@@ -1466,12 +1512,19 @@ func withdrawWakeupDeliveries(ctx context.Context, q *db.Queries, w db.IssueWake
 		Reason:           pgtype.Text{String: reason, Valid: true},
 		WorkspaceID:      w.WorkspaceID,
 		RecipientAgentID: w.AgentID,
-		SourcePattern:    "wakeup:" + util.UUIDToString(w.ID) + ":%",
+		SourcePattern:    wakeupDeliverySourcePattern(w.ID),
 	})
 	if err != nil {
 		return fmt.Errorf("withdraw wakeup deliveries: %w", err)
 	}
 	return nil
+}
+
+// wakeupDeliverySourcePattern scopes generic rows to one rule. The UUID and
+// the separators are literal for LIKE, and the trailing ':' keeps one rule's
+// key from matching a longer id.
+func wakeupDeliverySourcePattern(wakeupID pgtype.UUID) string {
+	return "wakeup:" + util.UUIDToString(wakeupID) + ":%"
 }
 
 // enqueueWakeupDelivery persists one firing for an external recipient. It runs
@@ -1539,21 +1592,6 @@ func wakeupDeliveryPayload(w db.IssueWakeup, note string) (json.RawMessage, erro
 		return nil, fmt.Errorf("wakeup delivery payload exceeds %d bytes", wakeupDeliveryPayloadLimit)
 	}
 	return raw, nil
-}
-
-// countRecentWakeupDeliveries applies the hourly firing cap to external
-// targets: they start no runs, so the managed-run count cannot see them.
-func countRecentWakeupDeliveries(ctx context.Context, tx pgx.Tx, w db.IssueWakeup, since time.Time) (int64, error) {
-	var count int64
-	err := tx.QueryRow(ctx, `SELECT count(*) FROM agent_mailbox_message
-		WHERE workspace_id=$1 AND recipient_agent_id=$2 AND source_type=$3
-		  AND source_key LIKE $4 AND created_at > $5`,
-		w.WorkspaceID, w.AgentID, wakeupDeliverySourceType,
-		"wakeup:"+util.UUIDToString(w.ID)+":%", since).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("count recent wakeup deliveries: %w", err)
-	}
-	return count, nil
 }
 
 func qCleanupMissingWakeup(ctx context.Context, tx pgx.Tx, id pgtype.UUID) error {

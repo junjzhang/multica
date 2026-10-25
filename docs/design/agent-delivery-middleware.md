@@ -205,16 +205,29 @@ input it already consumed.
 - The producer never asks whether the host is busy. The row stays `pending`
   and the worker's per-recipient lease defers it until the session is idle;
   waiting costs no model call and does not drop the trigger.
-- Disabling, replacing or closing a rule withdraws its `pending`, unleased
-  deliveries as `failed` with a visible reason. A `leased` row is left to its
-  outcome because the host may already have accepted it; cancellation does not
-  claim to retract accepted input.
+- While a notification for the rule is still undecided (`pending`, `leased` or
+  `unknown`), a later firing only advances the rule's timer and keeps its
+  inputs. This is the delivery equivalent of a managed rule merging into its
+  waiting run: a busy or offline host accumulates one notification, not one per
+  elapsed period. The first pass after the row reaches `delivered` or `failed`
+  merges the retained inputs into one new delivery.
+- Disabling, replacing or closing a rule withdraws its never-leased `pending`
+  deliveries as `failed` with a visible reason. A `leased` or `unknown` row is
+  left to its outcome because the host may already have accepted it. Those rows
+  can still be re-claimed for a receipt lookup, but a generic (non-comment)
+  claim is verify-only: the worker asks the host for the original receipt and
+  never sends the notification again, so disabling a rule cannot produce a
+  second turn. A `pending` row always has no lease, because recording any
+  outcome clears it.
 - The firing's timeline entry carries `delivery_id` instead of `task_id`, and
   `GetDelivery` is the read path for the row's current delivery and processing
   state. Delivery status is transport state, never business acceptance.
 
 Registration requires an `external_agent_session` row for the target; without
 one the rule is refused instead of queueing undeliverable notifications. The
+same check runs at dispatch: if the session disappeared after registration, the
+rule is disabled with a visible reason (`Wakeup disabled: external host session
+is no longer registered`) and its unaccepted notifications are withdrawn. The
 workspace-membership and `CanMemberInvokeAgent` checks are the same as for a
 managed target. System `child_done` rules keep their existing managed-only
 target resolution.

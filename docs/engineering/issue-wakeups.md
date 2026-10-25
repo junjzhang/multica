@@ -100,13 +100,20 @@ handed to the existing session instead of starting a managed run. The
 `wakeup_triggered` timeline entry carries the notification's `delivery_id`.
 The host's acceptance is transport state: it says the input was queued for the
 session, not that the agent did the work. A busy session leaves the delivery
-pending until it is idle, so waiting costs no model call. Disabling, replacing
-or closing the rule withdraws notifications the host has not accepted yet; a
-notification already leased by the host is left to its outcome. Registration
-requires the external agent's host session to be registered, and PR conditions
-still depend on the deployment's stored GitHub snapshots -- without GitHub App
-credentials those snapshots are unavailable and the rule reports the existing
-condition diagnostic.
+pending until it is idle, so waiting costs no model call. While a notification
+for the rule is still undecided (`pending`, `leased` or `unknown`), later
+firings only advance the timer and retain their inputs; once it reaches
+`delivered` or `failed`, the next pass merges those inputs into one delivery.
+This is the same "one execution per handled firing" behavior a managed rule gets
+by merging into its waiting run, so an offline host accumulates one
+notification instead of one per elapsed period. Disabling, replacing or closing
+the rule withdraws notifications the host has not accepted yet; a notification
+already leased or in `unknown` is left to a receipt check, which is verify-only
+and never sends it again. Registration and dispatch both require the external
+agent's host session; if it disappeared, the rule is disabled with a visible
+reason. PR conditions still depend on the deployment's stored GitHub snapshots
+-- without GitHub App credentials those snapshots are unavailable and the rule
+reports the existing condition diagnostic.
 
 ## Event catalog
 
@@ -222,9 +229,11 @@ starting a final run on the closed issue.
   the existing issue/agent execution fence still serializes actual runs.
 - A firing for an external target is one generic `agent_mailbox_message` row
   (`source_type='issue_wakeup'`) enqueued in the same transaction that consumes
-  its receipts and advances the rule; managed targets keep the task path. The
-  daemon's generic worker delivers it to the registered host session, and
-  disabling, replacing or closing a rule withdraws unleased rows.
+  its receipts and advances the rule; managed targets keep the task path. A
+  later firing waits while that rule has an undecided row, then merges the
+  retained inputs into one next delivery. The daemon's generic worker delivers
+  it to the registered host session, and disabling, replacing or closing a rule
+  withdraws unleased rows.
 - Issue/workspace deletion explicitly removes configurations and receipts in
   the application deletion graph. No foreign keys or cascading relationships
   are added.
