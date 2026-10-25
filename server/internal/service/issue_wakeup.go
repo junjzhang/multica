@@ -1211,17 +1211,17 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	// inputs stay pending, exactly like a claimed run holding its inputs. The
 	// first pass after the notification settles merges them into one delivery.
 	if !taskExists && agent.ExecutionKind == "external" {
-		var undecided bool
-		if undecided, err = q.HasUndecidedWakeupDelivery(ctx, db.HasUndecidedWakeupDeliveryParams{
+		undecided, findErr := q.FindUndecidedWakeupDelivery(ctx, db.FindUndecidedWakeupDeliveryParams{
 			WorkspaceID:      w.WorkspaceID,
 			RecipientAgentID: w.AgentID,
 			SourcePattern:    wakeupDeliverySourcePattern(w.ID),
-		}); err != nil {
-			return err
+		})
+		if findErr != nil && !errors.Is(findErr, pgx.ErrNoRows) {
+			return findErr
 		}
-		if undecided {
+		if findErr == nil {
 			if err = q.AdvanceIssueWakeup(ctx, db.AdvanceIssueWakeupParams{ID: w.ID, Enabled: w.Enabled, NextFireAt: next,
-				LastError: pgtype.Text{String: "Waiting for the previous wakeup notification to be accepted; new trigger inputs are retained.", Valid: true}}); err != nil {
+				LastError: pgtype.Text{String: undecidedWakeupReason(undecided), Valid: true}}); err != nil {
 				return err
 			}
 			if timedOut {
@@ -1518,6 +1518,18 @@ func withdrawWakeupDeliveries(ctx context.Context, q *db.Queries, w db.IssueWake
 		return fmt.Errorf("withdraw wakeup deliveries: %w", err)
 	}
 	return nil
+}
+
+// undecidedWakeupReason names the notification that holds a rule's inputs.
+// An unknown outcome is fail-closed: the host may have accepted the request, so
+// the rule waits for an operator rather than replaying the same input under a
+// new delivery id.
+func undecidedWakeupReason(row db.FindUndecidedWakeupDeliveryRow) string {
+	id := util.UUIDToString(row.ID)
+	if row.DeliveryStatus == "unknown" {
+		return fmt.Sprintf("Wakeup delivery %s has an unknown outcome: the host may have accepted it, so the rule is paused and will not send again until that delivery is resolved; new trigger inputs are retained.", id)
+	}
+	return fmt.Sprintf("Waiting for wakeup delivery %s (%s) to be accepted; new trigger inputs are retained.", id, row.DeliveryStatus)
 }
 
 // wakeupDeliverySourcePattern scopes generic rows to one rule. The UUID and

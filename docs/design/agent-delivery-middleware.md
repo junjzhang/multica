@@ -210,15 +210,23 @@ input it already consumed.
   inputs. This is the delivery equivalent of a managed rule merging into its
   waiting run: a busy or offline host accumulates one notification, not one per
   elapsed period. The first pass after the row reaches `delivered` or `failed`
-  merges the retained inputs into one new delivery.
+  merges the retained inputs into one new delivery. An `unknown` row is
+  fail-closed: the host may already have accepted it, so the rule stays paused
+  with a `last_error` that names the delivery, and only an operator can resolve
+  it. It is never replayed automatically under a new delivery id, because the
+  same input would then be delivered twice.
 - Disabling, replacing or closing a rule withdraws its never-leased `pending`
   deliveries as `failed` with a visible reason. A `leased` or `unknown` row is
   left to its outcome because the host may already have accepted it. Those rows
-  can still be re-claimed for a receipt lookup, but a generic (non-comment)
-  claim is verify-only: the worker asks the host for the original receipt and
-  never sends the notification again, so disabling a rule cannot produce a
-  second turn. A `pending` row always has no lease, because recording any
-  outcome clears it.
+  can still be re-claimed for a receipt lookup, and a reclaimed row is
+  verify-only: the worker asks the host for the original receipt and does not
+  send it again. That is not an absolute guarantee against a late turn. If the
+  in-flight attempt returns busy or unavailable, the worker records a retry,
+  the row becomes `pending` again without a lease, and the next claim treats it
+  as a first delivery -- so a notification already handed to the host can still
+  start one turn after the rule was disabled. The rule itself no longer fires,
+  and this in-flight attempt cannot repeat. A `pending` row always has no lease,
+  because recording any outcome clears it.
 - The firing's timeline entry carries `delivery_id` instead of `task_id`, and
   `GetDelivery` is the read path for the row's current delivery and processing
   state. Delivery status is transport state, never business acceptance.

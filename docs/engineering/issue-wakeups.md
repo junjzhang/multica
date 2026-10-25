@@ -106,10 +106,16 @@ firings only advance the timer and retain their inputs; once it reaches
 `delivered` or `failed`, the next pass merges those inputs into one delivery.
 This is the same "one execution per handled firing" behavior a managed rule gets
 by merging into its waiting run, so an offline host accumulates one
-notification instead of one per elapsed period. Disabling, replacing or closing
-the rule withdraws notifications the host has not accepted yet; a notification
-already leased or in `unknown` is left to a receipt check, which is verify-only
-and never sends it again. Registration and dispatch both require the external
+notification instead of one per elapsed period. An `unknown` row is
+fail-closed: the rule stays paused with a `last_error` naming the delivery, and
+an operator has to reconcile it before the rule can deliver again. It is never
+replayed automatically under a new id. Disabling, replacing or closing the rule
+withdraws notifications the host has not accepted yet; a notification already
+leased or in `unknown` is left to a receipt check, which is verify-only and
+does not send it again. One boundary remains: if that in-flight attempt returns
+busy or unavailable, the row goes back to `pending` without a lease and the
+next claim delivers it once more, so a rule disabled mid-attempt can still
+produce one late turn. Registration and dispatch both require the external
 agent's host session; if it disappeared, the rule is disabled with a visible
 reason. PR conditions still depend on the deployment's stored GitHub snapshots
 -- without GitHub App credentials those snapshots are unavailable and the rule

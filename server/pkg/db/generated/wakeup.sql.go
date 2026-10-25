@@ -715,6 +715,40 @@ func (q *Queries) FindPendingWakeupTask(ctx context.Context, wakeupID string) (A
 	return i, err
 }
 
+const findUndecidedWakeupDelivery = `-- name: FindUndecidedWakeupDelivery :one
+SELECT id, delivery_status FROM agent_mailbox_message
+WHERE workspace_id = $1 AND recipient_agent_id = $2
+  AND source_type = 'issue_wakeup' AND source_key LIKE $3::text
+  AND delivery_status IN ('pending','leased','unknown')
+ORDER BY (delivery_status = 'unknown') DESC, created_at ASC
+LIMIT 1
+`
+
+type FindUndecidedWakeupDeliveryParams struct {
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
+	SourcePattern    string      `json:"source_pattern"`
+}
+
+type FindUndecidedWakeupDeliveryRow struct {
+	ID             pgtype.UUID `json:"id"`
+	DeliveryStatus string      `json:"delivery_status"`
+}
+
+// An external target has no task that a later firing could join. While a
+// notification for the rule has not reached a terminal transport state, the
+// rule keeps its inputs instead of queueing another notification, just as a
+// managed rule waits for its claimed run. Terminal states (delivered, failed)
+// never block a new firing. The row is reported so last_error names the
+// delivery; unknown is fail-closed and waits for an operator, never a replay
+// under a new id.
+func (q *Queries) FindUndecidedWakeupDelivery(ctx context.Context, arg FindUndecidedWakeupDeliveryParams) (FindUndecidedWakeupDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, findUndecidedWakeupDelivery, arg.WorkspaceID, arg.RecipientAgentID, arg.SourcePattern)
+	var i FindUndecidedWakeupDeliveryRow
+	err := row.Scan(&i.ID, &i.DeliveryStatus)
+	return i, err
+}
+
 const findWaitingIssueRun = `-- name: FindWaitingIssueRun :one
 SELECT id FROM agent_task_queue WHERE issue_id= $1 AND agent_id= $2 AND status='queued'
  AND originator_user_id= $3::uuid ORDER BY created_at,id LIMIT 1
@@ -788,33 +822,6 @@ func (q *Queries) GetIssueWakeup(ctx context.Context, arg GetIssueWakeupParams) 
 		&i.PausedReason,
 	)
 	return i, err
-}
-
-const hasUndecidedWakeupDelivery = `-- name: HasUndecidedWakeupDelivery :one
-SELECT EXISTS(
- SELECT 1 FROM agent_mailbox_message
- WHERE workspace_id = $1 AND recipient_agent_id = $2
-   AND source_type = 'issue_wakeup' AND source_key LIKE $3::text
-   AND delivery_status IN ('pending','leased','unknown')
-)::bool
-`
-
-type HasUndecidedWakeupDeliveryParams struct {
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
-	SourcePattern    string      `json:"source_pattern"`
-}
-
-// An external target has no task that a later firing could join. While a
-// notification for the rule has not reached a terminal transport state, the
-// rule keeps its inputs instead of queueing another notification, just as a
-// managed rule waits for its claimed run. Terminal states (delivered, failed)
-// never block a new firing.
-func (q *Queries) HasUndecidedWakeupDelivery(ctx context.Context, arg HasUndecidedWakeupDeliveryParams) (bool, error) {
-	row := q.db.QueryRow(ctx, hasUndecidedWakeupDelivery, arg.WorkspaceID, arg.RecipientAgentID, arg.SourcePattern)
-	var column_1 bool
-	err := row.Scan(&column_1)
-	return column_1, err
 }
 
 const listDueWakeups = `-- name: ListDueWakeups :many
@@ -2090,7 +2097,8 @@ type WithdrawIssueWakeupDeliveriesParams struct {
 }
 
 // The same withdrawal for every wakeup of a closed issue, which is disabled
-// without loading each rule. The leased/unknown boundary is the same.
+// without loading each rule. The leased/unknown boundary and its busy-retry
+// caveat are the same as above.
 func (q *Queries) WithdrawIssueWakeupDeliveries(ctx context.Context, arg WithdrawIssueWakeupDeliveriesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, withdrawIssueWakeupDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
 	if err != nil {
@@ -2117,8 +2125,10 @@ type WithdrawUnclaimedWakeupDeliveriesParams struct {
 // Withdraws notifications from one disabled or replaced rule that no host has
 // accepted yet. A pending row has no lease: recording any outcome clears it.
 // A leased or unknown row is left to its outcome because the host may already
-// have accepted it; generic claims of those rows are verify-only, so the host
-// is asked for the receipt but is never sent the notification again.
+// have accepted it; a reclaimed row is verify-only and is never sent again.
+// That is not absolute: an in-flight attempt the host answers with busy or
+// unavailable returns to pending as a retry, and the next claim delivers it
+// once more after the rule was disabled.
 func (q *Queries) WithdrawUnclaimedWakeupDeliveries(ctx context.Context, arg WithdrawUnclaimedWakeupDeliveriesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, withdrawUnclaimedWakeupDeliveries,
 		arg.Reason,

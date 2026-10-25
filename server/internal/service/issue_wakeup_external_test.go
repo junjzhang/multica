@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delivery"
@@ -67,6 +69,118 @@ func newestWakeupDelivery(t *testing.T, f principalFixture, w pgtype.UUID) db.Ag
 		t.Fatalf("read wakeup delivery: %v", err)
 	}
 	return row
+}
+
+// wakeupQueueClient is the generic delivery transport the daemon worker uses,
+// bound to one fixture workspace. Tests that count host calls go through the
+// real Worker and Queue instead of the claim API directly, so a database row
+// count cannot hide a second send.
+type wakeupQueueClient struct {
+	q      *delivery.Queue
+	daemon string
+	owner  string
+}
+
+func (c wakeupQueueClient) ClaimDeliveries(ctx context.Context, workspaceID string, limit int) ([]delivery.Claim, error) {
+	return c.q.Claim(ctx, delivery.ClaimRequest{
+		Scope: delivery.Scope{WorkspaceID: workspaceID}, DaemonID: c.daemon,
+		OwnerUserID: c.owner, Limit: limit, Projection: delivery.GenericProjection,
+	})
+}
+
+func (c wakeupQueueClient) RecordDeliveryOutcome(ctx context.Context, workspaceID string, req delivery.OutcomeRequest) (delivery.Delivery, error) {
+	req.Scope = delivery.Scope{WorkspaceID: workspaceID}
+	return c.q.RecordOutcome(ctx, req)
+}
+
+// countingHost records every send and receipt lookup. onSend may block, which
+// lets a test change the rule while one attempt is in flight.
+type countingHost struct {
+	mu      sync.Mutex
+	sends   int
+	lookups int
+	ids     []string
+	receipt delivery.Receipt
+	onSend  func(ctx context.Context, attempt int) error
+}
+
+func (h *countingHost) DeliverIfIdle(ctx context.Context, _ delivery.HostTarget, d delivery.Delivery) (string, error) {
+	h.mu.Lock()
+	h.sends++
+	h.ids = append(h.ids, d.ID)
+	hook := h.onSend
+	attempt := h.sends
+	h.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, attempt); err != nil {
+			return "", err
+		}
+	}
+	return "receipt", nil
+}
+
+func (h *countingHost) LookupReceipt(context.Context, delivery.HostTarget, string) (delivery.Receipt, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lookups++
+	return h.receipt, nil
+}
+
+func (h *countingHost) counts() (sends, lookups int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sends, h.lookups
+}
+
+func (h *countingHost) sentIDs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.ids...)
+}
+
+func newWakeupTestWorker(f principalFixture, daemonID string, host delivery.Host) *delivery.Worker {
+	return delivery.NewWorker(wakeupQueueClient{q: delivery.NewQueue(f.q, f.Pool), daemon: daemonID, owner: f.UserID},
+		host, func() []string { return []string{f.WorkspaceID} }, daemonID, nil)
+}
+
+func startWakeupTestWorker(w *delivery.Worker) (context.CancelFunc, <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		_ = w.Run(ctx)
+		close(done)
+	}()
+	return cancel, done
+}
+
+func stopWakeupTestWorker(t *testing.T, cancel context.CancelFunc, done <-chan struct{}) {
+	t.Helper()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delivery worker did not stop")
+	}
+}
+
+// runWakeupTestWorkerRound gives the real worker one poll cycle, enough for
+// the immediate claim and host call its round performs.
+func runWakeupTestWorkerRound(t *testing.T, w *delivery.Worker) {
+	t.Helper()
+	cancel, done := startWakeupTestWorker(w)
+	time.Sleep(500 * time.Millisecond)
+	stopWakeupTestWorker(t, cancel, done)
+}
+
+func waitForWakeup(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // A one-shot timer aimed at an external session must produce exactly one
@@ -264,6 +378,157 @@ func TestWakeupExternalDisableKeepsLeasedDelivery(t *testing.T) {
 	}
 }
 
+// Disabling while the host call is in flight cannot withdraw that attempt. A
+// busy answer records a retry, the row returns to pending without a lease, and
+// the next claim treats it as a first delivery: the contract allows exactly one
+// late send, and the rule itself must not fire again.
+func TestWakeupExternalDisableDuringLeaseThenBusyAllowsOneRetry(t *testing.T) {
+	f, s, issue, agent, daemonID := externalWakeFixture(t)
+	ctx := context.Background()
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "at", Instruction: "Check it", AfterSeconds: 60})
+	wakeTick(t, f, s, w.ID)
+
+	entered := make(chan struct{})
+	release := make(chan error, 1)
+	host := &countingHost{onSend: func(_ context.Context, attempt int) error {
+		if attempt == 1 {
+			close(entered)
+			return <-release
+		}
+		return nil
+	}}
+	worker := newWakeupTestWorker(f, daemonID, host)
+	cancel, done := startWakeupTestWorker(worker)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		stopWakeupTestWorker(t, cancel, done)
+		t.Fatal("the worker never delivered the notification")
+	}
+
+	if _, err := s.Disable(ctx, issue, w.ID, parseTestUUID(t, f.UserID)); err != nil {
+		t.Fatal(err)
+	}
+	row := newestWakeupDelivery(t, f, w.ID)
+	if row.DeliveryStatus != "leased" || row.LastError.Valid {
+		stopWakeupTestWorker(t, cancel, done)
+		t.Fatalf("in-flight delivery after disable = status %q error %+v, want it left leased", row.DeliveryStatus, row.LastError)
+	}
+
+	release <- &delivery.HostError{Kind: delivery.HostBusy, Code: "agent_busy"}
+	waitForWakeup(t, "the busy retry to be recorded", func() bool {
+		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "pending"
+	})
+	stopWakeupTestWorker(t, cancel, done)
+
+	row = newestWakeupDelivery(t, f, w.ID)
+	if row.LeaseTokenHash.Valid || !row.NextAttemptAt.Valid {
+		t.Fatalf("busy retry = lease %+v next_attempt_at %+v, want a claimable pending row", row.LeaseTokenHash, row.NextAttemptAt)
+	}
+
+	// The next claim after the retry is a first delivery, not a receipt check.
+	f.Exec(t, "UPDATE agent_mailbox_message SET next_attempt_at=now() WHERE id=$1", row.ID)
+	worker = newWakeupTestWorker(f, daemonID, host)
+	cancel, done = startWakeupTestWorker(worker)
+	waitForWakeup(t, "the retried notification to be accepted", func() bool {
+		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "delivered"
+	})
+	stopWakeupTestWorker(t, cancel, done)
+
+	sends, lookups := host.counts()
+	if sends != 2 {
+		t.Fatalf("host attempts = %d, want the initial attempt plus exactly one retry", sends)
+	}
+	if lookups != 0 {
+		t.Fatalf("receipt lookups = %d, want the retry treated as a first delivery", lookups)
+	}
+	for _, id := range host.sentIDs() {
+		if id != util.UUIDToString(row.ID) {
+			t.Fatalf("host saw delivery %s, want only %s", id, util.UUIDToString(row.ID))
+		}
+	}
+
+	// The rule is disabled: it neither fires nor mints a second notification.
+	got, err := f.q.LocklessWakeup(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakeDispatch(t, s, got)
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("a disabled rule produced %d notifications, want 1", n)
+	}
+	runWakeupTestWorkerRound(t, newWakeupTestWorker(f, daemonID, host))
+	if sends, _ := host.counts(); sends != 2 {
+		t.Fatalf("host attempts after the rule was disabled = %d, want 2", sends)
+	}
+}
+
+// An unknown outcome is fail-closed: the host may have accepted the request, so
+// the rule pauses with a diagnostic naming that delivery instead of replaying
+// the same inputs under a new id. The worker only looks up the receipt.
+func TestWakeupExternalUnknownDeliveryPausesRuleForOperator(t *testing.T) {
+	f, s, issue, agent, daemonID := externalWakeFixture(t)
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
+	wakeTick(t, f, s, w.ID)
+	unknown := newestWakeupDelivery(t, f, w.ID)
+	f.Exec(t, `UPDATE agent_mailbox_message
+		SET delivery_status='unknown', last_error='host has no receipt', next_attempt_at=now()
+		WHERE id=$1`, unknown.ID)
+
+	wantError := func(got db.IssueWakeup) {
+		t.Helper()
+		if !got.LastError.Valid || !strings.Contains(got.LastError.String, "unknown") ||
+			!strings.Contains(got.LastError.String, util.UUIDToString(unknown.ID)) {
+			t.Fatalf("rule error = %+v, want the unknown delivery %s named", got.LastError, util.UUIDToString(unknown.ID))
+		}
+	}
+	got := wakeTick(t, f, s, w.ID)
+	wantError(got)
+	for period := 0; period < 5; period++ {
+		got = wakeTick(t, f, s, w.ID)
+		wantError(got)
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("deliveries with an unknown row = %d, want the original one", n)
+	}
+	if got.FireCount != 1 || !got.Enabled {
+		t.Fatalf("rule with an unknown row: fire_count=%d enabled=%t, want it paused but not fired again", got.FireCount, got.Enabled)
+	}
+	if n := wakeRuns(t, f, w.ID); n != 0 {
+		t.Fatalf("external target started %d managed runs", n)
+	}
+
+	// The worker verifies the ambiguous row; it must not send it again.
+	host := &countingHost{receipt: delivery.Receipt{Status: delivery.ReceiptAbsent}}
+	cancel, done := startWakeupTestWorker(newWakeupTestWorker(f, daemonID, host))
+	waitForWakeup(t, "the receipt lookup", func() bool {
+		sends, lookups := host.counts()
+		return lookups > 0 && sends == 0
+	})
+	stopWakeupTestWorker(t, cancel, done)
+	waitForWakeup(t, "the unknown outcome to be confirmed", func() bool {
+		row := newestWakeupDelivery(t, f, w.ID)
+		return row.DeliveryStatus == "unknown" && strings.Contains(row.LastError.String, "not replayed")
+	})
+	if sends, lookups := host.counts(); sends != 0 || lookups != 1 {
+		t.Fatalf("host sends=%d lookups=%d, want one lookup and no send", sends, lookups)
+	}
+	wantError(wakeTick(t, f, s, w.ID))
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
+		t.Fatalf("verification produced %d notifications, want no replay", n)
+	}
+
+	// Only an explicit resolution of that row lets the rule deliver again.
+	f.Exec(t, "UPDATE agent_mailbox_message SET delivery_status='delivered', delivered_at=now() WHERE id=$1", unknown.ID)
+	got = wakeTick(t, f, s, w.ID)
+	if got.FireCount != 2 {
+		t.Fatalf("fire_count after the unknown row was resolved = %d, want 2", got.FireCount)
+	}
+	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 2 {
+		t.Fatalf("deliveries after the unknown row was resolved = %d, want one more", n)
+	}
+}
+
 // An external target without a registered host session cannot be delivered,
 // so registration refuses it instead of queueing notifications forever.
 func TestWakeupExternalTargetRequiresRegisteredSession(t *testing.T) {
@@ -356,14 +621,27 @@ func settleWakeupDeliveries(t *testing.T, f principalFixture, w pgtype.UUID) {
 // A busy or offline host must not turn every elapsed period into its own model
 // turn. While one notification for the rule is undecided, later firings keep
 // their inputs; after it settles, the scheduler merges them into a single new
-// notification. No managed run is started at any point.
+// notification. The row counts are structural; a real Worker and a counting
+// host also prove how many times the delivery path actually calls the host.
 func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
-	f, s, issue, agent, _ := externalWakeFixture(t)
-	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
+	f, s, issue, agent, daemonID := externalWakeFixture(t)
+	host := &countingHost{}
 
+	// The session is still working on an earlier generic delivery, so the
+	// recipient lease, not the rule, is what holds the wakeup row.
+	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,source_type,source_key,kind,payload,
+			delivery_status,lease_token_hash,lease_owner,lease_expires_at,attempts)
+		VALUES (gen_random_uuid(),$1,$2,'agent','generic','blocking','test_blocker','{}'::jsonb,
+			'leased','hash',$3,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, daemonID)
+
+	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
 	wakeTick(t, f, s, w.ID)
 	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
 		t.Fatalf("first firing deliveries = %d pending, want 1", n)
+	}
+	runWakeupTestWorkerRound(t, newWakeupTestWorker(f, daemonID, host))
+	if sends, lookups := host.counts(); sends != 0 || lookups != 0 {
+		t.Fatalf("a busy recipient caused %d sends and %d lookups, want none", sends, lookups)
 	}
 
 	// The host stays busy across three more periods.
@@ -372,6 +650,10 @@ func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
 		if got.FireCount != 1 {
 			t.Fatalf("firing %d: fire_count = %d, a pending notification must hold the inputs", period+2, got.FireCount)
 		}
+	}
+	runWakeupTestWorkerRound(t, newWakeupTestWorker(f, daemonID, host))
+	if sends, lookups := host.counts(); sends != 0 || lookups != 0 {
+		t.Fatalf("waiting an hour caused %d sends and %d lookups, want none", sends, lookups)
 	}
 	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
 		t.Fatalf("deliveries after three waiting periods = %d, want 1", n)
@@ -387,9 +669,25 @@ func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
 		t.Fatalf("deliveries in the last hour = %d, want at most 1 while waiting", n)
 	}
 
+	// The session becomes idle: the one queued notification reaches the host
+	// exactly once.
+	f.Exec(t, `UPDATE agent_mailbox_message SET delivery_status='delivered',delivered_at=now()
+		WHERE workspace_id=$1 AND source_key='blocking'`, f.WorkspaceID)
+	first := newestWakeupDelivery(t, f, w.ID)
+	cancel, done := startWakeupTestWorker(newWakeupTestWorker(f, daemonID, host))
+	waitForWakeup(t, "the queued notification to be accepted", func() bool {
+		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "delivered"
+	})
+	stopWakeupTestWorker(t, cancel, done)
+	if sends, _ := host.counts(); sends != 1 {
+		t.Fatalf("host sends after the session turned idle = %d, want 1", sends)
+	}
+	if ids := host.sentIDs(); len(ids) != 1 || ids[0] != util.UUIDToString(first.ID) {
+		t.Fatalf("host saw %v, want only %s", ids, util.UUIDToString(first.ID))
+	}
+
 	// Once the host takes the notification, the next firing delivers the
 	// accumulated input as exactly one more notification.
-	settleWakeupDeliveries(t, f, w.ID)
 	got := wakeTick(t, f, s, w.ID)
 	if got.FireCount != 2 {
 		t.Fatalf("fire_count after the held input was delivered = %d, want 2", got.FireCount)
@@ -399,6 +697,18 @@ func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
 	}
 	if n := countWakeupDeliveries(t, f, w.ID, agent, "pending"); n != 1 {
 		t.Fatalf("pending deliveries after settling = %d, want 1", n)
+	}
+	second := newestWakeupDelivery(t, f, w.ID)
+	cancel, done = startWakeupTestWorker(newWakeupTestWorker(f, daemonID, host))
+	waitForWakeup(t, "the second notification to be accepted", func() bool {
+		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "delivered"
+	})
+	stopWakeupTestWorker(t, cancel, done)
+	if sends, _ := host.counts(); sends != 2 {
+		t.Fatalf("host sends after the second firing = %d, want 2", sends)
+	}
+	if ids := host.sentIDs(); len(ids) != 2 || ids[1] != util.UUIDToString(second.ID) || ids[0] == ids[1] {
+		t.Fatalf("host saw %v, want two distinct notifications", ids)
 	}
 	if n := wakeRuns(t, f, w.ID); n != 0 {
 		t.Fatalf("external target started %d managed runs", n)
