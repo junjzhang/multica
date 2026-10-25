@@ -93,6 +93,21 @@ every historical tick. Runs keep normal comment delivery, except that a run an
 every/cron rule started may end with a check-in instead (see below). Linked pull
 request conditions read the stored PR snapshot; there is no separate CI event.
 
+A rule may target a registered external agent (one with a host session and no
+Multica runtime). Such a rule keeps the same scheduler, conditions, caps and
+one-shot consumption, but its firing is stored as one generic delivery and
+handed to the existing session instead of starting a managed run. The
+`wakeup_triggered` timeline entry carries the notification's `delivery_id`.
+The host's acceptance is transport state: it says the input was queued for the
+session, not that the agent did the work. A busy session leaves the delivery
+pending until it is idle, so waiting costs no model call. Disabling, replacing
+or closing the rule withdraws notifications the host has not accepted yet; a
+notification already leased by the host is left to its outcome. Registration
+requires the external agent's host session to be registered, and PR conditions
+still depend on the deployment's stored GitHub snapshots -- without GitHub App
+credentials those snapshots are unavailable and the rule reports the existing
+condition diagnostic.
+
 ## Event catalog
 
 `multica issue wakeup events` lists the 25 supported issue-scoped subscriptions:
@@ -205,6 +220,11 @@ starting a final run on the closed issue.
   thread stays in `trigger_comment_id`. This preserves old retry SQL during a
   rolling server upgrade. Comment/assign coalescing excludes wakeup inputs, and
   the existing issue/agent execution fence still serializes actual runs.
+- A firing for an external target is one generic `agent_mailbox_message` row
+  (`source_type='issue_wakeup'`) enqueued in the same transaction that consumes
+  its receipts and advances the rule; managed targets keep the task path. The
+  daemon's generic worker delivers it to the registered host session, and
+  disabling, replacing or closing a rule withdraws unleased rows.
 - Issue/workspace deletion explicitly removes configurations and receipts in
   the application deletion graph. No foreign keys or cascading relationships
   are added.
@@ -214,7 +234,10 @@ starting a final run on the closed issue.
 Apply additive migrations before starting the new server. Existing pending-task
 indexes are not rebuilt or dropped, and historical queue rows are not rewritten.
 Deploy the updated CLI and daemon with the server to recognize the wakeup command
-and per-turn prompt. Before rollback, disable/drain wakeups; do not remove their
+and per-turn prompt. Before enabling an external wakeup target, every daemon must
+run a binary whose mailbox reader filters `source_type='comment'`; an old daemon
+could otherwise claim a generic wakeup delivery and render it as a comment
+notification. Before rollback, disable/drain wakeups; do not remove their
 configuration tables while tasks still reference them.
 
 Migration 520 adds capture hooks without indexes, table rewrites, or foreign

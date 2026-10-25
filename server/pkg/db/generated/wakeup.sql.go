@@ -2019,3 +2019,58 @@ func (q *Queries) TryLockIssueWakeup(ctx context.Context, id pgtype.UUID) (Issue
 	)
 	return i, err
 }
+
+const withdrawIssueWakeupDeliveries = `-- name: WithdrawIssueWakeupDeliveries :execrows
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = $1, updated_at = now()
+WHERE workspace_id = $2 AND issue_id = $3
+  AND source_type = 'issue_wakeup'
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+`
+
+type WithdrawIssueWakeupDeliveriesParams struct {
+	Reason      pgtype.Text `json:"reason"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+}
+
+// The same withdrawal for every wakeup of a closed issue, which is disabled
+// without loading each rule.
+func (q *Queries) WithdrawIssueWakeupDeliveries(ctx context.Context, arg WithdrawIssueWakeupDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, withdrawIssueWakeupDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const withdrawUnclaimedWakeupDeliveries = `-- name: WithdrawUnclaimedWakeupDeliveries :execrows
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = $1, updated_at = now()
+WHERE workspace_id = $2 AND recipient_agent_id = $3
+  AND source_type = 'issue_wakeup' AND source_key LIKE $4::text
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+`
+
+type WithdrawUnclaimedWakeupDeliveriesParams struct {
+	Reason           pgtype.Text `json:"reason"`
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
+	SourcePattern    string      `json:"source_pattern"`
+}
+
+// Withdraws notifications from one disabled or replaced rule that no host has
+// accepted yet. A leased row is left to its outcome: the host may already have
+// accepted it, and cancellation never claims to retract accepted input.
+func (q *Queries) WithdrawUnclaimedWakeupDeliveries(ctx context.Context, arg WithdrawUnclaimedWakeupDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, withdrawUnclaimedWakeupDeliveries,
+		arg.Reason,
+		arg.WorkspaceID,
+		arg.RecipientAgentID,
+		arg.SourcePattern,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

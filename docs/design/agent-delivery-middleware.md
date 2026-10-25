@@ -33,11 +33,20 @@ The follow-up consume slice adds:
 - A dedicated `unknown` delivery state and verify-only reclaims.
 - An optional retry class so a busy session is not treated as a failure.
 
+The wakeup slice adds:
+
+- `IssueWakeupService` delivers a firing to an external target through the
+  generic queue instead of starting a managed run (see [Wakeup producer for
+  external targets](#wakeup-producer-for-external-targets)).
+- Disabling, replacing or closing a rule withdraws its unaccepted deliveries.
+
 Deliberately unchanged:
 
 - The frozen mailbox API DTO and its rendered comment notification.
 - The external-agent identity/permission model and session/worktree ownership.
-- `IssueWakeupService`, autopilot scheduling and CI watchers.
+- Wakeup scheduling semantics: timers, conditions, caps, revision fencing and
+  one-shot consumption stay in `IssueWakeupService`.
+- Autopilot scheduling and CI watchers.
 - Message batching and priority scheduling.
 
 ## Domain
@@ -169,6 +178,52 @@ multi-recipient edit has the same all-or-nothing boundary as creation, and
 suppressed or permission-blocked targets still store nothing and are reported
 per target after the transaction commits.
 
+## Wakeup producer for external targets
+
+`IssueWakeupService` still owns when a rule fires: timers, conditions, the
+hourly cap, one-shot consumption and revision fencing are unchanged. Only the
+hand-off of a firing depends on the target:
+
+| Target | A firing becomes |
+| --- | --- |
+| managed agent (`runtime_id` set) | one `agent_task_queue` run, exactly as before |
+| external agent (`execution_kind='external'`) | one generic delivery with `source_type='issue_wakeup'` and recipient type `agent` |
+
+For an external target, dispatch calls `delivery.Store.Enqueue` inside the
+transaction that also consumes the source receipts and advances the rule. The
+notification, the consumed inputs and the rule's next state either commit or
+roll back together, so a retried scan cannot leave a notification behind an
+input it already consumed.
+
+- The idempotency key is `wakeup:<wakeup-id>:<revision>:<newest-receipt-id>`.
+  Replaying one firing resolves the existing row; another firing has new
+  receipts and therefore a distinct notification.
+- The payload is `{"schema":"issue_wakeup.v1","issue_id","wakeup_id",
+  "revision","note"}`, where `note` is the same rendered wakeup prompt a
+  managed run receives. The row references the issue but never a comment, so
+  the legacy comment projection stays unambiguous.
+- The producer never asks whether the host is busy. The row stays `pending`
+  and the worker's per-recipient lease defers it until the session is idle;
+  waiting costs no model call and does not drop the trigger.
+- Disabling, replacing or closing a rule withdraws its `pending`, unleased
+  deliveries as `failed` with a visible reason. A `leased` row is left to its
+  outcome because the host may already have accepted it; cancellation does not
+  claim to retract accepted input.
+- The firing's timeline entry carries `delivery_id` instead of `task_id`, and
+  `GetDelivery` is the read path for the row's current delivery and processing
+  state. Delivery status is transport state, never business acceptance.
+
+Registration requires an `external_agent_session` row for the target; without
+one the rule is refused instead of queueing undeliverable notifications. The
+workspace-membership and `CanMemberInvokeAgent` checks are the same as for a
+managed target. System `child_done` rules keep their existing managed-only
+target resolution.
+
+GitHub pull-request conditions are reused unchanged. They evaluate the stored
+`github_pull_request` snapshot; a deployment without GitHub App credentials has
+no fresh snapshots and the existing "condition pending" diagnostic says so. The
+delivery path never reads GitHub itself.
+
 ## Consuming a generic delivery
 
 Two entries consume the one table and their filters are disjoint, so the same
@@ -277,13 +332,14 @@ may change the id, clear the receipt, or resend on a guess.
 ## Rolling upgrade
 
 Old binaries still list and claim without the `source_type='comment'` filter,
-and their `SenderType` scan cannot read a NULL. No generic producer ships yet,
-so they are safe today. Before one does, every daemon must be on a binary with
-the read filter (or the fleet must be drained first); otherwise an old daemon
-could claim a generic row and render an issue/comment notification that does not
-exist. Old binaries also continue to write comment rows with `source_key = NULL`;
-the new store recovers those by the legacy key, but a row must not be rewritten
-or backfilled by hand during the rollover.
+and their `SenderType` scan cannot read a NULL. The wakeup producer is the first
+producer of generic rows, so every daemon must be on a binary with the read
+filter (or the fleet must be drained) before an external wakeup target is
+enabled; otherwise an old daemon could claim a generic row and render an
+issue/comment notification that does not exist. Old binaries also continue to
+write comment rows with `source_key = NULL`; the new store recovers those by the
+legacy key, but a row must not be rewritten or backfilled by hand during the
+rollover.
 
 A new daemon can run against a server without the generic claim entry: the
 request returns 404, the worker treats it as "not rolled out yet" and keeps
@@ -294,10 +350,12 @@ values valid.
 
 ## Known gaps
 
-- No CI watcher produces generic (`source_type != 'comment'`) deliveries yet;
-  the worker and its claim/outcome entry are ready for one.
+- Explicit external wakeup targets are the only producer of generic
+  (`source_type != 'comment'`) deliveries. No watcher observes an external CI
+  system; PR conditions still read stored snapshots.
 - The mailbox DTO has no generic projection; `GetDelivery` is the internal
-  read path and the generic claim DTO is the daemon's.
+  read path, the wakeup timeline exposes the `delivery_id`, and the generic
+  claim DTO is the daemon's.
 - `unknown` rows have no API or UI recovery action yet; they are visible through
   `delivery_status`, `last_error`, `host_receipt` and the preserved delivery id,
   and are resolved manually as described above.

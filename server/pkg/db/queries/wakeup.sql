@@ -320,3 +320,22 @@ WHERE id= @id AND status='dispatched' AND dispatched_at= @dispatched_at RETURNIN
 -- not finished: the run that made a change still knows about it.
 SELECT count(*) FROM agent_task_queue WHERE id=ANY(@ids::uuid[]) AND agent_id= @agent_id AND issue_id= @issue_id
  AND status IN ('dispatched','running','waiting_local_directory');
+
+-- name: WithdrawUnclaimedWakeupDeliveries :execrows
+-- Withdraws notifications from one disabled or replaced rule that no host has
+-- accepted yet. A leased row is left to its outcome: the host may already have
+-- accepted it, and cancellation never claims to retract accepted input.
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = @reason, updated_at = now()
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL;
+
+-- name: WithdrawIssueWakeupDeliveries :execrows
+-- The same withdrawal for every wakeup of a closed issue, which is disabled
+-- without loading each rule.
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = @reason, updated_at = now()
+WHERE workspace_id = @workspace_id AND issue_id = @issue_id
+  AND source_type = 'issue_wakeup'
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL;
