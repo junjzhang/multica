@@ -490,12 +490,20 @@ SET delivery_status = 'leased',
     lease_expires_at = $3,
     attempts = attempts + 1,
     updated_at = now()
-WHERE id = $4
-  AND workspace_id = $5
+WHERE agent_mailbox_message.id = $4
+  AND agent_mailbox_message.workspace_id = $5
   AND (
-      (delivery_status = 'pending' AND next_attempt_at <= now())
-      OR (delivery_status = 'leased' AND lease_expires_at <= now())
-      OR (delivery_status = 'unknown' AND next_attempt_at <= now())
+      (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
+      OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
+      OR (agent_mailbox_message.delivery_status = 'unknown' AND agent_mailbox_message.next_attempt_at <= now())
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM agent_mailbox_message inflight
+      WHERE inflight.recipient_agent_id = agent_mailbox_message.recipient_agent_id
+        AND inflight.id <> agent_mailbox_message.id
+        AND inflight.delivery_status = 'leased'
+        AND inflight.lease_expires_at > now()
   )
 RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
 `
@@ -511,6 +519,13 @@ type LeaseClaimableDeliveryParams struct {
 // Conditional lease: only a row that is still eligible at this instant is
 // leased. A concurrent claimant that already leased or acknowledged it makes
 // this a no-op instead of overwriting its lease.
+//
+// The in-flight check is repeated here, not only in the candidate list. Under
+// READ COMMITTED this statement takes a fresh snapshot after the caller's
+// per-recipient advisory lock, so it sees a lease another entry committed while
+// this claim was being prepared. The candidate list alone only proves the
+// recipient had no in-flight row before the lock: two disjoint projections
+// (comment and generic) could otherwise each lease a row for the same session.
 func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimableDeliveryParams) (AgentMailboxMessage, error) {
 	row := q.db.QueryRow(ctx, leaseClaimableDelivery,
 		arg.LeaseTokenHash,
@@ -692,12 +707,13 @@ type ListClaimableDeliveryIDsRow struct {
 	DeliveryStatus   string      `json:"delivery_status"`
 }
 
-// Candidates for one claim round, at most one per recipient session. The
-// caller leases each candidate in its own transaction; the advisory lock it
-// takes per recipient serialises concurrent claimants, and the conditional
-// lease re-check makes a lost race a no-op. An inflated lease is reclaimable so
-// a crashed worker does not strand a request. An ambiguous row (unknown) is
-// claimable again only for receipt verification, never for a second send.
+// Candidates for one claim round, at most one per recipient session. This list
+// is only a pre-lock hint: the conditional lease re-checks both row
+// eligibility and the same recipient's in-flight rows after taking the advisory
+// lock, so a candidate that lost a race is skipped. An inflated lease is
+// reclaimable so a crashed worker does not strand a request. An ambiguous row
+// (unknown) is claimable again only for receipt verification, never for a
+// second send.
 func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimableDeliveryIDsParams) ([]ListClaimableDeliveryIDsRow, error) {
 	rows, err := q.db.Query(ctx, listClaimableDeliveryIDs,
 		arg.RowLimit,

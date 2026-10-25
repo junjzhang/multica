@@ -509,7 +509,8 @@ func TestWorkerBoundsConcurrencyAcrossSessions(t *testing.T) {
 }
 
 // A malformed batch that repeats one session is reduced to its first row: the
-// same session must never receive overlapping turns.
+// same session must never receive overlapping turns. The dropped row is still
+// acknowledged as a retry so it does not become an unverifiable unknown.
 func TestWorkerNeverRunsOneSessionTwiceInABatch(t *testing.T) {
 	client := newFakeOutcomeClient()
 	client.claims["ws-1"] = [][]Claim{{
@@ -523,6 +524,99 @@ func TestWorkerNeverRunsOneSessionTwiceInABatch(t *testing.T) {
 
 	if host.deliverCount() != 1 || host.deliveries[0] != "delivery-1" {
 		t.Fatalf("deliveries = %v, want only the first row for the session", host.deliveries)
+	}
+	byID := map[string]OutcomeRequest{}
+	for _, ack := range client.ackSnapshot() {
+		byID[ack.request.DeliveryID] = ack.request
+	}
+	delivered, ok := byID["delivery-1"]
+	if !ok || delivered.State != OutcomeDelivered {
+		t.Fatalf("delivery-1 ack = %+v, want delivered", delivered)
+	}
+	dropped, ok := byID["delivery-2"]
+	if !ok || dropped.State != OutcomeRetry || dropped.LeaseToken != "lease-2" {
+		t.Fatalf("delivery-2 ack = %+v, want a retry under its own lease", dropped)
+	}
+}
+
+// A claim the worker cannot use proves the host was never called for that
+// lease. It must be recorded immediately; returning an error would leave the
+// row leased until verification read an absent receipt and parked a never-sent
+// message as permanently unknown. A verification-only row never returns to
+// claimable delivery, because its earlier attempt may already have been
+// accepted.
+func TestWorkerRecordsUnusableClaimWithoutCallingHost(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Claim)
+		want       string
+		wantState  OutcomeState
+		wantClass  RetryClass
+		wantStatus string
+	}{
+		{
+			name:       "missing host session",
+			mutate:     func(c *Claim) { c.Session.SessionID = "" },
+			want:       "no host session id",
+			wantState:  OutcomeRetry,
+			wantClass:  RetryDependency,
+			wantStatus: "pending",
+		},
+		{
+			name:       "foreign daemon",
+			mutate:     func(c *Claim) { c.Session.DaemonID = "daemon-2" },
+			want:       "bound to daemon",
+			wantState:  OutcomeRetry,
+			wantClass:  RetryDependency,
+			wantStatus: "pending",
+		},
+		{
+			name:       "unparseable lease",
+			mutate:     func(c *Claim) { c.ClaimError = "invalid lease_expires_at" },
+			want:       "invalid lease_expires_at",
+			wantState:  OutcomeRetry,
+			wantClass:  RetryDependency,
+			wantStatus: "pending",
+		},
+		{
+			name: "unparseable lease on a verification-only reclaim",
+			mutate: func(c *Claim) {
+				c.ClaimError = "invalid lease_expires_at"
+				c.VerifyOnly = true
+			},
+			want:       "not replayed",
+			wantState:  OutcomeUnknown,
+			wantStatus: "unknown",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newFakeOutcomeClient()
+			claim := testClaim("delivery-1", "session-1", "lease-1")
+			tc.mutate(&claim)
+			client.claims["ws-1"] = [][]Claim{{claim}}
+			host := newFakeHost()
+			worker := newTestWorker(client, host)
+
+			worker.round(context.Background())
+
+			if host.deliverCount() != 0 || host.receiptCalls != 0 {
+				t.Fatalf("host was called (deliveries=%d receipts=%d) for an unusable claim", host.deliverCount(), host.receiptCalls)
+			}
+			acks := client.ackSnapshot()
+			if len(acks) != 1 || acks[0].request.State != tc.wantState || acks[0].request.RetryClass != tc.wantClass {
+				t.Fatalf("ack = %+v, want state %q class %q", acks, tc.wantState, tc.wantClass)
+			}
+			if acks[0].request.storedStatus() != tc.wantStatus {
+				t.Fatalf("stored status = %q, want %q", acks[0].request.storedStatus(), tc.wantStatus)
+			}
+			if !contains(acks[0].request.Error, tc.want) {
+				t.Fatalf("error = %q, want %q", acks[0].request.Error, tc.want)
+			}
+			if len(worker.pending) != 0 {
+				t.Fatalf("pending = %d, want the immediate ack to be recorded", len(worker.pending))
+			}
+		})
 	}
 }
 

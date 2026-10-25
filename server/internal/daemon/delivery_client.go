@@ -55,16 +55,12 @@ func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit 
 	}
 	claims := make([]delivery.Claim, 0, len(resp.Deliveries))
 	for _, item := range resp.Deliveries {
-		leaseExpiresAt, err := time.Parse(time.RFC3339, item.LeaseExpiresAt)
-		if err != nil {
-			return nil, fmt.Errorf("delivery claim %s has an invalid lease_expires_at: %w", item.ID, err)
-		}
 		recipientType := item.RecipientType
 		if recipientType == "" {
 			recipientType = "agent"
 		}
 		recipient := delivery.Recipient{Type: recipientType, ID: item.RecipientAgentID}
-		claims = append(claims, delivery.Claim{
+		claim := delivery.Claim{
 			Delivery: delivery.Delivery{
 				ID:             item.ID,
 				Scope:          delivery.Scope{WorkspaceID: workspaceID},
@@ -81,10 +77,21 @@ func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit 
 				SessionID: item.ExternalSession.SessionID,
 				DaemonID:  item.ExternalSession.DaemonID,
 			},
-			LeaseToken:     item.DeliveryToken,
-			LeaseExpiresAt: leaseExpiresAt,
-			VerifyOnly:     item.VerifyOnly,
-		})
+			LeaseToken: item.DeliveryToken,
+			VerifyOnly: item.VerifyOnly,
+		}
+		leaseExpiresAt, err := time.Parse(time.RFC3339, item.LeaseExpiresAt)
+		if err != nil {
+			// Skip only this lease instead of discarding the whole batch. The
+			// worker records a retry for it: the host was never called, and
+			// leaving the row leased would later turn a never-sent delivery
+			// into an unverifiable unknown.
+			claim.ClaimError = fmt.Sprintf("delivery claim %s has an invalid lease_expires_at %q: %v", item.ID, item.LeaseExpiresAt, err)
+			claims = append(claims, claim)
+			continue
+		}
+		claim.LeaseExpiresAt = leaseExpiresAt
+		claims = append(claims, claim)
 	}
 	return claims, nil
 }

@@ -182,11 +182,15 @@ row can never be leased twice:
 `delivery.Queue.Claim` leases for either entry. It takes a per-recipient
 transaction-scoped advisory lock, leases at most one row per recipient session,
 and only leases a row that is still eligible (`pending` due, `leased` expired, or
-`unknown` due). A conditional `UPDATE` re-checks eligibility, so a lost race is a
-no-op. This keeps two workers or daemons from delivering to one session at the
-same time and stops one unreachable recipient from consuming more than one slot.
-The worker runs a bounded number of sessions concurrently; the claim itself is
-the fairness bound, not a priority scheduler.
+`unknown` due). The candidate list is only a pre-lock hint: the conditional
+`UPDATE` re-checks both eligibility and the recipient's in-flight rows after the
+lock, under READ COMMITTED's fresh statement snapshot. A lost race is a no-op,
+and the comment and generic entries cannot each lease a row for the same session
+even though neither candidate list contains the other projection's rows. This
+keeps two workers or daemons from delivering to one session at the same time and
+stops one unreachable recipient from consuming more than one slot. The worker
+runs a bounded number of sessions concurrently; the claim itself is the fairness
+bound, not a priority scheduler.
 
 `delivery.Queue.RecordOutcome` stores the fenced result. The delivery token,
 daemon and unexpired lease fence the write, so a stale or foreign ack matches no
@@ -229,6 +233,22 @@ unconfirmed with a diagnostic. An absent receipt is explicitly not treated as
 proof of non-execution, and recovery never changes the delivery id, clears the
 receipt, or clears history.
 
+A lease the daemon cannot use is a proven no-effect failure: the host was never
+called. This covers a missing host session id, a foreign daemon binding, an
+unparseable lease expiry and a second row for one session in a malformed batch.
+The worker records a `pending` retry with a diagnostic immediately instead of
+leaving the row leased until it is reclaimed for verification, which would turn
+a never-sent delivery into a permanent `unknown`. When such a lease was already
+a verification-only reclaim, the row stays `unknown` with the diagnostic,
+because the earlier attempt may have been accepted; it never returns to
+claimable delivery.
+
+An `unknown` row has no automatic replay path. It is identified by its
+`delivery_status`, the preserved delivery id and the diagnostic in `last_error`
+or `host_receipt`; resolving it is a manual, out-of-band operator action against
+that stable id. No API or UI action changes its state yet, and no recovery path
+may change the id, clear the receipt, or resend on a guess.
+
 ## Failure rules
 
 | Situation | Result |
@@ -244,6 +264,8 @@ receipt, or clears history.
 | Host without if-idle delivery | `pending` with a dependency error; no ordinary-send fallback |
 | Ambiguous host result | `unknown`; receipt lookup only, never a resend |
 | Receipt absent or lookup unsupported | Stays `unknown` with a diagnostic; not replayed |
+| Claim proves the host was not called (missing session, foreign daemon, unusable lease) | `pending` with a dependency retry; neither sent nor parked as `unknown` |
+| Unusable lease on a verification-only reclaim | Stays `unknown` with a diagnostic; never returns to claimable delivery |
 | Worker crash after acceptance | Lease expires; the reclaim verifies the original id instead of resending |
 
 ## Rolling upgrade
@@ -270,7 +292,8 @@ values valid.
   the worker and its claim/outcome entry are ready for one.
 - The mailbox DTO has no generic projection; `GetDelivery` is the internal
   read path and the generic claim DTO is the daemon's.
-- `unknown` rows have no UI recovery action yet; they are visible through
-  `last_error` and `delivery_status`.
+- `unknown` rows have no API or UI recovery action yet; they are visible through
+  `delivery_status`, `last_error`, `host_receipt` and the preserved delivery id,
+  and are resolved manually as described above.
 - Broadcast/multi-target fan-out, message batching, a second identity system
   and a separate service/outbox are out of scope.

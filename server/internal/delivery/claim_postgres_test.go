@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -334,4 +337,130 @@ func TestQueueClaimSkipsArchivedOrReboundSessions(t *testing.T) {
 	if len(claims) != 0 {
 		t.Fatalf("archived agent claims = %+v, want none", claims)
 	}
+}
+
+// TestLeaseClaimableDeliveryRechecksInflightAfterLock reproduces the
+// interleaving where the comment entry and the generic entry each list a
+// candidate for the same recipient before either leases one. The generic list
+// is a pre-lock snapshot, but its lease statement runs after the comment claim
+// committed. The lease itself must re-check the recipient's in-flight rows;
+// otherwise both projections rent the same session even though the advisory
+// lock only serialised the two claims.
+func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
+	generic := enqueueGeneric(t, pool, workspaceID, agentID, "run-race")
+	comment := enqueueComment(t, pool, workspaceID, agentID)
+
+	ctx := context.Background()
+	queries := db.New(pool)
+	workspaceUUID := mustParseUUID(t, workspaceID)
+	recipientUUID := mustParseUUID(t, agentID)
+	ownerUUID := mustParseUUID(t, ownerID)
+
+	list := func(tx pgx.Tx, commentProjection bool) []db.ListClaimableDeliveryIDsRow {
+		t.Helper()
+		rows, err := queries.WithTx(tx).ListClaimableDeliveryIDs(ctx, db.ListClaimableDeliveryIDsParams{
+			WorkspaceID:       workspaceUUID,
+			CommentProjection: commentProjection,
+			OwnerUserID:       ownerUUID,
+			DaemonID:          daemonID,
+			RowLimit:          5,
+		})
+		if err != nil {
+			t.Fatalf("list claimable (comment=%v): %v", commentProjection, err)
+		}
+		return rows
+	}
+	lease := func(tx pgx.Tx, deliveryID, token string) error {
+		t.Helper()
+		_, err := queries.WithTx(tx).LeaseClaimableDelivery(ctx, db.LeaseClaimableDeliveryParams{
+			ID:             mustParseUUID(t, deliveryID),
+			WorkspaceID:    workspaceUUID,
+			LeaseTokenHash: pgtype.Text{String: token, Valid: true},
+			LeaseOwner:     pgtype.Text{String: daemonID, Valid: true},
+			LeaseExpiresAt: pgtypeTime(time.Now().Add(time.Minute)),
+		})
+		return err
+	}
+
+	// The generic entry lists first, before anyone holds a lease, so its
+	// snapshot shows no in-flight row for this recipient.
+	txB, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin generic claim: %v", err)
+	}
+	defer txB.Rollback(ctx)
+	genericCandidates := list(txB, false)
+	if len(genericCandidates) != 1 || util.UUIDToString(genericCandidates[0].ID) != generic.ID {
+		t.Fatalf("generic candidates = %+v, want only %s", genericCandidates, generic.ID)
+	}
+
+	// The comment entry lists, locks the recipient, leases its row and commits
+	// while the generic claim transaction is still open.
+	txA, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin comment claim: %v", err)
+	}
+	commentCandidates := list(txA, true)
+	if len(commentCandidates) != 1 || util.UUIDToString(commentCandidates[0].ID) != comment.ID {
+		txA.Rollback(ctx)
+		t.Fatalf("comment candidates = %+v, want only %s", commentCandidates, comment.ID)
+	}
+	locked, err := queries.WithTx(txA).TryLockDeliveryRecipient(ctx, agentID)
+	if err != nil {
+		txA.Rollback(ctx)
+		t.Fatalf("lock recipient for comment claim: %v", err)
+	}
+	if !locked {
+		txA.Rollback(ctx)
+		t.Fatal("comment claim could not take the recipient lock")
+	}
+	if err := lease(txA, comment.ID, "comment-lease"); err != nil {
+		txA.Rollback(ctx)
+		t.Fatalf("lease comment row: %v", err)
+	}
+	if err := txA.Commit(ctx); err != nil {
+		t.Fatalf("commit comment claim: %v", err)
+	}
+
+	// The generic claimant now takes the released lock and leases its stale
+	// candidate. The row is still eligible on its own, but the recipient already
+	// has a committed in-flight lease, so the lease must match no row.
+	locked, err = queries.WithTx(txB).TryLockDeliveryRecipient(ctx, agentID)
+	if err != nil {
+		t.Fatalf("lock recipient for generic claim: %v", err)
+	}
+	if !locked {
+		t.Fatal("generic claim could not take the recipient lock after the comment claim committed")
+	}
+	if err := lease(txB, generic.ID, "generic-lease"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("generic lease error = %v, want pgx.ErrNoRows", err)
+	}
+	if err := txB.Rollback(ctx); err != nil {
+		t.Fatalf("rollback generic claim: %v", err)
+	}
+
+	var inflight int
+	var leasedID string
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(min(id::text), '')
+		FROM agent_mailbox_message
+		WHERE recipient_agent_id = $1
+		  AND delivery_status = 'leased'
+		  AND lease_expires_at > now()`, recipientUUID).Scan(&inflight, &leasedID); err != nil {
+		t.Fatalf("count in-flight rows: %v", err)
+	}
+	if inflight != 1 || leasedID != comment.ID {
+		t.Fatalf("in-flight rows = %d (lease %s), want only the comment row %s", inflight, leasedID, comment.ID)
+	}
+}
+
+func mustParseUUID(t *testing.T, value string) pgtype.UUID {
+	t.Helper()
+	parsed, err := util.ParseUUID(value)
+	if err != nil {
+		t.Fatalf("parse uuid %q: %v", value, err)
+	}
+	return parsed
 }

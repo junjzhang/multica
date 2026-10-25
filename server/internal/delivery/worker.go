@@ -225,6 +225,10 @@ func (w *Worker) dispatch(ctx context.Context, claims []Claim) {
 		}
 		if _, duplicate := seen[key]; duplicate {
 			w.logger.Warn("delivery batch held two rows for one session; using the first", "session_id", key)
+			// The duplicate is never delivered here. Record a result so the row
+			// does not stay leased until verification parks a never-sent
+			// delivery as unknown.
+			w.recordUnusable(ctx, claim, "the claim batch held a second row for this session, so the host was not called")
 			continue
 		}
 		seen[key] = struct{}{}
@@ -257,11 +261,18 @@ func (w *Worker) handleClaim(ctx context.Context, claim Claim) error {
 	if claim.LeaseToken == "" {
 		return errors.New("delivery claim has no delivery token")
 	}
+	if claim.ClaimError != "" {
+		// The lease itself was unusable, so the host was never called for it.
+		return w.recordUnusable(ctx, claim, claim.ClaimError)
+	}
 	if claim.Session.SessionID == "" {
-		return errors.New("delivery claim has no host session id")
+		// No host was called for this row either; leaving it leased would turn
+		// a never-sent delivery into an unverifiable unknown row.
+		return w.recordUnusable(ctx, claim, "delivery claim has no host session id, so the host was not called")
 	}
 	if claim.Session.DaemonID != "" && claim.Session.DaemonID != w.daemonID {
-		return fmt.Errorf("delivery claim is bound to daemon %q, not %q", claim.Session.DaemonID, w.daemonID)
+		return w.recordUnusable(ctx, claim, fmt.Sprintf(
+			"delivery claim is bound to daemon %q, not %q, so the host was not called", claim.Session.DaemonID, w.daemonID))
 	}
 
 	// A decided outcome that could not be acknowledged yet is re-sent under the
@@ -352,6 +363,19 @@ func unknownReason(cause *HostError, detail string) string {
 		return detail
 	}
 	return hostReason(cause, "outcome_unknown") + "; " + detail
+}
+
+// recordUnusable stores a lease the worker could not use. The host was not
+// called for this lease, but a verification-only row may already have been
+// accepted by an earlier attempt: it must stay unknown, never return to
+// claimable delivery. Only a row whose previous result proved no effect goes
+// back to pending, where the same id can be attempted again.
+func (w *Worker) recordUnusable(ctx context.Context, claim Claim, reason string) error {
+	if claim.VerifyOnly {
+		return w.record(ctx, claim, OutcomeUnknown, "", "",
+			reason+"; the earlier attempt is still unconfirmed and is not replayed")
+	}
+	return w.record(ctx, claim, OutcomeRetry, RetryDependency, "", reason)
 }
 
 // record stores the outcome locally before attempting the ack. A delayed or

@@ -89,6 +89,10 @@ type Claim struct {
 	// (an expired lease or an earlier unknown outcome). The holder must look up
 	// the host receipt instead of sending the message a second time.
 	VerifyOnly bool
+	// ClaimError means the daemon could not use the lease it was handed (for
+	// example an unparseable lease_expires_at). The host was not called, so the
+	// worker must record a retry instead of delivering or verifying.
+	ClaimError string
 }
 
 // OutcomeState is what the host proved about one delivery attempt.
