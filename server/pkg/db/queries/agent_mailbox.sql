@@ -228,9 +228,12 @@ RETURNING *;
 
 -- name: ListIssueMailboxDeliveries :many
 -- Bounded recent projection for the issue response. Complete history is the
--- mailbox API's keyset pagination.
+-- mailbox API's keyset pagination. Only the legacy comment projection is
+-- included: the frozen issue DTO has no way to render a generic delivery, and a
+-- generic row may legitimately carry only an issue reference.
 SELECT * FROM agent_mailbox_message
 WHERE issue_id = @issue_id AND workspace_id = @workspace_id
+  AND source_type = 'comment'
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 

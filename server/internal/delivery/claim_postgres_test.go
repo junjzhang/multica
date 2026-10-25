@@ -141,8 +141,12 @@ func TestQueueClaimSeparatesProjectionsAndBindsToDaemonOwner(t *testing.T) {
 
 func enqueueComment(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID string) Delivery {
 	t.Helper()
+	return enqueueCommentForIssue(t, pool, workspaceID, agentID, uuid.NewString())
+}
+
+func enqueueCommentForIssue(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, issueID string) Delivery {
+	t.Helper()
 	commentID := uuid.NewString()
-	issueID := uuid.NewString()
 	store := NewPostgres(db.New(pool))
 	created, err := store.Enqueue(context.Background(), EnqueueRequest{
 		Scope:     Scope{WorkspaceID: workspaceID},
@@ -453,6 +457,44 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	}
 	if inflight != 1 || leasedID != comment.ID {
 		t.Fatalf("in-flight rows = %d (lease %s), want only the comment row %s", inflight, leasedID, comment.ID)
+	}
+}
+
+// A generic delivery may carry an issue reference, but the frozen issue
+// projection only renders comment-shaped rows. It must never leak a generic row
+// into the issue response.
+func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	workspaceID, agentID, _, _ := newClaimFixture(t, pool)
+	issueID := uuid.NewString()
+	comment := enqueueCommentForIssue(t, pool, workspaceID, agentID, issueID)
+
+	store := NewPostgres(db.New(pool))
+	generic, err := store.Enqueue(context.Background(), EnqueueRequest{
+		Scope:     Scope{WorkspaceID: workspaceID},
+		Source:    Source{Type: "ci_run", Key: "run-issue-" + uuid.NewString()},
+		Recipient: Recipient{Type: "agent", ID: agentID},
+		Kind:      "ci_terminal",
+		Refs:      Refs{IssueID: issueID},
+		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+	})
+	if err != nil {
+		t.Fatalf("enqueue generic delivery with an issue reference: %v", err)
+	}
+
+	rows, err := db.New(pool).ListIssueMailboxDeliveries(context.Background(), db.ListIssueMailboxDeliveriesParams{
+		IssueID:     mustParseUUID(t, issueID),
+		WorkspaceID: mustParseUUID(t, workspaceID),
+	})
+	if err != nil {
+		t.Fatalf("list issue mailbox deliveries: %v", err)
+	}
+	if len(rows) != 1 || util.UUIDToString(rows[0].ID) != comment.ID {
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			ids = append(ids, util.UUIDToString(row.ID))
+		}
+		t.Fatalf("issue deliveries = %v, want only the comment row %s (generic %s must not leak)", ids, comment.ID, generic.ID)
 	}
 }
 

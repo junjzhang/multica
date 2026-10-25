@@ -192,6 +192,11 @@ stops one unreachable recipient from consuming more than one slot. The worker
 runs a bounded number of sessions concurrently; the claim itself is the fairness
 bound, not a priority scheduler.
 
+The issue-detail projection (`ListIssueMailboxDeliveries`) also keeps the
+`source_type = 'comment'` filter. A generic delivery may legitimately reference
+an issue, but the frozen `IssueResponse` mailbox DTO cannot render one, so a
+generic row never leaks into that list.
+
 `delivery.Queue.RecordOutcome` stores the fenced result. The delivery token,
 daemon and unexpired lease fence the write, so a stale or foreign ack matches no
 row. A delayed ack is retried by the worker under the same lease instead of
