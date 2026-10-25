@@ -52,6 +52,12 @@ type Recipient struct {
 
 // Refs optionally links a delivery to the business objects that own the real
 // conversation. The core treats them as opaque stable IDs.
+//
+// CommentID is the legacy comment projection and shares the table's
+// (recipient, comment) unique key, so it is only valid for a "comment" source.
+// A generic producer keeps any comment reference inside Payload instead: a
+// generic row occupying that key would make a later comment delivery look like
+// a replay of an unrelated request.
 type Refs struct {
 	IssueID   string
 	CommentID string
@@ -106,6 +112,9 @@ func (r EnqueueRequest) Validate() error {
 	}
 	if strings.TrimSpace(r.Kind) == "" {
 		return errors.New("delivery: kind is required")
+	}
+	if r.Refs.CommentID != "" && r.Source.Type != "comment" {
+		return fmt.Errorf("delivery: comment ref %s requires source type \"comment\"", r.Refs.CommentID)
 	}
 	if len(bytes.TrimSpace(r.Payload)) == 0 {
 		return errors.New("delivery: payload is required")

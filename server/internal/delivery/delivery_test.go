@@ -32,6 +32,13 @@ func TestEnqueueRequestValidation(t *testing.T) {
 		{name: "no payload", mutate: func(r *EnqueueRequest) { r.Payload = nil }, wantErr: "payload"},
 		{name: "null payload", mutate: func(r *EnqueueRequest) { r.Payload = json.RawMessage(`null`) }, wantErr: "must not be null"},
 		{name: "invalid payload", mutate: func(r *EnqueueRequest) { r.Payload = json.RawMessage(`{`) }, wantErr: "invalid payload"},
+		{name: "generic comment ref", mutate: func(r *EnqueueRequest) {
+			r.Refs.CommentID = "0190f0f0-0000-7000-8000-000000000003"
+		}, wantErr: "requires source type"},
+		{name: "comment source with ref", mutate: func(r *EnqueueRequest) {
+			r.Source.Type = "comment"
+			r.Refs.CommentID = "0190f0f0-0000-7000-8000-000000000003"
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

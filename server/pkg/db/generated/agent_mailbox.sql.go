@@ -252,8 +252,18 @@ type CreateDeliveryParams struct {
 // The delivery core's only insert. The unique (workspace_id, recipient_type,
 // recipient_agent_id, source_type, source_key) index is the idempotency
 // boundary; a conflicting row returns nothing so the caller can re-read it and
-// compare the immutable content. issue_id/comment_id/sender_* are the legacy
-// comment projection; generic deliveries leave them NULL.
+// compare the immutable content.
+//
+// The conflict target is deliberately omitted so the legacy
+// (recipient_agent_id, comment_id) index is absorbed too. Rows written before
+// the core can have source_key NULL, which the partial idempotency index does
+// not cover; only the legacy index identifies them, and the caller recovers
+// their original UUID through GetLegacyCommentDelivery. Generic sources cannot
+// create that ambiguity: EnqueueRequest.Validate rejects a comment reference
+// unless the source itself is "comment".
+//
+// issue_id/comment_id/sender_* are the legacy comment projection; generic
+// deliveries leave them NULL.
 func (q *Queries) CreateDelivery(ctx context.Context, arg CreateDeliveryParams) (AgentMailboxMessage, error) {
 	row := q.db.QueryRow(ctx, createDelivery,
 		arg.ID,

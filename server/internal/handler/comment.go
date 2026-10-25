@@ -2024,10 +2024,16 @@ type commentWriteResult struct {
 	Delivered map[string]struct{}
 }
 
+// commentEditWriteResult is what UpdateComment's write transaction returns: the
+// edited row and the mailbox deliveries that committed with it.
+type commentEditWriteResult struct {
+	Updated   db.UpdateCommentRow
+	Delivered map[string]struct{}
+}
+
 // commentTriggerPlan pins the explicit-mention resolution for one comment.
-// CreateComment resolves it before its write so valid external handoffs can be
-// persisted in the comment's transaction; the edit path uses the same resolver
-// through triggerTasksForComment.
+// CreateComment and UpdateComment resolve it before their write so valid
+// external handoffs can be persisted in the comment's transaction.
 type commentTriggerPlan struct {
 	triggers       []commentAgentTrigger
 	targets        []commentMentionTarget
@@ -2066,8 +2072,8 @@ func (h *Handler) planCommentTriggers(ctx context.Context, issue db.Issue, conte
 // turn is still running receives this comment there instead of a follow-up run.
 //
 // This wrapper is for callers that do not own the comment's write transaction
-// (comment edits). CreateComment uses planCommentTriggers and persists the
-// mailbox rows inside the write transaction instead.
+// (completion replay). CreateComment and UpdateComment use planCommentTriggers
+// and persist the mailbox rows inside the write transaction instead.
 func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, comment db.Comment, parentComment *db.Comment, actorType, actorID, originatorUserID string, suppressAgentIDs, steerTaskIDs []pgtype.UUID) []CommentTriggerOutcome {
 	if isNoteComment(comment.Content) {
 		return nil
@@ -3236,6 +3242,11 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	sourceTaskID := existing.SourceTaskID
 	var triggerIssue *db.Issue
 	var cancelled []db.AgentTaskQueue
+	// triggerPlan is resolved before the write so an edit that adds a valid
+	// external mention persists its delivery in the same transaction as the new
+	// content. mailboxDelivered is what that transaction actually committed.
+	var triggerPlan commentTriggerPlan
+	var mailboxDelivered map[string]struct{}
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
 		if err != nil {
@@ -3269,6 +3280,20 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to prepare comment edit")
 				return
 			}
+		}
+		// Resolve the edited content's triggers from the state this edit creates
+		// (old tasks cancelled above), before the row changes. Resolution is
+		// read-only; the write transaction below is the only thing that persists
+		// a valid external handoff.
+		if !isNoteComment(req.Content) {
+			var parentComment *db.Comment
+			if existing.ParentID.Valid {
+				parent, parentErr := h.Queries.GetComment(r.Context(), existing.ParentID)
+				if parentErr == nil {
+					parentComment = &parent
+				}
+			}
+			triggerPlan = h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, actorType, actorID, existing.ID, pgtype.UUID{}, sourceTaskID, h.invokeOriginatorFromRequest(r, actorType, actorID), suppressAgentIDs, false)
 		}
 	}
 
@@ -3327,6 +3352,13 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 		}
+		// The edited content and every valid external handoff are one database
+		// outcome: a mailbox insert failure rolls the edit back, so the caller
+		// can retry the same content instead of leaving an @ that will never be
+		// delivered.
+		if err == nil && triggerIssue != nil && len(triggerPlan.mailboxTargets) > 0 {
+			mailboxDelivered, err = h.enqueueMailboxDeliveries(r.Context(), qtx, *triggerIssue, existing.ID, triggerPlan.mailboxTargets, actorType, actorID)
+		}
 		if err == nil {
 			err = tx.Commit(r.Context())
 		}
@@ -3334,13 +3366,24 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			h.TaskService.BroadcastCancelledTasks(r.Context(), uuidToString(existing.WorkspaceID), cancelled)
 		}
 	} else {
-		var updated db.UpdateCommentRow
-		updated, err = wakeupWrite(h, r, func(q *db.Queries) (db.UpdateCommentRow, error) {
-			return q.UpdateComment(r.Context(), updateParams)
+		written, writeErr := wakeupWrite(h, r, func(q *db.Queries) (commentEditWriteResult, error) {
+			updated, err := q.UpdateComment(r.Context(), updateParams)
+			if err != nil {
+				return commentEditWriteResult{}, err
+			}
+			var delivered map[string]struct{}
+			if triggerIssue != nil && len(triggerPlan.mailboxTargets) > 0 {
+				delivered, err = h.enqueueMailboxDeliveries(r.Context(), q, *triggerIssue, existing.ID, triggerPlan.mailboxTargets, actorType, actorID)
+				if err != nil {
+					return commentEditWriteResult{}, err
+				}
+			}
+			return commentEditWriteResult{Updated: updated, Delivered: delivered}, nil
 		})
-		if err == nil {
-			comment = updated.Comment()
-			issueRevision = updated.IssueRevision
+		if err = writeErr; err == nil {
+			comment = written.Updated.Comment()
+			issueRevision = written.Updated.IssueRevision
+			mailboxDelivered = written.Delivered
 		}
 	}
 	if err != nil {
@@ -3369,21 +3412,19 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update comment")
 		return
 	}
-	retriggerEditedComment := func() []CommentTriggerOutcome {
+	finishEditedComment := func() []CommentTriggerOutcome {
 		if oldContent == comment.Content {
 			return nil
 		}
 		issue := *triggerIssue
-		var parentComment *db.Comment
-		if existing.ParentID.Valid {
-			parent, err := h.Queries.GetComment(r.Context(), existing.ParentID)
-			if err == nil {
-				parentComment = &parent
-			}
-		}
-
 		h.retriggerCancelledTaskSurvivors(r.Context(), issue, cancelled, existing.ID)
-		return h.triggerTasksForComment(r.Context(), issue, comment, parentComment, actorType, actorID, h.invokeOriginatorFromRequest(r, actorType, actorID), suppressAgentIDs, nil)
+		if len(mailboxDelivered) > 0 {
+			h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
+		}
+		// Native runs resolve after commit: a blocked mention must not fail the
+		// saved edit. Mailbox outcomes only report what the transaction
+		// committed, so the caller never sees "queued" for a rolled-back row.
+		return h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered)
 	}
 
 	// Fetch reactions and attachments for the updated comment.
@@ -3401,7 +3442,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 
 	// The broadcast above intentionally omits trigger_outcomes — it is the
 	// editor's private feedback, not shared timeline state (MUL-4525 §2).
-	resp.TriggerOutcomes = retriggerEditedComment()
+	resp.TriggerOutcomes = finishEditedComment()
 
 	writeJSON(w, http.StatusOK, resp)
 }

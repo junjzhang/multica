@@ -546,10 +546,10 @@ type commentMentionDeliveryPayload struct {
 }
 
 // enqueueMailboxDeliveries persists one delivery per explicit external mention
-// through the delivery core. q may be a transaction handle: CreateComment
-// passes its write transaction so the comment and every valid handoff commit or
-// roll back together. A persistence failure fails the whole call; the caller
-// decides how to report that, but it must not treat a target as queued.
+// through the delivery core. q may be a transaction handle: CreateComment and
+// UpdateComment pass their write transaction so the comment content and every
+// valid handoff commit or roll back together. A persistence failure fails the
+// whole call; the caller must not treat any target as queued.
 func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	if len(recipients) == 0 {
@@ -593,9 +593,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			},
 		})
 		if err != nil {
-			// Keep already-persisted recipients in the result. Callers that own a
-			// transaction roll all of them back; the edit path reports the
-			// recipients that did commit instead of claiming every target failed.
+			// Keep already-persisted recipients in the result for diagnostics.
+			// Callers own a transaction, so a failure rolls every one of them
+			// back and none is reported as queued.
 			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", uuidToString(agent.ID), err)
 		}
 		out[uuidToString(agent.ID)] = struct{}{}
