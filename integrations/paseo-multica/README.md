@@ -7,7 +7,7 @@ settings screen.
 
 ```text
 /multica connect      register this conversation, mint its external credential
-/multica status       show the binding, return address, and local validity
+/multica status       show the binding, return address, and current validity
 /multica disconnect   revoke this binding's credential and remove local context
 ```
 
@@ -47,10 +47,12 @@ through its existing `PASEO_AGENT_ID` without a provider reload.
 
 The file is a private credential cache, not task/queue authority. A repeat
 connect reuses a locally valid, host-compatible binding; it verifies that
-credential against the agent's own mailbox endpoint before trusting it. Expired
-or revoked credentials are repaired only by explicit `/multica connect`. A
-binding for another server, workspace, host, or daemon is reported and left
-untouched rather than silently rebound.
+credential against the bound agent's own mailbox endpoint before trusting it.
+That endpoint authorizes the credential's subject rather than a merely visible
+agent, so another agent's credential cannot validate this binding. Expired or
+revoked credentials are repaired only by explicit `/multica connect`. A binding
+for another server, workspace, host, or daemon is reported and left untouched
+rather than silently rebound.
 
 `disconnect` revokes only the token recorded in this session's file, then
 deletes that file. If the configured owner profile cannot revoke that token —
@@ -65,14 +67,24 @@ skips history replay and never injects an owner credential.
 
 ## Development
 
+This plugin is its own pnpm project with its own lockfile. It is loaded by
+Paseo and is not part of the Multica web/mobile dependency graph, so installing
+or changing it does not touch the repository lockfile.
+
 ```bash
-pnpm --filter @multica/paseo-multica typecheck
-pnpm --filter @multica/paseo-multica test
+cd integrations/paseo-multica
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test
 ```
 
 Tests use a temporary `HOME`, a fake host adapter, and a fake Multica API; the
 HTTP helper tests use a loopback server. They do not read a real user's
 Multica configuration or contact a production server.
+
+`.github/workflows/paseo-multica.yml` runs the same frozen install, typecheck,
+and package tests, but only for changes inside this directory or to that
+workflow.
 
 The plugin targets the deployed Paseo SDK/API `0.13.0-beta.1` (revision
 `fddb9e3a`). It is a directory plugin: install it from Settings → Plugins or
@@ -80,9 +92,11 @@ with `paseo plugin install <absolute path>` on the daemon host.
 
 ## Limits
 
-- `status` reports whether the local binding is complete, host-compatible, and
-  unexpired; it does not poll the server. A credential revoked elsewhere is
-  discovered on the next explicit `connect` or by the Multica command that uses
-  it.
+- `status` checks that the local binding is complete, host-compatible, and
+  unexpired, then asks the bound agent's mailbox whether Multica still accepts
+  the credential. A credential revoked elsewhere therefore shows as needing
+  attention. If that request cannot complete, the panel reports the binding as
+  unverified instead of claiming a connection. `status` never repairs anything;
+  `/multica connect` does that explicitly.
 - No automatic enrollment of existing sessions, no automatic model messages, no
   MCP server, and no provider reload.

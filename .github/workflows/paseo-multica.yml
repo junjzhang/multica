@@ -1,0 +1,63 @@
+name: Paseo Multica plugin
+
+# The plugin is its own pnpm project and is loaded directly by Paseo. Keep this
+# job path-scoped so it never adds cost to the web/mobile dependency graph, and
+# never change the main CI selection from here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "integrations/paseo-multica/**"
+      - ".github/workflows/paseo-multica.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "integrations/paseo-multica/**"
+      - ".github/workflows/paseo-multica.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paseo-multica-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: integrations/paseo-multica
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: integrations/paseo-multica/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: integrations/paseo-multica/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The plugin has its own lockfile; a frozen install here must not rewrite
+      # the repository's install graph.
+      - name: Assert the repository install graph is untouched
+        working-directory: ${{ github.workspace }}
+        run: git diff --exit-code -- pnpm-lock.yaml pnpm-workspace.yaml package.json
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
