@@ -33,6 +33,24 @@ func TestPerTurnContextBlocksRenderAgentReturnAddress(t *testing.T) {
 	}
 }
 
+// TestPerTurnContextBlocksOmitSelfCoordinator covers an agent that created an
+// issue and is also assigned it: the server records the creator as coordinator,
+// so the coordinator IS the executing agent. Naming it would instruct the run to
+// mention itself, and a self-mention queues another run for this agent while the
+// current one is still running — the pending-task check only deduplicates
+// queued/dispatched tasks — so every turn could wake the next one.
+func TestPerTurnContextBlocksOmitSelfCoordinator(t *testing.T) {
+	blocks := perTurnContextBlocks(Task{
+		AgentID:         testCoordinatorAgentID,
+		CoordinatorType: "agent",
+		CoordinatorID:   testCoordinatorAgentID,
+	}, promptOpts{})
+
+	if strings.Contains(blocks, "Result return address") || strings.Contains(blocks, "mention://") {
+		t.Fatalf("self-coordinated run was told to mention itself:\n%s", blocks)
+	}
+}
+
 func TestPerTurnContextBlocksReportMemberCoordinatorAsNotWakeable(t *testing.T) {
 	blocks := perTurnContextBlocks(Task{
 		CoordinatorType: "member",

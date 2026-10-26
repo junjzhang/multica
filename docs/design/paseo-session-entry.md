@@ -131,6 +131,10 @@ The issue coordinator is the recorded result recipient (no new DB state):
   - no recipient, unknown actor kind, or an old server that never sent the
     fields: no block. The run does not infer a recipient from the assignee, the
     trigger author or the latest commenter.
+  - the agent coordinator is the executing agent itself (an agent-created issue
+    assigned back to its creator): no block either. Naming the run's own agent
+    would tell it to mention itself, and a self-mention queues another run while
+    this one is still executing, so the run would keep waking itself.
 - The block states the permission boundary: the coordinator is this issue's
   recorded recipient, not evidence of who delegated this or any other task.
 

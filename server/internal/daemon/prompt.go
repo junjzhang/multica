@@ -91,6 +91,15 @@ func buildReturnAddressBlock(task Task) string {
 	}
 	switch task.CoordinatorType {
 	case "agent":
+		// An agent can be its own coordinator: the server records the creator
+		// as coordinator, and an agent-created issue assigned back to that same
+		// agent is the ordinary case. There is no one to hand back to, and a
+		// mention of this run's own agent would queue another run while this
+		// one is still executing — the pending-task check only covers queued
+		// and dispatched tasks, so the run could wake itself indefinitely.
+		if task.CoordinatorID == task.AgentID {
+			return ""
+		}
 		return fmt.Sprintf(
 			"[Result return address]\n"+
 				"This issue records an agent coordinator: %s. To hand a result back for review or acceptance, post a comment that explicitly mentions [@coordinator](mention://agent/%s). Only that explicit mention reaches the coordinator — nothing returns results automatically.\n"+
