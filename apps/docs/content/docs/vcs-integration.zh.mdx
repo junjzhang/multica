@@ -17,6 +17,18 @@ Multica 按工作区连接自托管的 Git 代码托管：**Forgejo**、**Gitea*
 与 GitHub 不同，这些代码托管没有「App」模型。每个工作区保存自己的实例地址和访问令牌，并在其仓库或组织上注册 Webhook。令牌和 Webhook 密钥均加密存储。
 </Callout>
 
+## 工蜂（TGit）
+
+在设置 → 代码中选择 **TGit (工蜂)**，填写实例地址（例如 `https://git.woa.com`）和具备 API 账户读取权限的个人访问令牌。Multica 通过 `GET /api/v3/user` 校验令牌。
+
+在仓库的 Webhook 设置中填写 Multica 提供的地址，将密钥填入 **Token**，启用**合并请求事件**。工蜂使用 `X-Event: Merge Request Hook` 和 `X-Token` 发送、校验事件。参见[工蜂 Webhook API](https://git.tencent.com/help/menu/api/hooks.html)。
+
+MR 的草稿、打开、关闭、合并状态同步到现有任务卡片。Fork MR 归属目标仓库；不会把事件操作者当作 MR 作者，也不会把更新时间当作合并或关闭时间。
+
+已有 MR 在收到 Webhook 后出现，不自动补录历史 MR。同步后，可使用同一主机的 `/merge_requests/N` 或 `/-/merge_requests/N` 链接手动关联，兼容 HTTP 与 HTTPS。连接实例不会自动创建仓库 Hook。
+
+**暂不同步工蜂 CI 结果**，卡片保持检查结果未知。本集成不增加轮询或新的条件唤醒。
+
 ## 前置条件（服务端）
 
 先为该部署开启此集成。它默认关闭，未开启时该板块不会出现：

@@ -48,11 +48,12 @@ import { useT } from "../../i18n";
 import { SettingsRow } from "./settings-layout";
 import { HostMark, HostStatus } from "./code-host";
 
-const PROVIDERS: VCSProvider[] = ["forgejo", "gitea", "gitlab"];
+const PROVIDERS: VCSProvider[] = ["forgejo", "gitea", "gitlab", "tgit"];
 const PROVIDER_LABELS: Record<VCSProvider, string> = {
   forgejo: "Forgejo",
   gitea: "Gitea",
   gitlab: "GitLab",
+  tgit: "TGit (工蜂)",
 };
 const PROVIDER_OPTIONS = PROVIDERS.map((p) => ({
   value: p,
@@ -60,7 +61,7 @@ const PROVIDER_OPTIONS = PROVIDERS.map((p) => ({
 }));
 
 /**
- * Self-hosted Forgejo / Gitea / GitLab connections, rendered as rows of the
+ * Self-hosted Git provider connections, rendered as rows of the
  * Code page's "Code hosting" card: one row per connected instance, then a row
  * to connect another. Connecting and rotating both end on the one-time webhook
  * secret, shown in a dialog the user has to dismiss.
@@ -310,7 +311,9 @@ export function VCSConnectionRows() {
                 onChange={(e) => setToken(e.target.value)}
                 disabled={connecting}
               />
-              <p className="text-caption text-muted-foreground">{t(($) => $.vcs.form_token_hint)}</p>
+              <p className="text-caption text-muted-foreground">
+                {provider === "tgit" ? t(($) => $.vcs.tgit_token_hint) : t(($) => $.vcs.form_token_hint)}
+              </p>
             </div>
             <DialogFooter>
               <Button
@@ -342,7 +345,11 @@ export function VCSConnectionRows() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>{t(($) => $.vcs.webhook_setup_title)}</DialogTitle>
-            <DialogDescription>{t(($) => $.vcs.webhook_setup_description)}</DialogDescription>
+            <DialogDescription>
+              {webhook?.provider === "tgit"
+                ? t(($) => $.vcs.tgit_webhook_setup_description)
+                : t(($) => $.vcs.webhook_setup_description)}
+            </DialogDescription>
           </DialogHeader>
           {webhook ? (
             <div className="space-y-3">

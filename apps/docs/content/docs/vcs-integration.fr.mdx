@@ -22,6 +22,18 @@ Ces fournisseurs fonctionnent en parallèle de GitHub : un espace de travail peu
 Contrairement à GitHub, ces fournisseurs n'ont pas de modèle « App ». Chaque espace de travail stocke sa propre URL d'instance et un jeton d'accès, et enregistre un webhook sur son dépôt ou son organisation. Le jeton et le secret du webhook sont chiffrés au repos.
 </Callout>
 
+## TGit (工蜂)
+
+Sélectionnez **TGit (工蜂)** dans Paramètres → Code, puis saisissez l’URL de l’instance et un jeton personnel autorisé à lire votre compte via l’API. La validation utilise `GET /api/v3/user`.
+
+Ajoutez un webhook au dépôt avec l’URL fournie, placez le secret dans **Token** et activez les événements **Merge request**. TGit utilise `X-Event: Merge Request Hook` et `X-Token`. Voir l’[API Webhook TGit](https://git.tencent.com/help/menu/api/hooks.html).
+
+Les cartes affichent les états brouillon, ouvert, fermé et fusionné. Les MR de forks appartiennent au dépôt cible. L’acteur de l’événement n’est pas affiché comme auteur de la MR. Les heures de fusion et de fermeture restent inconnues.
+
+Les MR existantes apparaissent après réception d’un webhook ; aucun historique ni hook de dépôt n’est créé automatiquement. Les liens HTTP et HTTPS du même hôte, avec `/merge_requests/N` ou `/-/merge_requests/N`, permettent l’association manuelle après synchronisation.
+
+**Les résultats CI TGit ne sont pas synchronisés.** Les vérifications restent inconnues. Aucun polling ni nouvelle condition de réveil n’est ajouté.
+
 ## Prérequis (serveur)
 
 Activez l'intégration pour ce déploiement. Elle est désactivée par défaut : la section reste masquée tant que vous n'avez pas défini :

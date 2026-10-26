@@ -50,7 +50,14 @@ func (q *Queries) DeleteVCSConnection(ctx context.Context, arg DeleteVCSConnecti
 const findVCSPullRequestByURL = `-- name: FindVCSPullRequestByURL :one
 SELECT id, workspace_id, connection_id, provider, repo_owner, repo_name, pr_number, title, state, html_url, branch, head_sha, author_login, author_avatar_url, merged_at, closed_at, pr_created_at, pr_updated_at, additions, deletions, changed_files, created_at, updated_at FROM vcs_pull_request
 WHERE workspace_id = $1
-  AND lower(rtrim(html_url, '/')) = lower($2::text)
+  AND (
+    lower(rtrim(html_url, '/')) = lower($2::text)
+    OR (
+      provider = 'tgit'
+      AND replace(regexp_replace(lower(rtrim(html_url, '/')), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+        = replace(regexp_replace(lower($2::text), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+    )
+  )
 ORDER BY pr_updated_at DESC
 LIMIT 1
 `

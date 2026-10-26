@@ -1,6 +1,6 @@
 // Package vcs is the provider abstraction for token-based Git providers that
 // Multica mirrors pull requests and CI status from: Forgejo, Gitea (Forgejo's
-// upstream, wire-identical), and GitLab. GitHub is intentionally NOT a vcs
+// upstream, wire-identical), GitLab, and TGit. GitHub is intentionally NOT a vcs
 // provider — its App/installation model and check_suite CI differ enough that
 // it keeps its own handler (server/internal/handler/github.go).
 //
@@ -25,12 +25,13 @@ const (
 	KindForgejo Kind = "forgejo"
 	KindGitea   Kind = "gitea"
 	KindGitLab  Kind = "gitlab"
+	KindTGit    Kind = "tgit"
 )
 
 // Valid reports whether k is a known provider kind.
 func (k Kind) Valid() bool {
 	switch k {
-	case KindForgejo, KindGitea, KindGitLab:
+	case KindForgejo, KindGitea, KindGitLab, KindTGit:
 		return true
 	}
 	return false
@@ -120,7 +121,7 @@ type Provider interface {
 	EventKind(h http.Header) EventKind
 	// VerifySignature authenticates the raw body against the connection's
 	// stored secret. Forgejo/Gitea use HMAC-SHA256 (X-Gitea-Signature);
-	// GitLab uses a plaintext token compare (X-Gitlab-Token).
+	// GitLab and TGit compare shared tokens (X-Gitlab-Token and X-Token).
 	VerifySignature(secret string, h http.Header, body []byte) bool
 	// ParsePullRequest decodes a pull/merge request webhook body.
 	ParsePullRequest(body []byte) (PullRequestEvent, error)
@@ -132,7 +133,7 @@ type Provider interface {
 }
 
 // registry maps a Kind to its Provider. Populated by package init in the
-// adapter files (forgejo.go, gitlab.go).
+// adapter files.
 var registry = map[Kind]Provider{}
 
 func register(p Provider) { registry[p.Kind()] = p }

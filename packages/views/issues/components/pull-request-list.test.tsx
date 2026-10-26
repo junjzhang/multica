@@ -262,6 +262,23 @@ describe("PullRequestList sidebar rows", () => {
     expect(verdict()).toHaveTextContent(expected);
   });
 
+  it("renders a TGit MR link without inventing a CI verdict", async () => {
+    const url = "https://git.test/org/widget/merge_requests/42";
+    mockPRs = [makePR({
+      provider: "tgit",
+      number: 42,
+      title: "Fix a TGit issue",
+      html_url: url,
+      author_login: null,
+      snapshot_available: undefined,
+      checks_conclusion: null,
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.getByRole("link", { name: /Fix a TGit issue/ })).toHaveAttribute("href", url);
+    expect(screen.queryByTestId("pull-request-verdict")).not.toBeInTheDocument();
+  });
+
   // --- Terminal PRs --------------------------------------------------------
 
   it("ends a merged PR at Merged, whatever its last snapshot said", async () => {

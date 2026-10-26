@@ -215,6 +215,13 @@ WHERE id = $1 AND workspace_id = $2;
 -- name: FindVCSPullRequestByURL :one
 SELECT * FROM vcs_pull_request
 WHERE workspace_id = $1
-  AND lower(rtrim(html_url, '/')) = lower(sqlc.arg('html_url')::text)
+  AND (
+    lower(rtrim(html_url, '/')) = lower(sqlc.arg('html_url')::text)
+    OR (
+      provider = 'tgit'
+      AND replace(regexp_replace(lower(rtrim(html_url, '/')), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+        = replace(regexp_replace(lower(sqlc.arg('html_url')::text), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+    )
+  )
 ORDER BY pr_updated_at DESC
 LIMIT 1;

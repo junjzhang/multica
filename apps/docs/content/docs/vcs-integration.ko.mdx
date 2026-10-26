@@ -17,6 +17,18 @@ Multica는 워크스페이스별로 자체 호스팅 Git 코드 호스팅인 **F
 GitHub와 달리 이 코드 호스팅에는 "App" 모델이 없습니다. 워크스페이스마다 인스턴스 URL과 액세스 token을 저장하고 저장소 또는 조직에 Webhook을 등록합니다. Token과 Webhook secret은 모두 암호화되어 저장됩니다.
 </Callout>
 
+## TGit (工蜂)
+
+설정 → 코드에서 **TGit (工蜂)** 를 선택하고 인스턴스 URL과 API로 계정을 읽을 수 있는 개인 액세스 토큰을 입력하세요. `GET /api/v3/user`로 토큰을 검증합니다.
+
+저장소 Webhook에 제공된 URL을 입력하고 시크릿을 **Token**에 붙여 넣은 뒤 **Merge request** 이벤트를 활성화하세요. TGit은 `X-Event: Merge Request Hook`과 `X-Token`을 사용합니다. [TGit Webhook API](https://git.tencent.com/help/menu/api/hooks.html)를 참고하세요.
+
+카드에 초안, 열림, 닫힘, 병합됨 상태가 표시됩니다. Fork MR은 대상 저장소에 속합니다. 이벤트 실행자를 MR 작성자로 표시하지 않으며 수정 시각을 병합 또는 종료 시각으로 사용하지 않습니다.
+
+기존 MR은 Webhook을 받은 후 표시됩니다. 과거 MR을 가져오거나 저장소 Hook을 자동 생성하지 않습니다. 동기화 후 같은 호스트의 HTTP/HTTPS `/merge_requests/N` 또는 `/-/merge_requests/N` 링크로 수동 연결할 수 있습니다.
+
+**TGit CI 결과는 동기화되지 않습니다.** 검사 결과는 알 수 없음으로 유지됩니다. 폴링이나 새 깨우기 조건은 추가하지 않습니다.
+
 ## 사전 조건(서버)
 
 먼저 이 배포에서 연동을 켭니다. 기본값은 꺼짐이며 활성화하기 전에는 해당 영역이 표시되지 않습니다.
