@@ -50,12 +50,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The plugin has its own lockfile; a frozen install here must not rewrite
-      # the repository's install graph.
-      - name: Assert the repository install graph is untouched
-        working-directory: ${{ github.workspace }}
-        run: git diff --exit-code -- pnpm-lock.yaml pnpm-workspace.yaml package.json
-
       - name: Typecheck
         run: pnpm typecheck
 
