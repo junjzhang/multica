@@ -167,9 +167,9 @@ func (r *TGitSnapshotRefresher) apply(ctx context.Context, pr db.VcsPullRequest)
 		r.h.reconcileVCSPullRequest(ctx, conn, event, updated, pr.State)
 		return nil
 	}
-	var previous vcs.TGitSnapshot
+	var previous, current vcs.TGitSnapshot
 	if !pr.SnapshotFetchedAt.Valid || pr.SnapshotError || time.Since(pr.SnapshotFetchedAt.Time) > 2*time.Minute ||
-		json.Unmarshal(pr.ApiSnapshot, &previous) != nil || !reflect.DeepEqual(previous, *snapshot) {
+		json.Unmarshal(pr.ApiSnapshot, &previous) != nil || json.Unmarshal(raw, &current) != nil || !reflect.DeepEqual(previous, current) {
 		r.h.publishTGitSnapshotChanged(ctx, updated)
 	}
 	return nil

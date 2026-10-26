@@ -275,6 +275,7 @@ func TestTGitSnapshotOnlyNotifiesChangesAndStillReconcilesMerge(t *testing.T) {
 	})
 	r := newTGitSnapshotRefresher(testHandler)
 	ev, snapshot := snapshotResult()
+	snapshot.Checks[0].TargetBranches = []string{}
 	var fetchErr error
 	r.fetch = func(context.Context, string, string, string, string, int32) (vcs.PullRequestEvent, *vcs.TGitSnapshot, error) {
 		return ev, snapshot, fetchErr
