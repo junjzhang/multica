@@ -418,6 +418,20 @@ export const GitHubPullRequestSchema = z.object({
   mergeable: z.string().nullable().optional(),
   merge_state_status: z.string().nullable().optional(),
   snapshot_available: z.boolean().optional(),
+  review: z.object({
+    state: z.string().catch("unknown"),
+    reviewers: z.array(z.object({
+      username: z.string(),
+      type: z.string().catch("unknown"),
+      review_state: z.string().catch("unknown"),
+    })).catch([]),
+    approver_rule: z.number().optional(),
+    necessary_approver_rule: z.number().optional(),
+  }).nullable().optional().catch(null),
+  check_details: z.array(z.object({
+    id: z.number(), context: z.string(), state: z.string(), target_url: z.string().catch(""),
+  })).optional().catch([]),
+  commit_gate: z.object({ state: z.string(), blocked: z.boolean().nullable() }).nullable().optional().catch(null),
   checks_rollup: z.string().nullable().optional(),
   checks_conclusion: z.string().nullable().optional(),
   checks_total: z.number().optional().default(0),

@@ -81,7 +81,7 @@ describe("VCSConnectionRows", () => {
     const webhook = await screen.findByRole("dialog", { name: /Finish setup/ });
     expect(within(webhook).getByDisplayValue("s3cret")).toBeInTheDocument();
     if (provider === "tgit") {
-      expect(within(webhook).getByText(/CI statuses are not synced/)).toBeInTheDocument();
+      expect(within(webhook).getByText(/CI, review and conflict status/)).toBeInTheDocument();
     }
     await user.click(within(webhook).getByRole("button", { name: "I've saved it" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());

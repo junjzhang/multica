@@ -32,7 +32,17 @@ MR events sync draft, open, closed and merged states into the existing issue car
 
 Existing MRs appear after a webhook delivery; this integration does not backfill them. Once mirrored, both `/merge_requests/N` and `/-/merge_requests/N` links on the same host can be used for manual linking, with either HTTP or HTTPS. No repository hooks are created automatically.
 
-**TGit CI results are not synced.** Cards keep check results unknown. This integration adds no polling or new wakeup conditions.
+TGit also reads **CI checks, MR review state and merge conflicts** through its API. Checks are scoped to the source commit and target branch, and the MR CI gate is evaluated independently of named checks. A pipeline waiting for human approval stays pending. Review uses the provider's aggregate decision; conflict detection uses the dedicated conflict API rather than inferring a conflict from a blocked merge.
+
+| MR metadata | Status snapshot |
+| --- | --- |
+| ![MR metadata](/images/docs/tgit-mr-basic.png) | ![Status snapshot](/images/docs/tgit-mr-status.png) |
+
+Snapshots are stored per MR and checked against the source and target revisions before publication. Missing or wrong-revision results remain unavailable; failed refreshes retain a visibly stale last result. Named checks and reviewer votes can be expanded on the card. Passing these displayed gates does not claim overall permission to merge.
+
+Only already-mirrored open MRs are refreshed. The server scans every 30 seconds, limits each MR to one attempt per minute and runs at most four fetches concurrently. Page visits and MR webhooks also request a refresh. Revision races retry shortly; errors back off, and rate limits honor Retry-After. Reconnecting resets credential-error backoff. No historical discovery/import or new wakeup conditions are added.
+
+For `git.woa.com`, the callback port must be 80, 443, 8080 or 8081. If Multica runs on another port, publish its authenticated webhook path through a reverse proxy on an accepted port.
 
 ## Prerequisites (server)
 

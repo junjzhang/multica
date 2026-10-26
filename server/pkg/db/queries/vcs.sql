@@ -225,3 +225,36 @@ WHERE workspace_id = $1
   )
 ORDER BY pr_updated_at DESC
 LIMIT 1;
+
+-- name: ListTGitSnapshotCandidates :many
+SELECT id FROM vcs_pull_request
+WHERE provider = 'tgit' AND state IN ('open', 'draft')
+  AND (snapshot_refresh_after IS NULL OR snapshot_refresh_after <= now())
+ORDER BY snapshot_refresh_after ASC NULLS FIRST, id
+LIMIT 100;
+
+-- name: ClaimTGitSnapshot :one
+UPDATE vcs_pull_request SET snapshot_refresh_after = now() + interval '1 minute'
+WHERE id = $1 AND provider = 'tgit' AND state IN ('open', 'draft')
+  AND (snapshot_refresh_after IS NULL OR snapshot_refresh_after <= now())
+RETURNING *;
+
+-- name: ApplyTGitSnapshot :one
+UPDATE vcs_pull_request
+SET api_snapshot = sqlc.arg('snapshot'), snapshot_fetched_at = now(), snapshot_error = false,
+    head_sha = sqlc.arg('head_sha'), pr_updated_at = sqlc.arg('remote_updated_at'),
+    title = sqlc.arg('title'), state = sqlc.arg('state'), branch = sqlc.narg('branch'), updated_at = now()
+WHERE id = sqlc.arg('id') AND provider = 'tgit' AND head_sha = sqlc.arg('expected_head')
+  AND pr_updated_at = sqlc.arg('expected_updated_at')
+  AND pr_updated_at <= sqlc.arg('remote_updated_at')
+  AND snapshot_refresh_after = sqlc.arg('claim_until')
+RETURNING *;
+
+-- name: FailTGitSnapshot :exec
+UPDATE vcs_pull_request
+SET snapshot_error = true, snapshot_refresh_after = sqlc.arg('retry_at')
+WHERE id = sqlc.arg('id') AND snapshot_refresh_after = sqlc.arg('claim_until');
+
+-- name: ResetVCSRefresh :exec
+UPDATE vcs_pull_request SET snapshot_refresh_after = NULL
+WHERE connection_id = $1 AND provider = 'tgit';
