@@ -56,7 +56,6 @@ export function StatusPanel({ agentId }: PluginAgentPanelProps) {
       ) : view?.reason ? (
         <SettingsRow label="Action needed" hint={view.reason} error={view.reason} />
       ) : null}
-      {view?.warning ? <SettingsRow label="Warning" hint={view.warning} error={view.warning} /> : null}
     </SettingsSection>
   );
 }

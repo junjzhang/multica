@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PaseoHostAdapter } from "../server/host";
+import { ConfigurationError } from "../server/owner-profile";
 import { createSessionService } from "../server/service";
 import {
   contextPath,
@@ -283,15 +284,28 @@ describe("session service", () => {
     expect((await readSessionContext(home, SESSION_B)).status).toBe("ok");
   });
 
-  it("does not remove a binding when the owner profile cannot reach its server", async () => {
+  it.each([
+    ["server", { server_url: "https://other.example" }],
+    ["workspace", { workspace_id: "0199a0b1-4444-7444-8444-444444444444" }],
+  ] as const)("keeps the binding when the owner profile cannot revoke it (%s mismatch)", async (_label, overrides) => {
     const { home, api, service } = await setup();
-    await writeSessionContext(home, makeContext({ server_url: "https://other.example" }));
-    const result = await service.disconnect(SESSION_A);
+    const context = makeContext(overrides);
+    await writeSessionContext(home, context);
 
-    expect(result.state).toBe("disconnected");
-    expect(result.warning).toMatch(/cannot revoke/);
+    const error = await service.disconnect(SESSION_A).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ConfigurationError);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toContain(context.agent_id);
+    expect(message).toContain(context.token_id);
+    expect(message).toContain(context.server_url);
+    expect(message).toContain(context.workspace_id);
+    expect(message).toMatch(/owner profile/);
+    expect(message).toMatch(/local context was kept/);
+
     expect(api.revoked).toHaveLength(0);
-    expect((await readSessionContext(home, SESSION_A)).status).toBe("missing");
+    const kept = await readSessionContext(home, SESSION_A);
+    expect(kept.status).toBe("ok");
+    if (kept.status === "ok") expect(kept.context.token_id).toBe(context.token_id);
   });
 
   it("reports disconnected and invalid states without a credential", async () => {

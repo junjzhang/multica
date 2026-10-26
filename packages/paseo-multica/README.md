@@ -53,8 +53,11 @@ binding for another server, workspace, host, or daemon is reported and left
 untouched rather than silently rebound.
 
 `disconnect` revokes only the token recorded in this session's file, then
-deletes that file. It never archives or deletes the Paseo conversation, its
-history, or any other agent's binding.
+deletes that file. If the configured owner profile cannot revoke that token —
+because it was issued by another server or workspace — the file is kept and the
+error names the agent, token, server, and workspace so the original profile can
+be restored before retrying. It never archives or deletes the Paseo
+conversation, its history, or any other agent's binding.
 
 `agent.session_open` injects only `MULTICA_EXTERNAL_SESSION_FILE` for an
 interactive opening of a session that already has a valid local binding. It

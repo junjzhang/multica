@@ -113,16 +113,10 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     return null;
   }
 
-  function viewFor(
-    context: SessionContext,
-    state: StatusView["state"],
-    reason?: string,
-    warning?: string,
-  ): StatusView {
+  function viewFor(context: SessionContext, state: StatusView["state"], reason?: string): StatusView {
     return {
       state,
       ...(reason ? { reason } : {}),
-      ...(warning ? { warning } : {}),
       agentId: context.agent_id,
       workspaceId: context.workspace_id,
       serverUrl: context.server_url,
@@ -136,11 +130,10 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     };
   }
 
-  function disconnectedView(reason: string, warning?: string): StatusView {
+  function disconnectedView(reason: string): StatusView {
     return {
       state: "disconnected",
       reason,
-      ...(warning ? { warning } : {}),
       checkedAt: now().toISOString(),
     };
   }
@@ -161,7 +154,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         const conflict = conflictFor(existing.context, host, owner, config.daemonId);
         if (conflict) {
           throw new ConfigurationError(
-            `${conflict} Refusing to rebind this session. Run /multica disconnect to clear only this session's local context, then connect again.`,
+            `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it, then connect again.`,
           );
         }
         if (!isExpired(existing.context, now())) {
@@ -308,10 +301,8 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       const owner = await loadOwnerProfile(deps.home, config.ownerProfile);
 
       if (owner.serverUrl !== context.server_url || owner.workspaceId !== context.workspace_id) {
-        await store.remove(deps.home, agentId);
-        return disconnectedView(
-          "Removed this session's local Multica context.",
-          `The credential was issued by "${context.server_url}" in workspace "${context.workspace_id}", which the configured owner profile cannot revoke.`,
+        throw new ConfigurationError(
+          `The configured owner profile cannot revoke this session's Multica credential: agent ${context.agent_id}, token ${context.token_id}, issued by "${context.server_url}" in workspace "${context.workspace_id}". Restore the owner profile that issued it and run /multica disconnect again. The local context was kept.`,
         );
       }
 

@@ -5,8 +5,6 @@ export const statusViewSchema = z.object({
   state: z.enum(["connected", "invalid", "disconnected"]),
   /** Actionable explanation for an invalid or disconnected state. */
   reason: z.string().optional(),
-  /** A problem that does not change the state, such as an unreaped remote token. */
-  warning: z.string().optional(),
   agentId: z.string().optional(),
   workspaceId: z.string().optional(),
   serverUrl: z.string().optional(),
