@@ -113,6 +113,9 @@ func readExternalSessionContext() (*externalSessionContext, error) {
 	if err := ctx.validate(); err != nil {
 		return nil, fmt.Errorf("external session context %s is invalid: %w; %s", path, err, externalSessionConnectHint)
 	}
+	// Normalize once so an explicit --server-url / MULTICA_SERVER_URL that
+	// names the same endpoint in another spelling is not a false conflict.
+	ctx.ServerURL = normalizeAPIBaseURL(ctx.ServerURL)
 	return &ctx, nil
 }
 
@@ -158,6 +161,9 @@ func (c *externalSessionContext) validate() error {
 	serverURL, err := url.Parse(c.ServerURL)
 	if err != nil || (serverURL.Scheme != "http" && serverURL.Scheme != "https") || serverURL.Host == "" || serverURL.User != nil {
 		return fmt.Errorf("server_url %q is not an http(s) base URL", c.ServerURL)
+	}
+	if strings.TrimSpace(c.Token) != c.Token {
+		return fmt.Errorf("token has surrounding whitespace")
 	}
 	if !strings.HasPrefix(c.Token, externalSessionTokenPrefix) {
 		return fmt.Errorf("token is not an external agent credential (%s...)", externalSessionTokenPrefix)

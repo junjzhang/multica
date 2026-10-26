@@ -282,6 +282,26 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 		})
 	}
 
+	t.Run("matching explicit endpoint and workspace", func(t *testing.T) {
+		humanAPI.reset()
+		externalAPI.reset()
+		env := map[string]string{
+			"PASEO_AGENT_ID":       "paseo-agent-1",
+			"MULTICA_SERVER_URL":   externalAPI.server.URL + "/",
+			"MULTICA_WORKSPACE_ID": "ws-external",
+		}
+		_, stderr, exitCode := externalAPI.runCLI(t, home, env, "issue", "list", "--output", "json")
+		if exitCode != 0 {
+			t.Fatalf("exit code = %d, stderr:\n%s", exitCode, stderr)
+		}
+		if got := humanAPI.recorded(); len(got) != 0 {
+			t.Fatalf("matching explicit input fell back to the human server: %#v", got)
+		}
+		if got := externalAPI.recorded(); len(got) != 1 || got[0].Authorization != "Bearer mea_session_token" {
+			t.Fatalf("session identity not used: %#v", got)
+		}
+	})
+
 	t.Run("explicit context file", func(t *testing.T) {
 		humanAPI.reset()
 		externalAPI.reset()
