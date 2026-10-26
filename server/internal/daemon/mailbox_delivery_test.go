@@ -174,6 +174,9 @@ func TestMailboxDeliveryBusyRetriesWithStableIdempotencyKey(t *testing.T) {
 	if len(client.ackCalls) != 1 || client.ackCalls[0].ack.Status != mailboxAckRetry || client.ackCalls[0].ack.Error != mailboxErrorAgentBusy {
 		t.Fatalf("busy ack = %+v", client.ackCalls)
 	}
+	if client.ackCalls[0].ack.RetryClass != "busy" {
+		t.Fatalf("busy retry class = %q, want busy", client.ackCalls[0].ack.RetryClass)
+	}
 	if err := loop.deliverOnce(context.Background()); err != nil {
 		t.Fatalf("round 2: %v", err)
 	}
@@ -206,6 +209,9 @@ func TestMailboxDeliveryOfflineStaysQueued(t *testing.T) {
 	}
 	if client.ackCalls[0].ack.Status != mailboxAckRetry || client.ackCalls[0].ack.Error != mailboxErrorHostUnreachable {
 		t.Fatalf("offline ack = %+v", client.ackCalls[0])
+	}
+	if client.ackCalls[0].ack.RetryClass != "unavailable" {
+		t.Fatalf("offline retry class = %q, want unavailable", client.ackCalls[0].ack.RetryClass)
 	}
 }
 

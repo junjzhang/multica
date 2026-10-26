@@ -20,13 +20,66 @@ SELECT * FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2;
 SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
 
+-- name: CreateDelivery :one
+-- The delivery core's only insert. The unique (workspace_id, recipient_type,
+-- recipient_agent_id, source_type, source_key) index is the idempotency
+-- boundary; a conflicting row returns nothing so the caller can re-read it and
+-- compare the immutable content.
+--
+-- The conflict target is deliberately omitted so the legacy
+-- (recipient_agent_id, comment_id) index is absorbed too. Rows written before
+-- the core can have source_key NULL, which the partial idempotency index does
+-- not cover; only the legacy index identifies them, and the caller recovers
+-- their original UUID through GetLegacyCommentDelivery. Generic sources cannot
+-- create that ambiguity: EnqueueRequest.Validate rejects a comment reference
+-- unless the source itself is "comment".
+--
+-- issue_id/comment_id/sender_* are the legacy comment projection; generic
+-- deliveries leave them NULL.
+INSERT INTO agent_mailbox_message (
+    id, workspace_id, issue_id, comment_id, recipient_agent_id, recipient_type,
+    source_session_id, sender_type, sender_id, source_type, source_key, kind, payload
+) VALUES (
+    @id, @workspace_id, sqlc.narg('issue_id'), sqlc.narg('comment_id'),
+    @recipient_agent_id, @recipient_type, sqlc.narg('source_session_id'),
+    sqlc.narg('sender_type'), sqlc.narg('sender_id'), @source_type, @source_key,
+    @kind, sqlc.narg('payload')
+)
+ON CONFLICT DO NOTHING
+RETURNING *;
+
+-- name: GetDelivery :one
+SELECT * FROM agent_mailbox_message WHERE id = @id AND workspace_id = @workspace_id;
+
+-- name: GetDeliveryByIdempotencyKey :one
+SELECT * FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id
+  AND recipient_type = @recipient_type
+  AND recipient_agent_id = @recipient_agent_id
+  AND source_type = @source_type
+  AND source_key = @source_key;
+
+-- name: GetLegacyCommentDelivery :one
+-- Rows written before the delivery core (and the old test-only insert path)
+-- have no source_key. The original (recipient_agent_id, comment_id) unique key
+-- remains their identity, so a replay returns the original mailbox UUID instead
+-- of creating a second request.
+SELECT * FROM agent_mailbox_message
+WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
+
 -- name: ListAgentMailboxMessages :many
 -- Keyset pagination in (created_at, id) order. The cursor is opaque to the
 -- client; both halves are bound, so a page boundary can never repeat or skip a
 -- message created in the same millisecond.
+--
+-- Only comment projections are listed: the frozen DTO carries issue_id and
+-- comment_id, and a generic delivery has neither. Old clients keep their exact
+-- view; generic deliveries are read through the delivery core until a separate
+-- projection exists.
 SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id
   AND workspace_id = @workspace_id
+  AND source_type = 'comment'
   AND (
     sqlc.narg('after_created_at')::timestamptz IS NULL
     OR created_at > sqlc.narg('after_created_at')::timestamptz
@@ -38,32 +91,71 @@ WHERE recipient_agent_id = @recipient_agent_id
 ORDER BY created_at ASC, id ASC
 LIMIT @page_limit;
 
--- name: LockClaimableMailboxMessageIDs :many
--- Locks a bounded batch of deliverable messages. The claim is bound to the
--- verified daemon/owner: the recipient must be a live external agent whose
--- session names this daemon and owner, and whose workspace matches. A pending
--- message is claimable at its next attempt; an expired lease is reclaimable so
--- a crashed daemon does not strand the request.
-SELECT m.id
-FROM agent_mailbox_message m
-JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
-JOIN agent a ON a.id = m.recipient_agent_id
-WHERE m.workspace_id = @workspace_id
-  AND s.workspace_id = @workspace_id
-  AND a.workspace_id = @workspace_id
-  AND a.execution_kind = 'external'
-  AND a.archived_at IS NULL
-  AND s.owner_user_id = @owner_user_id
-  AND s.daemon_id = @daemon_id
-  AND (
-    (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
-    OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
-  )
-ORDER BY m.next_attempt_at ASC, m.created_at ASC
-LIMIT @row_limit
-FOR UPDATE OF m SKIP LOCKED;
+-- name: ListClaimableDeliveryIDs :many
+-- Candidates for one claim round, at most one per recipient session. This list
+-- is only a pre-lock hint: the conditional lease re-checks both row
+-- eligibility and the same recipient's in-flight rows after taking the advisory
+-- lock, so a candidate that lost a race is skipped. An inflated lease is
+-- reclaimable so a crashed worker does not strand a request. An ambiguous row
+-- (unknown) is claimable again only for receipt verification, never for a
+-- second send.
+WITH ranked AS (
+    SELECT m.id,
+           m.recipient_agent_id,
+           m.delivery_status,
+           m.next_attempt_at,
+           m.created_at,
+           row_number() OVER (
+               PARTITION BY m.recipient_agent_id
+               ORDER BY m.next_attempt_at ASC, m.created_at ASC, m.id ASC
+           ) AS recipient_rank
+    FROM agent_mailbox_message m
+    JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
+    JOIN agent a ON a.id = m.recipient_agent_id
+    WHERE m.workspace_id = @workspace_id
+      AND (m.source_type = 'comment') = @comment_projection::boolean
+      AND s.workspace_id = @workspace_id
+      AND a.workspace_id = @workspace_id
+      AND a.execution_kind = 'external'
+      AND a.archived_at IS NULL
+      AND s.owner_user_id = @owner_user_id
+      AND s.daemon_id = @daemon_id
+      AND (
+          (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
+          OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
+          OR (m.delivery_status = 'unknown' AND m.next_attempt_at <= now())
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM agent_mailbox_message inflight
+          WHERE inflight.recipient_agent_id = m.recipient_agent_id
+            AND inflight.id <> m.id
+            AND inflight.delivery_status = 'leased'
+            AND inflight.lease_expires_at > now()
+      )
+)
+SELECT id, recipient_agent_id, delivery_status
+FROM ranked
+WHERE recipient_rank = 1
+ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+LIMIT @row_limit;
 
--- name: LeaseMailboxMessage :one
+-- name: TryLockDeliveryRecipient :one
+-- Transaction-scoped advisory lock that serialises claims for one recipient,
+-- so two daemons cannot lease different rows for the same session at once.
+SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('recipient_id')::text, 0)) AS locked;
+
+-- name: LeaseClaimableDelivery :one
+-- Conditional lease: only a row that is still eligible at this instant is
+-- leased. A concurrent claimant that already leased or acknowledged it makes
+-- this a no-op instead of overwriting its lease.
+--
+-- The in-flight check is repeated here, not only in the candidate list. Under
+-- READ COMMITTED this statement takes a fresh snapshot after the caller's
+-- per-recipient advisory lock, so it sees a lease another entry committed while
+-- this claim was being prepared. The candidate list alone only proves the
+-- recipient had no in-flight row before the lock: two disjoint projections
+-- (comment and generic) could otherwise each lease a row for the same session.
 UPDATE agent_mailbox_message
 SET delivery_status = 'leased',
     lease_token_hash = @lease_token_hash,
@@ -71,20 +163,41 @@ SET delivery_status = 'leased',
     lease_expires_at = @lease_expires_at,
     attempts = attempts + 1,
     updated_at = now()
-WHERE id = @id
+WHERE agent_mailbox_message.id = @id
+  AND agent_mailbox_message.workspace_id = @workspace_id
+  AND (
+      (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
+      OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
+      OR (agent_mailbox_message.delivery_status = 'unknown' AND agent_mailbox_message.next_attempt_at <= now())
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM agent_mailbox_message inflight
+      WHERE inflight.recipient_agent_id = agent_mailbox_message.recipient_agent_id
+        AND inflight.id <> agent_mailbox_message.id
+        AND inflight.delivery_status = 'leased'
+        AND inflight.lease_expires_at > now()
+  )
 RETURNING *;
 
--- name: AckAgentMailboxDelivery :one
--- The token and daemon fence this ack to the exact lease that claimed the
--- message. `delivered`/`retry`/`failed` all clear the lease, so a stale ack
--- (or a second ack of the same lease) matches no row and cannot overwrite a
--- later lease.
+-- name: RecordDeliveryOutcome :one
+-- One fenced write for every outcome. The token, daemon and unexpired lease
+-- fence the update: a stale or foreign ack matches no row and cannot overwrite
+-- a later lease. The retry schedule separates a busy host (short fixed delay)
+-- from an unreachable host or a not-yet-confirmed outcome (bounded failure
+-- backoff). Only rows whose prior outcome was a known no-effect return to
+-- claimable delivery; unknown rows are re-claimed for verification.
 UPDATE agent_mailbox_message
-SET delivery_status = CASE WHEN @status = 'retry' THEN 'pending' ELSE @status END,
+SET delivery_status = @status,
     delivered_at = CASE WHEN @status = 'delivered' THEN now() ELSE delivered_at END,
     host_receipt = COALESCE(sqlc.narg('host_receipt'), host_receipt),
     last_error = sqlc.narg('last_error'),
-    next_attempt_at = CASE WHEN @status = 'retry' THEN @next_attempt_at ELSE next_attempt_at END,
+    next_attempt_at = CASE
+        WHEN @status = 'pending' AND @retry_class::text = 'busy' THEN now() + interval '5 seconds'
+        WHEN @status = 'pending' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        WHEN @status = 'unknown' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        ELSE next_attempt_at
+    END,
     lease_token_hash = NULL,
     lease_owner = NULL,
     lease_expires_at = NULL,
@@ -115,9 +228,12 @@ RETURNING *;
 
 -- name: ListIssueMailboxDeliveries :many
 -- Bounded recent projection for the issue response. Complete history is the
--- mailbox API's keyset pagination.
+-- mailbox API's keyset pagination. Only the legacy comment projection is
+-- included: the frozen issue DTO has no way to render a generic delivery, and a
+-- generic row may legitimately carry only an issue reference.
 SELECT * FROM agent_mailbox_message
 WHERE issue_id = @issue_id AND workspace_id = @workspace_id
+  AND source_type = 'comment'
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 

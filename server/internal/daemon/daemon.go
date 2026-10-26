@@ -2162,16 +2162,30 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
+	// Both mailbox consumers send the verified daemon identity with every
+	// request. Set it once before the loops start, so neither goroutine writes
+	// the shared client configuration.
+	d.client.mailboxDaemonID = d.cfg.DaemonID
 	mailboxDeliveryDone := make(chan struct{})
 	go func() {
 		defer close(mailboxDeliveryDone)
 		d.runMailboxDelivery(ctx)
+	}()
+	deliveryWorkerDone := make(chan struct{})
+	go func() {
+		defer close(deliveryWorkerDone)
+		d.runDeliveryWorker(ctx)
 	}()
 	defer func() {
 		select {
 		case <-mailboxDeliveryDone:
 		case <-time.After(3 * time.Second):
 			d.logger.Warn("timed out waiting for mailbox delivery to stop")
+		}
+		select {
+		case <-deliveryWorkerDone:
+		case <-time.After(3 * time.Second):
+			d.logger.Warn("timed out waiting for the delivery worker to stop")
 		}
 	}()
 

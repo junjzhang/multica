@@ -148,6 +148,8 @@ var concurrentIndexCleanups = map[string]string{
 	"601_agent_mailbox_claim_index":                             "idx_agent_mailbox_claim",
 	"602_agent_mailbox_recipient_index":                         "idx_agent_mailbox_recipient",
 	"603_agent_mailbox_issue_index":                             "idx_agent_mailbox_issue",
+	"605_agent_mailbox_delivery_idempotency_index":              "uq_agent_mailbox_delivery_idempotency",
+	"607_agent_mailbox_verify_index":                            "idx_agent_mailbox_verify",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",

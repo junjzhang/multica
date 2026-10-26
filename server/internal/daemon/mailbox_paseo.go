@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
 // paseoCommandRunner isolates process execution so the adapter contract can be
@@ -279,3 +281,197 @@ func unsupportedIfIdleCLI(stderr []byte) bool {
 }
 
 var _ MailboxHostTransport = (*paseoCliTransport)(nil)
+
+// paseoReceiptResult is the frozen `paseo agent receipt --json` document. The
+// lookup is read-only: it never sends, resumes, creates or archives a session.
+type paseoReceiptResult struct {
+	AgentID   string `json:"agentId"`
+	MessageID string `json:"messageId"`
+	Status    string `json:"status"`
+}
+
+// LookupReceipt reads the host's receipt for one stable message id. Missing
+// receipts are reported as absent, which the worker treats as unconfirmed
+// rather than as proof that the request never ran.
+func (t *paseoCliTransport) LookupReceipt(ctx context.Context, session ExternalSession, messageID string) (delivery.Receipt, error) {
+	if t == nil || t.bin == "" {
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
+			Code:    "paseo_cli_unavailable",
+			Message: "paseo CLI is not configured, so delivery receipts cannot be read",
+		}
+	}
+	if strings.TrimSpace(session.SessionID) == "" {
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostRejected,
+			Code:    "missing_session_id",
+			Message: "delivery claim has no external session id",
+		}
+	}
+	lookupCtx := ctx
+	if t.timeout > 0 {
+		var cancel context.CancelFunc
+		lookupCtx, cancel = context.WithTimeout(ctx, t.timeout)
+		defer cancel()
+	}
+	// The host probe is the same read-only identity check the send path uses:
+	// a receipt from another machine must never be read as this session's.
+	if err := t.verifyHost(lookupCtx, session.HostID); err != nil {
+		return delivery.Receipt{}, hostErrorFromMailbox(err)
+	}
+	stdout, stderr, runErr := t.run(lookupCtx, t.bin, "agent", "receipt", session.SessionID, messageID, "--json")
+	if runErr != nil {
+		return delivery.Receipt{}, classifyPaseoReceiptError(lookupCtx, stderr, runErr)
+	}
+	var result paseoReceiptResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout), &result); err != nil {
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
+			Code:    "paseo_receipt_unrecognized",
+			Message: "paseo returned an unrecognized receipt document, so the outcome stays unconfirmed",
+			Err:     err,
+		}
+	}
+	if result.AgentID != session.SessionID {
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostRejected,
+			Code:    "paseo_receipt_identity_mismatch",
+			Message: "paseo returned a receipt for a different agent identity; it is not used",
+		}
+	}
+	if result.MessageID != messageID {
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostRejected,
+			Code:    "paseo_receipt_message_mismatch",
+			Message: "paseo returned a receipt for a different message id; it is not used",
+		}
+	}
+	switch result.Status {
+	case "accepted":
+		return delivery.Receipt{
+			Status:    delivery.ReceiptAccepted,
+			Reference: fmt.Sprintf("paseo:%s:%s:accepted", session.SessionID, messageID),
+		}, nil
+	case "pending":
+		return delivery.Receipt{Status: delivery.ReceiptPending}, nil
+	case "absent":
+		return delivery.Receipt{Status: delivery.ReceiptAbsent}, nil
+	default:
+		return delivery.Receipt{}, &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
+			Code:    "paseo_receipt_unrecognized",
+			Message: fmt.Sprintf("paseo returned unrecognized receipt status %q", result.Status),
+		}
+	}
+}
+
+// classifyPaseoReceiptError maps the CLI contract's receipt failures. A host
+// that predates the lookup is a capability gap, not an absent receipt.
+func classifyPaseoReceiptError(ctx context.Context, stderr []byte, runErr error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
+			Code:    "receipt_lookup_timeout",
+			Message: "paseo receipt lookup timed out; the outcome stays unconfirmed",
+			Err:     ctx.Err(),
+		}
+	}
+	if ctx.Err() != nil {
+		return &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
+			Code:    "receipt_lookup_interrupted",
+			Message: "daemon stopped during receipt lookup; the outcome stays unconfirmed",
+			Err:     ctx.Err(),
+		}
+	}
+	if code, ok := parsePaseoErrorCode(stderr); ok {
+		switch code {
+		case "DAEMON_UPDATE_REQUIRED", "unsupported_operation":
+			return &delivery.HostError{
+				Kind:    delivery.HostUnsupported,
+				Code:    code,
+				Message: "the installed paseo host cannot look up delivery receipts; upgrade Paseo before relying on recovery",
+			}
+		case "agent_request_receipt_identity_mismatch":
+			return &delivery.HostError{
+				Kind:    delivery.HostRejected,
+				Code:    code,
+				Message: "paseo refused receipt lookup for a different agent identity",
+			}
+		default:
+			return &delivery.HostError{
+				Kind:    delivery.HostUnavailable,
+				Code:    code,
+				Message: fmt.Sprintf("paseo receipt lookup failed with code %s; the outcome stays unconfirmed", code),
+			}
+		}
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
+			Code:    "paseo_cli_unavailable",
+			Message: "the paseo CLI could not be started, so delivery receipts cannot be read",
+			Err:     runErr,
+		}
+	}
+	if receiptLookupUnsupportedCLI(stderr) {
+		return &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
+			Code:    "paseo_receipt_unsupported",
+			Message: "the installed paseo CLI has no receipt command; upgrade Paseo before relying on recovery",
+		}
+	}
+	return &delivery.HostError{
+		Kind:    delivery.HostUnavailable,
+		Code:    "paseo_receipt_lookup_failed",
+		Message: "paseo returned an unrecognized receipt lookup failure; the outcome stays unconfirmed",
+		Err:     runErr,
+	}
+}
+
+// receiptLookupUnsupportedCLI recognises a CLI that predates the receipt
+// command. The argument parser rejects the command before any lookup happens,
+// so this is dependency detection, not a receipt heuristic.
+func receiptLookupUnsupportedCLI(stderr []byte) bool {
+	// This lookup only invokes `paseo agent receipt`, so any argument-parser
+	// rejection means the installed CLI predates the command. It happens before
+	// a lookup, so it is a capability gap, never a receipt status.
+	text := strings.ToLower(string(stderr))
+	return strings.Contains(text, "unknown command") ||
+		strings.Contains(text, "unknown option") ||
+		strings.Contains(text, "unrecognized command") ||
+		strings.Contains(text, "unrecognized option")
+}
+
+// hostErrorFromMailbox translates the frozen mailbox transport taxonomy into
+// the delivery worker's host contract. Both describe the same host outcomes;
+// keeping one CLI classifier avoids a second parser.
+func hostErrorFromMailbox(err error) error {
+	var mailboxErr *MailboxDeliveryError
+	if !errors.As(err, &mailboxErr) {
+		return &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
+			Code:    "host_result_unrecognized",
+			Message: "the host returned an unrecognized delivery result",
+			Err:     err,
+		}
+	}
+	kind := delivery.HostOutcomeUnknown
+	switch mailboxErr.Kind {
+	case MailboxDeliveryBusy:
+		kind = delivery.HostBusy
+	case MailboxDeliveryUnavailable:
+		kind = delivery.HostUnavailable
+	case MailboxDeliveryUnsupported:
+		kind = delivery.HostUnsupported
+	case MailboxDeliveryFailed:
+		kind = delivery.HostRejected
+	}
+	return &delivery.HostError{
+		Kind:    kind,
+		Code:    mailboxErr.Code,
+		Message: mailboxErr.Message,
+		Err:     mailboxErr.Err,
+	}
+}

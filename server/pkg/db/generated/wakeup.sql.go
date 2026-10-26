@@ -241,6 +241,34 @@ func (q *Queries) CountActiveIssueRunsOfAgent(ctx context.Context, arg CountActi
 	return count, err
 }
 
+const countRecentWakeupDeliveries = `-- name: CountRecentWakeupDeliveries :one
+SELECT count(*) FROM agent_mailbox_message
+WHERE workspace_id = $1 AND recipient_agent_id = $2
+  AND source_type = 'issue_wakeup' AND source_key LIKE $3::text
+  AND created_at > $4
+`
+
+type CountRecentWakeupDeliveriesParams struct {
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	RecipientAgentID pgtype.UUID        `json:"recipient_agent_id"`
+	SourcePattern    string             `json:"source_pattern"`
+	Since            pgtype.Timestamptz `json:"since"`
+}
+
+// The hourly firing cap for an external target. It starts no runs, so the
+// managed-run count cannot see its firings.
+func (q *Queries) CountRecentWakeupDeliveries(ctx context.Context, arg CountRecentWakeupDeliveriesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countRecentWakeupDeliveries,
+		arg.WorkspaceID,
+		arg.RecipientAgentID,
+		arg.SourcePattern,
+		arg.Since,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countRecentWakeupTasks = `-- name: CountRecentWakeupTasks :one
 SELECT count(*) FROM agent_task_queue WHERE context->>'wakeup_id'= $1::text AND issue_id= $2 AND created_at> $3
 `
@@ -684,6 +712,40 @@ func (q *Queries) FindPendingWakeupTask(ctx context.Context, wakeupID string) (A
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
 	)
+	return i, err
+}
+
+const findUndecidedWakeupDelivery = `-- name: FindUndecidedWakeupDelivery :one
+SELECT id, delivery_status FROM agent_mailbox_message
+WHERE workspace_id = $1 AND recipient_agent_id = $2
+  AND source_type = 'issue_wakeup' AND source_key LIKE $3::text
+  AND delivery_status IN ('pending','leased','unknown')
+ORDER BY (delivery_status = 'unknown') DESC, created_at ASC
+LIMIT 1
+`
+
+type FindUndecidedWakeupDeliveryParams struct {
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
+	SourcePattern    string      `json:"source_pattern"`
+}
+
+type FindUndecidedWakeupDeliveryRow struct {
+	ID             pgtype.UUID `json:"id"`
+	DeliveryStatus string      `json:"delivery_status"`
+}
+
+// An external target has no task that a later firing could join. While a
+// notification for the rule has not reached a terminal transport state, the
+// rule keeps its inputs instead of queueing another notification, just as a
+// managed rule waits for its claimed run. Terminal states (delivered, failed)
+// never block a new firing. The row is reported so last_error names the
+// delivery; unknown is fail-closed and waits for an operator, never a replay
+// under a new id.
+func (q *Queries) FindUndecidedWakeupDelivery(ctx context.Context, arg FindUndecidedWakeupDeliveryParams) (FindUndecidedWakeupDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, findUndecidedWakeupDelivery, arg.WorkspaceID, arg.RecipientAgentID, arg.SourcePattern)
+	var i FindUndecidedWakeupDeliveryRow
+	err := row.Scan(&i.ID, &i.DeliveryStatus)
 	return i, err
 }
 
@@ -2018,4 +2080,64 @@ func (q *Queries) TryLockIssueWakeup(ctx context.Context, id pgtype.UUID) (Issue
 		&i.PausedReason,
 	)
 	return i, err
+}
+
+const withdrawIssueWakeupDeliveries = `-- name: WithdrawIssueWakeupDeliveries :execrows
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = $1, updated_at = now()
+WHERE workspace_id = $2 AND issue_id = $3
+  AND source_type = 'issue_wakeup'
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+`
+
+type WithdrawIssueWakeupDeliveriesParams struct {
+	Reason      pgtype.Text `json:"reason"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+}
+
+// The same withdrawal for every wakeup of a closed issue, which is disabled
+// without loading each rule. The leased/unknown boundary and its busy-retry
+// caveat are the same as above.
+func (q *Queries) WithdrawIssueWakeupDeliveries(ctx context.Context, arg WithdrawIssueWakeupDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, withdrawIssueWakeupDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const withdrawUnclaimedWakeupDeliveries = `-- name: WithdrawUnclaimedWakeupDeliveries :execrows
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = $1, updated_at = now()
+WHERE workspace_id = $2 AND recipient_agent_id = $3
+  AND source_type = 'issue_wakeup' AND source_key LIKE $4::text
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+`
+
+type WithdrawUnclaimedWakeupDeliveriesParams struct {
+	Reason           pgtype.Text `json:"reason"`
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
+	SourcePattern    string      `json:"source_pattern"`
+}
+
+// Withdraws notifications from one disabled or replaced rule that no host has
+// accepted yet. A pending row has no lease: recording any outcome clears it.
+// A leased or unknown row is left to its outcome because the host may already
+// have accepted it; a reclaimed row is verify-only and is never sent again.
+// That is not absolute: an in-flight attempt the host answers with busy or
+// unavailable returns to pending as a retry, and the next claim delivers it
+// once more after the rule was disabled.
+func (q *Queries) WithdrawUnclaimedWakeupDeliveries(ctx context.Context, arg WithdrawUnclaimedWakeupDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, withdrawUnclaimedWakeupDeliveries,
+		arg.Reason,
+		arg.WorkspaceID,
+		arg.RecipientAgentID,
+		arg.SourcePattern,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

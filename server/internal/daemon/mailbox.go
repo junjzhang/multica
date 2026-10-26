@@ -55,6 +55,9 @@ type MailboxAckRequest struct {
 	Status        string `json:"status"`
 	HostReceipt   string `json:"host_receipt,omitempty"`
 	Error         string `json:"error,omitempty"`
+	// RetryClass lets the server keep a busy session's request warm instead of
+	// applying the failure backoff. Older daemons omit it.
+	RetryClass string `json:"retry_class,omitempty"`
 }
 
 const (
