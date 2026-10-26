@@ -63,7 +63,8 @@ Default path, on the provider execution host:
 
 ## Resolution and precedence
 
-`newAPIClient` is the single funnel for issue, comment and wakeup commands.
+`newAPIClient` is the single funnel for commands that act under a session,
+including issue, comment, wakeup, repo and runtime-profile commands.
 
 1. **Daemon-managed task wins.** Inside a managed task the task's `mat_` token
    is authoritative. An inherited `PASEO_AGENT_ID` is ignored, so the host
@@ -74,7 +75,22 @@ Default path, on the provider execution host:
    selects the binding, and its server, workspace and credential are used. A
    missing, corrupt, expired or mismatched file fails closed with the reconnect
    instruction; it never falls through to the human's default profile.
-3. **Unchanged human behavior.** With no binding and no managed task, existing
+3. **The credential's own agent must match.** The binding names an agent, but
+   the file alone cannot prove the `mea_` token belongs to it. Before any
+   command issues a business request, the CLI reads that agent's own mailbox
+   (`GET /api/agents/<agent_id>/mailbox`). The auth middleware derives the
+   acting agent from the credential, and the handler refuses with 403 when it
+   differs from `<agent_id>`; a 200 is the server confirming the token's own
+   agent. Reading the agent record is not used for this decision: workspace
+   visibility can succeed for a token owned by another agent. A mismatch, a
+   rejected credential, or an unreachable server refuses the command before the
+   first business request, so nothing is written under the wrong actor.
+4. **One workspace for identity and scope.** Commands that resolve a workspace
+   besides the credential (`repo`, `runtime profile`) use the already-selected
+   client's workspace. They never re-read the human profile after a session
+   binding chose the identity, because that would pair an external credential
+   with another workspace.
+5. **Unchanged human behavior.** With no binding and no managed task, existing
    profile resolution is untouched.
 
 Explicit input that disagrees with the binding is rejected, never silently
@@ -103,17 +119,26 @@ managed task, and no synthetic task id may enter attribution.
 - `return_address`: the existing conversation's `paseo://h/<host>/agent/<session>`
   and the Multica daemon that delivers to it.
 - `remote`: the server's answer about the binding (agent name, execution kind,
-  bound session) or why it could not confirm it.
+  provider, host, session, daemon) or why it could not confirm it.
 
-`valid` is only true after `GET /api/agents/<agent_id>` succeeds **and** returns
-the same external agent, host and session. A file on disk is never presented as
-authorization; a 401/403 reports the credential as rejected, a 404 as a missing
-agent, and an unreachable server as unverified. The command exits 0 for every
-binding state — the state is the report — and only a malformed invocation is an
-error. The token is never part of the output.
+`valid` is only true after the server confirms the credential's own agent with
+the own-mailbox read **and** `GET /api/agents/<agent_id>` returns the same
+external agent and provider/host/session/daemon. A file on disk is never
+presented as authorization; a 401/403 reports the credential as rejected or as
+belonging to another agent, a 404 as a missing agent, and an unreachable server
+as unverified. `session status` also applies the same `--profile`,
+`MULTICA_TOKEN`, endpoint and workspace conflict rules as ordinary commands, so
+it cannot report a binding those commands would refuse.
 
-`disconnected` means this process has no session environment. Inside a managed
-task, status explains that the task credential is authoritative instead.
+The command always writes the complete table or JSON report. It exits 0 only
+when `status` is `connected` and `valid` is true; `invalid` and `disconnected`
+exit non-zero. The token is never part of the output.
+
+`disconnected` means this process has no session environment, or the default
+binding file that `PASEO_AGENT_ID` selects does not exist (never connected, or
+removed after `/multica disconnect`). A malformed, expired or mismatched file is
+`invalid`. Inside a managed task, status explains that the task credential is
+authoritative instead.
 
 ## Result return address
 

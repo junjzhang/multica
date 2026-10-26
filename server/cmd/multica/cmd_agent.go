@@ -268,7 +268,14 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 		if err := sessionContextConflicts(cmd, session); err != nil {
 			return nil, err
 		}
-		return cli.NewAPIClient(session.ServerURL, session.WorkspaceID, session.Token), nil
+		client := cli.NewAPIClient(session.ServerURL, session.WorkspaceID, session.Token)
+		// A file that names agent B does not prove the token belongs to B.
+		// Confirm the credential's own identity before any command can write
+		// under it; a mismatch or an unverifiable server fails closed.
+		if err := verifyExternalSessionActor(context.Background(), client, session.AgentID); err != nil {
+			return nil, fmt.Errorf("refusing the Paseo session binding: %w; %s", err, externalSessionConnectHint)
+		}
+		return client, nil
 	}
 
 	taskContext := inDaemonManagedExecutionContext()
@@ -524,6 +531,17 @@ func requireWorkspaceID(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("workspace_id is required: use --workspace-id flag, set MULTICA_WORKSPACE_ID env, or run 'multica config set workspace_id <id>'")
 	}
 	return id, nil
+}
+
+// commandWorkspaceID returns the workspace the already-built client acts in.
+// A Paseo binding selects its own workspace, so callers must not resolve the
+// human profile afterwards: that would pair the session's credential with a
+// different workspace. Without a binding this is the ordinary resolver.
+func commandWorkspaceID(cmd *cobra.Command, client *cli.APIClient) (string, error) {
+	if client.WorkspaceID != "" {
+		return client.WorkspaceID, nil
+	}
+	return requireWorkspaceID(cmd)
 }
 
 // Agent commands

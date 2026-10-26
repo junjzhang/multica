@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,6 +37,39 @@ const (
 	externalSessionTokenPrefix = "mea_"
 	externalSessionConnectHint = "run `/multica connect` in the Paseo session to connect it"
 )
+
+var (
+	// errExternalSessionFileMissing lets session status report `disconnected`
+	// for a default path that was never written (or was removed by
+	// `/multica disconnect`) instead of calling that file invalid. Commands
+	// still fail closed on it.
+	errExternalSessionFileMissing = errors.New("no Multica binding for this Paseo session")
+	// errExternalSessionActorMismatch is the server-confirmed case where the
+	// credential authenticates a different agent than the binding declares.
+	// Visibility of that agent says nothing about who the token belongs to.
+	errExternalSessionActorMismatch = errors.New("the session credential does not belong to the agent named in the binding")
+)
+
+// verifyExternalSessionActor proves the credential's own identity before a
+// business command runs. GET /api/agents/{id}/mailbox is the existing
+// self-identity endpoint: Auth stamps X-Agent-ID from the credential row, and
+// the handler answers 403 unless the path id is that same agent. A visibility
+// GET of the agent could succeed for a token that belongs to someone else, so
+// it is not evidence for this decision.
+func verifyExternalSessionActor(ctx context.Context, client *cli.APIClient, agentID string) error {
+	path := "/api/agents/" + url.PathEscape(agentID) + "/mailbox?limit=1"
+	var page struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := client.GetJSON(ctx, path, &page); err != nil {
+		var httpErr *cli.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("%w: %s", errExternalSessionActorMismatch, agentID)
+		}
+		return fmt.Errorf("confirm the credential's own agent: %w", err)
+	}
+	return nil
+}
 
 // externalSessionContext mirrors the v1 file. Path and Explicit are where this
 // process found the binding, not file content, so they stay unexported: no
@@ -97,7 +132,7 @@ func readExternalSessionContext() (*externalSessionContext, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("no Multica binding for this Paseo session (expected %s); %s", path, externalSessionConnectHint)
+			return nil, fmt.Errorf("%w (expected %s); %s", errExternalSessionFileMissing, path, externalSessionConnectHint)
 		}
 		return nil, fmt.Errorf("read external session context %s: %w", path, err)
 	}

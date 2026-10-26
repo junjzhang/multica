@@ -76,11 +76,17 @@ type fakeAPI struct {
 	// agentStatus/agentBody answer GET /api/agents/<id>, used by session status.
 	agentStatus int
 	agentBody   string
+	// mailboxAgentID is the agent the fake credential authenticates. A mailbox
+	// request for any other agent returns 403, exactly like the real handler;
+	// visibility of an agent is not a credential-identity check.
+	mailboxAgentID string
+	// mailboxStatus forces the identity check itself to fail.
+	mailboxStatus int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
-	api := &fakeAPI{}
+	api := &fakeAPI{mailboxAgentID: "agent-1"}
 	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		api.mu.Lock()
@@ -96,7 +102,22 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 		})
 		status := http.StatusOK
 		response := "{}"
-		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/") {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/mailbox") {
+			requested := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/agents/"), "/mailbox")
+			switch {
+			case api.mailboxStatus != 0:
+				status = api.mailboxStatus
+				response = `{"error":"identity check failed"}`
+			case api.agentStatus == http.StatusUnauthorized || api.agentStatus == http.StatusForbidden:
+				status = api.agentStatus
+				response = `{"error":"invalid token"}`
+			case api.mailboxAgentID != "" && api.mailboxAgentID != requested:
+				status = http.StatusForbidden
+				response = `{"error":"mailbox credentials may only read their own mailbox"}`
+			default:
+				response = `{"messages":[],"next_cursor":null}`
+			}
+		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/") {
 			if api.agentStatus != 0 {
 				status = api.agentStatus
 			}
@@ -105,6 +126,10 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			}
 		} else if r.Method == http.MethodGet && r.URL.Path == "/api/issues" {
 			response = `{"issues":[],"total":0}`
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/runtime-profiles") {
+			response = `{"runtime_profiles":[]}`
+		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/workspaces/") {
+			response = `{"id":"ws-external","repos":[]}`
 		}
 		api.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -130,6 +155,11 @@ func (f *fakeAPI) recorded() []apiRequest {
 // runCLI executes one real CLI process with exactly the environment given:
 // nothing is inherited except PATH, and HOME points at the test's scratch home.
 func (f *fakeAPI) runCLI(t *testing.T, home string, env map[string]string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	return runCLIProcess(t, home, env, args...)
+}
+
+func runCLIProcess(t *testing.T, home string, env map[string]string, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -245,12 +275,17 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 	writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", externalAPI.server.URL, nil))
 
 	cases := []struct {
-		name string
-		args []string
+		name     string
+		args     []string
+		wantPath string
 	}{
-		{"issue list", []string{"issue", "list", "--output", "json"}},
-		{"issue comment add", []string{"issue", "comment", "add", sessionIssueID, "--content", "hello from the session", "--output", "json"}},
-		{"issue wakeup create", []string{"issue", "wakeup", "create", sessionIssueID, "--event", "comment.created", "--instruction", "watch this issue", "--output", "json"}},
+		{"issue list", []string{"issue", "list", "--output", "json"}, "/api/issues"},
+		{"issue comment add", []string{"issue", "comment", "add", sessionIssueID, "--content", "hello from the session", "--output", "json"}, "/api/issues/" + sessionIssueID + "/comments"},
+		{"issue wakeup create", []string{"issue", "wakeup", "create", sessionIssueID, "--event", "comment.created", "--instruction", "watch this issue", "--output", "json"}, ""},
+		// These used to re-read the human profile's workspace after the session
+		// client was built, splitting identity from scope.
+		{"repo list", []string{"repo", "list", "--output", "json"}, "/api/workspaces/ws-external"},
+		{"runtime profile list", []string{"runtime", "profile", "list", "--output", "json"}, "/api/workspaces/ws-external/runtime-profiles"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,20 +299,27 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 				t.Fatalf("session command reached the human profile's server: %#v", got)
 			}
 			got := externalAPI.recorded()
-			if len(got) != 1 {
-				t.Fatalf("external requests = %d, want 1 (%#v)", len(got), got)
+			if len(got) != 2 {
+				t.Fatalf("external requests = %d, want identity check + command (%#v)", len(got), got)
 			}
-			req := got[0]
-			if req.Authorization != "Bearer mea_session_token" {
-				t.Errorf("Authorization = %q, want the session's mea credential", req.Authorization)
+			if got[0].Path != "/api/agents/agent-1/mailbox" || got[0].Query != "limit=1" {
+				t.Fatalf("first request = %s?%s, want the own-mailbox identity check", got[0].Path, got[0].Query)
 			}
-			if req.WorkspaceID != "ws-external" {
-				t.Errorf("X-Workspace-ID = %q, want ws-external", req.WorkspaceID)
+			if tc.wantPath != "" && got[1].Path != tc.wantPath {
+				t.Fatalf("command request = %s, want %s (session workspace, not the human profile's)", got[1].Path, tc.wantPath)
 			}
-			// An external session is authorship, never a managed task: it must
-			// not borrow the daemon task headers.
-			if req.AgentID != "" || req.TaskID != "" {
-				t.Errorf("managed task headers leaked into a session request: agent=%q task=%q", req.AgentID, req.TaskID)
+			for _, req := range got {
+				if req.Authorization != "Bearer mea_session_token" {
+					t.Errorf("%s Authorization = %q, want the session's mea credential", req.Path, req.Authorization)
+				}
+				if req.WorkspaceID != "ws-external" {
+					t.Errorf("%s X-Workspace-ID = %q, want ws-external", req.Path, req.WorkspaceID)
+				}
+				// An external session is authorship, never a managed task: it must
+				// not borrow the daemon task headers.
+				if req.AgentID != "" || req.TaskID != "" {
+					t.Errorf("managed task headers leaked into a session request: agent=%q task=%q", req.AgentID, req.TaskID)
+				}
 			}
 		})
 	}
@@ -297,8 +339,14 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 		if got := humanAPI.recorded(); len(got) != 0 {
 			t.Fatalf("matching explicit input fell back to the human server: %#v", got)
 		}
-		if got := externalAPI.recorded(); len(got) != 1 || got[0].Authorization != "Bearer mea_session_token" {
-			t.Fatalf("session identity not used: %#v", got)
+		got := externalAPI.recorded()
+		if len(got) != 2 {
+			t.Fatalf("requests = %d, want identity check + list (%#v)", len(got), got)
+		}
+		for _, req := range got {
+			if req.Authorization != "Bearer mea_session_token" {
+				t.Fatalf("session identity not used: %#v", got)
+			}
 		}
 	})
 
@@ -317,8 +365,13 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 			t.Fatalf("explicit context still reached the human server: %#v", got)
 		}
 		got := externalAPI.recorded()
-		if len(got) != 1 || got[0].Authorization != "Bearer mea_explicit_token" || got[0].WorkspaceID != "ws-explicit" {
-			t.Fatalf("explicit binding was not used: %#v", got)
+		if len(got) != 2 {
+			t.Fatalf("requests = %d, want identity check + list (%#v)", len(got), got)
+		}
+		for _, req := range got {
+			if req.Authorization != "Bearer mea_explicit_token" || req.WorkspaceID != "ws-explicit" {
+				t.Fatalf("explicit binding was not used: %#v", got)
+			}
 		}
 	})
 }
@@ -556,6 +609,9 @@ func TestSessionStatusReportsNonSecretState(t *testing.T) {
 	if report.AgentID != "agent-1" || report.Remote == nil || report.Remote.AgentName != "External Implementer" {
 		t.Errorf("identity not reported from the server: %#v", report)
 	}
+	if report.Remote != nil && (report.Remote.Provider != "paseo" || report.Remote.HostID != "host-1" || report.Remote.SessionID != "paseo-agent-1" || report.Remote.DaemonID != "daemon-1") {
+		t.Errorf("remote binding not reported: %#v", report.Remote)
+	}
 	if report.ReturnAddress == nil || report.ReturnAddress.URL != "paseo://h/host-1/agent/paseo-agent-1" || report.ReturnAddress.DaemonID != "daemon-1" {
 		t.Errorf("return address = %#v", report.ReturnAddress)
 	}
@@ -578,8 +634,8 @@ func TestSessionStatusDistinguishesInvalidFromConnected(t *testing.T) {
 	writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", externalAPI.server.URL, nil))
 
 	stdout, stderr, exitCode := externalAPI.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
-	if exitCode != 0 {
-		t.Fatalf("exit code = %d, stderr:\n%s", exitCode, stderr)
+	if exitCode == 0 {
+		t.Fatalf("invalid binding exited 0; report:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 	var report sessionStatusReport
 	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
@@ -605,8 +661,8 @@ func TestSessionStatusReportsDisconnectedAndMalformed(t *testing.T) {
 
 	t.Run("no context", func(t *testing.T) {
 		stdout, stderr, exitCode := api.runCLI(t, home, nil, "session", "status", "--output", "json")
-		if exitCode != 0 {
-			t.Fatalf("exit code = %d, stderr:\n%s", exitCode, stderr)
+		if exitCode == 0 {
+			t.Fatalf("disconnected binding exited 0; stdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		var report sessionStatusReport
 		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
@@ -617,11 +673,28 @@ func TestSessionStatusReportsDisconnectedAndMalformed(t *testing.T) {
 		}
 	})
 
+	t.Run("default file removed after connect", func(t *testing.T) {
+		stdout, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+		if exitCode == 0 {
+			t.Fatalf("missing default file exited 0; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var report sessionStatusReport
+		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+			t.Fatalf("decode status JSON: %v\n%s", err, stdout)
+		}
+		if report.Status != "disconnected" || report.Valid || !strings.Contains(report.Error, "no Multica binding") {
+			t.Fatalf("report = %#v, want disconnected for a missing default file", report)
+		}
+		if got := api.recorded(); len(got) != 0 {
+			t.Fatalf("missing binding still contacted the server: %#v", got)
+		}
+	})
+
 	t.Run("malformed file", func(t *testing.T) {
 		writeSessionBindingRaw(t, defaultSessionPath(home, "paseo-agent-1"), "{not json", 0o600)
 		stdout, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
-		if exitCode != 0 {
-			t.Fatalf("exit code = %d, stderr:\n%s", exitCode, stderr)
+		if exitCode == 0 {
+			t.Fatalf("invalid binding exited 0; stdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		var report sessionStatusReport
 		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
@@ -631,4 +704,177 @@ func TestSessionStatusReportsDisconnectedAndMalformed(t *testing.T) {
 			t.Fatalf("report = %#v, want invalid with the parse problem", report)
 		}
 	})
+}
+
+// TestCLIProcessRejectsCredentialForAnotherAgent is the regression for a
+// binding that names agent B while the token belongs to another external agent
+// the same owner can see. Visible-agent reads must not be mistaken for proof:
+// the command has to stop at the own-mailbox identity check and never issue the
+// business write.
+func TestCLIProcessRejectsCredentialForAnotherAgent(t *testing.T) {
+	api := newFakeAPI(t)
+	api.mailboxAgentID = "agent-other"
+	api.agentBody = `{"id":"agent-1","name":"Declared Agent","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`
+	home := t.TempDir()
+	writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+
+	_, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"},
+		"issue", "comment", "add", sessionIssueID, "--content", "must not be attributed to another agent")
+	if exitCode == 0 {
+		t.Fatalf("mismatched credential accepted; stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "does not belong") {
+		t.Errorf("stderr does not name the identity mismatch:\n%s", stderr)
+	}
+	got := api.recorded()
+	if len(got) != 1 || got[0].Path != "/api/agents/agent-1/mailbox" {
+		t.Fatalf("mismatched credential sent more than the identity check: %#v", got)
+	}
+	if got[0].Method != http.MethodGet {
+		t.Fatalf("identity check must be read-only: %#v", got[0])
+	}
+}
+
+// TestSessionStatusRejectsAnotherAgentsCredential covers the same boundary for
+// the inspection command: the visible agent record matches the binding, but the
+// server says the credential is not that agent, so valid stays false.
+func TestSessionStatusRejectsAnotherAgentsCredential(t *testing.T) {
+	api := newFakeAPI(t)
+	api.mailboxAgentID = "agent-other"
+	api.agentBody = `{"id":"agent-1","name":"Declared Agent","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`
+	home := t.TempDir()
+	writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+
+	stdout, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+	if exitCode == 0 {
+		t.Fatalf("mismatched credential reported success; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	var report sessionStatusReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("decode status JSON: %v\n%s", err, stdout)
+	}
+	if report.Valid || report.Status != "invalid" {
+		t.Fatalf("status = %q valid = %t, want invalid/false; report: %#v", report.Status, report.Valid, report)
+	}
+	if report.Remote == nil || !strings.Contains(report.Remote.Error, "different agent") {
+		t.Errorf("remote error does not report the identity mismatch: %#v", report.Remote)
+	}
+	for _, req := range api.recorded() {
+		if req.Method != http.MethodGet {
+			t.Fatalf("session status issued a non-read request: %#v", req)
+		}
+	}
+}
+
+// TestSessionStatusRejectsRemoteBindingDrift proves status checks every field
+// the server records for the session, not only the agent's existence.
+func TestSessionStatusRejectsRemoteBindingDrift(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"provider", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"slack","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "provider"},
+		{"host", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-other","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "host"},
+		{"session", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-other","daemon_id":"daemon-1"}}`, "session"},
+		{"daemon", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-other"}}`, "daemon"},
+		{"execution kind", `{"id":"agent-1","name":"A","execution_kind":"managed","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "execution_kind"},
+		{"session removed", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":null}`, "no longer returns an external session"},
+		{"agent id", `{"id":"agent-other","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "not the recorded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.agentBody = tc.body
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+
+			stdout, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+			if exitCode == 0 {
+				t.Fatalf("binding drift exited 0; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode status JSON: %v\n%s", err, stdout)
+			}
+			if report.Valid || report.Status != "invalid" || !strings.Contains(report.Error, tc.want) {
+				t.Fatalf("report = %#v, want invalid with %q", report, tc.want)
+			}
+		})
+	}
+}
+
+// TestSessionStatusUsesCommandConflictRules keeps status from advertising a
+// binding that an ordinary command in the same process would refuse.
+func TestSessionStatusUsesCommandConflictRules(t *testing.T) {
+	api := newFakeAPI(t)
+	home := t.TempDir()
+	writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"profile flag", nil, []string{"--profile", "dev"}, "--profile"},
+		{"owner token", map[string]string{"MULTICA_TOKEN": "mul_owner_token"}, nil, "MULTICA_TOKEN"},
+		{"server env", map[string]string{"MULTICA_SERVER_URL": "http://127.0.0.1:1"}, nil, "conflicts with the session's server"},
+		{"workspace flag", nil, []string{"--workspace-id", "ws-owner"}, "conflicts with the session's workspace"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api.reset()
+			env := map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			args := append([]string{"session", "status", "--output", "json"}, tc.args...)
+			stdout, stderr, exitCode := api.runCLI(t, home, env, args...)
+			if exitCode == 0 {
+				t.Fatalf("conflicting status exited 0; stdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode status JSON: %v\n%s", err, stdout)
+			}
+			if report.Valid || report.Status != "invalid" || !strings.Contains(report.Error, tc.want) {
+				t.Fatalf("report = %#v, want invalid with %q", report, tc.want)
+			}
+			if got := api.recorded(); len(got) != 0 {
+				t.Fatalf("conflicting status still contacted the server: %#v", got)
+			}
+		})
+	}
+}
+
+// TestCLIProcessFailsClosedWhenActorCheckCannotVerify covers the other half of
+// the identity gate: a rejected credential and an unverifiable server must also
+// stop before the business request, not fall through to "try anyway".
+func TestCLIProcessFailsClosedWhenActorCheckCannotVerify(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"rejected credential", http.StatusUnauthorized},
+		{"unverifiable server", http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.mailboxStatus = tc.status
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+
+			_, stderr, exitCode := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"},
+				"issue", "comment", "add", sessionIssueID, "--content", "must not be written")
+			if exitCode == 0 {
+				t.Fatalf("identity check failure was ignored; stderr:\n%s", stderr)
+			}
+			got := api.recorded()
+			if len(got) != 1 || got[0].Method != http.MethodGet || got[0].Path != "/api/agents/agent-1/mailbox" {
+				t.Fatalf("requests = %#v, want only the own-mailbox identity check", got)
+			}
+		})
+	}
 }
