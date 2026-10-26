@@ -44,7 +44,7 @@ export function PullRequestSnapshotDetails({ pr }: { pr: GitHubPullRequest }) {
   if (pr.snapshot_available === false || pr.state === "closed" || pr.state === "merged") return null;
   if (!pr.review && !pr.check_details?.length && pr.commit_gate?.blocked !== true) return null;
   return (
-    <div className={`space-y-1 pb-1.5 pl-5.5 text-micro text-muted-foreground ${pr.snapshot_stale ? "opacity-60" : ""}`}>
+    <div className="space-y-1 pb-1.5 pl-5.5 text-micro text-muted-foreground">
       {pr.mergeable === "mergeable" ? <p>{t(($) => $.detail.pull_request_merge_clear)}</p> : null}
       {pr.commit_gate?.blocked === true ? <p>{t(($) => $.detail.pull_request_ci_gate_blocked)}</p> : null}
       {pr.review ? (
