@@ -7,6 +7,7 @@ import { statusSession, type StatusView } from "../shared/contracts";
 const STATE_LABEL: Record<StatusView["state"], string> = {
   connected: "Connected",
   invalid: "Needs attention",
+  unverified: "Not verified",
   disconnected: "Not connected",
 };
 

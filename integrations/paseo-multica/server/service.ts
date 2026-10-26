@@ -89,6 +89,14 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     return { serverUrl: owner.serverUrl, workspaceId: owner.workspaceId, token: owner.token };
   }
 
+  function contextCredential(context: SessionContext): ApiCredential {
+    return {
+      serverUrl: context.server_url,
+      workspaceId: context.workspace_id,
+      token: context.token,
+    };
+  }
+
   function conflictFor(
     context: SessionContext,
     host: HostSession,
@@ -159,12 +167,8 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         }
         if (!isExpired(existing.context, now())) {
           const validity = await api.verifyExternalAgentToken(
-            {
-              serverUrl: existing.context.server_url,
-              workspaceId: existing.context.workspace_id,
-              token: existing.context.token,
-            },
-            agentId,
+            contextCredential(existing.context),
+            existing.context.agent_id,
           );
           if (validity === "valid") {
             return viewFor(existing.context, "connected");
@@ -266,6 +270,24 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
           context,
           "invalid",
           `The Multica credential expired at ${context.expires_at}. Run /multica connect to repair it.`,
+        );
+      }
+      try {
+        const validity = await api.verifyExternalAgentToken(contextCredential(context), context.agent_id);
+        if (validity === "invalid") {
+          return viewFor(
+            context,
+            "invalid",
+            "Multica no longer accepts this session's credential (it was revoked, expired, or its external agent is gone). Run /multica connect to repair it.",
+          );
+        }
+      } catch (error) {
+        return viewFor(
+          context,
+          "unverified",
+          `Could not verify this session's Multica credential: ${describeError(
+            error,
+          )}. The local binding was left unchanged; run /multica status to retry.`,
         );
       }
       return viewFor(context, "connected");

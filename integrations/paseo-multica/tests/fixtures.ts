@@ -44,12 +44,14 @@ export class FakeApi implements MulticaApi {
   readonly credentialCalls: ApiCredential[] = [];
   readonly tokensRequested: { agentId: string; expiresAt: string }[] = [];
   readonly revoked: { agentId: string; tokenId: string }[] = [];
+  readonly verified: { agentId: string; token: string }[] = [];
   verifyCalls = 0;
-  verifyResult: "valid" | "invalid" | "throw" = "valid";
+  verifyResult: "subject" | "invalid" | "throw" = "subject";
   registerError: Error | null = null;
   tokenError: Error | null = null;
   revokeError: Error | null = null;
   private tokenSequence = 0;
+  private readonly tokenSubjects = new Map<string, string>();
 
   async registerExternalAgent(
     credential: ApiCredential,
@@ -70,7 +72,9 @@ export class FakeApi implements MulticaApi {
     if (this.tokenError) throw this.tokenError;
     this.tokensRequested.push({ agentId, expiresAt });
     this.tokenSequence += 1;
-    return { id: randomUUID(), token: EXTERNAL_TOKEN, expiresAt };
+    const token = this.tokenSequence === 1 ? EXTERNAL_TOKEN : `${EXTERNAL_TOKEN}-${this.tokenSequence}`;
+    this.tokenSubjects.set(token, agentId);
+    return { id: randomUUID(), token, expiresAt };
   }
 
   async revokeExternalAgentToken(credential: ApiCredential, agentId: string, tokenId: string): Promise<void> {
@@ -79,10 +83,14 @@ export class FakeApi implements MulticaApi {
     this.revoked.push({ agentId, tokenId });
   }
 
-  async verifyExternalAgentToken(): Promise<"valid" | "invalid"> {
+  async verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid"> {
     this.verifyCalls += 1;
+    this.verified.push({ agentId, token: credential.token });
     if (this.verifyResult === "throw") throw new Error("network unavailable");
-    return this.verifyResult;
+    if (this.verifyResult === "invalid") return "invalid";
+    // The real mailbox endpoint authorizes the credential's subject, so the
+    // path agent must be the agent the token was minted for.
+    return this.tokenSubjects.get(credential.token) === agentId ? "valid" : "invalid";
   }
 }
 

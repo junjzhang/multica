@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMulticaApi, type ApiCredential } from "../server/api";
-import { AGENT_A, EXTERNAL_TOKEN, OWNER_TOKEN, SERVER_URL, WORKSPACE_ID } from "./fixtures";
+import { AGENT_A, AGENT_B, EXTERNAL_TOKEN, OWNER_TOKEN, SERVER_URL, WORKSPACE_ID } from "./fixtures";
 
 interface Recorded {
   method: string;
@@ -127,6 +127,43 @@ describe("Multica API client", () => {
     await expect(api.verifyExternalAgentToken(external, AGENT_A)).resolves.toBe("valid");
     expect(calls[0]?.url).toBe(`/api/agents/${AGENT_A}/mailbox?limit=1`);
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${EXTERNAL_TOKEN}`);
+  });
+
+  it("checks the credential subject even when another agent is visible to its owner", async () => {
+    const tokenA = EXTERNAL_TOKEN;
+    const tokenB = "mea_external_token_b_0123456789";
+    const { credential, calls } = await startServer((request, response) => {
+      const url = request.url ?? "";
+      if (url.endsWith("/mailbox?limit=1")) {
+        const pathAgent = url.split("/")[3] ?? "";
+        const presented = (request.headers.authorization ?? "").replace(/^Bearer /, "");
+        const subject = presented === tokenA ? AGENT_A : presented === tokenB ? AGENT_B : "";
+        const allowed = pathAgent === subject;
+        response.writeHead(allowed ? 200 : 403, { "Content-Type": "application/json" });
+        response.end(allowed ? JSON.stringify({ messages: [], next_cursor: null }) : '{"error":"forbidden"}');
+        return;
+      }
+      // The actor-binding probe: a same-owner GET of agent B accepts agent A's
+      // credential. Verification must not rely on that visibility.
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ id: AGENT_B }));
+    });
+    const api = createMulticaApi();
+
+    const visible = await fetch(`${credential.serverUrl}/api/agents/${AGENT_B}`, {
+      headers: { Authorization: `Bearer ${tokenA}` },
+    });
+    expect(visible.status).toBe(200);
+    expect(await visible.json()).toEqual({ id: AGENT_B });
+
+    await expect(api.verifyExternalAgentToken({ ...credential, token: tokenA }, AGENT_B)).resolves.toBe(
+      "invalid",
+    );
+    expect(calls.at(-1)?.url).toBe(`/api/agents/${AGENT_B}/mailbox?limit=1`);
+
+    await expect(api.verifyExternalAgentToken({ ...credential, token: tokenB }, AGENT_B)).resolves.toBe(
+      "valid",
+    );
   });
 
   it("treats rejected and unknown credentials as invalid but propagates server failures", async () => {

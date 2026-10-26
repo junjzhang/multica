@@ -12,6 +12,7 @@ import {
 } from "../server/store";
 import {
   AGENT_A,
+  AGENT_B,
   DAEMON_ID,
   EXTERNAL_TOKEN,
   HOST_ID,
@@ -96,6 +97,52 @@ describe("session service", () => {
     expect(api.registrations).toHaveLength(1);
     expect(api.tokensRequested).toHaveLength(1);
     expect(api.verifyCalls).toBe(1);
+    // The credential is checked against the Multica agent it was minted for,
+    // never against the composer's Paseo session id.
+    expect(api.verified).toEqual([{ agentId: AGENT_A, token: EXTERNAL_TOKEN }]);
+  });
+
+  it("reports a remotely revoked credential from status without repairing it", async () => {
+    const { home, api, service } = await setup();
+    await service.connect(SESSION_A);
+    api.verifyResult = "invalid";
+
+    const view = await service.status(SESSION_A);
+    expect(view.state).toBe("invalid");
+    expect(view.reason).toMatch(/no longer accepts/);
+    expect(view.reason).toMatch(/\/multica connect/);
+    expect(api.tokensRequested).toHaveLength(1);
+    expect((await readSessionContext(home, SESSION_A)).status).toBe("ok");
+  });
+
+  it("does not claim connected when the remote check cannot complete", async () => {
+    const { api, service } = await setup();
+    await service.connect(SESSION_A);
+    api.verifyResult = "throw";
+
+    const view = await service.status(SESSION_A);
+    expect(view.state).toBe("unverified");
+    expect(view.reason).toMatch(/network unavailable/);
+    expect(view.reason).toMatch(/local binding was left unchanged/);
+  });
+
+  it("rejects a local credential minted for another Multica agent", async () => {
+    const { home, api, service } = await setup();
+    await service.connect(SESSION_A);
+    const binding = await readSessionContext(home, SESSION_A);
+    expect(binding.status).toBe("ok");
+    if (binding.status !== "ok") return;
+
+    // A context that declares agent B while carrying agent A's credential.
+    await writeSessionContext(home, { ...binding.context, agent_id: AGENT_B });
+
+    const view = await service.status(SESSION_A);
+    expect(view.state).toBe("invalid");
+    expect(api.verified.at(-1)).toEqual({ agentId: AGENT_B, token: EXTERNAL_TOKEN });
+
+    await expect(service.connect(SESSION_A)).rejects.toThrow(/different agent identity/);
+    expect(api.tokensRequested).toHaveLength(1);
+    expect((await readSessionContext(home, SESSION_A)).status).toBe("ok");
   });
 
   it("serializes concurrent connects into one identity and credential", async () => {

@@ -2,8 +2,8 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
 export const statusViewSchema = z.object({
-  state: z.enum(["connected", "invalid", "disconnected"]),
-  /** Actionable explanation for an invalid or disconnected state. */
+  state: z.enum(["connected", "invalid", "unverified", "disconnected"]),
+  /** Actionable explanation for an invalid, unverified, or disconnected state. */
   reason: z.string().optional(),
   agentId: z.string().optional(),
   workspaceId: z.string().optional(),
