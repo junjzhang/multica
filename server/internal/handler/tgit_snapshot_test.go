@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 func snapshotFixture(t *testing.T) (string, string, string) {
@@ -134,7 +136,19 @@ func TestTGitSnapshotFailureMarksStaleAndRecovers(t *testing.T) {
 	r.fetch = func(context.Context, string, string, string, string, int32) (vcs.PullRequestEvent, *vcs.TGitSnapshot, error) {
 		return vcs.PullRequestEvent{}, nil, vcs.ErrUnauthorized
 	}
+	originalBus := testHandler.Bus
+	testHandler.Bus = events.New()
+	t.Cleanup(func() { testHandler.Bus = originalBus })
+	notifiedStale := false
+	testHandler.Bus.Subscribe(protocol.EventPullRequestUpdated, func(event events.Event) {
+		if event.WorkspaceID == testWorkspaceID {
+			notifiedStale = listIssuePRsForTest(t, issue).PullRequests[0].SnapshotStale
+		}
+	})
 	r.refresh(ctx, parseUUID(pr))
+	if !notifiedStale {
+		t.Fatal("open cards were not notified after the snapshot became stale")
+	}
 	row, err := testHandler.Queries.GetVCSPullRequestInWorkspace(ctx, dbGetVCS(pr))
 	if err != nil {
 		t.Fatal(err)

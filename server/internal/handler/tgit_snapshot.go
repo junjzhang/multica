@@ -117,10 +117,19 @@ func (r *TGitSnapshotRefresher) refresh(ctx context.Context, id pgtype.UUID) {
 	case errors.Is(err, vcs.ErrUnauthorized):
 		delay = 15 * time.Minute
 	}
-	if saveErr := r.h.Queries.FailTGitSnapshot(saveCtx, db.FailTGitSnapshotParams{
+	changed, saveErr := r.h.Queries.FailTGitSnapshot(saveCtx, db.FailTGitSnapshotParams{
 		ID: pr.ID, ClaimUntil: pr.SnapshotRefreshAfter, RetryAt: pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true},
-	}); saveErr != nil {
+	})
+	if saveErr != nil {
 		slog.Warn("tgit: snapshot failure record failed", "err", saveErr)
+	} else if changed > 0 {
+		issueIDs, listErr := r.h.Queries.ListIssueIDsForVCSPullRequest(saveCtx, pr.ID)
+		if listErr != nil {
+			slog.Warn("tgit: snapshot failure notification failed", "err", listErr)
+		}
+		for _, issueID := range issueIDs {
+			r.h.publishIssuePullRequestsChanged(uuidToString(pr.WorkspaceID), issueID)
+		}
 	}
 	slog.Warn("tgit: snapshot refresh failed", "pr_id", uuidToString(pr.ID), "err", err)
 }

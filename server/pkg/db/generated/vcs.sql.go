@@ -160,7 +160,7 @@ func (q *Queries) DeleteVCSConnection(ctx context.Context, arg DeleteVCSConnecti
 	return err
 }
 
-const failTGitSnapshot = `-- name: FailTGitSnapshot :exec
+const failTGitSnapshot = `-- name: FailTGitSnapshot :execrows
 UPDATE vcs_pull_request
 SET snapshot_error = true, snapshot_refresh_after = $1
 WHERE id = $2 AND snapshot_refresh_after = $3
@@ -172,9 +172,12 @@ type FailTGitSnapshotParams struct {
 	ClaimUntil pgtype.Timestamptz `json:"claim_until"`
 }
 
-func (q *Queries) FailTGitSnapshot(ctx context.Context, arg FailTGitSnapshotParams) error {
-	_, err := q.db.Exec(ctx, failTGitSnapshot, arg.RetryAt, arg.ID, arg.ClaimUntil)
-	return err
+func (q *Queries) FailTGitSnapshot(ctx context.Context, arg FailTGitSnapshotParams) (int64, error) {
+	result, err := q.db.Exec(ctx, failTGitSnapshot, arg.RetryAt, arg.ID, arg.ClaimUntil)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const findVCSPullRequestByURL = `-- name: FindVCSPullRequestByURL :one

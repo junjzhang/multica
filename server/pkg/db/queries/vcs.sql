@@ -250,7 +250,7 @@ WHERE id = sqlc.arg('id') AND provider = 'tgit' AND head_sha = sqlc.arg('expecte
   AND snapshot_refresh_after = sqlc.arg('claim_until')
 RETURNING *;
 
--- name: FailTGitSnapshot :exec
+-- name: FailTGitSnapshot :execrows
 UPDATE vcs_pull_request
 SET snapshot_error = true, snapshot_refresh_after = sqlc.arg('retry_at')
 WHERE id = sqlc.arg('id') AND snapshot_refresh_after = sqlc.arg('claim_until');
