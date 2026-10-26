@@ -69,6 +69,20 @@ func TestTGitMRCardLifecycle(t *testing.T) {
 		}
 		attrs["title"] = "Fix " + issue.Identifier
 	}
+	attrs["last_commit"] = map[string]any{}
+	attrs["title"] = "It is a test merge request hook"
+	attrs["description"] = "It is a test merge request hook"
+	send("opened", "open", "2026-10-26T07:50:00+0000", vcsTestSecret, http.StatusAccepted)
+	if got := listIssuePRsForTest(t, issueID); len(got.PullRequests) != 1 || got.PullRequests[0].State != "merged" {
+		t.Fatalf("a newer setup probe overwrote the real MR: %+v", got.PullRequests)
+	}
+	attrs["iid"] = 1
+	attrs["url"] = "http://git.test/org/sub/widget/merge_requests/1"
+	send("opened", "open", "2026-10-26T07:50:00+0000", vcsTestSecret, http.StatusAccepted)
+	var emptyHeadCount int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM vcs_pull_request WHERE connection_id=$1 AND head_sha=''`, connID).Scan(&emptyHeadCount); err != nil || emptyHeadCount != 0 {
+		t.Fatalf("setup probe created a fake MR: count=%d err=%v", emptyHeadCount, err)
+	}
 	manualIssueID := dbfx.Issue(t, "TGit manual link")
 	t.Cleanup(func() { cleanupVCS(ctx, manualIssueID) })
 	for _, link := range []string{

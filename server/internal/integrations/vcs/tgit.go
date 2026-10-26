@@ -55,7 +55,8 @@ func (tgitProvider) ParsePullRequest(body []byte) (PullRequestEvent, error) {
 		return PullRequestEvent{}, err
 	}
 	a := payload.ObjectAttributes
-	if payload.ObjectKind != "merge_request" || a.IID <= 0 {
+	// TGit's setup probes have no source commit and must not replace real MRs.
+	if payload.ObjectKind != "merge_request" || a.IID <= 0 || strings.TrimSpace(a.LastCommit.ID) == "" {
 		return PullRequestEvent{}, errors.New("tgit: invalid merge request")
 	}
 	target, err := url.Parse(a.Target.WebURL)
