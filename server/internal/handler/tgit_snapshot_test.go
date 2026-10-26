@@ -261,3 +261,71 @@ func TestTGitSnapshotDeadlineRecordsFailure(t *testing.T) {
 		t.Fatal("timed-out snapshot still appears current")
 	}
 }
+
+func TestTGitSnapshotOnlyNotifiesChangesAndStillReconcilesMerge(t *testing.T) {
+	_, issue, pr := snapshotFixture(t)
+	originalBus := testHandler.Bus
+	testHandler.Bus = events.New()
+	t.Cleanup(func() { testHandler.Bus = originalBus })
+	var notifications int
+	testHandler.Bus.Subscribe(protocol.EventPullRequestUpdated, func(event events.Event) {
+		if event.WorkspaceID == testWorkspaceID {
+			notifications++
+		}
+	})
+	r := newTGitSnapshotRefresher(testHandler)
+	ev, snapshot := snapshotResult()
+	var fetchErr error
+	r.fetch = func(context.Context, string, string, string, string, int32) (vcs.PullRequestEvent, *vcs.TGitSnapshot, error) {
+		return ev, snapshot, fetchErr
+	}
+	refresh := func(want int) {
+		t.Helper()
+		notifications = 0
+		dbfx.Exec(t, `UPDATE vcs_pull_request SET snapshot_refresh_after=NULL WHERE id=$1`, pr)
+		r.refresh(context.Background(), parseUUID(pr))
+		if notifications != want {
+			t.Fatalf("got %d notifications, want %d", notifications, want)
+		}
+	}
+	refresh(1)
+	refresh(0)
+	refresh(0)
+	snapshot.Review.State = "approved"
+	refresh(1)
+	refresh(0)
+	fetchErr = errors.New("temporary network failure")
+	refresh(1)
+	refresh(0)
+	fetchErr = nil
+	refresh(1)
+	dbfx.Exec(t, `UPDATE vcs_pull_request SET snapshot_fetched_at=now()-interval '3 minutes' WHERE id=$1`, pr)
+	refresh(1)
+	refresh(0)
+	ev.State = "merged"
+	ev.UpdatedAt = "2026-10-26T08:00:00Z"
+	snapshot.MRUpdatedAt = ev.UpdatedAt
+	refresh(1)
+	if got := issueStatusForTest(t, issue); got != "done" {
+		t.Fatalf("merge did not reconcile linked issue: %s", got)
+	}
+}
+
+func TestTGitSnapshotResponsePreservesGatesWithoutNamedChecks(t *testing.T) {
+	for _, state := range []string{"pending", "failure"} {
+		ev, snapshot := snapshotResult()
+		snapshot.Checks = nil
+		blocked := true
+		snapshot.CommitGate = vcs.TGitGate{State: state, Blocked: &blocked}
+		raw, _ := json.Marshal(snapshot)
+		response := GitHubPullRequestResponse{Provider: "tgit"}
+		applyTGitSnapshotResponse(&response, raw, pgtype.Timestamptz{Time: time.Now(), Valid: true}, false, ev.HeadSHA, parseGHTime(ev.UpdatedAt))
+		conclusion := "pending"
+		if state == "failure" {
+			conclusion = "failed"
+		}
+		if response.ChecksTotal != 0 || response.ChecksRollup == nil || *response.ChecksRollup != state || response.ChecksConclusion == nil || *response.ChecksConclusion != conclusion {
+			t.Fatalf("gate %s was lost without named checks: %+v", state, response)
+		}
+	}
+}

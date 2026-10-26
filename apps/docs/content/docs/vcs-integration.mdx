@@ -42,6 +42,8 @@ Snapshots are stored per MR and checked against the source and target revisions 
 
 Only already-mirrored open MRs are refreshed. The server scans every 30 seconds, limits each MR to one attempt per minute and runs at most four fetches concurrently. Page visits and MR webhooks also request a refresh. Revision races retry shortly; errors back off, and rate limits honor Retry-After. Reconnecting resets credential-error backoff. No historical discovery/import or new wakeup conditions are added.
 
+Refresh capacity is shared across the service: four workers, up to 100 candidates per scan, and a queue of 256 MRs. Large queues or slow provider responses can exceed the two-minute freshness window; skipped queue entries remain eligible for later scans. Visits and webhooks respect the same cooldown, so a new head can remain unavailable until the next eligible refresh. Unchanged snapshots do not broadcast updates; changes and recovery from stale data do.
+
 For `git.woa.com`, the callback port must be 80, 443, 8080 or 8081. If Multica runs on another port, publish its authenticated webhook path through a reverse proxy on an accepted port.
 
 ## Prerequisites (server)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,14 +123,8 @@ func (r *TGitSnapshotRefresher) refresh(ctx context.Context, id pgtype.UUID) {
 	})
 	if saveErr != nil {
 		slog.Warn("tgit: snapshot failure record failed", "err", saveErr)
-	} else if changed > 0 {
-		issueIDs, listErr := r.h.Queries.ListIssueIDsForVCSPullRequest(saveCtx, pr.ID)
-		if listErr != nil {
-			slog.Warn("tgit: snapshot failure notification failed", "err", listErr)
-		}
-		for _, issueID := range issueIDs {
-			r.h.publishIssuePullRequestsChanged(uuidToString(pr.WorkspaceID), issueID)
-		}
+	} else if changed > 0 && !pr.SnapshotError {
+		r.h.publishTGitSnapshotChanged(saveCtx, pr)
 	}
 	slog.Warn("tgit: snapshot refresh failed", "pr_id", uuidToString(pr.ID), "err", err)
 }
@@ -165,9 +160,30 @@ func (r *TGitSnapshotRefresher) apply(ctx context.Context, pr db.VcsPullRequest)
 	if err != nil {
 		return err
 	}
-	event.HTMLURL = pr.HtmlUrl
-	r.h.reconcileVCSPullRequest(ctx, conn, event, updated, pr.State)
+	metadataChanged := pr.Title != updated.Title || pr.State != updated.State || pr.HeadSha != updated.HeadSha ||
+		pr.Branch != updated.Branch || !pr.PrUpdatedAt.Time.Equal(updated.PrUpdatedAt.Time)
+	if metadataChanged {
+		event.HTMLURL = pr.HtmlUrl
+		r.h.reconcileVCSPullRequest(ctx, conn, event, updated, pr.State)
+		return nil
+	}
+	var previous vcs.TGitSnapshot
+	if !pr.SnapshotFetchedAt.Valid || pr.SnapshotError || time.Since(pr.SnapshotFetchedAt.Time) > 2*time.Minute ||
+		json.Unmarshal(pr.ApiSnapshot, &previous) != nil || !reflect.DeepEqual(previous, *snapshot) {
+		r.h.publishTGitSnapshotChanged(ctx, updated)
+	}
 	return nil
+}
+
+func (h *Handler) publishTGitSnapshotChanged(ctx context.Context, pr db.VcsPullRequest) {
+	issueIDs, err := h.Queries.ListIssueIDsForVCSPullRequest(ctx, pr.ID)
+	if err != nil {
+		slog.Warn("tgit: snapshot notification failed", "err", err)
+		return
+	}
+	for _, issueID := range issueIDs {
+		h.publishIssuePullRequestsChanged(uuidToString(pr.WorkspaceID), issueID)
+	}
 }
 
 func applyTGitSnapshotResponse(resp *GitHubPullRequestResponse, raw []byte, fetched pgtype.Timestamptz, failed bool, head string, updated pgtype.Timestamptz) {
@@ -187,9 +203,10 @@ func applyTGitSnapshotResponse(resp *GitHubPullRequestResponse, raw []byte, fetc
 	available = true
 	resp.SnapshotFetchedAt = timestampToPtr(fetched)
 	resp.SnapshotStale = failed || time.Since(fetched.Time) > 2*time.Minute
-	resp.ChecksRollup = strPtrOrNil(snapshot.CheckState())
+	checkState := snapshot.CheckState()
+	resp.ChecksRollup = strPtrOrNil(checkState)
 	resp.ChecksTotal = int64(len(snapshot.Checks))
-	resp.ChecksPassed, resp.ChecksFailed, resp.ChecksPending, resp.ChecksRunning = 0, 0, 0, 0
+	resp.ChecksPassed, resp.ChecksFailed, resp.ChecksPending = 0, 0, 0
 	resp.FailedCheckNames = []string{}
 	for _, check := range snapshot.Checks {
 		switch check.State {
@@ -203,12 +220,13 @@ func applyTGitSnapshotResponse(resp *GitHubPullRequestResponse, raw []byte, fetc
 		}
 	}
 	resp.ChecksRunning = resp.ChecksPending
-	resp.ChecksConclusion = aggregateChecksConclusion(resp.ChecksFailed, resp.ChecksPassed, resp.ChecksPending, resp.ChecksTotal)
-	// The MR gate can still block after all named checks have passed.
-	if snapshot.CheckState() == "pending" {
+	resp.ChecksConclusion = nil
+	switch checkState {
+	case "success":
+		resp.ChecksConclusion = strPtrOrNil("passed")
+	case "pending":
 		resp.ChecksConclusion = strPtrOrNil("pending")
-	}
-	if snapshot.CheckState() == "failure" {
+	case "failure":
 		resp.ChecksConclusion = strPtrOrNil("failed")
 	}
 	if snapshot.HasConflicts != nil {

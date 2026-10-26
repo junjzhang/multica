@@ -38,6 +38,8 @@ Chaque instantané appartient à une MR et à ses révisions source/cible. Les r
 
 Seules les MR ouvertes déjà synchronisées sont actualisées : balayage toutes les 30 secondes, au plus une tentative par MR et par minute, quatre lectures simultanées. Les visites et webhooks peuvent demander une actualisation. Les erreurs déclenchent un délai et Retry-After est respecté. La reconnexion réinitialise le délai des erreurs d’accès. Aucun historique ni nouvelle condition de réveil n’est ajouté.
 
+La capacité est partagée par le service : quatre workers, 100 candidats par balayage et une file de 256 MR. Une file importante ou des réponses lentes peuvent dépasser la fenêtre de fraîcheur de deux minutes ; les MR non mises en file restent éligibles aux balayages suivants. Les visites et webhooks respectent le même délai, donc une nouvelle révision peut rester indisponible jusqu’au prochain rafraîchissement autorisé. Les instantanés inchangés ne sont pas diffusés ; les changements et le retour à des données à jour le sont.
+
 Pour `git.woa.com`, utilisez le port de callback 80, 443, 8080 ou 8081. Si Multica utilise un autre port, exposez le chemin webhook authentifié via un proxy inverse sur un port accepté.
 
 ## Prérequis (serveur)
