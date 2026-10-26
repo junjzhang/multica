@@ -92,6 +92,7 @@ export interface FakeHostOptions {
   title?: string | null;
   archivedAt?: string | null;
   exists?: boolean;
+  reportedId?: string;
 }
 
 export function fakeHost(options: FakeHostOptions = {}): PaseoHostAdapter {
@@ -101,6 +102,7 @@ export function fakeHost(options: FakeHostOptions = {}): PaseoHostAdapter {
     title = "Fix the build",
     archivedAt = null,
     exists = true,
+    reportedId,
   } = options;
   return {
     async listHosts() {
@@ -108,7 +110,7 @@ export function fakeHost(options: FakeHostOptions = {}): PaseoHostAdapter {
     },
     async refreshAgent(agentId) {
       if (!exists) return null;
-      return { agent: { id: agentId, title, archivedAt } };
+      return { agent: { id: reportedId ?? agentId, title, archivedAt } };
     },
   };
 }

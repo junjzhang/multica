@@ -214,6 +214,13 @@ describe("session service", () => {
     expect(api.tokensRequested).toHaveLength(0);
   });
 
+  it("refuses to bind a session the host reports under another id", async () => {
+    const { api, service } = await setup({ host: fakeHost({ reportedId: SESSION_B }) });
+    await expect(service.connect(SESSION_A)).rejects.toThrow(/different session id/);
+    expect(api.registrations).toHaveLength(0);
+    expect(api.tokensRequested).toHaveLength(0);
+  });
+
   it("reports a missing delivery daemon instead of guessing one", async () => {
     const { api, service } = await setup({ settings: { ownerProfile: "", daemonId: "" } });
     await expect(service.connect(SESSION_A)).rejects.toThrow(/delivery daemon/);

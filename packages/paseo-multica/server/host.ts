@@ -62,6 +62,9 @@ export async function resolveHostSession(adapter: PaseoHostAdapter, agentId: str
   if (refreshed.agent.archivedAt) {
     throw new Error("This Paseo session is archived. Restore it before connecting.");
   }
+  if (refreshed.agent.id !== agentId) {
+    throw new Error("The Paseo host returned a different session id. Refusing to bind this session.");
+  }
   return {
     hostId,
     hostLabel: directory.self.label.trim(),
