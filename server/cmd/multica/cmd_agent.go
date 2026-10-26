@@ -258,6 +258,19 @@ func resolveProfile(cmd *cobra.Command) string {
 }
 
 func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
+	// A Paseo session's binding owns credential, server and workspace for the
+	// commands that act on its behalf. It is resolved before any human-profile
+	// lookup so a missing or broken file fails closed instead of quietly
+	// falling through to the person who owns the machine.
+	if session, err := externalSessionForCommand(); err != nil {
+		return nil, err
+	} else if session != nil {
+		if err := sessionContextConflicts(cmd, session); err != nil {
+			return nil, err
+		}
+		return cli.NewAPIClient(session.ServerURL, session.WorkspaceID, session.Token), nil
+	}
+
 	taskContext := inDaemonManagedExecutionContext()
 	token := resolveToken(cmd)
 	if taskContext && !strings.HasPrefix(token, "mat_") {

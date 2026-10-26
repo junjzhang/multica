@@ -85,6 +85,7 @@ func init() {
 	rootCmd.AddCommand(skillCmd)
 	rootCmd.AddCommand(squadCmd)
 	rootCmd.AddCommand(chatCmd)
+	rootCmd.AddCommand(sessionCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(runtimeCmd)
 	rootCmd.AddCommand(authCmd)

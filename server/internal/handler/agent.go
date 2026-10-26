@@ -516,11 +516,19 @@ type AgentTaskResponse struct {
 	// old server — and a daemon must then keep telling the agent to read the
 	// issue. An empty IssueChangedFields is only "unchanged" alongside this
 	// flag; on its own it is indistinguishable from "nobody looked" (MUL-7344).
-	IssueStateDeltaKnown     bool                 `json:"issue_state_delta_known,omitempty"`
-	IssueChangedFields       []string             `json:"issue_changed_fields,omitempty"`        // subset of title,description in that order; empty alongside IssueStateDeltaKnown means unchanged. Fields outside that set (status, assignee, priority, labels, parent, due date, stage, project, metadata) are NOT compared and must never be reported as checked. Status and assignee are out because IssueStatus / IssueAssigneeType / IssueAssigneeID ship their current values on every claim, so no comparison is needed to learn them; priority is out because it does not change what the agent does
-	IssueStatus              string               `json:"issue_status,omitempty"`                // the issue's status key at claim time. Sent whether or not the delta is known: the agent needs it to decide workflow step 3 ("already in progress?") without a read
-	IssueAssigneeType        string               `json:"issue_assignee_type,omitempty"`         // "agent", "member" or "squad" at claim time; empty when unassigned. With IssueAssigneeID, lets the agent tell "mine" from "someone else's" without a read
-	IssueAssigneeID          string               `json:"issue_assignee_id,omitempty"`           // assignee UUID at claim time; empty when unassigned
+	IssueStateDeltaKnown bool     `json:"issue_state_delta_known,omitempty"`
+	IssueChangedFields   []string `json:"issue_changed_fields,omitempty"` // subset of title,description in that order; empty alongside IssueStateDeltaKnown means unchanged. Fields outside that set (status, assignee, priority, labels, parent, due date, stage, project, metadata) are NOT compared and must never be reported as checked. Status and assignee are out because IssueStatus / IssueAssigneeType / IssueAssigneeID ship their current values on every claim, so no comparison is needed to learn them; priority is out because it does not change what the agent does
+	IssueStatus          string   `json:"issue_status,omitempty"`         // the issue's status key at claim time. Sent whether or not the delta is known: the agent needs it to decide workflow step 3 ("already in progress?") without a read
+	IssueAssigneeType    string   `json:"issue_assignee_type,omitempty"`  // "agent", "member" or "squad" at claim time; empty when unassigned. With IssueAssigneeID, lets the agent tell "mine" from "someone else's" without a read
+	IssueAssigneeID      string   `json:"issue_assignee_id,omitempty"`    // assignee UUID at claim time; empty when unassigned
+	// CoordinatorType/CoordinatorID carry the issue's recorded result
+	// recipient at claim time, so the run can hand its result back to the
+	// conversation that asked for it. Absent on servers predating the field
+	// and when the issue records none; a daemon must then claim no return
+	// route rather than infer one. Never a task or queue: the recorded
+	// recipient still needs the ordinary explicit-mention handoff.
+	CoordinatorType          string               `json:"coordinator_type,omitempty"`            // "agent" or "member"
+	CoordinatorID            string               `json:"coordinator_id,omitempty"`              // coordinator actor UUID at claim time
 	ChatSessionID            string               `json:"chat_session_id,omitempty"`             // non-empty for chat tasks
 	ChatChannelType          string               `json:"chat_channel_type,omitempty"`           // "slack" when the chat session is backed by an IM channel; empty for a web-only chat. Makes the agent channel-aware (read history from the channel, not Multica)
 	ChatChannelDeliversFiles bool                 `json:"chat_channel_delivers_files,omitempty"` // server capability: THIS deployment can put a file the agent produced into THIS conversation — the adapter goes back for the bound attachment AND object storage exists to go back to. Absent/false on a server predating it, which is the safe reading: the agent is told to describe its file in words. Never inferred daemon-side from chat_channel_type; see handler.Handler.channelDeliversFiles
