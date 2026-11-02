@@ -284,7 +284,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			},
 			LeaseToken:     token,
 			LeaseExpiresAt: leased.LeaseExpiresAt.Time,
-			VerifyOnly:     verifyOnly(candidate.DeliveryStatus),
+			// The leased row, not the pre-lock candidate, is authoritative: a
+			// cancellation can commit between the candidate list and this lease
+			// (the withdrawal and this UPDATE serialise on the row), and a stale
+			// candidate that still said pending must not turn a withdrawn
+			// notification into a send.
+			VerifyOnly: verifyOnly(candidate.DeliveryStatus, leased.WithdrawnAt.Valid),
 		})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -298,9 +303,13 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 // the request before the worker or its acknowledgement disappeared. The same
 // holds for a row already marked unknown. Only a row the host explicitly
 // refused (pending, with a known no-effect result) is safe to deliver again.
-// This applies to every source: a comment notification recovers exactly like a
-// generic event, by looking up its original receipt.
-func verifyOnly(previousStatus string) bool {
+// A withdrawn row is never safe to send, whatever status the candidate list
+// recorded earlier. This applies to every source: a comment notification
+// recovers exactly like a generic event, by looking up its original receipt.
+func verifyOnly(previousStatus string, withdrawn bool) bool {
+	if withdrawn {
+		return true
+	}
 	switch previousStatus {
 	case "pending":
 		return false

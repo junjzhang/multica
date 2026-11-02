@@ -657,12 +657,17 @@ func TestWorkerUnusableClaimPreservesPendingDeliveredOutcome(t *testing.T) {
 
 func TestVerifyOnlyCoversEverySource(t *testing.T) {
 	for _, status := range []string{"leased", "unknown", ""} {
-		if !verifyOnly(status) {
+		if !verifyOnly(status, false) {
 			t.Fatalf("status %q must be verification-only: the host may have accepted it", status)
 		}
 	}
-	if verifyOnly("pending") {
+	if verifyOnly("pending", false) {
 		t.Fatal("a known no-effect row is deliverable again")
+	}
+	// A cancellation can commit after the candidate snapshot; the leased row's
+	// marker wins over a stale "pending" candidate.
+	if !verifyOnly("pending", true) {
+		t.Fatal("a withdrawn notification was not verification-only")
 	}
 }
 
