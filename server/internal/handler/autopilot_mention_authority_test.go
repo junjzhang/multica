@@ -259,6 +259,7 @@ func TestCreateComment_AutopilotLeaderMentionEnqueuesPrivateWorker(t *testing.T)
 	})
 	r.Header.Set("X-Agent-ID", fx.LeaderAgentID)
 	r.Header.Set("X-Task-ID", fx.LeaderTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", issueID)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
@@ -441,6 +442,7 @@ func TestUpdateComment_AutopilotAuthorityReStampedToEditingTask(t *testing.T) {
 		})
 		r.Header.Set("X-Agent-ID", fx.LeaderAgentID)
 		r.Header.Set("X-Task-ID", editTaskID)
+		r.Header.Set("X-Actor-Source", "task_token")
 		r = withURLParam(r, "commentId", commentID)
 		testHandler.UpdateComment(w, r)
 		if w.Code != http.StatusOK {

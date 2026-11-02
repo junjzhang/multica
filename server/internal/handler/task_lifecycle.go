@@ -209,15 +209,51 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A rerun is a fresh dispatch, not a reason to change who receives the
-	// result. An accepted return is reused; an issue that never had one records
-	// the actual rerun actor's address before the task is created.
-	accepted, _, derr := h.ensureDelegationReturnForDispatch(r, issue, actorType, actorID)
+	// result: the source run's complete accepted set is preserved, and the
+	// rerunning agent's own accepted address is added. The address is validated
+	// before anything is cancelled or created.
+	dispatchReturn, derr := h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})
 	if derr != nil {
 		writeDelegationReturnError(w, derr)
 		return
 	}
+	var actorReturnID pgtype.UUID
+	if dispatchReturn != nil {
+		actorReturnID, derr = recordDelegationReturn(r.Context(), h.Queries, issue, dispatchReturn, requestUserID(r))
+		if derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
+		}
+	}
+	// The source run is the named task, or the most recent earlier run for the
+	// rerun target when the request names none. A rerun never substitutes an
+	// arbitrary issue-level row.
+	inheritTaskID := sourceTaskID
+	if !inheritTaskID.Valid {
+		targetAgentID := issue.AssigneeID
+		if issue.AssigneeType.String == "squad" {
+			if squad, squadErr := h.Queries.GetSquad(r.Context(), issue.AssigneeID); squadErr == nil {
+				targetAgentID = squad.LeaderID
+			}
+		}
+		if issue.AssigneeType.String == "agent" || issue.AssigneeType.String == "squad" {
+			latest, latestErr := h.Queries.GetLatestTaskIDForIssueAndAgent(r.Context(), db.GetLatestTaskIDForIssueAndAgentParams{
+				IssueID:       issue.ID,
+				AgentID:       targetAgentID,
+				ExcludeTaskID: pgtype.UUID{},
+			})
+			if latestErr == nil {
+				inheritTaskID = latest
+			}
+		}
+	}
+	returnIDs, collectErr := h.collectDispatchReturns(r.Context(), issue, actorReturnID, inheritTaskID, false)
+	if collectErr != nil {
+		writeDelegationReturnError(w, collectErr)
+		return
+	}
 
-	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke)
+	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, returnIDs...)
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
 		return
@@ -235,7 +271,6 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := taskToResponse(*task, uuidToString(issue.WorkspaceID))
-	h.linkTaskDelegationReturn(r.Context(), task.ID, accepted.ID)
 	h.hydrateTaskAttributions(r.Context(), []*TaskAttribution{resp.Attribution})
 	writeJSON(w, http.StatusAccepted, resp)
 }

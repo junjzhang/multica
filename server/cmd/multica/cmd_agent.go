@@ -273,6 +273,15 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 		return nil, fmt.Errorf("agent execution context requires MULTICA_TOKEN to be a task-scoped mat_ token%s", daemonPortOnlyContextHint())
 	}
 
+	// A Paseo agent session must not silently authenticate its business
+	// commands as the human profile that owns the machine: the server would
+	// then classify the caller as a member and exempt the delegation gate.
+	// Explicit owner/credential-management commands are not marked and stay
+	// available to a human.
+	if err := cli.RequireAgentBusinessIdentity(cmd, token, strings.TrimSpace(os.Getenv(cli.PaseoAgentIDEnv)) != "", taskContext); err != nil {
+		return nil, err
+	}
+
 	serverURL := resolveServerURL(cmd)
 	workspaceID := resolveWorkspaceID(cmd)
 	if serverURL == "" {
@@ -294,7 +303,7 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 	if !taskContext {
 		returnSession := cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")
 		if strings.TrimSpace(returnSession) == "" {
-			returnSession = os.Getenv("PASEO_AGENT_ID")
+			returnSession = os.Getenv(cli.PaseoAgentIDEnv)
 		}
 		client.ReturnSession = strings.TrimSpace(returnSession)
 	} else if strings.TrimSpace(cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")) != "" {

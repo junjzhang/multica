@@ -130,14 +130,62 @@ func issueIDByTitle(t *testing.T, title string) (string, bool) {
 
 func acceptedReturn(t *testing.T, issueID string) (db.IssueDelegationReturn, bool) {
 	t.Helper()
-	row, err := testHandler.Queries.GetIssueDelegationReturn(context.Background(), db.GetIssueDelegationReturnParams{
+	rows := acceptedReturns(t, issueID)
+	if len(rows) == 0 {
+		return db.IssueDelegationReturn{}, false
+	}
+	return rows[0], true
+}
+
+func acceptedReturns(t *testing.T, issueID string) []db.IssueDelegationReturn {
+	t.Helper()
+	rows, err := testHandler.Queries.ListIssueDelegationReturns(context.Background(), db.ListIssueDelegationReturnsParams{
 		WorkspaceID: parseUUID(testWorkspaceID),
 		IssueID:     parseUUID(issueID),
 	})
 	if err != nil {
-		return db.IssueDelegationReturn{}, false
+		return nil
 	}
-	return row, true
+	return rows
+}
+
+func taskReturnIDs(t *testing.T, taskID string) []db.IssueDelegationReturn {
+	t.Helper()
+	rows, err := testHandler.Queries.ListAgentTaskDelegationReturns(context.Background(), parseUUID(taskID))
+	if err != nil {
+		return nil
+	}
+	return rows
+}
+
+func latestTaskIDFor(t *testing.T, issueID, agentID string) string {
+	t.Helper()
+	var taskID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT id FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		ORDER BY created_at DESC LIMIT 1`, issueID, agentID).Scan(&taskID); err != nil {
+		t.Fatalf("latest task for %s/%s: %v", issueID, agentID, err)
+	}
+	return taskID
+}
+
+func returnIDs(rows []db.IssueDelegationReturn) map[string]bool {
+	ids := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		ids[uuidToString(row.ID)] = true
+	}
+	return ids
+}
+
+func requireTaskReturns(t *testing.T, taskID string, want ...db.IssueDelegationReturn) {
+	t.Helper()
+	got := returnIDs(taskReturnIDs(t, taskID))
+	for _, row := range want {
+		if !got[uuidToString(row.ID)] {
+			t.Fatalf("task %s returns = %v, missing %s (dispatcher %s)", taskID, got, uuidToString(row.ID), uuidToString(row.DispatcherAgentID))
+		}
+	}
 }
 
 // bumpIssueCounter keeps the workspace counter ahead of numbers that fixture
@@ -198,15 +246,13 @@ func TestCreateDelegatedIssueByManagedDispatcherIsAtomic(t *testing.T) {
 		uuidToString(accepted.SourceTaskID) != sourceTask {
 		t.Fatalf("accepted = %+v, want managed task %s for %s", accepted, sourceTask, dispatcher)
 	}
-	var returnID, delegatedFrom, taskStatus, runtimeID string
+	var taskID, delegatedFrom, taskStatus, runtimeID string
 	if err := testPool.QueryRow(context.Background(), `
-		SELECT COALESCE(delegation_return_id::text,''), COALESCE(delegated_from_task_id::text,''), status, runtime_id
-		FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target).Scan(&returnID, &delegatedFrom, &taskStatus, &runtimeID); err != nil {
+		SELECT id, COALESCE(delegated_from_task_id::text,''), status, runtime_id
+		FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target).Scan(&taskID, &delegatedFrom, &taskStatus, &runtimeID); err != nil {
 		t.Fatalf("delegated task: %v", err)
 	}
-	if returnID != uuidToString(accepted.ID) {
-		t.Fatalf("task return link = %q, want %s", returnID, uuidToString(accepted.ID))
-	}
+	requireTaskReturns(t, taskID, accepted)
 	if delegatedFrom != sourceTask {
 		t.Fatalf("task delegated_from = %q, want source %s", delegatedFrom, sourceTask)
 	}
@@ -286,13 +332,7 @@ func TestCreateDelegatedIssueByExternalDispatcherBindsExplicitSession(t *testing
 	if binding.SessionID != sessionID {
 		t.Fatalf("binding session = %s, want %s", binding.SessionID, sessionID)
 	}
-	var linked string
-	if err := testPool.QueryRow(context.Background(), `SELECT COALESCE(delegation_return_id::text,'') FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target).Scan(&linked); err != nil {
-		t.Fatalf("delegated task: %v", err)
-	}
-	if linked != uuidToString(accepted.ID) {
-		t.Fatalf("task return link = %q, want %s", linked, uuidToString(accepted.ID))
-	}
+	requireTaskReturns(t, latestTaskIDFor(t, issueID, target), accepted)
 }
 
 func TestCreateDelegatedIssueByExternalDispatcherWithoutSessionCreatesNothing(t *testing.T) {
@@ -450,13 +490,7 @@ func TestUpdateAssignmentByManagedDispatcherRecordsReturn(t *testing.T) {
 		uuidToString(accepted.DispatcherAgentID) != dispatcher {
 		t.Fatalf("accepted = %+v, want managed task %s", accepted, sourceTask)
 	}
-	var linked string
-	if err := testPool.QueryRow(context.Background(), `SELECT COALESCE(delegation_return_id::text,'') FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target).Scan(&linked); err != nil {
-		t.Fatalf("assigned task: %v", err)
-	}
-	if linked != uuidToString(accepted.ID) {
-		t.Fatalf("task return link = %q, want %s", linked, uuidToString(accepted.ID))
-	}
+	requireTaskReturns(t, latestTaskIDFor(t, issueID, target), accepted)
 }
 
 func TestUpdateAssignmentByUnpinnedManagedDispatcherChangesNothing(t *testing.T) {
@@ -487,64 +521,107 @@ func TestUpdateAssignmentByUnpinnedManagedDispatcherChangesNothing(t *testing.T)
 	}
 }
 
-func TestAgentMentionRecordsReturnAndCoalescingKeepsIt(t *testing.T) {
+func TestAgentMentionCoalescingPreservesEveryDispatcher(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 	firstAgent, firstTask, firstToken := managedDispatcherFixture(t, "mention-first")
-	secondAgent, _, secondToken := managedDispatcherFixture(t, "mention-second")
+	secondAgent, secondTask, secondToken := managedDispatcherFixture(t, "mention-second")
 	target, _ := executableTarget(t, "mention-target")
-	issueID := dbfx.Issue(t, "Mention delegation")
-	mention := fmt.Sprintf("[@Target](mention://agent/%s) please handle this %d", target, time.Now().UnixNano())
+	issueID := dbfx.Issue(t, "Mention coalescing")
+	post := func(token, content string, parentID string) *httptest.ResponseRecorder {
+		body := map[string]any{"content": content}
+		if parentID != "" {
+			body["parent_id"] = parentID
+		}
+		return serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateComment), http.MethodPost, "/api/issues/"+issueID+"/comments", body, map[string]string{"id": issueID}, nil)
+	}
 
+	firstResponse := post(firstToken, fmt.Sprintf("[@Target](mention://agent/%s) first request %d", target, time.Now().UnixNano()), "")
+	if firstResponse.Code != http.StatusCreated {
+		t.Fatalf("first mention status = %d: %s", firstResponse.Code, firstResponse.Body.String())
+	}
+	var firstComment struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(firstResponse.Body.Bytes(), &firstComment); err != nil {
+		t.Fatalf("decode first comment: %v", err)
+	}
+	firstRows := acceptedReturns(t, issueID)
+	if len(firstRows) != 1 || uuidToString(firstRows[0].DispatcherAgentID) != firstAgent || uuidToString(firstRows[0].SourceTaskID) != firstTask {
+		t.Fatalf("first dispatcher returns = %+v, want one managed row for %s", firstRows, firstAgent)
+	}
+	targetTaskID := latestTaskIDFor(t, issueID, target)
+	requireTaskReturns(t, targetTaskID, firstRows[0])
+
+	// The second agent explicitly mentions the SAME worker. The request folds
+	// into the pending run; the run must keep both accepted relationships, not
+	// just the first one.
+	// Same thread: the second explicit mention folds into the pending run.
+	if w := post(secondToken, fmt.Sprintf("[@Target](mention://agent/%s) second request %d", target, time.Now().UnixNano()), firstComment.ID); w.Code != http.StatusCreated {
+		t.Fatalf("second mention status = %d: %s", w.Code, w.Body.String())
+	}
+	rows := acceptedReturns(t, issueID)
+	if len(rows) != 2 {
+		t.Fatalf("accepted returns = %d, want one per dispatcher: %+v", len(rows), rows)
+	}
+	byDispatcher := map[string]db.IssueDelegationReturn{}
+	for _, row := range rows {
+		byDispatcher[uuidToString(row.DispatcherAgentID)] = row
+	}
+	if _, ok := byDispatcher[firstAgent]; !ok {
+		t.Fatalf("coalescing dropped the first dispatcher's return: %+v", rows)
+	}
+	secondReturn, ok := byDispatcher[secondAgent]
+	if !ok {
+		t.Fatalf("coalescing dropped the second dispatcher's return: %+v", rows)
+	}
+	if uuidToString(secondReturn.SourceTaskID) != secondTask {
+		t.Fatalf("second return source = %s, want %s", uuidToString(secondReturn.SourceTaskID), secondTask)
+	}
+	if latestTaskIDFor(t, issueID, target) != targetTaskID {
+		t.Fatal("second mention created a second run instead of coalescing")
+	}
+	requireTaskReturns(t, targetTaskID, rows...)
+}
+
+// A second dispatcher's INDEPENDENT delegation (different worker, so no
+// coalescing) must be addressed to that dispatcher, not to the first one.
+func TestSecondDispatcherIndependentDelegationGetsItsOwnReturn(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	firstAgent, firstTask, firstToken := managedDispatcherFixture(t, "two-dispatchers-first")
+	secondAgent, secondTask, secondToken := managedDispatcherFixture(t, "two-dispatchers-second")
+	targetA, _ := executableTarget(t, "two-dispatchers-a")
+	targetB, _ := executableTarget(t, "two-dispatchers-b")
+	issueID := dbfx.Issue(t, "Two dispatchers, two workers")
 	post := func(token, content string) *httptest.ResponseRecorder {
 		return serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateComment), http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{
 			"content": content,
 		}, map[string]string{"id": issueID}, nil)
 	}
 
-	w := post(firstToken, mention)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("first mention status = %d: %s", w.Code, w.Body.String())
+	if w := post(firstToken, fmt.Sprintf("[@A](mention://agent/%s) first delegation %d", targetA, time.Now().UnixNano())); w.Code != http.StatusCreated {
+		t.Fatalf("first mention = %d: %s", w.Code, w.Body.String())
 	}
-	accepted, ok := acceptedReturn(t, issueID)
-	if !ok {
-		t.Fatal("agent mention recorded no accepted return")
+	if w := post(secondToken, fmt.Sprintf("[@B](mention://agent/%s) second delegation %d", targetB, time.Now().UnixNano())); w.Code != http.StatusCreated {
+		t.Fatalf("second mention = %d: %s", w.Code, w.Body.String())
 	}
-	if uuidToString(accepted.DispatcherAgentID) != firstAgent || uuidToString(accepted.SourceTaskID) != firstTask {
-		t.Fatalf("accepted = %+v, want managed task %s for %s", accepted, firstTask, firstAgent)
+	rows := acceptedReturns(t, issueID)
+	if len(rows) != 2 {
+		t.Fatalf("accepted returns = %d, want 2: %+v", len(rows), rows)
 	}
-	targetTask := func() (taskID, linked, trigger string) {
-		t.Helper()
-		if err := testPool.QueryRow(context.Background(), `
-			SELECT id, COALESCE(delegation_return_id::text,''), COALESCE(trigger_comment_id::text,'')
-			FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2
-			ORDER BY created_at DESC LIMIT 1`, issueID, target).Scan(&taskID, &linked, &trigger); err != nil {
-			t.Fatalf("target task: %v", err)
-		}
-		return taskID, linked, trigger
+	taskA := latestTaskIDFor(t, issueID, targetA)
+	taskB := latestTaskIDFor(t, issueID, targetB)
+	returnsA := taskReturnIDs(t, taskA)
+	returnsB := taskReturnIDs(t, taskB)
+	if len(returnsA) != 1 || uuidToString(returnsA[0].DispatcherAgentID) != firstAgent || uuidToString(returnsA[0].SourceTaskID) != firstTask {
+		t.Fatalf("worker A returns = %+v, want only %s/%s", returnsA, firstAgent, firstTask)
 	}
-	firstTaskID, firstLink, _ := targetTask()
-	if firstLink != uuidToString(accepted.ID) {
-		t.Fatalf("first task link = %q, want %s", firstLink, uuidToString(accepted.ID))
+	if len(returnsB) != 1 || uuidToString(returnsB[0].DispatcherAgentID) != secondAgent || uuidToString(returnsB[0].SourceTaskID) != secondTask {
+		t.Fatalf("worker B returns = %+v, want only %s/%s (not the first dispatcher %s)", returnsB, secondAgent, secondTask, firstAgent)
 	}
-
-	// A second, different agent mentioning the same worker folds into the
-	// pending run. It must not steal the accepted recipient.
-	w = post(secondToken, fmt.Sprintf("additional context %d", time.Now().UnixNano()))
-	if w.Code != http.StatusCreated {
-		t.Fatalf("second mention status = %d: %s", w.Code, w.Body.String())
-	}
-	still, _ := acceptedReturn(t, issueID)
-	if still.ID != accepted.ID || uuidToString(still.DispatcherAgentID) != firstAgent {
-		t.Fatalf("coalesced mention replaced the accepted return: %+v", still)
-	}
-	secondTaskID, secondLink, secondTrigger := targetTask()
-	if secondTaskID != firstTaskID || secondLink != firstLink {
-		t.Fatalf("coalescing changed the run: task %s->%s link %s->%s", firstTaskID, secondTaskID, firstLink, secondLink)
-	}
-	_ = secondTrigger
-	_ = secondAgent
 }
 
 func TestAgentMentionWithoutPinnedSessionCreatesNoComment(t *testing.T) {
@@ -628,13 +705,7 @@ func TestReassignmentPreservesAcceptedReturn(t *testing.T) {
 	if !ok || still.ID != accepted.ID || uuidToString(still.DispatcherAgentID) != externalAgent {
 		t.Fatalf("reassignment changed the accepted return: %+v", still)
 	}
-	var linked string
-	if err := testPool.QueryRow(context.Background(), `SELECT COALESCE(delegation_return_id::text,'') FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, secondTarget).Scan(&linked); err != nil {
-		t.Fatalf("reassigned task: %v", err)
-	}
-	if linked != uuidToString(accepted.ID) {
-		t.Fatalf("reassigned task link = %q, want %s", linked, uuidToString(accepted.ID))
-	}
+	requireTaskReturns(t, latestTaskIDFor(t, issueID, secondTarget), accepted)
 }
 
 func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
@@ -669,7 +740,9 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 	if !ok || still.ID != accepted.ID || uuidToString(still.DispatcherAgentID) != externalAgent {
 		t.Fatalf("rerun changed the accepted return: %+v", still)
 	}
-	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND delegation_return_id = $3`, issueID, target, uuidToString(accepted.ID)); n != 1 {
-		t.Fatalf("rerun linked %d tasks to the accepted return, want 1", n)
+	rerunTaskID := latestTaskIDFor(t, issueID, target)
+	requireTaskReturns(t, rerunTaskID, accepted)
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target); n != 2 {
+		t.Fatalf("rerun created %d tasks for the target, want the completed source plus the rerun", n)
 	}
 }

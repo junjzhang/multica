@@ -543,25 +543,44 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	// The durable launch obligation commits with the delegated issue and its
 	// return address. The task is published only after commit, so a rollback
 	// leaves no half-created delegation and the runtime is never woken for
-	// uncommitted rows.
+	// uncommitted rows. A squad starts through the very same transaction: the
+	// leader task is not left to a post-commit enqueue.
+	actorID := opts.ActorID
+	if actorID == "" {
+		actorID = util.UUIDToString(issue.CreatorID)
+	}
 	delegatedTaskInserted := false
+	var delegatedTask db.AgentTaskQueue
 	var acceptedTaskAttr attribution.Result
-	if delegationRecorded && opts.AssignedAgentRunFireAt.IsZero() &&
-		issue.AssigneeType.Valid && issue.AssigneeType.String == "agent" &&
-		s.shouldEnqueueAgentTaskWithQueries(ctx, qtx, issue) {
-		var task db.AgentTaskQueue
-		var attr attribution.Result
-		task, attr, err = s.TaskService.EnqueueAssignedTaskInTx(ctx, qtx, issue, acceptedReturn.ID)
-		switch {
-		case err == nil:
-			assignedTask = task
-			acceptedTaskAttr = attr
-			delegatedTaskInserted = true
-		case errors.Is(err, ErrDuplicatePendingTask):
-			// A concurrent enqueue already covers this fresh issue's target;
-			// the accepted return still commits with the issue.
-		default:
-			return IssueCreateResult{}, fmt.Errorf("enqueue delegated agent task: %w", err)
+	if delegationRecorded && opts.AssignedAgentRunFireAt.IsZero() && issue.AssigneeType.Valid {
+		switch issue.AssigneeType.String {
+		case "agent":
+			if s.shouldEnqueueAgentTaskWithQueries(ctx, qtx, issue) {
+				task, attr, taskErr := s.TaskService.EnqueueAssignedTaskInTx(ctx, qtx, issue, []pgtype.UUID{acceptedReturn.ID})
+				switch {
+				case taskErr == nil:
+					delegatedTask = task
+					acceptedTaskAttr = attr
+					delegatedTaskInserted = true
+				case errors.Is(taskErr, ErrDuplicatePendingTask):
+					// A concurrent enqueue already covers this fresh issue's
+					// target; the accepted return still commits with the issue.
+				default:
+					return IssueCreateResult{}, fmt.Errorf("enqueue delegated agent task: %w", taskErr)
+				}
+			}
+		case "squad":
+			if s.shouldEnqueueSquadLeaderOnAssignWithQueries(ctx, qtx, issue) {
+				task, attr, inserted, taskErr := s.enqueueSquadLeaderTaskInTx(ctx, qtx, issue, pgtype.UUID{}, p.CreatorType, actorID, []pgtype.UUID{acceptedReturn.ID})
+				if taskErr != nil {
+					return IssueCreateResult{}, fmt.Errorf("enqueue delegated squad leader task: %w", taskErr)
+				}
+				if inserted {
+					delegatedTask = task
+					acceptedTaskAttr = attr
+					delegatedTaskInserted = true
+				}
+			}
 		}
 	}
 
@@ -581,11 +600,6 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	}
 
 	attachments := s.linkAttachments(ctx, issue, p.AttachmentIDs)
-
-	actorID := opts.ActorID
-	if actorID == "" {
-		actorID = util.UUIDToString(issue.CreatorID)
-	}
 
 	var assignedTaskID pgtype.UUID
 	if !opts.AssignedAgentRunFireAt.IsZero() {
@@ -607,7 +621,11 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			// AssignedAgentRunFireAt currently belongs to channel /issue, which
 			// always resolves an agent assignee. Preserve the ordinary squad path
 			// for any future caller that supplies the option with a squad.
-			s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, p.CreatorType, actorID, acceptedReturn.ID)
+			var squadReturnIDs []pgtype.UUID
+			if acceptedReturn.ID.Valid {
+				squadReturnIDs = []pgtype.UUID{acceptedReturn.ID}
+			}
+			s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, p.CreatorType, actorID, squadReturnIDs)
 		}
 	}
 
@@ -616,9 +634,9 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	if delegatedTaskInserted {
 		// The task committed with the issue and its accepted return. Build the
 		// optional external overlay and wake the runtime only now.
-		assignedTaskID = assignedTask.ID
-		s.TaskService.HydrateQueuedIssueTaskOverlay(ctx, assignedTask)
-		s.TaskService.PublishQueuedIssueTask(ctx, assignedTask, acceptedTaskAttr)
+		assignedTaskID = delegatedTask.ID
+		s.TaskService.ApplyQueuedIssueTaskOverlay(ctx, delegatedTask)
+		s.TaskService.PublishQueuedIssueTask(ctx, delegatedTask, acceptedTaskAttr)
 	} else if opts.AssignedAgentRunFireAt.IsZero() {
 		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt, acceptedReturn.ID)
 	}
@@ -958,7 +976,11 @@ func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue,
 		var task db.AgentTaskQueue
 		var err error
 		if agentRunFireAt.IsZero() {
-			task, err = s.TaskService.EnqueueTaskForIssue(ctx, issue)
+			if delegationReturnID.Valid {
+				task, err = s.TaskService.EnqueueTaskForIssueWithReturns(ctx, issue, []pgtype.UUID{delegationReturnID})
+			} else {
+				task, err = s.TaskService.EnqueueTaskForIssue(ctx, issue)
+			}
 		} else {
 			task, err = s.TaskService.EnqueueDeferredChannelIssueTask(ctx, issue, agentRunFireAt)
 		}
@@ -967,33 +989,17 @@ func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue,
 				"issue_id", util.UUIDToString(issue.ID),
 				"error", err)
 		} else {
-			s.linkTaskDelegationReturn(ctx, task.ID, delegationReturnID)
 			return task.ID
 		}
 	}
 	if s.shouldEnqueueSquadLeaderOnAssign(ctx, issue) {
-		s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, creatorType, actorID, delegationReturnID)
+		var returnIDs []pgtype.UUID
+		if delegationReturnID.Valid {
+			returnIDs = []pgtype.UUID{delegationReturnID}
+		}
+		s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, creatorType, actorID, returnIDs)
 	}
 	return pgtype.UUID{}
-}
-
-// linkTaskDelegationReturn records which accepted delegation return a run was
-// dispatched under. It is metadata for per-run precision; the authoritative
-// recipient stays the issue's accepted return row, so a failed link must not
-// discard an already-queued run.
-func (s *IssueService) linkTaskDelegationReturn(ctx context.Context, taskID, delegationReturnID pgtype.UUID) {
-	if !taskID.Valid || !delegationReturnID.Valid {
-		return
-	}
-	if _, err := s.Queries.SetAgentTaskDelegationReturn(ctx, db.SetAgentTaskDelegationReturnParams{
-		ID:                 taskID,
-		DelegationReturnID: delegationReturnID,
-	}); err != nil {
-		slog.Warn("link task to accepted delegation return failed",
-			"task_id", util.UUIDToString(taskID),
-			"delegation_return_id", util.UUIDToString(delegationReturnID),
-			"error", err)
-	}
 }
 
 // shouldEnqueueAgentTaskWithQueries returns true when an issue create should
@@ -1043,61 +1049,86 @@ func agentAssigneeVerdict(ctx context.Context, lookup RuntimeLookup, issue db.Is
 }
 
 func (s *IssueService) shouldEnqueueSquadLeaderOnAssign(ctx context.Context, issue db.Issue) bool {
-	if issue.TriageState.Valid || issuestatus.Effective(ctx, s.Queries, issue.WorkspaceID, issue.Status) == "backlog" {
-		return false
-	}
-	return s.isSquadLeaderReady(ctx, issue)
+	return s.shouldEnqueueSquadLeaderOnAssignWithQueries(ctx, s.Queries, issue)
 }
 
-func (s *IssueService) isSquadLeaderReady(ctx context.Context, issue db.Issue) bool {
+// shouldEnqueueSquadLeaderOnAssignWithQueries resolves the same parking and
+// readiness rules through the caller's query handle, so a create inside its
+// transaction decides on the snapshot it is writing.
+func (s *IssueService) shouldEnqueueSquadLeaderOnAssignWithQueries(ctx context.Context, q *db.Queries, issue db.Issue) bool {
+	if issue.TriageState.Valid || issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) == "backlog" {
+		return false
+	}
+	return s.isSquadLeaderReadyWithQueries(ctx, q, issue)
+}
+
+func (s *IssueService) isSquadLeaderReadyWithQueries(ctx context.Context, q *db.Queries, issue db.Issue) bool {
 	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "squad" || !issue.AssigneeID.Valid {
 		return false
 	}
-	squad, err := s.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+	squad, err := q.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
 		ID:          issue.AssigneeID,
 		WorkspaceID: issue.WorkspaceID,
 	})
 	if err != nil {
 		return false
 	}
-	agent, err := s.Queries.GetAgent(ctx, squad.LeaderID)
+	agent, err := q.GetAgent(ctx, squad.LeaderID)
 	if err != nil {
 		return false
 	}
-	verdict, err := AgentReadiness(ctx, s.runtimeLookup(s.Queries), agent)
+	verdict, err := AgentReadiness(ctx, s.runtimeLookup(q), agent)
 	if err != nil {
 		return false
 	}
 	return verdict.Ready()
 }
 
-func (s *IssueService) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, authorType, authorID string, delegationReturnID pgtype.UUID) {
-	squad, err := s.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
+// enqueueSquadLeaderTaskInTx creates the leader's run inside the caller's
+// transaction and links every accepted return it carries. inserted=false means
+// the squad is unavailable or already has a pending leader run; the accepted
+// return still commits with the issue.
+func (s *IssueService) enqueueSquadLeaderTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, authorType, authorID string, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
+	squad, err := q.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
 		ID:          issue.AssigneeID,
 		WorkspaceID: issue.WorkspaceID,
 	})
 	if err != nil {
-		return
+		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
-	hasPending, err := s.Queries.HasPendingTaskForIssueAndAgent(ctx, db.HasPendingTaskForIssueAndAgentParams{
+	hasPending, err := q.HasPendingTaskForIssueAndAgent(ctx, db.HasPendingTaskForIssueAndAgentParams{
 		IssueID: issue.ID,
 		AgentID: squad.LeaderID,
 		// Key dedup on the reviewed head (TEN-356).
 		HeadSha: headShaText(s.TaskService.ResolveIssueReviewSHA(ctx, issue.ID)),
 	})
 	if err != nil || hasPending {
-		return
+		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
-	task, err := s.TaskService.EnqueueTaskForSquadLeader(ctx, issue, squad.LeaderID, squad.ID, triggerCommentID, OriginDerived)
+	task, attr, err := s.TaskService.EnqueueSquadLeaderTaskInTx(ctx, q, issue, squad.LeaderID, squad.ID, triggerCommentID, OriginDerived, delegationReturnIDs)
 	if err != nil {
-		slog.Warn("enqueue squad leader task on create failed",
+		if errors.Is(err, ErrDuplicatePendingTask) {
+			return db.AgentTaskQueue{}, attribution.Result{}, false, nil
+		}
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
+	return task, attr, true, nil
+}
+
+func (s *IssueService) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, authorType, authorID string, delegationReturnIDs []pgtype.UUID) {
+	task, attr, inserted, err := s.enqueueSquadLeaderTaskInTx(ctx, s.Queries, issue, triggerCommentID, authorType, authorID, delegationReturnIDs)
+	if err != nil {
+		slog.Warn("enqueue squad leader task failed",
 			"issue_id", util.UUIDToString(issue.ID),
-			"squad_id", util.UUIDToString(squad.ID),
-			"leader_id", util.UUIDToString(squad.LeaderID),
+			"squad_id", util.UUIDToString(issue.AssigneeID),
 			"error", err)
 		return
 	}
-	s.linkTaskDelegationReturn(ctx, task.ID, delegationReturnID)
+	if !inserted {
+		return
+	}
+	s.TaskService.ApplyQueuedIssueTaskOverlay(ctx, task)
+	s.TaskService.PublishQueuedIssueTask(ctx, task, attr)
 	// A member creating an issue assigned to a squad delegates the same way as
 	// one assigned to an agent (see Create). A trigger comment, when present,
 	// already recorded its author at enqueue.

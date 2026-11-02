@@ -74,6 +74,7 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				}), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)
 				if response.AuthorType != "agent" || response.SourceTaskID == nil || *response.SourceTaskID != workerTaskID {
@@ -205,9 +206,11 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 				req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", body), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				if mode == "leader_reply" {
 					req.Header.Set("X-Agent-ID", leaderID)
 					req.Header.Set("X-Task-ID", taskID)
+					req.Header.Set("X-Actor-Source", "task_token")
 				}
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)

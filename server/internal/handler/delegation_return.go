@@ -3,12 +3,9 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -37,7 +34,9 @@ func delegationReturnRequired(actorType string, assigneeType pgtype.Text) bool {
 // resolveDelegationAddress derives the acting agent's return address from
 // server-stamped request context. A managed run is addressed by the task id the
 // auth middleware took from the mat_ token; an external session by its explicit
-// host-session reference. Anything else on an agent request fails closed.
+// host-session reference. Auth strips client-supplied identity headers, so an
+// agent actor without one of those two stamped sources has no address and must
+// fail closed rather than fall back to a legacy header pair.
 func (h *Handler) resolveDelegationAddress(r *http.Request, workspaceID, actorType, actorID string) (delegation.Address, error) {
 	if actorType != "agent" {
 		return delegation.Address{}, delegation.ErrReturnMissing
@@ -48,73 +47,116 @@ func (h *Handler) resolveDelegationAddress(r *http.Request, workspaceID, actorTy
 	case "external_agent":
 		return delegation.ResolveExternal(r.Context(), h.Queries, workspaceID, actorID, r.Header.Get(ReturnSessionHeader))
 	default:
-		// Legacy agent headers (X-Agent-ID + X-Task-ID without the stamped
-		// source) are still accepted by resolveActor inside tests and by the
-		// oldest daemons. Prefer the task if it is present; otherwise there is
-		// no evidence of an address.
-		if taskID := strings.TrimSpace(r.Header.Get("X-Task-ID")); taskID != "" {
-			return delegation.ResolveManaged(r.Context(), h.Queries, workspaceID, actorID, taskID)
-		}
-		return delegation.Address{}, fmt.Errorf("%w: this request did not come from a task token or an external session", delegation.ErrReturnMissing)
+		return delegation.Address{}, delegation.ErrReturnMissing
 	}
 }
 
-// acceptedDelegationReturn returns the issue's already accepted recipient. The
-// first accepted delegation owns it; later assignments, reruns, and folded
-// comments reuse it rather than replacing someone else's result recipient.
-func (h *Handler) acceptedDelegationReturn(ctx context.Context, issue db.Issue) (db.IssueDelegationReturn, bool) {
-	accepted, err := h.Queries.GetIssueDelegationReturn(ctx, db.GetIssueDelegationReturnParams{
-		WorkspaceID: issue.WorkspaceID,
-		IssueID:     issue.ID,
-	})
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			// A read failure is not evidence that the issue has no accepted
-			// recipient; callers that need a hard gate treat it as missing.
-			return db.IssueDelegationReturn{}, false
-		}
-		return db.IssueDelegationReturn{}, false
+// prepareCommentDelegationReturn validates the author's address when this
+// comment will start at least one executable native run. A mention that
+// resolved only to blocked targets (runtime unavailable, archived, ...) has no
+// executable trigger, so the comment keeps its per-target blocked outcome
+// instead of being refused. Discussions and member comments need no address.
+func (h *Handler) prepareCommentDelegationReturn(r *http.Request, issue db.Issue, actorType, actorID string, plan commentTriggerPlan) (*delegation.Address, error) {
+	if len(plan.triggers) == 0 {
+		return nil, nil
 	}
-	return accepted, true
+	return h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})
 }
 
-// ensureDelegationReturnForDispatch validates and records the actor's accepted
-// return for an existing issue before a run is queued. An existing accepted
-// return is returned untouched. A member actor needs no return.
-func (h *Handler) ensureDelegationReturnForDispatch(r *http.Request, issue db.Issue, actorType, actorID string) (db.IssueDelegationReturn, bool, error) {
-	if accepted, ok := h.acceptedDelegationReturn(r.Context(), issue); ok {
-		return accepted, true, nil
+// prepareDelegationReturn validates the current actor's address before a
+// business write, without persisting anything. The address is recorded later,
+// inside that write's transaction, so a rejected write leaves no phantom
+// accepted return. It returns nil when this dispatch needs no address.
+func (h *Handler) prepareDelegationReturn(r *http.Request, issue db.Issue, actorType, actorID string, willRun bool, assigneeType pgtype.Text) (*delegation.Address, error) {
+	if !willRun || !delegationReturnRequired(actorType, assigneeType) {
+		return nil, nil
 	}
-	if actorType != "agent" {
-		return db.IssueDelegationReturn{}, false, nil
-	}
+	// An issue-level return is not evidence for THIS dispatch: always resolve
+	// the current trusted actor context. A stale or second dispatcher's row
+	// must never let a new delegation skip the address check.
 	address, err := h.resolveDelegationAddress(r, util.UUIDToString(issue.WorkspaceID), actorType, actorID)
 	if err != nil {
-		return db.IssueDelegationReturn{}, true, err
+		return nil, err
 	}
-	accepted, err := delegation.Ensure(r.Context(), h.Queries, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), address, requestUserID(r))
-	if err != nil {
-		return db.IssueDelegationReturn{}, true, err
-	}
-	return accepted, true, nil
+	return &address, nil
 }
 
-// linkTaskDelegationReturn attaches an already-queued run to the accepted
-// return. The issue-level row remains authoritative, so a failed link is logged
-// instead of discarding a run that is already durable.
-func (h *Handler) linkTaskDelegationReturn(ctx context.Context, taskID, acceptedID pgtype.UUID) {
-	if !taskID.Valid || !acceptedID.Valid {
-		return
+// recordDelegationReturn records a prepared address through the caller's
+// transaction and returns the accepted row's id. It is a no-op when the
+// dispatch needs no address.
+func recordDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
+	if address == nil {
+		return pgtype.UUID{}, nil
 	}
-	if _, err := h.Queries.SetAgentTaskDelegationReturn(ctx, db.SetAgentTaskDelegationReturnParams{
-		ID:                 taskID,
-		DelegationReturnID: acceptedID,
-	}); err != nil {
-		slog.Warn("link task to accepted delegation return failed",
-			"task_id", util.UUIDToString(taskID),
-			"delegation_return_id", util.UUIDToString(acceptedID),
-			"error", err,
-		)
+	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *address, createdBy)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	return accepted.ID, nil
+}
+
+// collectDispatchReturns builds the complete set of accepted relationships the
+// run about to be created must carry:
+//
+//   - the current dispatcher's accepted return (when it is an agent);
+//   - the source run's complete set for a rerun or continuation;
+//   - every accepted return on the issue for an executor reassignment, so the
+//     original recipients still receive the result; or, otherwise, only
+//     relationships no run carries yet (a backlog delegation whose execution
+//     is only now starting).
+func (h *Handler) collectDispatchReturns(ctx context.Context, issue db.Issue, actorReturnID, sourceTaskID pgtype.UUID, inheritAll bool) ([]pgtype.UUID, error) {
+	ids := make([]pgtype.UUID, 0, 4)
+	if actorReturnID.Valid {
+		ids = append(ids, actorReturnID)
+	}
+	if sourceTaskID.Valid {
+		inherited, err := delegation.RunReturnIDs(ctx, h.Queries, sourceTaskID)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, inherited...)
+	}
+	var err error
+	if inheritAll {
+		var all []pgtype.UUID
+		all, err = delegation.IssueReturnIDs(ctx, h.Queries, issue.WorkspaceID, issue.ID)
+		ids = append(ids, all...)
+	} else {
+		var unlinked []pgtype.UUID
+		unlinked, err = delegation.UnlinkedReturnIDs(ctx, h.Queries, issue.WorkspaceID, issue.ID)
+		ids = append(ids, unlinked...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// linkCommentTaskReturns attaches a comment's accepted relationship to the runs
+// that comment became part of, including a pending run it was folded into. The
+// relationship itself already committed with the comment; a link failure is
+// reported rather than rolled back into the saved comment.
+func (h *Handler) linkCommentTaskReturns(ctx context.Context, issue db.Issue, commentID, returnID pgtype.UUID) {
+	if err := delegation.LinkComment(ctx, h.Queries, issue.ID, commentID, returnID); err != nil {
+		slog.Warn("link comment tasks to accepted delegation return failed",
+			"issue_id", util.UUIDToString(issue.ID),
+			"comment_id", util.UUIDToString(commentID),
+			"delegation_return_id", util.UUIDToString(returnID),
+			"error", err)
+	}
+}
+
+// asDelegationReturnError returns err when it is a delegation gate refusal, so
+// callers that ran the gate inside a write transaction can render the stable
+// code instead of a generic 500.
+func asDelegationReturnError(err error) error {
+	switch {
+	case errors.Is(err, delegation.ErrReturnMissing),
+		errors.Is(err, delegation.ErrReturnInvalid),
+		errors.Is(err, delegation.ErrReturnNotReady):
+		return err
+	default:
+		return nil
 	}
 }
 
@@ -140,40 +182,5 @@ func writeDelegationReturnError(w http.ResponseWriter, err error) {
 		})
 	default:
 		writeError(w, http.StatusInternalServerError, "failed to resolve the delegation return address")
-	}
-}
-
-// prepareCommentDelegationReturn validates the author's return address when a
-// comment starts managed runs (an explicit @mention resolved to a native task).
-// The comment is written only after this succeeds, so a missing or invalid
-// address cannot leave an executable half-delegation behind. Discussions with
-// no managed target, and ordinary member comments, are untouched.
-func (h *Handler) prepareCommentDelegationReturn(r *http.Request, issue db.Issue, actorType, actorID string, plan commentTriggerPlan) (db.IssueDelegationReturn, error) {
-	if len(plan.nativeTargets) == 0 || actorType != "agent" {
-		return db.IssueDelegationReturn{}, nil
-	}
-	accepted, _, err := h.ensureDelegationReturnForDispatch(r, issue, actorType, actorID)
-	return accepted, err
-}
-
-// linkCommentTriggeredTasks attaches the runs this exact comment started to the
-// accepted return. A comment folded into an existing run keeps that run's
-// original recipient; completion replay has no request context and is left on
-// the issue's accepted return.
-func (h *Handler) linkCommentTriggeredTasks(ctx context.Context, issueID, commentID, acceptedID pgtype.UUID) {
-	if !issueID.Valid || !commentID.Valid || !acceptedID.Valid {
-		return
-	}
-	if _, err := h.Queries.LinkTriggeredTasksToDelegationReturn(ctx, db.LinkTriggeredTasksToDelegationReturnParams{
-		IssueID:            issueID,
-		TriggerCommentID:   commentID,
-		DelegationReturnID: acceptedID,
-	}); err != nil {
-		slog.Warn("link comment-triggered tasks to accepted delegation return failed",
-			"issue_id", util.UUIDToString(issueID),
-			"comment_id", util.UUIDToString(commentID),
-			"delegation_return_id", util.UUIDToString(acceptedID),
-			"error", err,
-		)
 	}
 }

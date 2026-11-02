@@ -139,6 +139,12 @@ type AgentSkill struct {
 	Enabled   bool               `json:"enabled"`
 }
 
+type AgentTaskDelegationReturn struct {
+	TaskID             pgtype.UUID        `json:"task_id"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type AgentTaskQueue struct {
 	ID                    pgtype.UUID        `json:"id"`
 	AgentID               pgtype.UUID        `json:"agent_id"`
@@ -211,8 +217,6 @@ type AgentTaskQueue struct {
 	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
 	IssueSnapshot             []byte      `json:"issue_snapshot"`
 	WorkflowStep              pgtype.Text `json:"workflow_step"`
-	// The accepted issue_delegation_return this run was dispatched under. Set only when a fresh task is inserted for a delegated issue; comment coalescing and reruns inherit the existing task's value and never overwrite it.
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
 }
 
 type AgentToLabel struct {

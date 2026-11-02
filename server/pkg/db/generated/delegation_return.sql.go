@@ -19,7 +19,7 @@ INSERT INTO issue_delegation_return (
     $1, $2, $3, $4, $5,
     $6, $7
 )
-ON CONFLICT (workspace_id, issue_id) DO NOTHING
+ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
 RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, created_at
 `
 
@@ -33,10 +33,10 @@ type CreateIssueDelegationReturnParams struct {
 	SourceTaskID      pgtype.UUID `json:"source_task_id"`
 }
 
-// The accepted return is written with the delegated issue (or with the first
-// run dispatched for it) in one transaction. A concurrent dispatch for the same
-// issue loses on uq_issue_delegation_return_issue and re-reads the winner
-// instead of replacing it; see GetIssueDelegationReturn.
+// The accepted return is written with the dispatching business write in one
+// transaction. A concurrent dispatch by the SAME actor loses on
+// uq_issue_delegation_return_dispatcher and re-reads the winner instead of
+// replacing it; a different actor has its own key and its own row.
 func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIssueDelegationReturnParams) (IssueDelegationReturn, error) {
 	row := q.db.QueryRow(ctx, createIssueDelegationReturn,
 		arg.ID,
@@ -61,98 +61,243 @@ func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIss
 	return i, err
 }
 
-const getIssueDelegationReturn = `-- name: GetIssueDelegationReturn :one
+const getIssueDelegationReturnForDispatcher = `-- name: GetIssueDelegationReturnForDispatcher :one
 SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, created_at FROM issue_delegation_return
-WHERE workspace_id = $1 AND issue_id = $2
+WHERE workspace_id = $1
+  AND issue_id = $2
+  AND dispatcher_agent_id = $3
 `
 
-type GetIssueDelegationReturnParams struct {
+type GetIssueDelegationReturnForDispatcherParams struct {
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	IssueID           pgtype.UUID `json:"issue_id"`
+	DispatcherAgentID pgtype.UUID `json:"dispatcher_agent_id"`
+}
+
+// One actor's accepted return on one issue. The caller must pass the actor it
+// is dispatching for; an issue-wide lookup would let a later dispatcher reuse
+// an earlier actor's address.
+func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg GetIssueDelegationReturnForDispatcherParams) (IssueDelegationReturn, error) {
+	row := q.db.QueryRow(ctx, getIssueDelegationReturnForDispatcher, arg.WorkspaceID, arg.IssueID, arg.DispatcherAgentID)
+	var i IssueDelegationReturn
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.DispatcherAgentID,
+		&i.ReturnKind,
+		&i.ExternalSessionID,
+		&i.SourceTaskID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getLatestTaskIDForIssueAndAgent = `-- name: GetLatestTaskIDForIssueAndAgent :one
+SELECT id FROM agent_task_queue
+WHERE issue_id = $1
+  AND agent_id = $2
+  AND (
+      $3::uuid IS NULL
+      OR id <> $3
+  )
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetLatestTaskIDForIssueAndAgentParams struct {
+	IssueID       pgtype.UUID `json:"issue_id"`
+	AgentID       pgtype.UUID `json:"agent_id"`
+	ExcludeTaskID pgtype.UUID `json:"exclude_task_id"`
+}
+
+// The most recent earlier run for one issue/executor pair. Rerun and executor
+// reassignment copy that run's accepted relationships instead of substituting
+// an arbitrary issue-level row.
+func (q *Queries) GetLatestTaskIDForIssueAndAgent(ctx context.Context, arg GetLatestTaskIDForIssueAndAgentParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getLatestTaskIDForIssueAndAgent, arg.IssueID, arg.AgentID, arg.ExcludeTaskID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const linkAgentTaskDelegationReturn = `-- name: LinkAgentTaskDelegationReturn :execrows
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+VALUES ($1, $2)
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+`
+
+type LinkAgentTaskDelegationReturnParams struct {
+	TaskID             pgtype.UUID `json:"task_id"`
+	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+}
+
+// Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
+// a folded comment, or a retry can link the same relationship again without
+// rewriting the run's existing set.
+func (q *Queries) LinkAgentTaskDelegationReturn(ctx context.Context, arg LinkAgentTaskDelegationReturnParams) (int64, error) {
+	result, err := q.db.Exec(ctx, linkAgentTaskDelegationReturn, arg.TaskID, arg.DelegationReturnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const linkCommentTasksToDelegationReturn = `-- name: LinkCommentTasksToDelegationReturn :execrows
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT t.id, $1
+FROM agent_task_queue t
+WHERE t.issue_id = $2
+  AND (
+      t.trigger_comment_id = $3
+      OR $3 = ANY(t.coalesced_comment_ids)
+  )
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+`
+
+type LinkCommentTasksToDelegationReturnParams struct {
+	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+	IssueID            pgtype.UUID `json:"issue_id"`
+	CommentID          pgtype.UUID `json:"comment_id"`
+}
+
+// Attaches the accepted relationship of one comment to every task that
+// comment became part of: the run it triggered, or the pending run it was
+// folded into (its id lands in coalesced_comment_ids). A run it merely steered
+// is also covered, and linking is idempotent.
+func (q *Queries) LinkCommentTasksToDelegationReturn(ctx context.Context, arg LinkCommentTasksToDelegationReturnParams) (int64, error) {
+	result, err := q.db.Exec(ctx, linkCommentTasksToDelegationReturn, arg.DelegationReturnID, arg.IssueID, arg.CommentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listAgentTaskDelegationReturns = `-- name: ListAgentTaskDelegationReturns :many
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.created_at
+FROM issue_delegation_return r
+JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
+WHERE l.task_id = $1
+ORDER BY r.created_at, r.id
+`
+
+// The complete set of accepted return relationships one run carries. Result
+// submission reads this set so a coalesced run notifies every dispatcher.
+func (q *Queries) ListAgentTaskDelegationReturns(ctx context.Context, taskID pgtype.UUID) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listAgentTaskDelegationReturns, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listIssueDelegationReturns = `-- name: ListIssueDelegationReturns :many
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, created_at FROM issue_delegation_return
+WHERE workspace_id = $1 AND issue_id = $2
+ORDER BY created_at, id
+`
+
+type ListIssueDelegationReturnsParams struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 	IssueID     pgtype.UUID `json:"issue_id"`
 }
 
-func (q *Queries) GetIssueDelegationReturn(ctx context.Context, arg GetIssueDelegationReturnParams) (IssueDelegationReturn, error) {
-	row := q.db.QueryRow(ctx, getIssueDelegationReturn, arg.WorkspaceID, arg.IssueID)
-	var i IssueDelegationReturn
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.IssueID,
-		&i.DispatcherAgentID,
-		&i.ReturnKind,
-		&i.ExternalSessionID,
-		&i.SourceTaskID,
-		&i.CreatedAt,
-	)
-	return i, err
+// Every accepted return relationship recorded on the issue, oldest first.
+func (q *Queries) ListIssueDelegationReturns(ctx context.Context, arg ListIssueDelegationReturnsParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listIssueDelegationReturns, arg.WorkspaceID, arg.IssueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const getIssueDelegationReturnForTask = `-- name: GetIssueDelegationReturnForTask :one
+const listUnlinkedIssueDelegationReturns = `-- name: ListUnlinkedIssueDelegationReturns :many
 SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.created_at
 FROM issue_delegation_return r
-JOIN agent_task_queue t ON t.delegation_return_id = r.id
-WHERE t.id = $1
+WHERE r.workspace_id = $1
+  AND r.issue_id = $2
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_delegation_return l
+      WHERE l.delegation_return_id = r.id
+  )
+ORDER BY r.created_at, r.id
 `
 
-func (q *Queries) GetIssueDelegationReturnForTask(ctx context.Context, taskID pgtype.UUID) (IssueDelegationReturn, error) {
-	row := q.db.QueryRow(ctx, getIssueDelegationReturnForTask, taskID)
-	var i IssueDelegationReturn
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.IssueID,
-		&i.DispatcherAgentID,
-		&i.ReturnKind,
-		&i.ExternalSessionID,
-		&i.SourceTaskID,
-		&i.CreatedAt,
-	)
-	return i, err
+type ListUnlinkedIssueDelegationReturnsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
 }
 
-const linkTriggeredTasksToDelegationReturn = `-- name: LinkTriggeredTasksToDelegationReturn :execrows
-UPDATE agent_task_queue
-SET delegation_return_id = $1
-WHERE issue_id = $2
-  AND trigger_comment_id = $3
-  AND delegation_return_id IS NULL
-`
-
-type LinkTriggeredTasksToDelegationReturnParams struct {
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
-	IssueID            pgtype.UUID `json:"issue_id"`
-	TriggerCommentID   pgtype.UUID `json:"trigger_comment_id"`
-}
-
-// A comment that starts a fresh run records which accepted delegation return
-// that run belongs to. Only tasks this exact comment triggered are touched:
-// a run the comment was folded into keeps its original link and recipient.
-func (q *Queries) LinkTriggeredTasksToDelegationReturn(ctx context.Context, arg LinkTriggeredTasksToDelegationReturnParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkTriggeredTasksToDelegationReturn, arg.DelegationReturnID, arg.IssueID, arg.TriggerCommentID)
+// Accepted relationships that no run carries yet: a backlog delegation, or a
+// return recorded for work whose run was never started. Starting a run must
+// attach these rather than guess which one applies.
+func (q *Queries) ListUnlinkedIssueDelegationReturns(ctx context.Context, arg ListUnlinkedIssueDelegationReturnsParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listUnlinkedIssueDelegationReturns, arg.WorkspaceID, arg.IssueID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected(), nil
-}
-
-const setAgentTaskDelegationReturn = `-- name: SetAgentTaskDelegationReturn :execrows
-UPDATE agent_task_queue
-SET delegation_return_id = $1
-WHERE id = $2 AND delegation_return_id IS NULL
-`
-
-type SetAgentTaskDelegationReturnParams struct {
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
-	ID                 pgtype.UUID `json:"id"`
-}
-
-// Links one dispatched run to the accepted return. It is written after the
-// task insert in the same transaction and never rewrites an existing link, so
-// a rerun or a folded comment keeps the original recipient.
-func (q *Queries) SetAgentTaskDelegationReturn(ctx context.Context, arg SetAgentTaskDelegationReturnParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setAgentTaskDelegationReturn, arg.DelegationReturnID, arg.ID)
-	if err != nil {
-		return 0, err
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
-	return result.RowsAffected(), nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

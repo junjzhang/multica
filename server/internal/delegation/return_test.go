@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -239,7 +240,7 @@ func TestResolveExternalMatchesRegisteredSessionOnly(t *testing.T) {
 	}
 }
 
-func TestEnsureKeepsFirstAcceptedReturn(t *testing.T) {
+func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 	requireDB(t)
 	agentID, sessionID, _ := externalSession(t, "ensure")
 	issueID := dbfx.Issue(t, "Delegation ensure")
@@ -253,19 +254,42 @@ func TestEnsureKeepsFirstAcceptedReturn(t *testing.T) {
 	if first.ReturnKind != string(KindExternalSession) || first.DispatcherAgentID.Valid == false {
 		t.Fatalf("first row = %+v", first)
 	}
+
+	// A second session for the SAME dispatcher must not replace the first
+	// accepted address for this key.
+	secondSession := dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id": testWorkspaceID, "owner_user_id": testUserID, "agent_id": agentID,
+		"provider": "paseo", "host_id": "ensure-second-host",
+		"session_id": "ensure-second-host-session", "display_name": "second",
+		"daemon_id": "ensure-second-daemon",
+	})
+	sameKey, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: secondSession,
+	}, testUserID)
+	if err != nil {
+		t.Fatalf("same-key Ensure: %v", err)
+	}
+	if sameKey.ID != first.ID || util.UUIDToString(sameKey.ExternalSessionID) != util.UUIDToString(first.ExternalSessionID) {
+		t.Fatalf("same dispatcher replaced its accepted return: %+v vs %+v", sameKey, first)
+	}
+
+	// A DIFFERENT dispatcher has its own key and its own accepted address.
 	otherAgent, otherSession, _ := externalSession(t, "ensure-other")
 	second, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 		DispatcherAgentID: otherAgent, Kind: KindExternalSession, ExternalSessionID: otherSession,
 	}, testUserID)
 	if err != nil {
-		t.Fatalf("second Ensure: %v", err)
+		t.Fatalf("second dispatcher Ensure: %v", err)
 	}
-	if second.ID != first.ID || second.DispatcherAgentID != first.DispatcherAgentID {
-		t.Fatalf("second Ensure replaced the accepted return: %+v vs %+v", second, first)
+	if second.ID == first.ID || util.UUIDToString(second.DispatcherAgentID) != otherAgent || util.UUIDToString(second.ExternalSessionID) != otherSession {
+		t.Fatalf("second dispatcher return = %+v, want its own row for %s/%s", second, otherAgent, otherSession)
+	}
+	if n := countRowsIn(t, `SELECT count(*) FROM issue_delegation_return WHERE workspace_id = $1 AND issue_id = $2`, testWorkspaceID, issueID); n != 2 {
+		t.Fatalf("accepted return rows = %d, want one per dispatcher", n)
 	}
 }
 
-func TestConcurrentEnsureAcceptsExactlyOneReturn(t *testing.T) {
+func TestConcurrentEnsureIsPerDispatcher(t *testing.T) {
 	requireDB(t)
 	agentA, sessionA, _ := externalSession(t, "race-a")
 	agentB, sessionB, _ := externalSession(t, "race-b")
@@ -292,8 +316,41 @@ func TestConcurrentEnsureAcceptsExactlyOneReturn(t *testing.T) {
 	if first.err != nil || second.err != nil {
 		t.Fatalf("concurrent Ensure errors: %v / %v", first.err, second.err)
 	}
-	if first.row.ID != second.row.ID {
-		t.Fatalf("concurrent Ensure accepted two returns: %s vs %s", first.row.ID, second.row.ID)
+	if first.row.ID == second.row.ID {
+		t.Fatalf("distinct dispatchers shared one return row: %s", first.row.ID)
+	}
+	if n := countRowsIn(t, `SELECT count(*) FROM issue_delegation_return WHERE workspace_id = $1 AND issue_id = $2`, testWorkspaceID, issueID); n != 2 {
+		t.Fatalf("accepted return rows = %d, want 2", n)
+	}
+}
+
+func TestConcurrentEnsureSameDispatcherAcceptsOneRow(t *testing.T) {
+	requireDB(t)
+	agentID, sessionID, _ := externalSession(t, "race-same")
+	issueID := dbfx.Issue(t, "Delegation same-dispatcher race")
+	rows := make(chan db.IssueDelegationReturn, 2)
+	errs := make(chan error, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+				DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: sessionID,
+			}, testUserID)
+			rows <- row
+			errs <- err
+		}()
+	}
+	close(start)
+	first, second := <-rows, <-rows
+	if err := <-errs; err != nil {
+		t.Fatalf("concurrent Ensure error: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("concurrent Ensure error: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("same dispatcher accepted two rows: %s vs %s", first.ID, second.ID)
 	}
 	if n := countRowsIn(t, `SELECT count(*) FROM issue_delegation_return WHERE workspace_id = $1 AND issue_id = $2`, testWorkspaceID, issueID); n != 1 {
 		t.Fatalf("accepted return rows = %d, want 1", n)

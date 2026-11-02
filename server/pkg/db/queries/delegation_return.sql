@@ -1,8 +1,8 @@
 -- name: CreateIssueDelegationReturn :one
--- The accepted return is written with the delegated issue (or with the first
--- run dispatched for it) in one transaction. A concurrent dispatch for the same
--- issue loses on uq_issue_delegation_return_issue and re-reads the winner
--- instead of replacing it; see GetIssueDelegationReturn.
+-- The accepted return is written with the dispatching business write in one
+-- transaction. A concurrent dispatch by the SAME actor loses on
+-- uq_issue_delegation_return_dispatcher and re-reads the winner instead of
+-- replacing it; a different actor has its own key and its own row.
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id, return_kind,
     external_session_id, source_task_id
@@ -10,33 +10,80 @@ INSERT INTO issue_delegation_return (
     @id, @workspace_id, @issue_id, @dispatcher_agent_id, @return_kind,
     sqlc.narg('external_session_id'), sqlc.narg('source_task_id')
 )
-ON CONFLICT (workspace_id, issue_id) DO NOTHING
+ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
 RETURNING *;
 
--- name: GetIssueDelegationReturn :one
+-- name: GetIssueDelegationReturnForDispatcher :one
+-- One actor's accepted return on one issue. The caller must pass the actor it
+-- is dispatching for; an issue-wide lookup would let a later dispatcher reuse
+-- an earlier actor's address.
 SELECT * FROM issue_delegation_return
-WHERE workspace_id = @workspace_id AND issue_id = @issue_id;
+WHERE workspace_id = @workspace_id
+  AND issue_id = @issue_id
+  AND dispatcher_agent_id = @dispatcher_agent_id;
 
--- name: SetAgentTaskDelegationReturn :execrows
--- Links one dispatched run to the accepted return. It is written after the
--- task insert in the same transaction and never rewrites an existing link, so
--- a rerun or a folded comment keeps the original recipient.
-UPDATE agent_task_queue
-SET delegation_return_id = @delegation_return_id
-WHERE id = @id AND delegation_return_id IS NULL;
+-- name: ListIssueDelegationReturns :many
+-- Every accepted return relationship recorded on the issue, oldest first.
+SELECT * FROM issue_delegation_return
+WHERE workspace_id = @workspace_id AND issue_id = @issue_id
+ORDER BY created_at, id;
 
--- name: GetIssueDelegationReturnForTask :one
+-- name: ListUnlinkedIssueDelegationReturns :many
+-- Accepted relationships that no run carries yet: a backlog delegation, or a
+-- return recorded for work whose run was never started. Starting a run must
+-- attach these rather than guess which one applies.
 SELECT r.*
 FROM issue_delegation_return r
-JOIN agent_task_queue t ON t.delegation_return_id = r.id
-WHERE t.id = @task_id;
+WHERE r.workspace_id = @workspace_id
+  AND r.issue_id = @issue_id
+  AND NOT EXISTS (
+      SELECT 1 FROM agent_task_delegation_return l
+      WHERE l.delegation_return_id = r.id
+  )
+ORDER BY r.created_at, r.id;
 
--- name: LinkTriggeredTasksToDelegationReturn :execrows
--- A comment that starts a fresh run records which accepted delegation return
--- that run belongs to. Only tasks this exact comment triggered are touched:
--- a run the comment was folded into keeps its original link and recipient.
-UPDATE agent_task_queue
-SET delegation_return_id = @delegation_return_id
+-- name: ListAgentTaskDelegationReturns :many
+-- The complete set of accepted return relationships one run carries. Result
+-- submission reads this set so a coalesced run notifies every dispatcher.
+SELECT r.*
+FROM issue_delegation_return r
+JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
+WHERE l.task_id = @task_id
+ORDER BY r.created_at, r.id;
+
+-- name: LinkAgentTaskDelegationReturn :execrows
+-- Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
+-- a folded comment, or a retry can link the same relationship again without
+-- rewriting the run's existing set.
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+VALUES (@task_id, @delegation_return_id)
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+
+-- name: LinkCommentTasksToDelegationReturn :execrows
+-- Attaches the accepted relationship of one comment to every task that
+-- comment became part of: the run it triggered, or the pending run it was
+-- folded into (its id lands in coalesced_comment_ids). A run it merely steered
+-- is also covered, and linking is idempotent.
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT t.id, @delegation_return_id
+FROM agent_task_queue t
+WHERE t.issue_id = @issue_id
+  AND (
+      t.trigger_comment_id = @comment_id
+      OR @comment_id = ANY(t.coalesced_comment_ids)
+  )
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+
+-- name: GetLatestTaskIDForIssueAndAgent :one
+-- The most recent earlier run for one issue/executor pair. Rerun and executor
+-- reassignment copy that run's accepted relationships instead of substituting
+-- an arbitrary issue-level row.
+SELECT id FROM agent_task_queue
 WHERE issue_id = @issue_id
-  AND trigger_comment_id = @trigger_comment_id
-  AND delegation_return_id IS NULL;
+  AND agent_id = @agent_id
+  AND (
+      sqlc.narg('exclude_task_id')::uuid IS NULL
+      OR id <> sqlc.narg('exclude_task_id')
+  )
+ORDER BY created_at DESC
+LIMIT 1;

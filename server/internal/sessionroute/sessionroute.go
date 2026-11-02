@@ -66,15 +66,15 @@ type BindRequest struct {
 func Resolve(ctx context.Context, q *db.Queries, workspaceID, agentID, issueID string) (Binding, error) {
 	ws, err := util.ParseUUID(workspaceID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: workspace id: %w", err)
+		return Binding{}, fmt.Errorf("%w: workspace_id must be a UUID", ErrInvalidBinding)
 	}
 	agent, err := util.ParseUUID(agentID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: agent id: %w", err)
+		return Binding{}, fmt.Errorf("%w: agent id must be a UUID", ErrInvalidBinding)
 	}
 	issue, err := util.ParseUUID(issueID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: issue id: %w", err)
+		return Binding{}, fmt.Errorf("%w: issue_id must be a UUID", ErrInvalidBinding)
 	}
 	row, err := q.GetActiveAgentSessionBinding(ctx, db.GetActiveAgentSessionBindingParams{
 		WorkspaceID: ws,
@@ -181,19 +181,19 @@ func Bind(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error) 
 func parseBindRequest(req BindRequest) (ws, agentID, issueID, sessionID pgtype.UUID, createdBy pgtype.UUID, err error) {
 	ws, err = util.ParseUUID(strings.TrimSpace(req.WorkspaceID))
 	if err != nil {
-		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("sessionroute: workspace id: %w", err)
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: workspace_id must be a UUID", ErrInvalidBinding)
 	}
 	agentID, err = util.ParseUUID(strings.TrimSpace(req.AgentID))
 	if err != nil {
-		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("sessionroute: agent id: %w", err)
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: agent id must be a UUID", ErrInvalidBinding)
 	}
 	issueID, err = util.ParseUUID(strings.TrimSpace(req.IssueID))
 	if err != nil {
-		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("sessionroute: issue id: %w", err)
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: issue_id must be a UUID", ErrInvalidBinding)
 	}
 	sessionID, err = util.ParseUUID(strings.TrimSpace(req.SessionID))
 	if err != nil {
-		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("sessionroute: session id: %w", err)
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: session_id must be a UUID", ErrInvalidBinding)
 	}
 	if req.CreatedBy != "" {
 		createdBy, err = util.ParseUUID(req.CreatedBy)

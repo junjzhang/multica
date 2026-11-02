@@ -1,13 +1,15 @@
--- A delegated issue names the actor its result returns to and the address that
--- actor accepted when the delegation was dispatched. The address is either a
+-- A delegated issue names each actor its results return to and the address that
+-- actor accepted when it dispatched work on the issue. The address is either a
 -- registered external host session or the managed run that dispatched the
 -- work; an Agent identity alone is not an address.
 --
--- The row is at most one per issue: the first accepted delegation owns the
--- result recipient. Reassigning the executor, folding a later comment into a
--- run, or an ordinary rerun never rewrites it; an explicit takeover changes the
--- external binding, not this record. The delegated issue and this row are
--- written in the same transaction, and a task launch never outruns it.
+-- The row is keyed by (workspace, issue, dispatcher agent): every real
+-- dispatcher keeps its own accepted relationship, so a second agent delegating
+-- on the same issue is never addressed back to the first. The first accepted
+-- delegation for one key owns that key's recipient; an ordinary reassignment,
+-- rerun, or folded comment reuses it, and only explicit takeover changes the
+-- external binding. The delegated issue and this row are written in the same
+-- transaction.
 CREATE TABLE issue_delegation_return (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL,

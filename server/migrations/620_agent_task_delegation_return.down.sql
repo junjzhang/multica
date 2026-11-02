@@ -1,2 +1,1 @@
-ALTER TABLE agent_task_queue
-    DROP COLUMN IF EXISTS delegation_return_id;
+DROP TABLE IF EXISTS agent_task_delegation_return;

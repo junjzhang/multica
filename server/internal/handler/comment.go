@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -1858,10 +1859,19 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		threadRootID = rootComment.ID
 	}
 	triggerPlan := h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, authorType, authorID, commentID, threadRootID, sourceTaskID, originatorUserID, suppressAgentIDs, rootComment == nil)
-	commentReturn, derr := h.prepareCommentDelegationReturn(r, issue, authorType, authorID, triggerPlan)
+	// Resolve the author's return address before the write. The row itself is
+	// recorded inside the comment transaction below, so a comment that fails
+	// to commit leaves no phantom accepted return.
+	commentAddress, derr := h.prepareCommentDelegationReturn(r, issue, authorType, authorID, triggerPlan)
 	if derr != nil {
 		writeDelegationReturnError(w, derr)
 		return
+	}
+	var commentReturnID pgtype.UUID
+	recordCommentReturn := func(q *db.Queries) error {
+		var recordErr error
+		commentReturnID, recordErr = recordDelegationReturn(r.Context(), q, issue, commentAddress, requestUserID(r))
+		return recordErr
 	}
 	var mailboxDelivered mailboxDeliveryResults
 
@@ -1910,6 +1920,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		qtx := h.Queries.WithTx(tx)
 		created, err = qtx.CreateComment(r.Context(), createParams)
 		if err == nil {
+			err = recordCommentReturn(qtx)
+		}
+		if err == nil {
 			var missing pgtype.UUID
 			missing, err = lockCommentAttachments(r.Context(), qtx, issue.WorkspaceID, issue.ID, attachmentIDs)
 			if err == nil && missing.Valid {
@@ -1934,6 +1947,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		written, writeErr := wakeupWrite(h, r, func(q *db.Queries) (commentWriteResult, error) {
 			row, err := q.CreateComment(r.Context(), createParams)
 			if err != nil {
+				return commentWriteResult{}, err
+			}
+			if err := recordCommentReturn(q); err != nil {
 				return commentWriteResult{}, err
 			}
 			delivered, err := h.enqueueMailboxDeliveries(r.Context(), q, issue, row.ID, triggerPlan.mailboxTargets, authorType, authorID)
@@ -1983,8 +1999,8 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// The comment and its valid external handoffs are committed. Resolve the
 	// native runs now; a blocked mention must not fail the saved comment and is
 	// surfaced per target instead (MUL-4525 §2).
-	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered)
-	h.linkCommentTriggeredTasks(r.Context(), issue.ID, comment.ID, commentReturn.ID)
+	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered, commentReturnID)
+	h.linkCommentTaskReturns(r.Context(), issue, comment.ID, commentReturnID)
 	if len(steerTaskIDs) > 0 {
 		applyCommentSupplements(&resp, h.listCommentSupplements(r.Context(), issue.WorkspaceID, []pgtype.UUID{comment.ID})[uuidToString(comment.ID)])
 	}
@@ -2104,10 +2120,10 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 // applyCommentTriggers runs the native trigger side after the comment (and any
 // mailbox deliveries) committed. Mailbox outcomes only report what the
 // transaction persisted.
-func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered mailboxDeliveryResults) []CommentTriggerOutcome {
+func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered mailboxDeliveryResults, delegationReturnIDs ...pgtype.UUID) []CommentTriggerOutcome {
 	h.noteBlockedRuntimeTargets(ctx, issue, plan.targets)
 	triggers, steered := h.steerCommentAgentTriggers(ctx, issue, comment, actorType, plan.triggers, steerTaskIDs)
-	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers)
+	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers, delegationReturnIDs...)
 	for agentID, result := range steered {
 		enqueued[agentID] = result
 	}
@@ -2233,7 +2249,7 @@ type commentEnqueueResult struct {
 // target that resolved to the agent, so coalescing a run never drops a named
 // target's outcome. queued / coalesced / deferred are success-shaped (the run
 // was handled, no duplicate task); only a real enqueue failure is blocked.
-func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, triggers []commentAgentTrigger) map[string]commentEnqueueResult {
+func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, triggers []commentAgentTrigger, delegationReturnIDs ...pgtype.UUID) map[string]commentEnqueueResult {
 	results := make(map[string]commentEnqueueResult, len(triggers))
 	record := func(trigger commentAgentTrigger, status DispatchStatus, reason DispatchReasonCode) {
 		execSquadID := ""
@@ -2243,7 +2259,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 		results[uuidToString(trigger.Agent.ID)] = commentEnqueueResult{status: status, reason: reason, execSquadID: execSquadID}
 	}
 	for _, trigger := range triggers {
-		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID)
+		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, delegationReturnIDs...)
 		record(trigger, status, reason)
 	}
 	return results
@@ -2285,7 +2301,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 // A duplicate that cannot yet be resolved re-loops (bounded by maxAttempts); on
 // genuine non-convergence it returns a truthful internal_error, never a fabricated
 // deferred that would silently drop the comment.
-func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
+func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, delegationReturnIDs ...pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
 	pending := trigger.AlreadyPending
 	lostRace := false
 	// Resolve the reviewed HEAD lazily and at most once — the common
@@ -2371,7 +2387,7 @@ func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Iss
 				// no-blocker case; we simply never PROMISE it.)
 			}
 		}
-		if err := h.enqueueSingleCommentTrigger(ctx, issue, triggerCommentID, trigger); err != nil {
+		if err := h.enqueueSingleCommentTrigger(ctx, issue, triggerCommentID, trigger, delegationReturnIDs...); err != nil {
 			// Lost the enqueue race: a sibling task for this (issue, agent) now
 			// exists. Re-resolve as pending so the next attempt folds this
 			// comment into that sibling (queued) or durably registers it
@@ -2749,11 +2765,11 @@ func logCommentEnqueueFailure(msg string, err error, attrs ...any) {
 // enqueueSingleCommentTrigger enqueues one resolved trigger and returns the
 // enqueue error (nil on success) so the caller can surface a
 // trigger_outcome (MUL-4525 §2).
-func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger) error {
+func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger, delegationReturnIDs ...pgtype.UUID) error {
 	switch trigger.Source {
 	case commentTriggerSourceIssueAssignee:
 		if trigger.Squad != nil {
-			if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginDerived); err != nil {
+			if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginDerived, delegationReturnIDs...); err != nil {
 				logCommentEnqueueFailure("enqueue squad leader task failed", err,
 					"issue_id", uuidToString(issue.ID),
 					"squad_id", uuidToString(trigger.Squad.ID),
@@ -2762,7 +2778,7 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 			}
 			return nil
 		}
-		if _, err := h.TaskService.EnqueueTaskForIssue(ctx, issue, triggerCommentID); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForIssueWithTriggerAndReturns(ctx, issue, triggerCommentID, delegationReturnIDs); err != nil {
 			// EnqueueTaskForIssue now returns ErrDuplicatePendingTask on the
 			// benign duplicate-pending-task race, so use the shared helper that
 			// downgrades that case to debug — matching the squad-leader and
@@ -2773,14 +2789,14 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 			return err
 		}
 	case commentTriggerSourceMentionSquadLeader:
-		if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...); err != nil {
 			logCommentEnqueueFailure("enqueue squad leader mention task failed", err,
 				"issue_id", uuidToString(issue.ID),
 				"agent_id", uuidToString(trigger.Agent.ID))
 			return err
 		}
 	case commentTriggerSourceMentionAgent:
-		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...); err != nil {
 			logCommentEnqueueFailure("enqueue mention agent task failed", err,
 				"issue_id", uuidToString(issue.ID),
 				"agent_id", uuidToString(trigger.Agent.ID))
@@ -2794,9 +2810,9 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 		// for the thread-parent path. Gating on the source as well would keep
 		// the thread-parent path demoted for no reason (MUL-7006).
 		if trigger.Squad != nil {
-			_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed)
+			_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...)
 		} else {
-			_, err = h.TaskService.EnqueueTaskForThreadParent(ctx, issue, trigger.Agent.ID, triggerCommentID)
+			_, err = h.TaskService.EnqueueTaskForThreadParent(ctx, issue, trigger.Agent.ID, triggerCommentID, delegationReturnIDs...)
 		}
 		if err != nil {
 			logCommentEnqueueFailure("enqueue routed comment agent task failed", err,
@@ -3254,7 +3270,8 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// external mention persists its delivery in the same transaction as the new
 	// content. mailboxDelivered is what that transaction actually committed.
 	var triggerPlan commentTriggerPlan
-	var commentReturn db.IssueDelegationReturn
+	var commentAddress *delegation.Address
+	var commentReturnID pgtype.UUID
 	var mailboxDelivered mailboxDeliveryResults
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
@@ -3304,7 +3321,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			}
 			triggerPlan = h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, actorType, actorID, existing.ID, pgtype.UUID{}, sourceTaskID, h.invokeOriginatorFromRequest(r, actorType, actorID), suppressAgentIDs, false)
 			var prepErr error
-			commentReturn, prepErr = h.prepareCommentDelegationReturn(r, issue, actorType, actorID, triggerPlan)
+			commentAddress, prepErr = h.prepareCommentDelegationReturn(r, issue, actorType, actorID, triggerPlan)
 			if prepErr != nil {
 				writeDelegationReturnError(w, prepErr)
 				return
@@ -3346,6 +3363,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			comment = updated.Comment()
 			issueRevision = updated.IssueRevision
+			if commentAddress != nil && triggerIssue != nil {
+				commentReturnID, err = recordDelegationReturn(r.Context(), qtx, *triggerIssue, commentAddress, requestUserID(r))
+			}
 		}
 		if err == nil && oldContent != req.Content && strictContentEdit {
 			cancelled, err = qtx.CancelAgentTasksByTriggerComment(r.Context(), existing.ID)
@@ -3385,6 +3405,12 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			updated, err := q.UpdateComment(r.Context(), updateParams)
 			if err != nil {
 				return commentEditWriteResult{}, err
+			}
+			if commentAddress != nil && triggerIssue != nil {
+				commentReturnID, err = recordDelegationReturn(r.Context(), q, *triggerIssue, commentAddress, requestUserID(r))
+				if err != nil {
+					return commentEditWriteResult{}, err
+				}
 			}
 			var delivered mailboxDeliveryResults
 			if triggerIssue != nil && len(triggerPlan.mailboxTargets) > 0 {
@@ -3439,8 +3465,8 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		// Native runs resolve after commit: a blocked mention must not fail the
 		// saved edit. Mailbox outcomes only report what the transaction
 		// committed, so the caller never sees "queued" for a rolled-back row.
-		outcomes := h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered)
-		h.linkCommentTriggeredTasks(r.Context(), issue.ID, comment.ID, commentReturn.ID)
+		outcomes := h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered, commentReturnID)
+		h.linkCommentTaskReturns(r.Context(), issue, comment.ID, commentReturnID)
 		return outcomes
 	}
 
