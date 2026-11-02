@@ -28,6 +28,13 @@ var agentExternalRegisterCmd = &cobra.Command{
 	RunE:  runAgentExternalRegister,
 }
 
+var agentSessionBindCmd = &cobra.Command{
+	Use:   "bind <agent-id>",
+	Short: "Bind an explicit issue to one of this agent's host sessions",
+	Args:  exactArgs(1),
+	RunE:  runAgentSessionBind,
+}
+
 var agentTokenCmd = &cobra.Command{
 	Use:   "token",
 	Short: "Provision and revoke external agent credentials",
@@ -71,12 +78,14 @@ func registerAgentExternalCommandTree() {
 	agentCmd.AddCommand(agentTokenCmd)
 	agentCmd.AddCommand(agentMailboxCmd)
 	agentExternalCmd.AddCommand(agentExternalRegisterCmd)
+	agentExternalCmd.AddCommand(agentSessionBindCmd)
 	agentTokenCmd.AddCommand(agentTokenCreateCmd)
 	agentTokenCmd.AddCommand(agentTokenRevokeCmd)
 	agentMailboxCmd.AddCommand(agentMailboxListCmd)
 	agentMailboxCmd.AddCommand(agentMailboxAckCmd)
 
 	registerAgentExternalRegisterFlags(agentExternalRegisterCmd)
+	registerAgentSessionBindFlags(agentSessionBindCmd)
 	registerAgentTokenCreateFlags(agentTokenCreateCmd)
 	registerAgentTokenRevokeFlags(agentTokenRevokeCmd)
 	registerAgentMailboxListFlags(agentMailboxListCmd)
@@ -84,7 +93,8 @@ func registerAgentExternalCommandTree() {
 }
 
 func registerAgentExternalRegisterFlags(cmd *cobra.Command) {
-	cmd.Flags().String("name", "", "Agent display name (required)")
+	cmd.Flags().String("name", "", "Agent display name (required unless --agent-id is set)")
+	cmd.Flags().String("agent-id", "", "Attach this session to an existing external agent instead of creating one")
 	cmd.Flags().String("provider", "paseo", "External host provider (currently paseo)")
 	cmd.Flags().String("host-id", "", "Host server/connection id (not a hostname; required)")
 	cmd.Flags().String("session-id", "", "Exact existing host session id (for Paseo, the Paseo agent id; required)")
@@ -92,6 +102,12 @@ func registerAgentExternalRegisterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("url", "", "Optional deep link to the existing session")
 	cmd.Flags().String("daemon-id", "", "Authorized Multica daemon that delivers to this session (required)")
 	cmd.Flags().String("permission-mode", "", "Invocation permission mode: private or public_to")
+	cmd.Flags().String("output", "json", "Output format: json or table")
+}
+
+func registerAgentSessionBindFlags(cmd *cobra.Command) {
+	cmd.Flags().String("issue", "", "Issue id this session should serve (required)")
+	cmd.Flags().String("session", "", "Registered external session id (required)")
 	cmd.Flags().String("output", "json", "Output format: json or table")
 }
 
@@ -127,8 +143,9 @@ type externalAgentTokenResponse struct {
 
 func runAgentExternalRegister(cmd *cobra.Command, _ []string) error {
 	name := strings.TrimSpace(flagString(cmd, "name"))
-	if name == "" {
-		return fmt.Errorf("--name is required")
+	agentID := strings.TrimSpace(flagString(cmd, "agent-id"))
+	if name == "" && agentID == "" {
+		return fmt.Errorf("--name is required unless --agent-id is set")
 	}
 	provider := strings.TrimSpace(flagString(cmd, "provider"))
 	if provider == "" {
@@ -178,6 +195,9 @@ func runAgentExternalRegister(cmd *cobra.Command, _ []string) error {
 		"name":             name,
 		"external_session": session,
 	}
+	if agentID != "" {
+		body["agent_id"] = agentID
+	}
 	if permissionMode != "" {
 		body["permission_mode"] = permissionMode
 	}
@@ -201,6 +221,38 @@ func runAgentExternalRegister(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 	return cli.PrintJSON(os.Stdout, result)
+}
+
+type agentSessionBindingCLI struct {
+	ID        string `json:"id"`
+	AgentID   string `json:"agent_id"`
+	IssueID   string `json:"issue_id"`
+	SessionID string `json:"session_id"`
+}
+
+func runAgentSessionBind(cmd *cobra.Command, args []string) error {
+	issueID := strings.TrimSpace(flagString(cmd, "issue"))
+	sessionID := strings.TrimSpace(flagString(cmd, "session"))
+	if issueID == "" || sessionID == "" {
+		return fmt.Errorf("--issue and --session are required")
+	}
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+
+	var binding agentSessionBindingCLI
+	path := "/api/agents/" + url.PathEscape(args[0]) + "/session-bindings"
+	if err := client.PostJSON(ctx, path, map[string]any{"issue_id": issueID, "session_id": sessionID}, &binding); err != nil {
+		return fmt.Errorf("bind external session: %w", err)
+	}
+	if flagString(cmd, "output") == "table" {
+		cli.PrintTable(os.Stdout, []string{"BINDING", "AGENT", "ISSUE", "SESSION"}, [][]string{{binding.ID, binding.AgentID, binding.IssueID, binding.SessionID}})
+		return nil
+	}
+	return cli.PrintJSON(os.Stdout, binding)
 }
 
 // ExternalAgent mirrors the additive Agent fields the external endpoint

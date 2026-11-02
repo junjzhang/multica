@@ -100,6 +100,8 @@ type AgentMailboxMessage struct {
 	Kind             string             `json:"kind"`
 	RecipientType    string             `json:"recipient_type"`
 	Payload          []byte             `json:"payload"`
+	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
+	NotificationKey  pgtype.Text        `json:"notification_key"`
 }
 
 type AgentMcpServer struct {
@@ -749,6 +751,17 @@ type ExternalAgentSession struct {
 	DaemonID    string             `json:"daemon_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ExternalAgentSessionBinding struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	SessionID   pgtype.UUID        `json:"session_id"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type ExternalAgentToken struct {

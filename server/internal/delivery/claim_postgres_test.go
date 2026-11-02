@@ -64,15 +64,34 @@ func newClaimFixture(t *testing.T, pool *pgxpool.Pool) (workspaceID, agentID, ow
 	return workspaceID, agentID, ownerID, daemonID
 }
 
+// fixtureSessionID returns the session the fixture registered for one agent.
+func fixtureSessionID(t *testing.T, pool *pgxpool.Pool, agentID string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT id::text FROM external_agent_session WHERE agent_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		util.MustParseUUID(agentID)).Scan(&id); err != nil {
+		t.Fatalf("load fixture session: %v", err)
+	}
+	return id
+}
+
 func enqueueGeneric(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, key string) Delivery {
+	t.Helper()
+	return enqueueGenericTo(t, pool, workspaceID, agentID, fixtureSessionID(t, pool, agentID), key)
+}
+
+func enqueueGenericTo(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, targetSessionID, key string) Delivery {
 	t.Helper()
 	store := NewPostgres(db.New(pool))
 	created, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "ci_run", Key: key},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "ci_run", Key: key},
+		Target:          Target{SessionID: targetSessionID},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "ci:" + key,
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic delivery: %v", err)
@@ -149,12 +168,14 @@ func enqueueCommentForIssue(t *testing.T, pool *pgxpool.Pool, workspaceID, agent
 	commentID := uuid.NewString()
 	store := NewPostgres(db.New(pool))
 	created, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "comment", Key: commentID},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "comment_mention",
-		Payload:   json.RawMessage(fmt.Sprintf(`{"schema":"comment_mention.v1","issue_id":%q,"comment_id":%q}`, issueID, commentID)),
-		Refs:      Refs{IssueID: issueID, CommentID: commentID},
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "comment", Key: commentID},
+		Target:          Target{SessionID: fixtureSessionID(t, pool, agentID)},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "comment:" + commentID + ":agent:" + agentID,
+		Kind:            "comment_mention",
+		Payload:         json.RawMessage(fmt.Sprintf(`{"schema":"comment_mention.v1","issue_id":%q,"comment_id":%q}`, issueID, commentID)),
+		Refs:            Refs{IssueID: issueID, CommentID: commentID},
 	})
 	if err != nil {
 		t.Fatalf("enqueue comment delivery: %v", err)
@@ -361,6 +382,8 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	workspaceUUID := mustParseUUID(t, workspaceID)
 	recipientUUID := mustParseUUID(t, agentID)
 	ownerUUID := mustParseUUID(t, ownerID)
+	targetSessionID := fixtureSessionID(t, pool, agentID)
+	targetSessionUUID := mustParseUUID(t, targetSessionID)
 
 	list := func(tx pgx.Tx, commentProjection bool) []db.ListClaimableDeliveryIDsRow {
 		t.Helper()
@@ -379,11 +402,12 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	lease := func(tx pgx.Tx, deliveryID, token string) error {
 		t.Helper()
 		_, err := queries.WithTx(tx).LeaseClaimableDelivery(ctx, db.LeaseClaimableDeliveryParams{
-			ID:             mustParseUUID(t, deliveryID),
-			WorkspaceID:    workspaceUUID,
-			LeaseTokenHash: pgtype.Text{String: token, Valid: true},
-			LeaseOwner:     pgtype.Text{String: daemonID, Valid: true},
-			LeaseExpiresAt: pgtypeTime(time.Now().Add(time.Minute)),
+			ID:              mustParseUUID(t, deliveryID),
+			WorkspaceID:     workspaceUUID,
+			TargetSessionID: targetSessionUUID,
+			LeaseTokenHash:  pgtype.Text{String: token, Valid: true},
+			LeaseOwner:      pgtype.Text{String: daemonID, Valid: true},
+			LeaseExpiresAt:  pgtypeTime(time.Now().Add(time.Minute)),
 		})
 		return err
 	}
@@ -411,7 +435,7 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 		txA.Rollback(ctx)
 		t.Fatalf("comment candidates = %+v, want only %s", commentCandidates, comment.ID)
 	}
-	locked, err := queries.WithTx(txA).TryLockDeliveryRecipient(ctx, agentID)
+	locked, err := queries.WithTx(txA).TryLockDeliveryTarget(ctx, targetSessionID)
 	if err != nil {
 		txA.Rollback(ctx)
 		t.Fatalf("lock recipient for comment claim: %v", err)
@@ -431,7 +455,7 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	// The generic claimant now takes the released lock and leases its stale
 	// candidate. The row is still eligible on its own, but the recipient already
 	// has a committed in-flight lease, so the lease must match no row.
-	locked, err = queries.WithTx(txB).TryLockDeliveryRecipient(ctx, agentID)
+	locked, err = queries.WithTx(txB).TryLockDeliveryTarget(ctx, targetSessionID)
 	if err != nil {
 		t.Fatalf("lock recipient for generic claim: %v", err)
 	}
@@ -471,12 +495,14 @@ func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
 
 	store := NewPostgres(db.New(pool))
 	generic, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "ci_run", Key: "run-issue-" + uuid.NewString()},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Refs:      Refs{IssueID: issueID},
-		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "ci_run", Key: "run-issue-" + uuid.NewString()},
+		Target:          Target{SessionID: fixtureSessionID(t, pool, agentID)},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "ci:run-issue:" + uuid.NewString(),
+		Kind:            "ci_terminal",
+		Refs:            Refs{IssueID: issueID},
+		Payload:         json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic delivery with an issue reference: %v", err)

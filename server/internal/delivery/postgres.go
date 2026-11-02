@@ -84,29 +84,26 @@ func (p *Postgres) findExisting(ctx context.Context, req EnqueueRequest) (Delive
 	if err != nil {
 		return Delivery{}, false, fmt.Errorf("delivery: workspace id: %w", err)
 	}
-	recipientID, err := util.ParseUUID(req.Recipient.ID)
-	if err != nil {
-		return Delivery{}, false, fmt.Errorf("delivery: recipient id: %w", err)
-	}
-	row, err := p.q.GetDeliveryByIdempotencyKey(ctx, db.GetDeliveryByIdempotencyKeyParams{
-		WorkspaceID:      workspaceID,
-		RecipientType:    req.Recipient.Type,
-		RecipientAgentID: recipientID,
-		SourceType:       req.Source.Type,
-		SourceKey:        pgtype.Text{String: req.Source.Key, Valid: true},
+	row, err := p.q.GetDeliveryByNotificationKey(ctx, db.GetDeliveryByNotificationKeyParams{
+		WorkspaceID:     workspaceID,
+		NotificationKey: pgtype.Text{String: req.NotificationKey, Valid: true},
 	})
 	if err == nil {
 		return deliveryFromRow(row), true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return Delivery{}, false, fmt.Errorf("delivery: read idempotency key: %w", err)
+		return Delivery{}, false, fmt.Errorf("delivery: read notification key: %w", err)
 	}
 
-	// Rows written before the core carry no source_key. The legacy
+	// Rows written before the core carry no notification_key. The legacy
 	// (recipient, comment) unique key still identifies them, and the original
 	// mailbox UUID is the idempotency result the caller must receive.
 	if req.Source.Type != "comment" || req.Refs.CommentID == "" {
 		return Delivery{}, false, nil
+	}
+	recipientID, err := util.ParseUUID(req.Recipient.ID)
+	if err != nil {
+		return Delivery{}, false, fmt.Errorf("delivery: recipient id: %w", err)
 	}
 	commentID, err := util.ParseUUID(req.Refs.CommentID)
 	if err != nil {
@@ -133,6 +130,10 @@ func createDeliveryParams(req EnqueueRequest) (db.CreateDeliveryParams, error) {
 	recipientID, err := util.ParseUUID(req.Recipient.ID)
 	if err != nil {
 		return db.CreateDeliveryParams{}, fmt.Errorf("delivery: recipient id: %w", err)
+	}
+	targetID, err := util.ParseUUID(req.Target.SessionID)
+	if err != nil {
+		return db.CreateDeliveryParams{}, fmt.Errorf("delivery: target session id: %w", err)
 	}
 	issueID, err := optionalUUID(req.Refs.IssueID)
 	if err != nil {
@@ -165,6 +166,8 @@ func createDeliveryParams(req EnqueueRequest) (db.CreateDeliveryParams, error) {
 		CommentID:        commentID,
 		RecipientAgentID: recipientID,
 		RecipientType:    req.Recipient.Type,
+		TargetSessionID:  targetID,
+		NotificationKey:  pgtype.Text{String: req.NotificationKey, Valid: true},
 		SourceSessionID:  sessionID,
 		SenderType:       senderType,
 		SenderID:         senderID,
@@ -187,7 +190,9 @@ func deliveryFromRow(row db.AgentMailboxMessage) Delivery {
 		ID:               util.UUIDToString(row.ID),
 		Scope:            Scope{WorkspaceID: util.UUIDToString(row.WorkspaceID)},
 		Source:           Source{Type: row.SourceType, Key: row.SourceKey.String, ActorType: row.SenderType.String, ActorID: util.UUIDToString(row.SenderID), SessionID: util.UUIDToString(row.SourceSessionID)},
+		Target:           Target{SessionID: util.UUIDToString(row.TargetSessionID)},
 		Recipient:        Recipient{Type: row.RecipientType, ID: util.UUIDToString(row.RecipientAgentID)},
+		NotificationKey:  row.NotificationKey.String,
 		Kind:             row.Kind,
 		Refs:             Refs{IssueID: util.UUIDToString(row.IssueID), CommentID: util.UUIDToString(row.CommentID)},
 		DeliveryStatus:   row.DeliveryStatus,

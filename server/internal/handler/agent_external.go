@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
@@ -88,6 +89,9 @@ type externalSessionInput struct {
 }
 
 type createExternalAgentRequest struct {
+	// AgentID attaches another host session to an existing external agent.
+	// Omitted, registration mints a new agent identity, as before.
+	AgentID         string               `json:"agent_id,omitempty"`
 	Name            string               `json:"name"`
 	ExternalSession externalSessionInput `json:"external_session"`
 	PermissionMode  *string              `json:"permission_mode"`
@@ -180,7 +184,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
-	if name == "" {
+	if req.AgentID == "" && name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
@@ -256,6 +260,37 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Adding a session to an existing external agent is the only way one agent
+	// identity owns several physical sessions. The agent stays the same
+	// identity; only its set of addresses grows.
+	var targetAgent db.Agent
+	if req.AgentID != "" {
+		existingAgentID, parseErr := util.ParseUUID(strings.TrimSpace(req.AgentID))
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "agent_id is not a valid uuid")
+			return
+		}
+		targetAgent, err = h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{ID: existingAgentID, WorkspaceID: wsUUID})
+		if err != nil {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		if targetAgent.ExecutionKind != "external" {
+			writeError(w, http.StatusBadRequest, "only external agents can own host sessions")
+			return
+		}
+		if targetAgent.ArchivedAt.Valid {
+			writeError(w, http.StatusConflict, "archived agents cannot register a session")
+			return
+		}
+		if !h.canManageAgent(w, r, targetAgent) {
+			return
+		}
+		if name == "" {
+			name = targetAgent.Name
+		}
+	}
+
 	// Repeat registration of the same session returns the same identity, never
 	// a second agent. Only presentation fields may move.
 	if existing, err := h.Queries.GetExternalAgentSessionByIdentity(r.Context(), db.GetExternalAgentSessionByIdentityParams{
@@ -265,7 +300,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		HostID:      session.HostID,
 		SessionID:   session.SessionID,
 	}); err == nil {
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve external session")
@@ -297,24 +332,27 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to resolve external session")
 			return
 		}
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	}
 
-	created, err := qtx.CreateExternalAgent(r.Context(), db.CreateExternalAgentParams{
-		WorkspaceID:    wsUUID,
-		Name:           name,
-		Visibility:     visibility,
-		PermissionMode: permissionMode,
-		OwnerID:        parseUUID(ownerID),
-	})
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "an agent with this name already exists in this workspace")
+	created := targetAgent
+	if !created.ID.Valid {
+		created, err = qtx.CreateExternalAgent(r.Context(), db.CreateExternalAgentParams{
+			WorkspaceID:    wsUUID,
+			Name:           name,
+			Visibility:     visibility,
+			PermissionMode: permissionMode,
+			OwnerID:        parseUUID(ownerID),
+		})
+		if err != nil {
+			if isUniqueViolation(err) {
+				writeError(w, http.StatusConflict, "an agent with this name already exists in this workspace")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to create external agent")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "failed to create external agent")
-		return
 	}
 	createdSession, err := qtx.CreateExternalAgentSession(r.Context(), db.CreateExternalAgentSessionParams{
 		ID:          dbid.NewV7(),
@@ -343,14 +381,14 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "external session was registered concurrently; retry")
 			return
 		}
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create external session")
 		return
 	}
-	if permissionMode == "public_to" {
+	if permissionMode == "public_to" && !targetAgent.ID.Valid {
 		if err := replaceInvocationTargetsWithQueries(r.Context(), qtx, created.ID, parseUUID(ownerID), []targetSpec{{
 			targetType: invocationTargetWorkspace,
 			targetID:   wsUUID,
@@ -376,20 +414,33 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Request, session db.ExternalAgentSession, displayName string, link *string, daemonID string) {
+// writeExistingExternalAgent answers a repeat registration of one physical
+// host session. requestedAgentID is the agent the caller explicitly asked to
+// extend; a session identity is immutable, so naming a different agent is a
+// conflict rather than a silent move of the session to that agent.
+func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Request, session db.ExternalAgentSession, requestedAgentID pgtype.UUID, displayName string, link *string, daemonID string) {
+	if requestedAgentID.Valid && requestedAgentID != session.AgentID {
+		writeError(w, http.StatusConflict, "external session is already registered to another agent")
+		return
+	}
 	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load external agent")
 		return
 	}
+	// The session id scopes the write. An agent may own several host sessions,
+	// and re-registering one must leave every sibling's profile and daemon as
+	// they were.
 	updatedSession, err := h.Queries.UpdateExternalAgentSessionProfile(r.Context(), db.UpdateExternalAgentSessionProfileParams{
-		AgentID:     session.AgentID,
+		ID:          session.ID,
+		WorkspaceID: session.WorkspaceID,
 		DisplayName: displayName,
 		Url:         ptrToText(link),
 		DaemonID:    daemonID,
 	})
 	if err != nil {
-		updatedSession = session
+		writeError(w, http.StatusInternalServerError, "failed to update external session profile")
+		return
 	}
 	resp := h.agentToResponse(agent)
 	resp.ExternalSession = externalSessionToResponse(updatedSession)

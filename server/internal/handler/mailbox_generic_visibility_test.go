@@ -20,8 +20,9 @@ func TestGenericDeliveryHiddenFromLegacyMailboxReaders(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, ownerID := externalAgentFixture(t, "Generic Visibility Target", "daemon-generic")
+	agentID, sessionID, ownerID := externalAgentFixture(t, "Generic Visibility Target", "daemon-generic")
 	issueID := dbfx.Issue(t, "generic visibility")
+	bindExternalSession(t, agentID, sessionID, issueID)
 	if w, _ := postMentionComment(t, issueID, agentID); w.Code != http.StatusCreated {
 		t.Fatalf("create comment: %d %s", w.Code, w.Body.String())
 	}
@@ -34,11 +35,13 @@ func TestGenericDeliveryHiddenFromLegacyMailboxReaders(t *testing.T) {
 
 	store := delivery.NewPostgres(testHandler.Queries)
 	generic, err := store.Enqueue(t.Context(), delivery.EnqueueRequest{
-		Scope:     delivery.Scope{WorkspaceID: testWorkspaceID},
-		Source:    delivery.Source{Type: "ci", Key: "generic-visibility-run-1"},
-		Recipient: delivery.Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run":1}`),
+		Scope:           delivery.Scope{WorkspaceID: testWorkspaceID},
+		Source:          delivery.Source{Type: "ci", Key: "generic-visibility-run-1"},
+		Target:          delivery.Target{SessionID: sessionID},
+		Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "ci:generic-visibility-run-1",
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run":1}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic: %v", err)

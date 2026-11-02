@@ -76,8 +76,9 @@ func TestCommentAndMailboxRollBackTogether(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, _ := externalAgentFixture(t, "Atomic Mailbox Recipient", "daemon-atomic")
+	agentID, sessionID, _ := externalAgentFixture(t, "Atomic Mailbox Recipient", "daemon-atomic")
 	issueID := dbfx.Issue(t, "atomic mailbox comment")
+	bindExternalSession(t, agentID, sessionID, issueID)
 	installMailboxInsertFailure(t, "")
 
 	w, _ := postMentionComment(t, issueID, agentID)
@@ -99,9 +100,11 @@ func TestCommentMailboxFailureIsAllOrNothingForMultipleRecipients(t *testing.T) 
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	firstAgent, _, _ := externalAgentFixture(t, "Atomic Mailbox First", "daemon-atomic")
-	secondAgent, _, _ := externalAgentFixture(t, "Atomic Mailbox Second", "daemon-atomic")
+	firstAgent, firstSession, _ := externalAgentFixture(t, "Atomic Mailbox First", "daemon-atomic")
+	secondAgent, secondSession, _ := externalAgentFixture(t, "Atomic Mailbox Second", "daemon-atomic")
 	issueID := dbfx.Issue(t, "atomic multi-recipient mailbox")
+	bindExternalSession(t, firstAgent, firstSession, issueID)
+	bindExternalSession(t, secondAgent, secondSession, issueID)
 	installMailboxInsertFailure(t, secondAgent)
 
 	w, _ := postMentionComment(t, issueID, firstAgent, secondAgent)
@@ -125,7 +128,7 @@ func TestQuickActionMailboxDeliveryRollsBackComment(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, _ := externalAgentFixture(t, "Atomic Quick Action Target", "daemon-atomic")
+	agentID, sessionID, _ := externalAgentFixture(t, "Atomic Quick Action Target", "daemon-atomic")
 	var action QuickActionResponse
 	testutil.Call(t, testHandler.CreateQuickAction, newRequest(http.MethodPost, "/api/quick-actions", map[string]any{
 		"name": "Atomic quick action", "prompt": "review the change", "visibility": "public",
@@ -134,6 +137,7 @@ func TestQuickActionMailboxDeliveryRollsBackComment(t *testing.T) {
 	dbfx.Cleanup(t, `DELETE FROM quick_action WHERE id = $1`, action.ID)
 
 	issueID := dbfx.Issue(t, "atomic quick action issue")
+	bindExternalSession(t, agentID, sessionID, issueID)
 	installMailboxInsertFailure(t, "")
 
 	w := httptest.NewRecorder()
@@ -157,8 +161,9 @@ func TestCommentMailboxDeliveryWritesCoreFields(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, _ := externalAgentFixture(t, "Atomic Mailbox Fields", "daemon-atomic")
+	agentID, sessionID, _ := externalAgentFixture(t, "Atomic Mailbox Fields", "daemon-atomic")
 	issueID := dbfx.Issue(t, "atomic mailbox fields")
+	bindExternalSession(t, agentID, sessionID, issueID)
 
 	w, resp := postMentionComment(t, issueID, agentID)
 	if w.Code != http.StatusCreated {

@@ -184,9 +184,15 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 }
 
 const getExternalAgentSessionByAgentID = `-- name: GetExternalAgentSessionByAgentID :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE agent_id = $1
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1
 `
 
+// Presentation only: an agent may own several sessions, and the frozen agent
+// DTO still carries one. The oldest session is the stable choice; no delivery
+// path may address a message through this lookup.
 func (q *Queries) GetExternalAgentSessionByAgentID(ctx context.Context, agentID pgtype.UUID) (ExternalAgentSession, error) {
 	row := q.db.QueryRow(ctx, getExternalAgentSessionByAgentID, agentID)
 	var i ExternalAgentSession
@@ -414,7 +420,7 @@ SET display_name = $1,
     url = $2,
     daemon_id = $3,
     updated_at = now()
-WHERE agent_id = $4
+WHERE id = $4 AND workspace_id = $5
 RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at
 `
 
@@ -422,17 +428,21 @@ type UpdateExternalAgentSessionProfileParams struct {
 	DisplayName string      `json:"display_name"`
 	Url         pgtype.Text `json:"url"`
 	DaemonID    string      `json:"daemon_id"`
-	AgentID     pgtype.UUID `json:"agent_id"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
 // Only presentation and the delivering daemon are mutable; the identity tuple
-// is immutable once registered.
+// is immutable once registered. The exact session id scopes the write: an
+// agent may own several host sessions and re-registering one must never touch
+// a sibling's profile or daemon.
 func (q *Queries) UpdateExternalAgentSessionProfile(ctx context.Context, arg UpdateExternalAgentSessionProfileParams) (ExternalAgentSession, error) {
 	row := q.db.QueryRow(ctx, updateExternalAgentSessionProfile,
 		arg.DisplayName,
 		arg.Url,
 		arg.DaemonID,
-		arg.AgentID,
+		arg.ID,
+		arg.WorkspaceID,
 	)
 	var i ExternalAgentSession
 	err := row.Scan(

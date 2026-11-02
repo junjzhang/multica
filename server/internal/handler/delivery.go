@@ -19,6 +19,7 @@ type daemonDeliveryClaim struct {
 	Payload          json.RawMessage       `json:"payload"`
 	RecipientAgentID string                `json:"recipient_agent_id"`
 	RecipientType    string                `json:"recipient_type"`
+	TargetSessionID  string                `json:"target_session_id"`
 	ExternalSession  daemonDeliverySession `json:"external_session"`
 	DeliveryStatus   string                `json:"delivery_status"`
 	Attempts         int32                 `json:"attempts"`
@@ -71,6 +72,7 @@ func (h *Handler) ClaimDaemonDeliveries(w http.ResponseWriter, r *http.Request) 
 			Payload:          claim.Payload,
 			RecipientAgentID: claim.Recipient.ID,
 			RecipientType:    claim.Recipient.Type,
+			TargetSessionID:  claim.Delivery.Target.SessionID,
 			ExternalSession: daemonDeliverySession{
 				Provider:  claim.Session.Provider,
 				HostID:    claim.Session.HostID,

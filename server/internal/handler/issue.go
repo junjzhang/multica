@@ -4560,6 +4560,11 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 		if err := qtx.DeleteAgentMailboxMessagesForIssue(ctx, issue.ID); err != nil {
 			return issueDeleteResult{}, err
 		}
+		// Bindings route future notifications; a deleted issue must not leave
+		// an exact key behind that a recreated id could inherit.
+		if err := qtx.DeleteAgentSessionBindingsForIssue(ctx, issue.ID); err != nil {
+			return issueDeleteResult{}, err
+		}
 		if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("delete issue: %w", err)
 		}

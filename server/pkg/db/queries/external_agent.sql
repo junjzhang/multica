@@ -31,7 +31,13 @@ ON CONFLICT (workspace_id, owner_user_id, provider, host_id, session_id) DO NOTH
 RETURNING *;
 
 -- name: GetExternalAgentSessionByAgentID :one
-SELECT * FROM external_agent_session WHERE agent_id = $1;
+-- Presentation only: an agent may own several sessions, and the frozen agent
+-- DTO still carries one. The oldest session is the stable choice; no delivery
+-- path may address a message through this lookup.
+SELECT * FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
 
 -- name: GetExternalAgentSessionByID :one
 SELECT * FROM external_agent_session WHERE id = $1 AND workspace_id = $2;
@@ -52,13 +58,15 @@ SELECT * FROM external_agent_session WHERE id = ANY(@ids::uuid[]);
 
 -- name: UpdateExternalAgentSessionProfile :one
 -- Only presentation and the delivering daemon are mutable; the identity tuple
--- is immutable once registered.
+-- is immutable once registered. The exact session id scopes the write: an
+-- agent may own several host sessions and re-registering one must never touch
+-- a sibling's profile or daemon.
 UPDATE external_agent_session
 SET display_name = @display_name,
     url = sqlc.narg('url'),
     daemon_id = @daemon_id,
     updated_at = now()
-WHERE agent_id = @agent_id
+WHERE id = @id AND workspace_id = @workspace_id
 RETURNING *;
 
 -- name: WorkspaceDaemonOwnedByUser :one
