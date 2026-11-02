@@ -104,6 +104,13 @@ func (h *Handler) BindAgentSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// A concurrent bind of the same key revoked and re-created the row
+		// between our revoke and insert. The unique active-binding index is
+		// the arbiter; report the lost race, not a server fault.
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "the session binding changed concurrently; retry")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to bind session")
 		return
 	}

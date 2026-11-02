@@ -184,10 +184,12 @@ type Store interface {
 // are the available identity, and only the legacy (recipient, comment) lookup
 // can find them.
 //
-// Target is deliberately not compared. The stored target is the frozen address
-// of an already-created notification: a producer retry that re-resolves after
-// an explicit rebind returns the original delivery instead of failing or
-// creating a second one.
+// Target and Source.SessionID are route snapshots, not logical notification
+// identity, and are deliberately not compared. They record where the message
+// was addressed and which session the sender used when the row was created; a
+// producer retry that re-resolves after an explicit rebind must replay the
+// original delivery with its original route instead of failing or creating a
+// second one. The stored Source.SessionID stays untouched.
 func (r EnqueueRequest) sameContent(existing Delivery) bool {
 	if existing.Kind != r.Kind {
 		return false
@@ -205,8 +207,7 @@ func (r EnqueueRequest) sameContent(existing Delivery) bool {
 		return false
 	}
 	if existing.Source.ActorType != r.Source.ActorType ||
-		existing.Source.ActorID != r.Source.ActorID ||
-		existing.Source.SessionID != r.Source.SessionID {
+		existing.Source.ActorID != r.Source.ActorID {
 		return false
 	}
 	if len(existing.Payload) == 0 {

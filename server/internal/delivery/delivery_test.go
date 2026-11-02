@@ -108,6 +108,15 @@ func TestSameContentRequiresOneLogicalNotification(t *testing.T) {
 		{name: "retry after rebind keeps the frozen route", mutate: func(r *EnqueueRequest) {
 			r.Target.SessionID = "0190f0f0-0000-7000-8000-000000000006"
 		}, want: true},
+		{name: "retry after sender rebind keeps the original source route", mutate: func(r *EnqueueRequest) {
+			r.Source.SessionID = "0190f0f0-0000-7000-8000-000000000011"
+		}, want: true},
+		{name: "another actor under one key", mutate: func(r *EnqueueRequest) {
+			r.Source.ActorID = "0190f0f0-0000-7000-8000-000000000012"
+		}},
+		{name: "another actor kind under one key", mutate: func(r *EnqueueRequest) {
+			r.Source.ActorType = "agent"
+		}},
 		{name: "another recipient under one key", mutate: func(r *EnqueueRequest) {
 			r.Recipient.ID = "0190f0f0-0000-7000-8000-000000000007"
 		}},

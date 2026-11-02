@@ -300,7 +300,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		HostID:      session.HostID,
 		SessionID:   session.SessionID,
 	}); err == nil {
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve external session")
@@ -332,7 +332,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to resolve external session")
 			return
 		}
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	}
 
@@ -381,7 +381,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "external session was registered concurrently; retry")
 			return
 		}
-		h.writeExistingExternalAgent(w, r, existing, displayName, link, session.DaemonID)
+		h.writeExistingExternalAgent(w, r, existing, targetAgent.ID, displayName, link, session.DaemonID)
 		return
 	}
 	if err != nil {
@@ -414,20 +414,33 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Request, session db.ExternalAgentSession, displayName string, link *string, daemonID string) {
+// writeExistingExternalAgent answers a repeat registration of one physical
+// host session. requestedAgentID is the agent the caller explicitly asked to
+// extend; a session identity is immutable, so naming a different agent is a
+// conflict rather than a silent move of the session to that agent.
+func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Request, session db.ExternalAgentSession, requestedAgentID pgtype.UUID, displayName string, link *string, daemonID string) {
+	if requestedAgentID.Valid && requestedAgentID != session.AgentID {
+		writeError(w, http.StatusConflict, "external session is already registered to another agent")
+		return
+	}
 	agent, err := h.Queries.GetAgent(r.Context(), session.AgentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load external agent")
 		return
 	}
+	// The session id scopes the write. An agent may own several host sessions,
+	// and re-registering one must leave every sibling's profile and daemon as
+	// they were.
 	updatedSession, err := h.Queries.UpdateExternalAgentSessionProfile(r.Context(), db.UpdateExternalAgentSessionProfileParams{
-		AgentID:     session.AgentID,
+		ID:          session.ID,
+		WorkspaceID: session.WorkspaceID,
 		DisplayName: displayName,
 		Url:         ptrToText(link),
 		DaemonID:    daemonID,
 	})
 	if err != nil {
-		updatedSession = session
+		writeError(w, http.StatusInternalServerError, "failed to update external session profile")
+		return
 	}
 	resp := h.agentToResponse(agent)
 	resp.ExternalSession = externalSessionToResponse(updatedSession)
