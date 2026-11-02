@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -359,7 +360,12 @@ func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to load claimed mailbox message")
 			return
 		}
-		session, err := h.Queries.GetExternalAgentSessionByAgentID(r.Context(), leased.RecipientAgentID)
+		// The lease carries the target the producer froze. Loading it by id
+		// keeps a rebind from changing where an existing message is delivered.
+		session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
+			ID:          parseUUID(claim.Delivery.Target.SessionID),
+			WorkspaceID: wsUUID,
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load external session")
 			return
@@ -515,26 +521,50 @@ type commentMentionDeliveryPayload struct {
 	CommentID string `json:"comment_id"`
 }
 
+// mailboxDeliveryResults is the per-agent outcome of persisting a comment
+// handoff. A queued entry means the delivery row committed; any other reason
+// means the target was not addressed (for example no active session binding)
+// and the comment response must say so instead of claiming a handoff.
+type mailboxDeliveryResults map[string]DispatchReasonCode
+
+// queuedMailboxAgents returns the agents whose delivery actually committed.
+func (r mailboxDeliveryResults) queuedMailboxAgents() map[string]struct{} {
+	out := make(map[string]struct{}, len(r))
+	for agentID, reason := range r {
+		if reason == ReasonQueued {
+			out[agentID] = struct{}{}
+		}
+	}
+	return out
+}
+
 // enqueueMailboxDeliveries persists one delivery per explicit external mention
 // through the delivery core. q may be a transaction handle: CreateComment and
 // UpdateComment pass their write transaction so the comment content and every
 // valid handoff commit or roll back together. A persistence failure fails the
 // whole call; the caller must not treat any target as queued.
-func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (map[string]struct{}, error) {
-	out := map[string]struct{}{}
+//
+// The session a handoff addresses is resolved by the application from the
+// explicit (agent, issue) binding and then frozen on the delivery. A missing
+// binding is reported per target and never falls back to another session of
+// the same agent.
+func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (mailboxDeliveryResults, error) {
+	out := mailboxDeliveryResults{}
 	if len(recipients) == 0 {
 		return out, nil
 	}
+	workspaceID := uuidToString(issue.WorkspaceID)
+	issueID := uuidToString(issue.ID)
 	var sourceSessionID string
 	if actorType == "agent" {
-		if session, err := q.GetExternalAgentSessionByAgentID(ctx, parseUUID(actorID)); err == nil {
-			sourceSessionID = uuidToString(session.ID)
+		if binding, err := sessionroute.Resolve(ctx, q, workspaceID, actorID, issueID); err == nil {
+			sourceSessionID = binding.SessionID
 		}
 	}
 	store := delivery.NewPostgres(q)
 	payload, err := json.Marshal(commentMentionDeliveryPayload{
 		Schema:    "comment_mention.v1",
-		IssueID:   uuidToString(issue.ID),
+		IssueID:   issueID,
 		CommentID: uuidToString(commentID),
 	})
 	if err != nil {
@@ -545,8 +575,20 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			continue
 		}
 		agent := *target.MailboxAgent
-		_, err := store.Enqueue(ctx, delivery.EnqueueRequest{
-			Scope: delivery.Scope{WorkspaceID: uuidToString(issue.WorkspaceID)},
+		agentID := uuidToString(agent.ID)
+		binding, err := sessionroute.Resolve(ctx, q, workspaceID, agentID, issueID)
+		if errors.Is(err, sessionroute.ErrNotBound) {
+			// The mention names an identity with no explicit target on this
+			// issue. Fail the target, keep the comment: the author can bind a
+			// session and ask again.
+			out[agentID] = ReasonTargetUnavailable
+			continue
+		}
+		if err != nil {
+			return out, fmt.Errorf("resolve session binding for agent %s: %w", agentID, err)
+		}
+		_, err = store.Enqueue(ctx, delivery.EnqueueRequest{
+			Scope: delivery.Scope{WorkspaceID: workspaceID},
 			Source: delivery.Source{
 				Type:      "comment",
 				Key:       uuidToString(commentID),
@@ -554,11 +596,13 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 				ActorID:   actorID,
 				SessionID: sourceSessionID,
 			},
-			Recipient: delivery.Recipient{Type: "agent", ID: uuidToString(agent.ID)},
-			Kind:      "comment_mention",
-			Payload:   payload,
+			Target:          delivery.Target{SessionID: binding.SessionID},
+			Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+			NotificationKey: "comment:" + uuidToString(commentID) + ":agent:" + agentID,
+			Kind:            "comment_mention",
+			Payload:         payload,
 			Refs: delivery.Refs{
-				IssueID:   uuidToString(issue.ID),
+				IssueID:   issueID,
 				CommentID: uuidToString(commentID),
 			},
 		})
@@ -566,9 +610,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			// Keep already-persisted recipients in the result for diagnostics.
 			// Callers own a transaction, so a failure rolls every one of them
 			// back and none is reported as queued.
-			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", uuidToString(agent.ID), err)
+			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", agentID, err)
 		}
-		out[uuidToString(agent.ID)] = struct{}{}
+		out[agentID] = ReasonQueued
 	}
 	return out, nil
 }

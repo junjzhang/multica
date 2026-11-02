@@ -18,13 +18,15 @@ func TestGenericDeliveryClaimAndOutcome(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, ownerID := externalAgentFixture(t, "Generic Delivery Target", "daemon-generic-worker")
+	agentID, sessionID, ownerID := externalAgentFixture(t, "Generic Delivery Target", "daemon-generic-worker")
 	created, err := delivery.NewPostgres(testHandler.Queries).Enqueue(t.Context(), delivery.EnqueueRequest{
-		Scope:     delivery.Scope{WorkspaceID: testWorkspaceID},
-		Source:    delivery.Source{Type: "ci_run", Key: "generic-claim-run-1"},
-		Recipient: delivery.Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run_id":"run-1","conclusion":"success"}`),
+		Scope:           delivery.Scope{WorkspaceID: testWorkspaceID},
+		Source:          delivery.Source{Type: "ci_run", Key: "generic-claim-run-1"},
+		Target:          delivery.Target{SessionID: sessionID},
+		Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "ci:generic-claim-run-1",
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run_id":"run-1","conclusion":"success"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic: %v", err)

@@ -8,11 +8,13 @@ import (
 
 func validRequest() EnqueueRequest {
 	return EnqueueRequest{
-		Scope:     Scope{WorkspaceID: "0190f0f0-0000-7000-8000-000000000001"},
-		Source:    Source{Type: "ci_run", Key: "run-1"},
-		Recipient: Recipient{Type: "agent", ID: "0190f0f0-0000-7000-8000-000000000002"},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run_id":"run-1"}`),
+		Scope:           Scope{WorkspaceID: "0190f0f0-0000-7000-8000-000000000001"},
+		Source:          Source{Type: "ci_run", Key: "run-1"},
+		Target:          Target{SessionID: "0190f0f0-0000-7000-8000-000000000004"},
+		Recipient:       Recipient{Type: "agent", ID: "0190f0f0-0000-7000-8000-000000000002"},
+		NotificationKey: "ci:run-1",
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run_id":"run-1"}`),
 	}
 }
 
@@ -28,6 +30,8 @@ func TestEnqueueRequestValidation(t *testing.T) {
 		{name: "no source key", mutate: func(r *EnqueueRequest) { r.Source.Key = "" }, wantErr: "source key"},
 		{name: "no recipient type", mutate: func(r *EnqueueRequest) { r.Recipient.Type = "" }, wantErr: "recipient type"},
 		{name: "no recipient id", mutate: func(r *EnqueueRequest) { r.Recipient.ID = "" }, wantErr: "recipient id"},
+		{name: "no target session", mutate: func(r *EnqueueRequest) { r.Target.SessionID = "" }, wantErr: "target session id"},
+		{name: "no notification key", mutate: func(r *EnqueueRequest) { r.NotificationKey = "" }, wantErr: "notification key"},
 		{name: "no kind", mutate: func(r *EnqueueRequest) { r.Kind = "" }, wantErr: "kind"},
 		{name: "no payload", mutate: func(r *EnqueueRequest) { r.Payload = nil }, wantErr: "payload"},
 		{name: "null payload", mutate: func(r *EnqueueRequest) { r.Payload = json.RawMessage(`null`) }, wantErr: "must not be null"},

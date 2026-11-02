@@ -31,7 +31,13 @@ ON CONFLICT (workspace_id, owner_user_id, provider, host_id, session_id) DO NOTH
 RETURNING *;
 
 -- name: GetExternalAgentSessionByAgentID :one
-SELECT * FROM external_agent_session WHERE agent_id = $1;
+-- Presentation only: an agent may own several sessions, and the frozen agent
+-- DTO still carries one. The oldest session is the stable choice; no delivery
+-- path may address a message through this lookup.
+SELECT * FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
 
 -- name: GetExternalAgentSessionByID :one
 SELECT * FROM external_agent_session WHERE id = $1 AND workspace_id = $2;

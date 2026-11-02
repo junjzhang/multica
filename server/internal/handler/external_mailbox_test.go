@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -55,6 +56,21 @@ func externalAgentFixture(t *testing.T, name, daemonID string) (agentID, session
 		ON CONFLICT (agent_id, target_type, target_id) DO NOTHING
 	`, agentID, testWorkspaceID)
 	return agentID, sessionID, ownerID
+}
+
+// bindExternalSession records the explicit (agent, issue) target the comment
+// and wakeup producers resolve. Tests that expect a mailbox handoff must bind
+// first: there is no implicit session fallback.
+func bindExternalSession(t *testing.T, agentID, sessionID, issueID string) {
+	t.Helper()
+	if _, err := sessionroute.Bind(context.Background(), testHandler.Queries, sessionroute.BindRequest{
+		WorkspaceID: testWorkspaceID,
+		AgentID:     agentID,
+		IssueID:     issueID,
+		SessionID:   sessionID,
+	}); err != nil {
+		t.Fatalf("bind external session: %v", err)
+	}
 }
 
 func externalTokenFixture(t *testing.T, agentID, ownerID string, expiresAt time.Time) string {
@@ -182,9 +198,11 @@ func TestExternalAgentsAreDistinctAuthors(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentA, _, _ := externalAgentFixture(t, "External Author A", "daemon-authors")
-	agentB, _, _ := externalAgentFixture(t, "External Author B", "daemon-authors")
+	agentA, sessionA, _ := externalAgentFixture(t, "External Author A", "daemon-authors")
+	agentB, sessionB, _ := externalAgentFixture(t, "External Author B", "daemon-authors")
 	issueID := dbfx.Issue(t, "external authors")
+	bindExternalSession(t, agentA, sessionA, issueID)
+	bindExternalSession(t, agentB, sessionB, issueID)
 
 	postAs := func(agentID, content string) CommentResponse {
 		w := httptest.NewRecorder()
@@ -348,8 +366,9 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		t.Skip("database not available")
 	}
 	ctx := context.Background()
-	recipient, _, ownerID := externalAgentFixture(t, "Mailbox Recipient", "daemon-claim")
+	recipient, recipientSession, ownerID := externalAgentFixture(t, "Mailbox Recipient", "daemon-claim")
 	issueID := dbfx.Issue(t, "mailbox fencing")
+	bindExternalSession(t, recipient, recipientSession, issueID)
 	changes := recordMailboxChanges(issueID)
 	commentID := dbfx.Comment(t, issueID, "please review the change")
 
@@ -368,6 +387,10 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		return msg
 	}
 	first := create()
+	// This test exercises the frozen comment projection and lease fencing; the
+	// legacy insert has no target, so record the only registered session as the
+	// row's frozen destination, as the cutover backfill does.
+	dbfx.Exec(t, `UPDATE agent_mailbox_message SET target_session_id = $1 WHERE id = $2`, recipientSession, uuidToString(first.ID))
 	// Replaying the same delivery is idempotent.
 	if _, err := testHandler.Queries.CreateAgentMailboxMessage(ctx, db.CreateAgentMailboxMessageParams{
 		WorkspaceID:      parseUUID(testWorkspaceID),
@@ -497,19 +520,20 @@ func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	first, _, owner := externalAgentFixture(t, "First host recipient", "daemon-first")
-	second, _, _ := externalAgentFixture(t, "Second host recipient", "daemon-second")
+	first, firstSession, owner := externalAgentFixture(t, "First host recipient", "daemon-first")
+	second, secondSession, _ := externalAgentFixture(t, "Second host recipient", "daemon-second")
 	dbfx.Exec(t, `UPDATE agent SET owner_id=$1 WHERE id=$2`, owner, second)
 	dbfx.Exec(t, `UPDATE external_agent_session SET owner_user_id=$1 WHERE agent_id=$2`, owner, second)
 	dbfx.Runtime(t, "First delivery daemon", testutil.Cols{"daemon_id": "daemon-first", "owner_id": owner})
 	dbfx.Runtime(t, "Second delivery daemon", testutil.Cols{"daemon_id": "daemon-second", "owner_id": owner})
 	dbfx.Runtime(t, "Foreign delivery daemon", testutil.Cols{"daemon_id": "daemon-foreign"})
 	issue := dbfx.Issue(t, "daemon selection")
-	for _, recipient := range []string{first, second} {
+	for recipient, session := range map[string]string{first: firstSession, second: secondSession} {
 		comment := dbfx.Comment(t, issue, "request")
 		dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{
 			"workspace_id": testWorkspaceID, "issue_id": issue, "comment_id": comment,
-			"recipient_agent_id": recipient, "sender_type": "member", "sender_id": testUserID,
+			"recipient_agent_id": recipient, "target_session_id": session,
+			"sender_type": "member", "sender_id": testUserID,
 		})
 	}
 	claim := func(selector string) *httptest.ResponseRecorder {

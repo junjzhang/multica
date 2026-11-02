@@ -184,9 +184,15 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 }
 
 const getExternalAgentSessionByAgentID = `-- name: GetExternalAgentSessionByAgentID :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE agent_id = $1
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1
 `
 
+// Presentation only: an agent may own several sessions, and the frozen agent
+// DTO still carries one. The oldest session is the stable choice; no delivery
+// path may address a message through this lookup.
 func (q *Queries) GetExternalAgentSessionByAgentID(ctx context.Context, agentID pgtype.UUID) (ExternalAgentSession, error) {
 	row := q.db.QueryRow(ctx, getExternalAgentSessionByAgentID, agentID)
 	var i ExternalAgentSession

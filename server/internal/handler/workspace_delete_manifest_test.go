@@ -26,6 +26,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"agent_invocation_target":            workspaceDelete,
 	"agent_mailbox_message":              workspaceDelete,
 	"external_agent_session":             workspaceDelete,
+	"external_agent_session_binding":     workspaceDelete,
 	"external_agent_token":               workspaceDelete,
 	"agent_runtime":                      workspaceDelete,
 	"agent_skill":                        workspaceDelete,

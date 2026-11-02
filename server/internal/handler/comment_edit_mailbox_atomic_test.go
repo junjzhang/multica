@@ -60,8 +60,9 @@ func TestEditCommentAddedMentionPersistsDeliveryAtomically(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, _ := externalAgentFixture(t, "Edit Strict Target", "daemon-edit-strict")
+	agentID, sessionID, _ := externalAgentFixture(t, "Edit Strict Target", "daemon-edit-strict")
 	issueID := dbfx.Issue(t, "edit strict mention")
+	bindExternalSession(t, agentID, sessionID, issueID)
 	created := postPlainComment(t, issueID)
 	original := storedCommentContent(t, created.ID)
 	content := fmt.Sprintf("[@Target](mention://agent/%s) please review", agentID)
@@ -103,8 +104,9 @@ func TestEditCommentAddedMentionNonStrictRollsBack(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, _, _ := externalAgentFixture(t, "Edit Legacy Target", "daemon-edit-legacy")
+	agentID, sessionID, _ := externalAgentFixture(t, "Edit Legacy Target", "daemon-edit-legacy")
 	issueID := dbfx.Issue(t, "edit legacy mention")
+	bindExternalSession(t, agentID, sessionID, issueID)
 	created := postPlainComment(t, issueID)
 	original := storedCommentContent(t, created.ID)
 	content := fmt.Sprintf("[@Target](mention://agent/%s) please review", agentID)
@@ -143,9 +145,11 @@ func TestEditCommentMailboxFailureIsAllOrNothingForMultipleRecipients(t *testing
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	firstAgent, _, _ := externalAgentFixture(t, "Edit Multi First", "daemon-edit-multi")
-	secondAgent, _, _ := externalAgentFixture(t, "Edit Multi Second", "daemon-edit-multi")
+	firstAgent, firstSession, _ := externalAgentFixture(t, "Edit Multi First", "daemon-edit-multi")
+	secondAgent, secondSession, _ := externalAgentFixture(t, "Edit Multi Second", "daemon-edit-multi")
 	issueID := dbfx.Issue(t, "edit multi recipient")
+	bindExternalSession(t, firstAgent, firstSession, issueID)
+	bindExternalSession(t, secondAgent, secondSession, issueID)
 	created := postPlainComment(t, issueID)
 	original := storedCommentContent(t, created.ID)
 	content := fmt.Sprintf("[@First](mention://agent/%s) and [@Second](mention://agent/%s) please review", firstAgent, secondAgent)
@@ -184,9 +188,10 @@ func TestEditCommentMailboxRespectsSuppressionAndPermission(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	allowedAgent, _, _ := externalAgentFixture(t, "Edit Allowed Target", "daemon-edit-policy")
+	allowedAgent, allowedSession, _ := externalAgentFixture(t, "Edit Allowed Target", "daemon-edit-policy")
 	suppressedAgent, _, _ := externalAgentFixture(t, "Edit Suppressed Target", "daemon-edit-policy")
 	issueID := dbfx.Issue(t, "edit mailbox policy")
+	bindExternalSession(t, allowedAgent, allowedSession, issueID)
 	created := postPlainComment(t, issueID)
 	content := fmt.Sprintf("[@Allowed](mention://agent/%s) and [@Suppressed](mention://agent/%s) please review", allowedAgent, suppressedAgent)
 

@@ -1858,7 +1858,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		threadRootID = rootComment.ID
 	}
 	triggerPlan := h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, authorType, authorID, commentID, threadRootID, sourceTaskID, originatorUserID, suppressAgentIDs, rootComment == nil)
-	var mailboxDelivered map[string]struct{}
+	var mailboxDelivered mailboxDeliveryResults
 
 	createParams := db.CreateCommentParams{
 		ID:           commentID,
@@ -1971,7 +1971,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// must keep the resolved root in sync.
 	h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(issue.WorkspaceID), authorType, authorID, h.wakeupSourceTaskID(r))
 
-	if len(mailboxDelivered) > 0 {
+	if len(mailboxDelivered.queuedMailboxAgents()) > 0 {
 		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
 	}
 
@@ -2021,14 +2021,14 @@ func isNoteComment(content string) bool {
 // the mailbox deliveries it persisted atomically with it.
 type commentWriteResult struct {
 	Created   db.CreateCommentRow
-	Delivered map[string]struct{}
+	Delivered mailboxDeliveryResults
 }
 
 // commentEditWriteResult is what UpdateComment's write transaction returns: the
 // edited row and the mailbox deliveries that committed with it.
 type commentEditWriteResult struct {
 	Updated   db.UpdateCommentRow
-	Delivered map[string]struct{}
+	Delivered mailboxDeliveryResults
 }
 
 // commentTriggerPlan pins the explicit-mention resolution for one comment.
@@ -2079,7 +2079,7 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 		return nil
 	}
 	plan := h.planCommentTriggers(ctx, issue, comment.Content, parentComment, actorType, actorID, comment.ID, pgtype.UUID{}, comment.SourceTaskID, originatorUserID, suppressAgentIDs, false)
-	var delivered map[string]struct{}
+	var delivered mailboxDeliveryResults
 	if len(plan.mailboxTargets) > 0 {
 		var err error
 		delivered, err = h.enqueueMailboxDeliveries(ctx, h.Queries, issue, comment.ID, plan.mailboxTargets, actorType, actorID)
@@ -2088,7 +2088,7 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 			// reported per target instead of claiming the handoff was saved;
 			// recipients that did commit stay queued.
 			slog.Warn("enqueue mailbox deliveries failed", "error", err, "comment_id", uuidToString(comment.ID))
-		} else if len(delivered) > 0 {
+		} else if len(delivered.queuedMailboxAgents()) > 0 {
 			h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
 		}
 	}
@@ -2098,7 +2098,7 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 // applyCommentTriggers runs the native trigger side after the comment (and any
 // mailbox deliveries) committed. Mailbox outcomes only report what the
 // transaction persisted.
-func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered map[string]struct{}) []CommentTriggerOutcome {
+func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered mailboxDeliveryResults) []CommentTriggerOutcome {
 	h.noteBlockedRuntimeTargets(ctx, issue, plan.targets)
 	triggers, steered := h.steerCommentAgentTriggers(ctx, issue, comment, actorType, plan.triggers, steerTaskIDs)
 	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers)
@@ -2135,7 +2135,7 @@ func splitMailboxTargets(targets []commentMentionTarget, suppressAgentIDs []pgty
 // "request persisted in the mailbox", never "run started"; dispatch_kind
 // mailbox keeps it visually distinct from a managed run. A persistence failure
 // is reported as blocked/internal_error instead of silently claiming success.
-func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered map[string]struct{}) []CommentTriggerOutcome {
+func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered mailboxDeliveryResults) []CommentTriggerOutcome {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -2144,9 +2144,11 @@ func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered map[string
 		if t.MailboxAgent == nil {
 			continue
 		}
-		status, reason := DispatchQueued, ReasonQueued
-		if _, ok := delivered[uuidToString(t.MailboxAgent.ID)]; !ok {
-			status, reason = DispatchBlocked, ReasonInternalError
+		status, reason := DispatchBlocked, ReasonTargetUnavailable
+		if queued, ok := delivered[uuidToString(t.MailboxAgent.ID)]; ok && queued == ReasonQueued {
+			status, reason = DispatchQueued, ReasonQueued
+		} else if ok {
+			reason = queued
 		}
 		out = append(out, CommentTriggerOutcome{
 			TargetType:   t.TargetType,
@@ -3246,7 +3248,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// external mention persists its delivery in the same transaction as the new
 	// content. mailboxDelivered is what that transaction actually committed.
 	var triggerPlan commentTriggerPlan
-	var mailboxDelivered map[string]struct{}
+	var mailboxDelivered mailboxDeliveryResults
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
 		if err != nil {
@@ -3371,7 +3373,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return commentEditWriteResult{}, err
 			}
-			var delivered map[string]struct{}
+			var delivered mailboxDeliveryResults
 			if triggerIssue != nil && len(triggerPlan.mailboxTargets) > 0 {
 				delivered, err = h.enqueueMailboxDeliveries(r.Context(), q, *triggerIssue, existing.ID, triggerPlan.mailboxTargets, actorType, actorID)
 				if err != nil {
@@ -3418,7 +3420,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		}
 		issue := *triggerIssue
 		h.retriggerCancelledTaskSurvivors(r.Context(), issue, cancelled, existing.ID)
-		if len(mailboxDelivered) > 0 {
+		if len(mailboxDelivered.queuedMailboxAgents()) > 0 {
 			h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
 		}
 		// Native runs resolve after commit: a blocked mention must not fail the

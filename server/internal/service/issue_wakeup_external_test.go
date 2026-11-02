@@ -29,12 +29,30 @@ func externalWakeFixture(t *testing.T) (principalFixture, *IssueWakeupService, p
 	agent := f.Agent(t, fmt.Sprintf("agent-external-%d", n), "", testutil.Cols{
 		"owner_id": f.UserID, "execution_kind": "external",
 	})
-	f.Insert(t, "external_agent_session", testutil.Cols{
+	session := f.Insert(t, "external_agent_session", testutil.Cols{
 		"workspace_id": f.WorkspaceID, "owner_user_id": f.UserID, "agent_id": agent,
 		"provider": "paseo", "host_id": fmt.Sprintf("host-%d", n), "session_id": fmt.Sprintf("session-%d", n),
 		"display_name": "external session", "daemon_id": daemonID,
 	})
+	// Wakeup producers resolve the explicit (agent, issue) binding; there is
+	// no implicit session fallback.
+	f.Insert(t, "external_agent_session_binding", testutil.Cols{
+		"workspace_id": f.WorkspaceID, "agent_id": agent, "issue_id": issue, "session_id": session,
+	})
 	return f, s, issue, agent, daemonID
+}
+
+// fixtureExternalSessionID returns the session the external fixture registered
+// for one agent.
+func fixtureExternalSessionID(t *testing.T, f principalFixture, agent string) string {
+	t.Helper()
+	var id string
+	if err := f.Pool.QueryRow(context.Background(),
+		`SELECT id::text FROM external_agent_session WHERE agent_id=$1 ORDER BY created_at ASC LIMIT 1`,
+		util.MustParseUUID(agent)).Scan(&id); err != nil {
+		t.Fatalf("load external fixture session: %v", err)
+	}
+	return id
 }
 
 func wakeupDeliveryPattern(w pgtype.UUID) string {
@@ -277,10 +295,11 @@ func TestWakeupExternalDeliveryWaitsBehindBusySession(t *testing.T) {
 	f, s, issue, agent, daemonID := externalWakeFixture(t)
 	ctx := context.Background()
 	// Pretend the host is still working on an earlier notification.
-	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,source_type,source_key,kind,payload,
+	blockingSession := fixtureExternalSessionID(t, f, agent)
+	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,target_session_id,source_type,source_key,kind,payload,
 			delivery_status,lease_token_hash,lease_owner,lease_expires_at,attempts)
-		VALUES (gen_random_uuid(),$1,$2,'agent','issue_wakeup','wakeup:busy','issue_wakeup','{}'::jsonb,
-			'leased','hash',$3,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, daemonID)
+		VALUES (gen_random_uuid(),$1,$2,'agent',$3,'issue_wakeup','wakeup:busy','issue_wakeup','{}'::jsonb,
+			'leased','hash',$4,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, blockingSession, daemonID)
 
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "at", Instruction: "Check it now", AfterSeconds: 60})
 	wakeTick(t, f, s, w.ID)
@@ -629,10 +648,11 @@ func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
 
 	// The session is still working on an earlier generic delivery, so the
 	// recipient lease, not the rule, is what holds the wakeup row.
-	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,source_type,source_key,kind,payload,
+	blockingSession := fixtureExternalSessionID(t, f, agent)
+	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,target_session_id,source_type,source_key,kind,payload,
 			delivery_status,lease_token_hash,lease_owner,lease_expires_at,attempts)
-		VALUES (gen_random_uuid(),$1,$2,'agent','generic','blocking','test_blocker','{}'::jsonb,
-			'leased','hash',$3,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, daemonID)
+		VALUES (gen_random_uuid(),$1,$2,'agent',$3,'generic','blocking','test_blocker','{}'::jsonb,
+			'leased','hash',$4,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, blockingSession, daemonID)
 
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
 	wakeTick(t, f, s, w.ID)

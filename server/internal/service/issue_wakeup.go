@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -480,13 +481,14 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 	if err = s.authorize(ctx, q, issue.WorkspaceID, member, agent); err != nil {
 		return out, err
 	}
-	// A registered external session is the delivery address; without one the
-	// rule could never be delivered, so refuse it at registration instead of
-	// queueing notifications that no host can claim.
+	// The explicit (agent, issue) session binding is the delivery address;
+	// without one the rule could never be delivered, so refuse it at
+	// registration instead of queueing notifications that no host can claim.
+	// There is no fallback to another session of the same agent.
 	if agent.ExecutionKind == "external" {
-		if _, err = q.GetExternalAgentSessionByAgentID(ctx, agent.ID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return out, fmt.Errorf("%w: agent has no registered host session", ErrWakeupInput)
+		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(agent.ID), util.UUIDToString(issue.ID)); err != nil {
+			if errors.Is(err, sessionroute.ErrNotBound) {
+				return out, fmt.Errorf("%w: agent has no session bound to this issue", ErrWakeupInput)
 			}
 			return out, err
 		}
@@ -1053,17 +1055,17 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	}
 	authErr := s.authorize(ctx, q, w.WorkspaceID, w.CreatedBy, agent)
 	disableReason := "Wakeup disabled: issue closed or permission unavailable"
-	// The registered host session is the external target's delivery address,
-	// and it can disappear after registration. Queueing then would leave a
-	// notification no host can claim, so the rule ends like one whose target
-	// is no longer allowed to run.
+	// The issue's explicit session binding is the external target's delivery
+	// address, and it can be revoked after registration. Queueing then would
+	// leave a notification no host can claim, so the rule ends like one whose
+	// target is no longer allowed to run.
 	if authErr == nil && agent.ID.Valid && agent.ExecutionKind == "external" {
-		if _, err = q.GetExternalAgentSessionByAgentID(ctx, agent.ID); err != nil {
-			if !errors.Is(err, pgx.ErrNoRows) {
+		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID)); err != nil {
+			if !errors.Is(err, sessionroute.ErrNotBound) {
 				return err
 			}
 			authErr = ErrWakeupForbidden
-			disableReason = "Wakeup disabled: external host session is no longer registered"
+			disableReason = "Wakeup disabled: external host session binding is no longer active"
 		}
 	}
 	if w.DisabledAt.Valid || !active || authErr != nil {
@@ -1549,15 +1551,25 @@ func enqueueWakeupDelivery(ctx context.Context, q *db.Queries, w db.IssueWakeup,
 	if err != nil {
 		return "", err
 	}
+	key := wakeupDeliveryKey(w, receipts)
+	binding, err := sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID))
+	if errors.Is(err, sessionroute.ErrNotBound) {
+		return "", fmt.Errorf("%w: agent has no session bound to this issue", ErrWakeupForbidden)
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve wakeup session binding: %w", err)
+	}
 	enqueued, err := delivery.NewPostgres(q).Enqueue(ctx, delivery.EnqueueRequest{
 		Scope: delivery.Scope{WorkspaceID: util.UUIDToString(w.WorkspaceID)},
 		Source: delivery.Source{
 			Type: wakeupDeliverySourceType,
-			Key:  wakeupDeliveryKey(w, receipts),
+			Key:  key,
 		},
-		Recipient: delivery.Recipient{Type: "agent", ID: util.UUIDToString(w.AgentID)},
-		Kind:      wakeupDeliveryKind,
-		Payload:   payload,
+		Target:          delivery.Target{SessionID: binding.SessionID},
+		Recipient:       delivery.Recipient{Type: "agent", ID: util.UUIDToString(w.AgentID)},
+		NotificationKey: key,
+		Kind:            wakeupDeliveryKind,
+		Payload:         payload,
 		// A generic producer may reference the issue it concerns but never
 		// fabricates a comment: the comment projection stays comment-only.
 		Refs: delivery.Refs{IssueID: util.UUIDToString(w.IssueID)},

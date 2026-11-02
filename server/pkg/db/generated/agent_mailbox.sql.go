@@ -22,7 +22,7 @@ SET processing_status = CASE
 WHERE id = $2
   AND workspace_id = $3
   AND recipient_agent_id = $4
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key
 `
 
 type AckAgentMailboxProcessingParams struct {
@@ -69,6 +69,8 @@ func (q *Queries) AckAgentMailboxProcessing(ctx context.Context, arg AckAgentMai
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
@@ -83,7 +85,7 @@ INSERT INTO agent_mailbox_message (
     $7, $8
 )
 ON CONFLICT (recipient_agent_id, comment_id) DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key
 `
 
 type CreateAgentMailboxMessageParams struct {
@@ -138,6 +140,8 @@ func (q *Queries) CreateAgentMailboxMessage(ctx context.Context, arg CreateAgent
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
@@ -145,15 +149,17 @@ func (q *Queries) CreateAgentMailboxMessage(ctx context.Context, arg CreateAgent
 const createDelivery = `-- name: CreateDelivery :one
 INSERT INTO agent_mailbox_message (
     id, workspace_id, issue_id, comment_id, recipient_agent_id, recipient_type,
-    source_session_id, sender_type, sender_id, source_type, source_key, kind, payload
+    target_session_id, notification_key, source_session_id, sender_type, sender_id,
+    source_type, source_key, kind, payload
 ) VALUES (
     $1, $2, $3, $4,
-    $5, $6, $7,
-    $8, $9, $10, $11,
-    $12, $13
+    $5, $6, $7, $8,
+    $9,
+    $10, $11, $12, $13,
+    $14, $15
 )
 ON CONFLICT DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key
 `
 
 type CreateDeliveryParams struct {
@@ -163,6 +169,8 @@ type CreateDeliveryParams struct {
 	CommentID        pgtype.UUID `json:"comment_id"`
 	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
 	RecipientType    string      `json:"recipient_type"`
+	TargetSessionID  pgtype.UUID `json:"target_session_id"`
+	NotificationKey  pgtype.Text `json:"notification_key"`
 	SourceSessionID  pgtype.UUID `json:"source_session_id"`
 	SenderType       pgtype.Text `json:"sender_type"`
 	SenderID         pgtype.UUID `json:"sender_id"`
@@ -172,16 +180,19 @@ type CreateDeliveryParams struct {
 	Payload          []byte      `json:"payload"`
 }
 
-// The delivery core's only insert. The unique (workspace_id, recipient_type,
-// recipient_agent_id, source_type, source_key) index is the idempotency
-// boundary; a conflicting row returns nothing so the caller can re-read it and
-// compare the immutable content.
+// The delivery core's only insert. The unique (workspace_id, notification_key)
+// index is the idempotency boundary; a conflicting row returns nothing so the
+// caller can re-read it and compare the immutable content.
+//
+// target_session_id is the frozen address of one physical session. A retry
+// keeps the row even if the producer now resolves a different session, so the
+// address and the delivery id never move under an existing notification.
 //
 // The conflict target is deliberately omitted so the legacy
 // (recipient_agent_id, comment_id) index is absorbed too. Rows written before
-// the core can have source_key NULL, which the partial idempotency index does
-// not cover; only the legacy index identifies them, and the caller recovers
-// their original UUID through GetLegacyCommentDelivery. Generic sources cannot
+// the core have a NULL notification_key, which the partial index does not
+// cover; only the legacy index identifies them, and the caller recovers their
+// original UUID through GetLegacyCommentDelivery. Generic sources cannot
 // create that ambiguity: EnqueueRequest.Validate rejects a comment reference
 // unless the source itself is "comment".
 //
@@ -195,6 +206,8 @@ func (q *Queries) CreateDelivery(ctx context.Context, arg CreateDeliveryParams) 
 		arg.CommentID,
 		arg.RecipientAgentID,
 		arg.RecipientType,
+		arg.TargetSessionID,
+		arg.NotificationKey,
 		arg.SourceSessionID,
 		arg.SenderType,
 		arg.SenderID,
@@ -230,6 +243,8 @@ func (q *Queries) CreateDelivery(ctx context.Context, arg CreateDeliveryParams) 
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
@@ -253,7 +268,7 @@ func (q *Queries) DeleteAgentMailboxMessagesForIssue(ctx context.Context, issueI
 }
 
 const getAgentMailboxMessage = `-- name: GetAgentMailboxMessage :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetAgentMailboxMessageParams struct {
@@ -290,12 +305,14 @@ func (q *Queries) GetAgentMailboxMessage(ctx context.Context, arg GetAgentMailbo
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
 const getAgentMailboxMessageByComment = `-- name: GetAgentMailboxMessageByComment :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -333,12 +350,14 @@ func (q *Queries) GetAgentMailboxMessageByComment(ctx context.Context, arg GetAg
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
 const getDelivery = `-- name: GetDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetDeliveryParams struct {
@@ -375,35 +394,26 @@ func (q *Queries) GetDelivery(ctx context.Context, arg GetDeliveryParams) (Agent
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
-const getDeliveryByIdempotencyKey = `-- name: GetDeliveryByIdempotencyKey :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message
+const getDeliveryByNotificationKey = `-- name: GetDeliveryByNotificationKey :one
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE workspace_id = $1
-  AND recipient_type = $2
-  AND recipient_agent_id = $3
-  AND source_type = $4
-  AND source_key = $5
+  AND notification_key = $2
 `
 
-type GetDeliveryByIdempotencyKeyParams struct {
-	WorkspaceID      pgtype.UUID `json:"workspace_id"`
-	RecipientType    string      `json:"recipient_type"`
-	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
-	SourceType       string      `json:"source_type"`
-	SourceKey        pgtype.Text `json:"source_key"`
+type GetDeliveryByNotificationKeyParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	NotificationKey pgtype.Text `json:"notification_key"`
 }
 
-func (q *Queries) GetDeliveryByIdempotencyKey(ctx context.Context, arg GetDeliveryByIdempotencyKeyParams) (AgentMailboxMessage, error) {
-	row := q.db.QueryRow(ctx, getDeliveryByIdempotencyKey,
-		arg.WorkspaceID,
-		arg.RecipientType,
-		arg.RecipientAgentID,
-		arg.SourceType,
-		arg.SourceKey,
-	)
+// The notification, not its issue or session, is the idempotency unit.
+func (q *Queries) GetDeliveryByNotificationKey(ctx context.Context, arg GetDeliveryByNotificationKeyParams) (AgentMailboxMessage, error) {
+	row := q.db.QueryRow(ctx, getDeliveryByNotificationKey, arg.WorkspaceID, arg.NotificationKey)
 	var i AgentMailboxMessage
 	err := row.Scan(
 		&i.ID,
@@ -431,12 +441,14 @@ func (q *Queries) GetDeliveryByIdempotencyKey(ctx context.Context, arg GetDelive
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
 const getLegacyCommentDelivery = `-- name: GetLegacyCommentDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -478,6 +490,8 @@ func (q *Queries) GetLegacyCommentDelivery(ctx context.Context, arg GetLegacyCom
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
@@ -492,6 +506,7 @@ SET delivery_status = 'leased',
     updated_at = now()
 WHERE agent_mailbox_message.id = $4
   AND agent_mailbox_message.workspace_id = $5
+  AND agent_mailbox_message.target_session_id = $6
   AND (
       (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
       OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
@@ -500,20 +515,21 @@ WHERE agent_mailbox_message.id = $4
   AND NOT EXISTS (
       SELECT 1
       FROM agent_mailbox_message inflight
-      WHERE inflight.recipient_agent_id = agent_mailbox_message.recipient_agent_id
+      WHERE inflight.target_session_id = agent_mailbox_message.target_session_id
         AND inflight.id <> agent_mailbox_message.id
         AND inflight.delivery_status = 'leased'
         AND inflight.lease_expires_at > now()
   )
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key
 `
 
 type LeaseClaimableDeliveryParams struct {
-	LeaseTokenHash pgtype.Text        `json:"lease_token_hash"`
-	LeaseOwner     pgtype.Text        `json:"lease_owner"`
-	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
-	ID             pgtype.UUID        `json:"id"`
-	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	LeaseTokenHash  pgtype.Text        `json:"lease_token_hash"`
+	LeaseOwner      pgtype.Text        `json:"lease_owner"`
+	LeaseExpiresAt  pgtype.Timestamptz `json:"lease_expires_at"`
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	TargetSessionID pgtype.UUID        `json:"target_session_id"`
 }
 
 // Conditional lease: only a row that is still eligible at this instant is
@@ -522,9 +538,9 @@ type LeaseClaimableDeliveryParams struct {
 //
 // The in-flight check is repeated here, not only in the candidate list. Under
 // READ COMMITTED this statement takes a fresh snapshot after the caller's
-// per-recipient advisory lock, so it sees a lease another entry committed while
+// per-session advisory lock, so it sees a lease another entry committed while
 // this claim was being prepared. The candidate list alone only proves the
-// recipient had no in-flight row before the lock: two disjoint projections
+// session had no in-flight row before the lock: two disjoint projections
 // (comment and generic) could otherwise each lease a row for the same session.
 func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimableDeliveryParams) (AgentMailboxMessage, error) {
 	row := q.db.QueryRow(ctx, leaseClaimableDelivery,
@@ -533,6 +549,7 @@ func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimable
 		arg.LeaseExpiresAt,
 		arg.ID,
 		arg.WorkspaceID,
+		arg.TargetSessionID,
 	)
 	var i AgentMailboxMessage
 	err := row.Scan(
@@ -561,12 +578,14 @@ func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimable
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
 const listAgentMailboxMessages = `-- name: ListAgentMailboxMessages :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE recipient_agent_id = $1
   AND workspace_id = $2
   AND source_type = 'comment'
@@ -639,6 +658,8 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 			&i.Kind,
 			&i.RecipientType,
 			&i.Payload,
+			&i.TargetSessionID,
+			&i.NotificationKey,
 		); err != nil {
 			return nil, err
 		}
@@ -653,18 +674,19 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 const listClaimableDeliveryIDs = `-- name: ListClaimableDeliveryIDs :many
 WITH ranked AS (
     SELECT m.id,
-           m.recipient_agent_id,
+           m.target_session_id,
            m.delivery_status,
            m.next_attempt_at,
            m.created_at,
            row_number() OVER (
-               PARTITION BY m.recipient_agent_id
+               PARTITION BY m.target_session_id
                ORDER BY m.next_attempt_at ASC, m.created_at ASC, m.id ASC
-           ) AS recipient_rank
+           ) AS target_rank
     FROM agent_mailbox_message m
-    JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
-    JOIN agent a ON a.id = m.recipient_agent_id
+    JOIN external_agent_session s ON s.id = m.target_session_id
+    JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = $2
+      AND m.target_session_id IS NOT NULL
       AND (m.source_type = 'comment') = $3::boolean
       AND s.workspace_id = $2
       AND a.workspace_id = $2
@@ -680,15 +702,15 @@ WITH ranked AS (
       AND NOT EXISTS (
           SELECT 1
           FROM agent_mailbox_message inflight
-          WHERE inflight.recipient_agent_id = m.recipient_agent_id
+          WHERE inflight.target_session_id = m.target_session_id
             AND inflight.id <> m.id
             AND inflight.delivery_status = 'leased'
             AND inflight.lease_expires_at > now()
       )
 )
-SELECT id, recipient_agent_id, delivery_status
+SELECT id, target_session_id, delivery_status
 FROM ranked
-WHERE recipient_rank = 1
+WHERE target_rank = 1
 ORDER BY next_attempt_at ASC, created_at ASC, id ASC
 LIMIT $1
 `
@@ -702,18 +724,23 @@ type ListClaimableDeliveryIDsParams struct {
 }
 
 type ListClaimableDeliveryIDsRow struct {
-	ID               pgtype.UUID `json:"id"`
-	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
-	DeliveryStatus   string      `json:"delivery_status"`
+	ID              pgtype.UUID `json:"id"`
+	TargetSessionID pgtype.UUID `json:"target_session_id"`
+	DeliveryStatus  string      `json:"delivery_status"`
 }
 
-// Candidates for one claim round, at most one per recipient session. This list
+// Candidates for one claim round, at most one per physical session. This list
 // is only a pre-lock hint: the conditional lease re-checks both row
-// eligibility and the same recipient's in-flight rows after taking the advisory
+// eligibility and the same session's in-flight rows after taking the advisory
 // lock, so a candidate that lost a race is skipped. An inflated lease is
 // reclaimable so a crashed worker does not strand a request. An ambiguous row
 // (unknown) is claimable again only for receipt verification, never for a
 // second send.
+//
+// external_agent_session is joined by the frozen target_session_id, never by
+// the agent's current binding: the host's provider/host/session identity is
+// immutable, while daemon_id only decides which authorized worker can reach
+// it and may be reassigned without changing the target.
 func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimableDeliveryIDsParams) ([]ListClaimableDeliveryIDsRow, error) {
 	rows, err := q.db.Query(ctx, listClaimableDeliveryIDs,
 		arg.RowLimit,
@@ -729,7 +756,7 @@ func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimabl
 	items := []ListClaimableDeliveryIDsRow{}
 	for rows.Next() {
 		var i ListClaimableDeliveryIDsRow
-		if err := rows.Scan(&i.ID, &i.RecipientAgentID, &i.DeliveryStatus); err != nil {
+		if err := rows.Scan(&i.ID, &i.TargetSessionID, &i.DeliveryStatus); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -834,7 +861,7 @@ func (q *Queries) ListIssueExternalParticipants(ctx context.Context, arg ListIss
 }
 
 const listIssueMailboxDeliveries = `-- name: ListIssueMailboxDeliveries :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE issue_id = $1 AND workspace_id = $2
   AND source_type = 'comment'
 ORDER BY created_at DESC, id DESC
@@ -885,6 +912,8 @@ func (q *Queries) ListIssueMailboxDeliveries(ctx context.Context, arg ListIssueM
 			&i.Kind,
 			&i.RecipientType,
 			&i.Payload,
+			&i.TargetSessionID,
+			&i.NotificationKey,
 		); err != nil {
 			return nil, err
 		}
@@ -918,7 +947,7 @@ WHERE id = $5
   AND lease_token_hash = $7
   AND lease_expires_at > now()
   AND lease_owner = $8
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key
 `
 
 type RecordDeliveryOutcomeParams struct {
@@ -976,18 +1005,22 @@ func (q *Queries) RecordDeliveryOutcome(ctx context.Context, arg RecordDeliveryO
 		&i.Kind,
 		&i.RecipientType,
 		&i.Payload,
+		&i.TargetSessionID,
+		&i.NotificationKey,
 	)
 	return i, err
 }
 
-const tryLockDeliveryRecipient = `-- name: TryLockDeliveryRecipient :one
+const tryLockDeliveryTarget = `-- name: TryLockDeliveryTarget :one
 SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked
 `
 
-// Transaction-scoped advisory lock that serialises claims for one recipient,
-// so two daemons cannot lease different rows for the same session at once.
-func (q *Queries) TryLockDeliveryRecipient(ctx context.Context, recipientID string) (bool, error) {
-	row := q.db.QueryRow(ctx, tryLockDeliveryRecipient, recipientID)
+// Transaction-scoped advisory lock that serialises claims for one physical
+// session, so two daemons cannot lease different rows for the same session at
+// once. Two sessions of the same agent are different keys and proceed
+// independently.
+func (q *Queries) TryLockDeliveryTarget(ctx context.Context, targetSessionID string) (bool, error) {
+	row := q.db.QueryRow(ctx, tryLockDeliveryTarget, targetSessionID)
 	var locked bool
 	err := row.Scan(&locked)
 	return locked, err

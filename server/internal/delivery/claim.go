@@ -199,11 +199,15 @@ func NewQueue(q *db.Queries, tx TxBeginner) *Queue {
 	return &Queue{q: q, tx: tx}
 }
 
-// Claim leases at most one deliverable row per recipient session. Two workers
+// Claim leases at most one deliverable row per physical session. Two workers
 // (or two daemons) can therefore never deliver to the same session at once, and
-// an unreachable recipient cannot hold more than one slot. The per-recipient
+// an unreachable recipient cannot hold more than one slot. Two sessions of the
+// same agent are different targets and proceed independently. The per-session
 // advisory lock serialises concurrent claim transactions; the conditional lease
 // re-checks eligibility so a lost race simply skips the row.
+//
+// The session row is loaded by the delivery's frozen Target, never by the
+// recipient agent's current binding.
 func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 	if err := req.validate(); err != nil {
 		return nil, err
@@ -248,13 +252,13 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 
 	claims := make([]Claim, 0, len(candidates))
 	for _, candidate := range candidates {
-		recipientID := util.UUIDToString(candidate.RecipientAgentID)
-		locked, err := qtx.TryLockDeliveryRecipient(ctx, recipientID)
+		targetSessionID := util.UUIDToString(candidate.TargetSessionID)
+		locked, err := qtx.TryLockDeliveryTarget(ctx, targetSessionID)
 		if err != nil {
-			return nil, fmt.Errorf("delivery: lock recipient %s: %w", recipientID, err)
+			return nil, fmt.Errorf("delivery: lock target %s: %w", targetSessionID, err)
 		}
 		if !locked {
-			// Another claim transaction is already leasing this recipient.
+			// Another claim transaction is already leasing this session.
 			continue
 		}
 		token, err := newLeaseToken()
@@ -262,11 +266,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			return nil, err
 		}
 		leased, err := qtx.LeaseClaimableDelivery(ctx, db.LeaseClaimableDeliveryParams{
-			ID:             candidate.ID,
-			WorkspaceID:    workspaceID,
-			LeaseTokenHash: pgtype.Text{String: auth.HashToken(token), Valid: true},
-			LeaseOwner:     pgtype.Text{String: req.DaemonID, Valid: true},
-			LeaseExpiresAt: pgtypeTime(time.Now().Add(leaseDuration)),
+			ID:              candidate.ID,
+			WorkspaceID:     workspaceID,
+			TargetSessionID: candidate.TargetSessionID,
+			LeaseTokenHash:  pgtype.Text{String: auth.HashToken(token), Valid: true},
+			LeaseOwner:      pgtype.Text{String: req.DaemonID, Valid: true},
+			LeaseExpiresAt:  pgtypeTime(time.Now().Add(leaseDuration)),
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Another claimant leased or acknowledged the row first.
@@ -275,9 +280,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		if err != nil {
 			return nil, fmt.Errorf("delivery: lease %s: %w", util.UUIDToString(candidate.ID), err)
 		}
-		session, err := qtx.GetExternalAgentSessionByAgentID(ctx, candidate.RecipientAgentID)
+		session, err := qtx.GetExternalAgentSessionByID(ctx, db.GetExternalAgentSessionByIDParams{
+			ID:          candidate.TargetSessionID,
+			WorkspaceID: workspaceID,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("delivery: load session for %s: %w", recipientID, err)
+			return nil, fmt.Errorf("delivery: load target session %s: %w", targetSessionID, err)
 		}
 		d := deliveryFromRow(leased)
 		claims = append(claims, Claim{

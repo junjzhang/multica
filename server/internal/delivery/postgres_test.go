@@ -44,11 +44,13 @@ func cleanupDelivery(t *testing.T, pool *pgxpool.Pool, id string) {
 
 func genericRequest(workspaceID, recipientID string) EnqueueRequest {
 	return EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "ci_run", Key: "run-42-attempt-1"},
-		Recipient: Recipient{Type: "agent", ID: recipientID},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "ci_run", Key: "run-42-attempt-1"},
+		Target:          Target{SessionID: uuid.NewString()},
+		Recipient:       Recipient{Type: "agent", ID: recipientID},
+		NotificationKey: "ci:run-42-attempt-1",
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
 	}
 }
 
@@ -124,6 +126,53 @@ func TestPostgresEnqueueIdempotencyAndConflict(t *testing.T) {
 	}
 }
 
+// TestPostgresRetryKeepsFrozenTargetAndID proves the retry boundary: the same
+// notification key returns the original row even after the producer resolves a
+// different session, while a new key under the same content is its own
+// notification.
+func TestPostgresRetryKeepsFrozenTargetAndID(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	store := NewPostgres(db.New(pool))
+	workspaceID := uuid.NewString()
+	recipientID := uuid.NewString()
+
+	first := genericRequest(workspaceID, recipientID)
+	first.Target.SessionID = uuid.NewString()
+	stored, err := store.Enqueue(context.Background(), first)
+	if err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	cleanupDelivery(t, pool, stored.ID)
+
+	rebound := first
+	rebound.Target.SessionID = uuid.NewString()
+	replayed, err := store.Enqueue(context.Background(), rebound)
+	if err != nil {
+		t.Fatalf("replay after rebind: %v", err)
+	}
+	if replayed.ID != stored.ID {
+		t.Fatalf("replayed id = %s, want frozen original %s", replayed.ID, stored.ID)
+	}
+	if replayed.Target.SessionID != first.Target.SessionID {
+		t.Fatalf("replayed target = %s, want frozen %s", replayed.Target.SessionID, first.Target.SessionID)
+	}
+
+	next := first
+	next.NotificationKey = "ci:run-42-attempt-2"
+	next.Target.SessionID = rebound.Target.SessionID
+	second, err := store.Enqueue(context.Background(), next)
+	if err != nil {
+		t.Fatalf("new notification enqueue: %v", err)
+	}
+	cleanupDelivery(t, pool, second.ID)
+	if second.ID == stored.ID {
+		t.Fatal("a new notification reused the earlier delivery id")
+	}
+	if second.Target.SessionID != rebound.Target.SessionID {
+		t.Fatalf("new notification target = %s, want %s", second.Target.SessionID, rebound.Target.SessionID)
+	}
+}
+
 // TestPostgresEnqueueRecoversLegacyCommentID proves rows written before the
 // core keep their original mailbox UUID: a replay resolves through the legacy
 // (recipient, comment) key instead of inserting a second request.
@@ -151,12 +200,14 @@ func TestPostgresEnqueueRecoversLegacyCommentID(t *testing.T) {
 
 	payload := json.RawMessage(`{"schema":"comment_mention.v1","issue_id":"` + issueID + `","comment_id":"` + commentID + `"}`)
 	recovered, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "comment", Key: commentID, ActorType: "member", ActorID: util.UUIDToString(legacy.SenderID)},
-		Recipient: Recipient{Type: "agent", ID: recipientID},
-		Kind:      "comment_mention",
-		Payload:   payload,
-		Refs:      Refs{IssueID: issueID, CommentID: commentID},
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "comment", Key: commentID, ActorType: "member", ActorID: util.UUIDToString(legacy.SenderID)},
+		Target:          Target{SessionID: uuid.NewString()},
+		Recipient:       Recipient{Type: "agent", ID: recipientID},
+		NotificationKey: "comment:" + commentID + ":agent:" + recipientID,
+		Kind:            "comment_mention",
+		Payload:         payload,
+		Refs:            Refs{IssueID: issueID, CommentID: commentID},
 	})
 	if err != nil {
 		t.Fatalf("enqueue replay: %v", err)

@@ -21,16 +21,19 @@ SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
 
 -- name: CreateDelivery :one
--- The delivery core's only insert. The unique (workspace_id, recipient_type,
--- recipient_agent_id, source_type, source_key) index is the idempotency
--- boundary; a conflicting row returns nothing so the caller can re-read it and
--- compare the immutable content.
+-- The delivery core's only insert. The unique (workspace_id, notification_key)
+-- index is the idempotency boundary; a conflicting row returns nothing so the
+-- caller can re-read it and compare the immutable content.
+--
+-- target_session_id is the frozen address of one physical session. A retry
+-- keeps the row even if the producer now resolves a different session, so the
+-- address and the delivery id never move under an existing notification.
 --
 -- The conflict target is deliberately omitted so the legacy
 -- (recipient_agent_id, comment_id) index is absorbed too. Rows written before
--- the core can have source_key NULL, which the partial idempotency index does
--- not cover; only the legacy index identifies them, and the caller recovers
--- their original UUID through GetLegacyCommentDelivery. Generic sources cannot
+-- the core have a NULL notification_key, which the partial index does not
+-- cover; only the legacy index identifies them, and the caller recovers their
+-- original UUID through GetLegacyCommentDelivery. Generic sources cannot
 -- create that ambiguity: EnqueueRequest.Validate rejects a comment reference
 -- unless the source itself is "comment".
 --
@@ -38,10 +41,12 @@ WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
 -- deliveries leave them NULL.
 INSERT INTO agent_mailbox_message (
     id, workspace_id, issue_id, comment_id, recipient_agent_id, recipient_type,
-    source_session_id, sender_type, sender_id, source_type, source_key, kind, payload
+    target_session_id, notification_key, source_session_id, sender_type, sender_id,
+    source_type, source_key, kind, payload
 ) VALUES (
     @id, @workspace_id, sqlc.narg('issue_id'), sqlc.narg('comment_id'),
-    @recipient_agent_id, @recipient_type, sqlc.narg('source_session_id'),
+    @recipient_agent_id, @recipient_type, @target_session_id, @notification_key,
+    sqlc.narg('source_session_id'),
     sqlc.narg('sender_type'), sqlc.narg('sender_id'), @source_type, @source_key,
     @kind, sqlc.narg('payload')
 )
@@ -51,13 +56,11 @@ RETURNING *;
 -- name: GetDelivery :one
 SELECT * FROM agent_mailbox_message WHERE id = @id AND workspace_id = @workspace_id;
 
--- name: GetDeliveryByIdempotencyKey :one
+-- name: GetDeliveryByNotificationKey :one
+-- The notification, not its issue or session, is the idempotency unit.
 SELECT * FROM agent_mailbox_message
 WHERE workspace_id = @workspace_id
-  AND recipient_type = @recipient_type
-  AND recipient_agent_id = @recipient_agent_id
-  AND source_type = @source_type
-  AND source_key = @source_key;
+  AND notification_key = @notification_key;
 
 -- name: GetLegacyCommentDelivery :one
 -- Rows written before the delivery core (and the old test-only insert path)
@@ -92,27 +95,33 @@ ORDER BY created_at ASC, id ASC
 LIMIT @page_limit;
 
 -- name: ListClaimableDeliveryIDs :many
--- Candidates for one claim round, at most one per recipient session. This list
+-- Candidates for one claim round, at most one per physical session. This list
 -- is only a pre-lock hint: the conditional lease re-checks both row
--- eligibility and the same recipient's in-flight rows after taking the advisory
+-- eligibility and the same session's in-flight rows after taking the advisory
 -- lock, so a candidate that lost a race is skipped. An inflated lease is
 -- reclaimable so a crashed worker does not strand a request. An ambiguous row
 -- (unknown) is claimable again only for receipt verification, never for a
 -- second send.
+--
+-- external_agent_session is joined by the frozen target_session_id, never by
+-- the agent's current binding: the host's provider/host/session identity is
+-- immutable, while daemon_id only decides which authorized worker can reach
+-- it and may be reassigned without changing the target.
 WITH ranked AS (
     SELECT m.id,
-           m.recipient_agent_id,
+           m.target_session_id,
            m.delivery_status,
            m.next_attempt_at,
            m.created_at,
            row_number() OVER (
-               PARTITION BY m.recipient_agent_id
+               PARTITION BY m.target_session_id
                ORDER BY m.next_attempt_at ASC, m.created_at ASC, m.id ASC
-           ) AS recipient_rank
+           ) AS target_rank
     FROM agent_mailbox_message m
-    JOIN external_agent_session s ON s.agent_id = m.recipient_agent_id
-    JOIN agent a ON a.id = m.recipient_agent_id
+    JOIN external_agent_session s ON s.id = m.target_session_id
+    JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = @workspace_id
+      AND m.target_session_id IS NOT NULL
       AND (m.source_type = 'comment') = @comment_projection::boolean
       AND s.workspace_id = @workspace_id
       AND a.workspace_id = @workspace_id
@@ -128,22 +137,24 @@ WITH ranked AS (
       AND NOT EXISTS (
           SELECT 1
           FROM agent_mailbox_message inflight
-          WHERE inflight.recipient_agent_id = m.recipient_agent_id
+          WHERE inflight.target_session_id = m.target_session_id
             AND inflight.id <> m.id
             AND inflight.delivery_status = 'leased'
             AND inflight.lease_expires_at > now()
       )
 )
-SELECT id, recipient_agent_id, delivery_status
+SELECT id, target_session_id, delivery_status
 FROM ranked
-WHERE recipient_rank = 1
+WHERE target_rank = 1
 ORDER BY next_attempt_at ASC, created_at ASC, id ASC
 LIMIT @row_limit;
 
--- name: TryLockDeliveryRecipient :one
--- Transaction-scoped advisory lock that serialises claims for one recipient,
--- so two daemons cannot lease different rows for the same session at once.
-SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('recipient_id')::text, 0)) AS locked;
+-- name: TryLockDeliveryTarget :one
+-- Transaction-scoped advisory lock that serialises claims for one physical
+-- session, so two daemons cannot lease different rows for the same session at
+-- once. Two sessions of the same agent are different keys and proceed
+-- independently.
+SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('target_session_id')::text, 0)) AS locked;
 
 -- name: LeaseClaimableDelivery :one
 -- Conditional lease: only a row that is still eligible at this instant is
@@ -152,9 +163,9 @@ SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('recipient_id')::text
 --
 -- The in-flight check is repeated here, not only in the candidate list. Under
 -- READ COMMITTED this statement takes a fresh snapshot after the caller's
--- per-recipient advisory lock, so it sees a lease another entry committed while
+-- per-session advisory lock, so it sees a lease another entry committed while
 -- this claim was being prepared. The candidate list alone only proves the
--- recipient had no in-flight row before the lock: two disjoint projections
+-- session had no in-flight row before the lock: two disjoint projections
 -- (comment and generic) could otherwise each lease a row for the same session.
 UPDATE agent_mailbox_message
 SET delivery_status = 'leased',
@@ -165,6 +176,7 @@ SET delivery_status = 'leased',
     updated_at = now()
 WHERE agent_mailbox_message.id = @id
   AND agent_mailbox_message.workspace_id = @workspace_id
+  AND agent_mailbox_message.target_session_id = @target_session_id
   AND (
       (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
       OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
@@ -173,7 +185,7 @@ WHERE agent_mailbox_message.id = @id
   AND NOT EXISTS (
       SELECT 1
       FROM agent_mailbox_message inflight
-      WHERE inflight.recipient_agent_id = agent_mailbox_message.recipient_agent_id
+      WHERE inflight.target_session_id = agent_mailbox_message.target_session_id
         AND inflight.id <> agent_mailbox_message.id
         AND inflight.delivery_status = 'leased'
         AND inflight.lease_expires_at > now()
