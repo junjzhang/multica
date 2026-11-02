@@ -139,4 +139,23 @@ describe("NewChatButton", () => {
     expect(onStart).toHaveBeenCalledWith(agents[0]);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  it("does not offer external or unknown execution to native chat", () => {
+    const onStart = vi.fn();
+    render(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <NewChatButton
+          agents={[
+            { ...agents[0]!, execution_kind: "external", runtime_id: "", runtime_bound: false },
+            { ...agents[1]!, execution_kind: "future-kind" },
+          ]}
+          userId="user-1"
+          onStart={onStart}
+        />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: NEW_CHAT_LABEL }));
+    expect(onStart).toHaveBeenCalledWith(null);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
 });

@@ -3,8 +3,6 @@ title: Inbox and subscriptions
 description: One place for assignments, mentions, comments, and agent failures that need your follow-up.
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
 The inbox collects the work activity that concerns you. It's not a full activity log — it flags where something changed that needs your attention; the full context stays on the corresponding issue.
 
 ## What lands in the inbox
@@ -12,10 +10,11 @@ The inbox collects the work activity that concerns you. It's not a full activity
 Common notifications include:
 
 - an issue is assigned to you, or moved away from you;
-- an issue you subscribe to gets a new comment, or its assignee, status, priority, or dates change;
+- a root issue you subscribe to gets a new comment, or its assignee, status, priority, or dates change;
+- routine activity on a sub-issue you manually subscribed to, or that is currently assigned to you (see [Sub-issue activity](#sub-issue-activity) below);
 - someone @-mentions you in an issue description or comment;
 - an issue or comment you created gets a reaction;
-- an agent run fails on an issue you subscribe to;
+- an agent run fails on an issue you subscribe to after its queued retries are exhausted;
 - creating an issue through an agent completes or fails;
 - an autopilot you subscribe to creates a new issue, or is paused after consecutive failures.
 
@@ -33,9 +32,18 @@ These participants subscribe to an issue automatically:
 
 Changing the assignee does not remove existing subscriptions. Subscribe or unsubscribe anytime on the issue page; after unsubscribing, ordinary updates stop reaching your inbox, while direct @-mentions still notify you individually.
 
-<Callout type="info">
-When a sub-issue's status changes, subscribers of the parent issue are notified as well. Sub-issue comments, priority, and date changes do not bubble up to the parent.
-</Callout>
+## Sub-issue activity
+
+Routine activity on a sub-issue is quiet by default. It stays visible in the issue timeline, but creates no Inbox notification for implicit subscribers: the child's creator, commenters, delegated subscribers, and anyone subscribed only through the parent. A manual subscription to the parent is not opt-in to its children.
+
+Two recipients still get routine sub-issue updates in the Inbox:
+
+- the sub-issue's current human assignee;
+- anyone who manually subscribed to that exact sub-issue.
+
+To follow a sub-issue's routine updates, subscribe to it manually. If the GUI already shows you as subscribed through an automatic source, unsubscribe first and then subscribe again; only that second, explicit action records a manual subscription. Status changes that need a human still notify, including `blocked` and custom statuses that mark a handoff; only routine progress is quiet. Parent subscribers receive those handoff changes, but not routine child activity. Explicit @-mentions and assignments also keep notifying. Root issues keep their existing behavior: comments and status changes on a root issue notify its subscribers as before.
+
+A failure whose retry is already queued stays visible in the GUI but creates no Inbox row; the Inbox notification arrives only when recovery is exhausted.
 
 ## Agents don't use the inbox
 

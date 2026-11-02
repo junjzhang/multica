@@ -22,7 +22,7 @@ import (
 // shape for single-PR webhook broadcasts (no aggregated check counts; the
 // frontend re-queries the issue's PR list for fresh counts).
 func vcsPullRequestToResponse(p db.VcsPullRequest) GitHubPullRequestResponse {
-	return GitHubPullRequestResponse{
+	resp := GitHubPullRequestResponse{
 		ID:               uuidToString(p.ID),
 		Provider:         p.Provider,
 		WorkspaceID:      uuidToString(p.WorkspaceID),
@@ -45,12 +45,14 @@ func vcsPullRequestToResponse(p db.VcsPullRequest) GitHubPullRequestResponse {
 		Deletions:        p.Deletions,
 		ChangedFiles:     p.ChangedFiles,
 	}
+	applyTGitSnapshotResponse(&resp, p.ApiSnapshot, p.SnapshotFetchedAt, p.SnapshotError, p.HeadSha, p.PrUpdatedAt)
+	return resp
 }
 
 // vcsPullRequestRowToResponse maps an issue's PR-list row, which carries the
 // aggregated commit-status counts, onto the shared response shape.
 func vcsPullRequestRowToResponse(p db.ListVCSPullRequestsByIssueRow) GitHubPullRequestResponse {
-	return GitHubPullRequestResponse{
+	resp := GitHubPullRequestResponse{
 		ID:               uuidToString(p.ID),
 		Provider:         p.Provider,
 		WorkspaceID:      uuidToString(p.WorkspaceID),
@@ -79,6 +81,8 @@ func vcsPullRequestRowToResponse(p db.ListVCSPullRequestsByIssueRow) GitHubPullR
 		Deletions:        p.Deletions,
 		ChangedFiles:     p.ChangedFiles,
 	}
+	applyTGitSnapshotResponse(&resp, p.ApiSnapshot, p.SnapshotFetchedAt, p.SnapshotError, p.HeadSha, p.PrUpdatedAt)
+	return resp
 }
 
 // ── Webhook ─────────────────────────────────────────────────────────────────
@@ -200,6 +204,13 @@ func (h *Handler) mirrorVCSPullRequest(ctx context.Context, conn db.VcsConnectio
 		return
 	}
 
+	h.reconcileVCSPullRequest(ctx, conn, ev, pr, prevState)
+	if pr.Provider == "tgit" {
+		h.TGitSnapshots.Enqueue(pr.ID)
+	}
+}
+
+func (h *Handler) reconcileVCSPullRequest(ctx context.Context, conn db.VcsConnection, ev vcs.PullRequestEvent, pr db.VcsPullRequest, prevState string) {
 	// Out-of-order guard for the link write. UpsertVCSPullRequest keeps the
 	// newer persisted row on a stale redelivery, so `pr` may reflect a newer
 	// event than this `ev`. Everything the link pass decides below comes from

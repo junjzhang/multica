@@ -96,6 +96,11 @@ type IssueCreateParams struct {
 	// Its immutable snapshot and cloned attachment rows commit in the same
 	// transaction as the new issue.
 	SourceContext *SourceContextCapture
+	// Coordinator is the issue's fixed escalation owner. The HTTP caller may
+	// set it explicitly; when unset, Create derives it from the dispatch actor
+	// below. It is never inferred from later mentions.
+	CoordinatorType pgtype.Text
+	CoordinatorID   pgtype.UUID
 }
 
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
@@ -374,49 +379,61 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 
 	var issue db.Issue
 	var assignedTask db.AgentTaskQueue
+	// The initial coordinator is the dispatch actor, recorded once at create.
+	// Later mentions, assignment or execution changes never rewrite it.
+	coordinatorType := p.CoordinatorType
+	coordinatorID := p.CoordinatorID
+	if !coordinatorType.Valid && !coordinatorID.Valid && p.CreatorID.Valid {
+		coordinatorType = pgtype.Text{String: p.CreatorType, Valid: true}
+		coordinatorID = p.CreatorID
+	}
 	if p.OriginType.Valid {
 		issue, err = qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
-			ID:            dbid.NewV7(),
-			WorkspaceID:   p.WorkspaceID,
-			Title:         p.Title,
-			Description:   p.Description,
-			Status:        p.Status,
-			Priority:      p.Priority,
-			AssigneeType:  p.AssigneeType,
-			AssigneeID:    p.AssigneeID,
-			CreatorType:   p.CreatorType,
-			CreatorID:     p.CreatorID,
-			ParentIssueID: p.ParentIssueID,
-			Position:      newPosition,
-			StartDate:     p.StartDate,
-			DueDate:       p.DueDate,
-			Number:        issueNumber,
-			ProjectID:     projectID,
-			OriginType:    p.OriginType,
-			OriginID:      p.OriginID,
-			Stage:         p.Stage,
-			Properties:    properties,
+			ID:              dbid.NewV7(),
+			CoordinatorType: coordinatorType,
+			CoordinatorID:   coordinatorID,
+			WorkspaceID:     p.WorkspaceID,
+			Title:           p.Title,
+			Description:     p.Description,
+			Status:          p.Status,
+			Priority:        p.Priority,
+			AssigneeType:    p.AssigneeType,
+			AssigneeID:      p.AssigneeID,
+			CreatorType:     p.CreatorType,
+			CreatorID:       p.CreatorID,
+			ParentIssueID:   p.ParentIssueID,
+			Position:        newPosition,
+			StartDate:       p.StartDate,
+			DueDate:         p.DueDate,
+			Number:          issueNumber,
+			ProjectID:       projectID,
+			OriginType:      p.OriginType,
+			OriginID:        p.OriginID,
+			Stage:           p.Stage,
+			Properties:      properties,
 		})
 	} else {
 		issue, err = qtx.CreateIssue(ctx, db.CreateIssueParams{
-			ID:            dbid.NewV7(),
-			WorkspaceID:   p.WorkspaceID,
-			Title:         p.Title,
-			Description:   p.Description,
-			Status:        p.Status,
-			Priority:      p.Priority,
-			AssigneeType:  p.AssigneeType,
-			AssigneeID:    p.AssigneeID,
-			CreatorType:   p.CreatorType,
-			CreatorID:     p.CreatorID,
-			ParentIssueID: p.ParentIssueID,
-			Position:      newPosition,
-			StartDate:     p.StartDate,
-			DueDate:       p.DueDate,
-			Number:        issueNumber,
-			ProjectID:     projectID,
-			Stage:         p.Stage,
-			Properties:    properties,
+			ID:              dbid.NewV7(),
+			CoordinatorType: coordinatorType,
+			CoordinatorID:   coordinatorID,
+			WorkspaceID:     p.WorkspaceID,
+			Title:           p.Title,
+			Description:     p.Description,
+			Status:          p.Status,
+			Priority:        p.Priority,
+			AssigneeType:    p.AssigneeType,
+			AssigneeID:      p.AssigneeID,
+			CreatorType:     p.CreatorType,
+			CreatorID:       p.CreatorID,
+			ParentIssueID:   p.ParentIssueID,
+			Position:        newPosition,
+			StartDate:       p.StartDate,
+			DueDate:         p.DueDate,
+			Number:          issueNumber,
+			ProjectID:       projectID,
+			Stage:           p.Stage,
+			Properties:      properties,
 		})
 	}
 	if err != nil {

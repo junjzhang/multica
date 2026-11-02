@@ -58,8 +58,8 @@ match, or the link resolves to the wrong entity (or to nothing).
 
 | To…                  | type     | uuid from       | What the backend does                                    |
 | -------------------- | -------- | --------------- | -------------------------------------------------------- |
-| trigger an agent     | `agent`  | agent.id        | enqueues a run for that agent                            |
-| hand work to a squad | `squad`  | squad.id        | resolves the squad's `leader_id` and enqueues a run for the LEADER agent |
+| trigger an agent     | `agent`  | agent.id        | enqueues a run for that agent; an external agent gets one mailbox request instead |
+| hand work to a squad | `squad`  | squad.id        | resolves the squad's `leader_id` and enqueues a run for the LEADER agent (mailbox for an external leader) |
 | link a person        | `member` | member.user_id  | renders a link; enqueues NOTHING — no agent run          |
 | reference an issue   | `issue`  | issue.id        | renders a link; enqueues NOTHING — always safe           |
 
@@ -70,14 +70,28 @@ resolves the squad and adds its leader to the set; everything that is not
 
 A `member` mention therefore does NOT make a person "run", and no notification
 is delivered through the comment path. What IS guaranteed is the contract above:
-only `agent` and `squad` mentions enqueue work.
+only `agent` and `squad` mentions dispatch work. A plain comment, a reply, and a
+read receipt dispatch nothing, even on an assigned issue. Only an explicit `@`
+is a handoff.
+
+An external agent (`execution_kind=external`, bound to a host session) is never
+given a fake native run. The explicit `@` persists one mailbox message whose
+body is the comment, and `trigger_outcomes` reports `dispatch_kind: "mailbox"`.
+The registered host adapter performs delivery: an idle session starts a new turn
+in the same session, a busy session keeps the request queued for after its
+current turn. The first implementation supports Paseo only after the separately
+required atomic if-idle host extension is installed. Without that extension,
+delivery fails with an actionable dependency error and the request stays
+queued; reading the mailbox alone does not start the session. A message that is
+persisted, delivered, or read is not proof that work started.
 
 ## Preview and per-comment suppression
 
 Newer clients can call `POST /api/issues/{id}/comments/trigger-preview` before
 creating or editing a comment. The preview endpoint runs the same trigger
 computation as create and edit re-triggering, so the displayed agent chips come
-from backend rules, not from a client-side reimplementation.
+from backend rules, not from a client-side reimplementation. An external target
+carries `dispatch_kind: "mailbox"`; an absent value means a native run.
 
 When previewing an edit, clients may send `editing_comment_id`. The server
 validates that the comment belongs to the same workspace and issue, derives or
@@ -88,7 +102,7 @@ on the issue still dedupe the preview.
 When creating or editing a comment, clients may send an optional
 `suppress_agent_ids` array. The server still computes the full trigger set
 first, then removes those agent IDs as a post-filter. A missing or empty field
-preserves the old behavior. A valid UUID that is not in the computed trigger set
+suppresses nothing. A valid UUID that is not in the computed trigger set
 is a no-op; a malformed UUID is rejected at the request boundary.
 
 ## @all is the broadcast type
@@ -97,19 +111,14 @@ is a no-op; a malformed UUID is rejected at the request boundary.
 
     [@all](mention://all/all)
 
-It addresses everyone on the issue. It does NOT make any specific agent run.
-And it is special at trigger time: a comment that carries an `@all` mention is
-treated as a broadcast that SUPPRESSES the issue assignee's automatic
-on-comment trigger (and the other implicit routing fallbacks — thread parent /
-conversation owner). Use `@all` to announce, not to request work from the
-assignee.
+It addresses everyone on the issue. It does NOT make any specific agent run and
+is not a handoff. There is no implicit assignee trigger to suppress: a comment
+with no explicit `@agent` / `@squad` starts no agent regardless of `@all`.
 
-`@all` only suppresses those IMPLICIT routes. An EXPLICIT `@agent` / `@squad`
-mention in the same comment still fires normally: a comment reading
-`[@all](mention://all/all) heads up — [@Preflight](mention://agent/<uuid>)
-please take this` enqueues Preflight and nobody else. The explicit-mention
-branch is evaluated BEFORE the `@all` short-circuit, so explicit mentions win
-over the broadcast.
+An EXPLICIT `@agent` / `@squad` mention in the same comment still dispatches:
+a comment reading `[@all](mention://all/all) heads up —
+[@Preflight](mention://agent/<uuid>) please take this` starts Preflight and
+nobody else. Use `@all` to announce, and name the actor you need explicitly.
 
 ## What does NOT happen
 
@@ -150,14 +159,18 @@ not injected into an already running prompt. Different threads queue independent
   `editing_comment_id` ignores pending tasks from the same comment being edited,
   because save cancels those old tasks before it re-computes triggers. It is
   still comment-scoped, not an agent-wide bypass.
-- **A hand-off to the issue assignee because your target is busy.** A reply
-  already routed to an agent stays with that agent; an offline or queued target
-  is waited for, never swapped for the issue assignee. Mention whoever else you
-  need by hand.
-- **An archived agent, or one with no runtime bound** (likewise a squad whose
-  leader is): blocked with `target_unavailable` and `runtime_offline`
-  respectively. Both are checked only AFTER the invoke gate, so a caller who may
-  not invoke the target never learns its state.
+- **A plain reply or a comment with no explicit `@`.** Replying to an agent's
+  comment, replying in a thread it participates in, and commenting on an issue
+  it owns are discussion. None of them routes to that agent, the assignee, or a
+  thread owner. Name the agent you need with an explicit `@`.
+- **An archived agent, or a managed agent with no runtime bound** (likewise a
+  squad whose leader is): blocked with `target_unavailable` and
+  `runtime_offline` respectively. Both are checked only AFTER the invoke gate,
+  so a caller who may not invoke the target never learns its state.
+- **An external target.** The request becomes a mailbox message instead of a
+  run. If the host adapter is missing or the required atomic if-idle extension
+  is unavailable, the message stays queued with an actionable reason; it is not
+  reported as delivered or started.
 - **A private agent you cannot invoke:** blocked — the mention path applies the
   invoke gate to both `@agent` and `@squad`. That is the *run* gate, not the
   *see* gate: a workspace admin who can open a private agent in the UI still may
@@ -191,10 +204,12 @@ This fallback is bound to verified task lineage: it applies only when the
 delegating run's own task is the one working on that autopilot issue (author ==
 task agent, `task.issue_id` == this issue), so a run doing work elsewhere can
 never borrow another autopilot creator's authority by commenting on its issue.
-The same authority carries the plain assigned-squad-leader wake (a worker's
-result comment on the autopilot issue can still wake the leader), and it survives
-a busy target: if the mentioned agent is already running, the delegation is
-replayed at that run's completion under the same authority, so it is never lost.
+The same authority carries an explicit worker-to-leader handoff: a worker's
+result comment on the autopilot issue wakes the leader only when it `@`-mentions
+the leader (or the squad), and it survives a busy target: if the mentioned agent
+is already running, the delegation is replayed at that run's completion under
+the same authority, so it is never lost. An ordinary result reply without that
+mention wakes nobody.
 
 Editing or deleting input cancels active runs that contain that comment and
 re-evaluates surviving inputs. These cancelled runs expose
@@ -232,8 +247,9 @@ Correct:
   2. `[@Alice](mention://member/7f3a…) please review`
      → a real `user_id` parses; the link renders and resolves to Alice.
 
-@all broadcast: `[@all](mention://all/all) heads up` — addresses everyone,
-runs no specific agent, and suppresses the assignee auto-trigger.
+@all broadcast: `[@all](mention://all/all) heads up` — addresses everyone and
+runs no agent. To start an agent in the same comment, name it with an explicit
+`@`.
 
 Using the wrong `type` for a real UUID still parses — it just resolves to the
 wrong entity, or to nothing. That is why the type must match the id source.

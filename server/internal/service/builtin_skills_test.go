@@ -517,9 +517,25 @@ func TestPlatformSkillCoversPlatformContracts(t *testing.T) {
 				"--resolve-properties",
 				"display_values",
 				"`value` keeps the stored ids",
+				// Coordinator closure: delivery stops at in_review, only an
+				// explicitly authorized coordinator accepts and closes, and
+				// merge permission stays a separate grant. The stage anchors
+				// keep in_review from reading as a closed barrier and name the
+				// handoff path when the coordinator is not the parent assignee.
+				"the implementer's review handoff",
+				"an implementer never accepts",
+				"its own delivery. Acceptance does not deliver the parent",
+				"the task explicitly authorizes verifies the evidence",
+				"merging needs its own grant",
+				"it closes no stage barrier and wakes no parent",
+				"the explicit `@` mention in the delivery comment",
 			},
 			notWant: []string{
 				"--no-start",
+				// The unconditional human ceiling the coordinator contract
+				// replaced: an authorized coordinator may now close accepted
+				// sub-issues, while the implementer still cannot self-accept.
+				"`done` stays human",
 				// MUL-6966 phase 1: this reference must not teach the KV bag
 				// at all — not as a section, not as a command, and not as a
 				// named key inside a warning. A blanket ban on the vocabulary

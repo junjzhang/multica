@@ -190,8 +190,8 @@ func TestCommentEnqueueRaceDispatchedWinnerDurablyCoversLoser(t *testing.T) {
 
 	// Losing comment PREDATES the winner task; winner is already dispatched with
 	// its claim receipt (delivered = its own trigger only).
-	loserCommentID := insertDupRaceComment(t, issueID, "losing instruction (predates winner)", "10 minutes")
-	winnerCommentID := insertDupRaceComment(t, issueID, "winning instruction", "6 minutes")
+	loserCommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") losing instruction (predates winner)", "10 minutes")
+	winnerCommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") winning instruction", "6 minutes")
 	var winnerTaskID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, delivered_comment_ids, status, priority, created_at, dispatched_at)
@@ -284,7 +284,7 @@ func TestCommentEnqueueRaceDifferentHeadNotCoalesced(t *testing.T) {
 	}
 
 	// Pending winner stamped for the OLD head A (queued), and a NEWER head-B comment.
-	headAcommentID := insertDupRaceComment(t, issueID, "review head A", "6 minutes")
+	headAcommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") review head A", "6 minutes")
 	var winnerTaskID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, delivered_comment_ids, status, priority, created_at, context)
@@ -293,7 +293,7 @@ func TestCommentEnqueueRaceDifferentHeadNotCoalesced(t *testing.T) {
 	`, agentID, runtimeID, issueID, headAcommentID, dupRaceHeadA).Scan(&winnerTaskID); err != nil {
 		t.Fatalf("insert head-A winner: %v", err)
 	}
-	headBcommentID := insertDupRaceComment(t, issueID, "please review head B", "1 minute")
+	headBcommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") please review head B", "1 minute")
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
 	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(headBcommentID), []commentAgentTrigger{trigger})
@@ -596,7 +596,7 @@ func TestCommentEnqueueRaceMixedCoveringAndNewerNotDeferred(t *testing.T) {
 
 	// T0: A (head-A) running, OLDER than the comment. T1: comment C. T2: B
 	// (head-A) queued, NEWER than C — it occupies the unique slot.
-	aTrigger := insertDupRaceComment(t, issueID, "A trigger", "11 minutes")
+	aTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") A trigger", "11 minutes")
 	var taskA string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, delivered_comment_ids, status, priority, created_at, started_at, context)
@@ -606,7 +606,7 @@ func TestCommentEnqueueRaceMixedCoveringAndNewerNotDeferred(t *testing.T) {
 		t.Fatalf("insert running task A: %v", err)
 	}
 	loserCommentID := insertDupRaceComment(t, issueID, "losing comment C", "5 minutes")
-	bTrigger := insertDupRaceComment(t, issueID, "B trigger", "2 minutes")
+	bTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") B trigger", "2 minutes")
 	var taskB string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, delivered_comment_ids, status, priority, created_at, context)
@@ -713,9 +713,9 @@ func TestReconcileBlockedReplayPropagatesToClaimedBlocker(t *testing.T) {
 	agentID, issueID, runtimeID := dupRaceFixture(t, "dup-race-propagate-claimed", 999319)
 	seedDupRacePR(t, issueID, 999319)
 
-	aTrigger := insertDupRaceComment(t, issueID, "A trigger", "11 minutes")
-	loserCommentID := insertDupRaceComment(t, issueID, "comment C needing coverage", "8 minutes")
-	bTrigger := insertDupRaceComment(t, issueID, "B trigger", "6 minutes")
+	aTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") A trigger", "11 minutes")
+	loserCommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") comment C needing coverage", "8 minutes")
+	bTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") B trigger", "6 minutes")
 
 	// A: running (outside the unique index), head A, with C already registered as a
 	// planned-but-NOT-delivered input — the exact state the lost-race path leaves.
@@ -786,11 +786,11 @@ func TestReconcileBlockedReplayPropagatesToQueuedBlocker(t *testing.T) {
 	agentID, issueID, runtimeID := dupRaceFixture(t, "dup-race-propagate-queued", 999320)
 	seedDupRacePR(t, issueID, 999320)
 
-	aTrigger := insertDupRaceComment(t, issueID, "A trigger", "11 minutes")
+	aTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") A trigger", "11 minutes")
 	// C lands while A is running (newer than A) and is NOT in A's arrays — the
 	// AlreadyPending shape, covered by reconcile's timestamp window alone.
-	loserCommentID := insertDupRaceComment(t, issueID, "comment C posted during the run", "5 minutes")
-	bTrigger := insertDupRaceComment(t, issueID, "B trigger", "2 minutes")
+	loserCommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") comment C posted during the run", "5 minutes")
+	bTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") B trigger", "2 minutes")
 
 	var taskA string
 	if err := testPool.QueryRow(ctx, `
@@ -842,9 +842,9 @@ func TestReconcileBlockedReplayNeverFoldsIntoDifferentHeadQueuedBlocker(t *testi
 	agentID, issueID, runtimeID := dupRaceFixture(t, "dup-race-propagate-crosshead", 999321)
 	seedDupRacePR(t, issueID, 999321) // current head = head B
 
-	aTrigger := insertDupRaceComment(t, issueID, "A trigger", "11 minutes")
-	loserCommentID := insertDupRaceComment(t, issueID, "comment C posted during the run", "5 minutes")
-	bTrigger := insertDupRaceComment(t, issueID, "B trigger", "2 minutes")
+	aTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") A trigger", "11 minutes")
+	loserCommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") comment C posted during the run", "5 minutes")
+	bTrigger := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") B trigger", "2 minutes")
 
 	var taskA string
 	if err := testPool.QueryRow(ctx, `
