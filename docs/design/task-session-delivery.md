@@ -17,6 +17,8 @@ This contract covers delegations issued through Multica. Sub-agents created insi
 - External registration returns `external_session.id`, the Multica session record ID consumed by `agent external bind --session`.
 - `external_session.session_id` remains the host's session ID; it is not the identifier accepted by the binding API.
 
+Each admitted dispatch records the return relationships it actually accepted. Distinct dispatchers on the same issue retain their own bindings. If several requests coalesce into one run, that run preserves every accepted return relationship; a continuation, rerun, or executor reassignment preserves the corresponding run's recipients. Backlog delegation retains its accepted relationship before execution exists. Persist the relationship with the triggering business write and executable work, so a failed comment or rejected assignment cannot leave a phantom accepted return.
+
 ## Managed dispatchers
 
 When a managed Agent explicitly delegates through Multica, derive its return identity from the authenticated task token and server-owned task/session record. The original issue or chat scope, runtime, provider session, and work directory remain the return destination; the delegated issue is not a replacement scope. Harness-internal sub-agent creation remains outside this contract.
