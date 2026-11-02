@@ -67,6 +67,7 @@ func TestRunAgentExternalRegisterSendsExplicitSession(t *testing.T) {
 			"name":           "External Reviewer",
 			"execution_kind": "external",
 			"external_session": map[string]any{
+				"id":       "11111111-1111-4111-8111-111111111111",
 				"provider": "paseo", "host_id": "host-1", "session_id": "paseo-1",
 				"display_name": "Reviewer", "url": nil, "daemon_id": "daemon-1",
 			},
@@ -108,6 +109,17 @@ func TestRunAgentExternalRegisterSendsExplicitSession(t *testing.T) {
 	}
 	if !strings.Contains(out, `"execution_kind": "external"`) {
 		t.Fatalf("output = %s", out)
+	}
+	var response struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"external_session"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Session.ID != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("registered session id = %q; CLI output must retain the binding target", response.Session.ID)
 	}
 }
 

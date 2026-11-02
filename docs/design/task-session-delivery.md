@@ -14,6 +14,8 @@ This contract covers delegations issued through Multica. Sub-agents created insi
 - Creating a delegated issue and its authenticated dispatcher's return binding is one database transaction. Reject missing, foreign, or invalid return addresses before any managed task is queued. Task launch must not outrun the committed binding.
 - Managed executors' sessions are managed by Multica. Leaders do not register harness-internal sessions or sub-agents.
 - Reassignment of the executor does not change the recorded return recipient. Explicit takeover identifies the replacement recipient for future notifications; it does not rewrite earlier delivery envelopes.
+- External registration returns `external_session.id`, the Multica session record ID consumed by `agent external bind --session`.
+- `external_session.session_id` remains the host's session ID; it is not the identifier accepted by the binding API.
 
 ## Managed dispatchers
 

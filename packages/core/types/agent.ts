@@ -40,6 +40,7 @@ export type AgentExecutionKind = "managed" | "external";
  * session, and `daemon_id` names the Multica daemon that delivers to it.
  */
 export interface ExternalSession {
+  id?: string;
   provider: string;
   host_id: string;
   session_id: string;
