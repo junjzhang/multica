@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -680,17 +681,29 @@ func TestReassignmentPreservesAcceptedReturn(t *testing.T) {
 		t.Skip("database not available")
 	}
 	externalAgent, externalSessionID, _ := externalAgentFixture(t, "Reassign External", "delegation-daemon")
-	_, sourceTask, token := managedDispatcherFixture(t, "reassign")
-	firstTarget, _ := executableTarget(t, "reassign-first")
+	dispatcher, sourceTask, token := managedDispatcherFixture(t, "reassign")
+	firstTarget, firstRuntime := executableTarget(t, "reassign-first")
 	secondTarget, _ := executableTarget(t, "reassign-second")
 	issueID := dbfx.Issue(t, "Reassign delegated issue")
-	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: firstTarget}, delegation.Address{
+	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {
 		t.Fatalf("seed accepted return: %v", err)
 	}
-	// Give the issue a current assignee so the update is a real reassignment.
+	// The replaced assignment's intent and its run are the exact set a
+	// reassignment must preserve.
+	firstRun := dbfx.Task(t, firstTarget, testutil.Cols{
+		"issue_id": issueID, "runtime_id": firstRuntime, "status": "completed",
+		"session_id": "first-run-session", "work_dir": "/work/first",
+	})
+	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(firstRun), accepted.ID); err != nil {
+		t.Fatalf("link replaced assignment run: %v", err)
+	}
+	if err := delegation.StoreAssignmentIntent(context.Background(), testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(issueID),
+		delegation.Assignee{Type: "agent", ID: firstTarget}, []pgtype.UUID{accepted.ID}, parseUUID(firstRun)); err != nil {
+		t.Fatalf("seed replaced assignment intent: %v", err)
+	}
 	dbfx.Exec(t, `UPDATE issue SET assignee_type = 'agent', assignee_id = $1 WHERE id = $2`, firstTarget, issueID)
 	_ = sourceTask
 
@@ -706,6 +719,14 @@ func TestReassignmentPreservesAcceptedReturn(t *testing.T) {
 		t.Fatalf("reassignment changed the accepted return: %+v", still)
 	}
 	requireTaskReturns(t, latestTaskIDFor(t, issueID, secondTarget), accepted)
+	own := acceptedReturns(t, issueID)
+	var operator db.IssueDelegationReturn
+	for _, row := range own {
+		if uuidToString(row.DispatcherAgentID) == dispatcher {
+			operator = row
+		}
+	}
+	requireTaskReturns(t, latestTaskIDFor(t, issueID, secondTarget), operator)
 }
 
 func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
@@ -720,17 +741,19 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 		"assignee_id":   target,
 		"status":        "in_progress",
 	})
-	dbfx.Task(t, target, testutil.Cols{
+	sourceRun := dbfx.Task(t, target, testutil.Cols{
 		"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
 		"session_id": "target-old-session", "work_dir": "/work/target",
 	})
-	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: target}, delegation.Address{
+	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {
 		t.Fatalf("seed accepted return: %v", err)
 	}
-	_ = dispatcher
+	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(sourceRun), accepted.ID); err != nil {
+		t.Fatalf("link source run return: %v", err)
+	}
 
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.RerunIssue), http.MethodPost, "/api/issues/"+issueID+"/rerun", map[string]any{}, map[string]string{"id": issueID}, nil)
 	if w.Code != http.StatusAccepted {
@@ -742,6 +765,13 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 	}
 	rerunTaskID := latestTaskIDFor(t, issueID, target)
 	requireTaskReturns(t, rerunTaskID, accepted)
+	var operator db.IssueDelegationReturn
+	for _, row := range acceptedReturns(t, issueID) {
+		if uuidToString(row.DispatcherAgentID) == dispatcher {
+			operator = row
+		}
+	}
+	requireTaskReturns(t, rerunTaskID, operator)
 	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target); n != 2 {
 		t.Fatalf("rerun created %d tasks for the target, want the completed source plus the rerun", n)
 	}

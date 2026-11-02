@@ -3,10 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/attribution"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -71,25 +75,72 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 	return active || err != nil
 }
 
-// dispatchIssueRun executes the enqueue side effect for a decision produced by
-// WillEnqueueRun. handoffNote is a legacy API input retained for installed
-// clients and travels only with a run that actually starts. The squad path
-// still flows through enqueueSquadLeaderTask so the leader access gate and
-// pending dedup stay in one place.
-func (h *Handler) dispatchIssueRun(ctx context.Context, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID) {
+// enqueueAssignmentRunInTx creates the run an explicit assignment starts inside
+// the issue write's transaction. inserted=false means a sibling pending run
+// already covers the target; the assignment intent still commits. Any other
+// error rolls the whole assignment back, so a rejected or failed enqueue can
+// never leave an assignee without its durable launch obligation.
+func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
+	if trigger.AssigneeType != "agent" && trigger.AssigneeType != "squad" {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
+	}
+	// A pending sibling may already cover the target. Probe first, then use a
+	// savepoint for the insert race: a duplicate aborts the current transaction,
+	// so the coalesced branch must run outside the failed subtransaction.
+	if pending, err := q.GetPendingAssignmentTaskForIssueAndAgent(ctx, db.GetPendingAssignmentTaskForIssueAndAgentParams{
+		IssueID: issue.ID, AgentID: trigger.AgentID,
+	}); err == nil {
+		if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturnIDs...); err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, false, err
+		}
+		return pending, attribution.Result{}, false, nil
+	}
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
+	qsp := h.Queries.WithTx(sp)
+	var task db.AgentTaskQueue
+	var attr attribution.Result
 	switch trigger.AssigneeType {
 	case "agent":
 		// The member who performed this assign/promote is the accountable human
 		// for the run (MUL-4302 §4). An agent actor is not a human, so only a
 		// member actor is threaded; otherwise attribution falls back to the chain.
-		if _, err := h.TaskService.EnqueueTaskForIssueWithHandoff(ctx, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs...); err != nil {
-			slog.Warn("enqueue assigned agent task failed",
-				"issue_id", uuidToString(issue.ID), "error", err)
-			return
-		}
+		task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs)
 	case "squad":
-		h.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, actorType, actorID, handoffNote, delegationReturnIDs)
+		task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs)
 	}
+	if err != nil {
+		_ = sp.Rollback(ctx)
+		if errors.Is(err, service.ErrDuplicatePendingTask) {
+			return h.linkAssignmentIntoPendingRun(ctx, q, issue, trigger.AgentID, delegationReturnIDs)
+		}
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
+	return task, attr, true, nil
+}
+
+// linkAssignmentIntoPendingRun attaches this assignment's accepted returns to
+// the pending run that already covers the target. The assignment coalesces into
+// that run; it does not start a second one and must not lose its dispatcher.
+func (h *Handler) linkAssignmentIntoPendingRun(ctx context.Context, q *db.Queries, issue db.Issue, agentID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
+	pending, err := q.GetPendingAssignmentTaskForIssueAndAgent(ctx, db.GetPendingAssignmentTaskForIssueAndAgentParams{
+		IssueID: issue.ID,
+		AgentID: agentID,
+	})
+	if err != nil {
+		// The occupant vanished between the insert conflict and this read; the
+		// assignment intent still commits with the issue.
+		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
+	}
+	if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturnIDs...); err != nil {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
+	return pending, attribution.Result{}, false, nil
 }
 
 // memberActorUserID returns the acting member's user id as a pgtype.UUID when the

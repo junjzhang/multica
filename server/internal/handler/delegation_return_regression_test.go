@@ -363,7 +363,7 @@ func TestRerunInheritsSourceRunReturns(t *testing.T) {
 		"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
 		"session_id": "rerun-inherit-session", "work_dir": "/work/rerun-inherit",
 	})
-	inherited, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: target}, delegation.Address{
+	inherited, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {

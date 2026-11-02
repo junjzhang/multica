@@ -414,6 +414,19 @@ deleted_external_agent_sessions AS (
 deleted_external_agent_session_bindings AS (
     DELETE FROM external_agent_session_binding WHERE workspace_id = $1
 ),
+deleted_comment_delegation_returns AS (
+    DELETE FROM comment_delegation_return
+    WHERE comment_id IN (SELECT id FROM comment WHERE workspace_id = $1)
+       OR delegation_return_id IN (SELECT id FROM issue_delegation_return WHERE workspace_id = $1)
+),
+deleted_issue_assignment_delegation_returns AS (
+    DELETE FROM issue_assignment_delegation_return
+    WHERE issue_id IN (SELECT id FROM ws_issues)
+),
+deleted_issue_assignment_delegations AS (
+    DELETE FROM issue_assignment_delegation
+    WHERE workspace_id = $1 OR issue_id IN (SELECT id FROM ws_issues)
+),
 deleted_issue_delegation_returns AS (
     DELETE FROM issue_delegation_return WHERE workspace_id = $1
 ),

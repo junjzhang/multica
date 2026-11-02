@@ -3,10 +3,17 @@
 //
 // It resolves the address from evidence the server trusts — a managed run's
 // task token, or an authenticated external session registered for the acting
-// agent — and records the accepted recipient for one (issue, dispatcher agent,
-// assignee) dispatch. It deliberately never picks an agent's "current",
-// "latest" or "only" session: a missing or invalid address fails closed before
-// any child work exists.
+// agent — and records the accepted recipient for one (issue, dispatcher agent)
+// pair. It deliberately never picks an agent's "current", "latest" or "only"
+// session: a missing or invalid address fails closed before any child work
+// exists.
+//
+// The accepted address is intentionally separate from the dispatch intent.
+// A comment or an assignment records which accepted relationships it carries;
+// a run links only the intents it actually covers. That is what keeps two
+// independent requests to the same worker from inheriting each other's
+// recipient, while a genuine coalesce or a rerun preserves every relationship
+// it actually covers.
 package delegation
 
 import (
@@ -30,8 +37,8 @@ const (
 	// KindExternalSession addresses a registered host session of an external
 	// agent. The exact session is frozen on that dispatcher's accepted return.
 	KindExternalSession Kind = "external_session"
-	// KindManagedTask addresses the managed run that dispatched the work. The
-	// source task row owns the runtime, provider session and work directory;
+	// KindManagedTask addresses the managed run that first dispatched the work.
+	// The source task row owns the runtime, provider session and work directory;
 	// the next slice resumes that row instead of the agent+issue latest session.
 	KindManagedTask Kind = "managed_task"
 )
@@ -51,11 +58,15 @@ var (
 	// ErrReturnInvalid reports a foreign, cross-workspace, ambiguous, archived,
 	// or otherwise unverifiable address.
 	ErrReturnInvalid = errors.New("the delegation return address is not valid")
+	// ErrReturnConflict reports that this actor already accepted a different
+	// physical session for this issue. An ordinary dispatch must not silently
+	// keep the old address or overwrite it with the new one; the caller needs
+	// an explicit takeover.
+	ErrReturnConflict = errors.New("this agent already has a different accepted return session on this issue")
 )
 
-// Assignee is the exact assignment slot a dispatch targets. A return is keyed
-// by it, so a backlog row for one worker is never attached to another worker's
-// run, and a reassignment copies only the replaced assignment's recipients.
+// Assignee is the exact assignment slot a dispatch targets. It identifies the
+// assignment intent, not the accepted address (which is per dispatcher).
 type Assignee struct {
 	Type string
 	ID   string
@@ -263,20 +274,20 @@ func ResolveExternal(ctx context.Context, q *db.Queries, workspaceID, agentID, s
 	}
 }
 
-// Ensure records addr as the accepted return for one
-// (issue, dispatcher agent, assignee) dispatch and returns the row that was
-// accepted. The first accepted delegation for that key wins: an existing row is
-// returned unchanged, so a later assignment, rerun, mention, or folded comment
-// by the same actor cannot silently retarget its own result. A different
-// dispatcher or a different assignment slot has a different key and therefore
-// its own accepted relationship.
+// Ensure records addr as the accepted return for one (issue, dispatcher agent)
+// pair and returns the row that was accepted. The first accepted address for
+// that key wins: an existing row is returned unchanged when the current
+// trusted source is the same physical session. A different physical session for
+// the same actor on the same issue is a conflict, not a silent reuse of the old
+// run and not a silent overwrite with the new one.
 //
 // A managed address is re-validated under a row lock inside the caller's
 // transaction. Passing a transaction-bound *db.Queries is therefore required
 // when the row must commit with the delegated issue, comment, or run; an
 // already completed source run is refused here even when the pre-write read saw
-// it active.
-func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, assignee Assignee, addr Address, createdBy string) (db.IssueDelegationReturn, error) {
+// it active, while a previously accepted row that names a completed source
+// remains a valid delivery target.
+func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, addr Address, createdBy string) (db.IssueDelegationReturn, error) {
 	ws, err := util.ParseUUID(strings.TrimSpace(workspaceID))
 	if err != nil {
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: workspace id: %w", err)
@@ -289,40 +300,74 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, ass
 	if err != nil {
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: dispatcher agent id: %w", err)
 	}
-	if assignee.Type != "agent" && assignee.Type != "squad" {
-		return db.IssueDelegationReturn{}, fmt.Errorf("%w: assignee type", ErrReturnInvalid)
-	}
-	assigneeID, err := util.ParseUUID(strings.TrimSpace(assignee.ID))
-	if err != nil {
-		return db.IssueDelegationReturn{}, fmt.Errorf("%w: assignee id", ErrReturnInvalid)
-	}
 
+	var (
+		currentTask  db.AgentTaskQueue
+		binding      sessionroute.Binding
+		hasBinding   bool
+		managedInput bool
+	)
 	switch addr.Kind {
 	case KindManagedTask:
 		if strings.TrimSpace(addr.SourceTaskID) == "" {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: source task id", ErrReturnInvalid)
 		}
-		if err := recheckManagedSourceLocked(ctx, q, ws, dispatcher, addr.SourceTaskID); err != nil {
-			return db.IssueDelegationReturn{}, err
+		sourceTaskID, parseErr := util.ParseUUID(strings.TrimSpace(addr.SourceTaskID))
+		if parseErr != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: source task id", ErrReturnInvalid)
 		}
+		task, checkErr := recheckManagedSourceLocked(ctx, q, ws, dispatcher, sourceTaskID)
+		if checkErr != nil {
+			return db.IssueDelegationReturn{}, checkErr
+		}
+		currentTask = task
+		managedInput = true
 	case KindExternalSession:
 		if strings.TrimSpace(addr.ExternalSessionID) == "" {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: external session id", ErrReturnInvalid)
 		}
+		sessionID, parseErr := util.ParseUUID(strings.TrimSpace(addr.ExternalSessionID))
+		if parseErr != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: external session id", ErrReturnInvalid)
+		}
+		// Reuse the reviewed binding. The first accepted target for
+		// (agent, issue) is fixed, so an ordinary dispatch from a different
+		// physical session cannot retarget it; only the explicit takeover
+		// endpoint calls Bind.
+		binding, err = sessionroute.Ensure(ctx, q, sessionroute.BindRequest{
+			WorkspaceID: util.UUIDToString(ws),
+			AgentID:     util.UUIDToString(dispatcher),
+			IssueID:     util.UUIDToString(issue),
+			SessionID:   util.UUIDToString(sessionID),
+			CreatedBy:   firstNonEmpty(createdBy, addr.CreatedBy),
+		})
+		if err != nil {
+			if errors.Is(err, sessionroute.ErrInvalidBinding) {
+				return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnInvalid, err)
+			}
+			return db.IssueDelegationReturn{}, err
+		}
+		if binding.SessionID != util.UUIDToString(sessionID) {
+			// The accepted binding is a different physical session and this
+			// request is not an explicit takeover. Do not silently deliver to
+			// either one.
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: current session %s, accepted binding %s", ErrReturnConflict, util.UUIDToString(sessionID), binding.SessionID)
+		}
+		hasBinding = true
 	default:
 		return db.IssueDelegationReturn{}, fmt.Errorf("%w: unknown return kind %q", ErrReturnInvalid, addr.Kind)
 	}
 
-	lookup := db.GetIssueDelegationReturnForDispatchParams{
+	lookup := db.LockIssueDelegationReturnForDispatcherParams{
 		WorkspaceID:       ws,
 		IssueID:           issue,
 		DispatcherAgentID: dispatcher,
-		AssigneeType:      assignee.Type,
-		AssigneeID:        assigneeID,
 	}
-	if existing, err := q.GetIssueDelegationReturnForDispatch(ctx, lookup); err == nil {
-		return existing, nil
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	existing, err := q.LockIssueDelegationReturnForDispatcher(ctx, lookup)
+	if err == nil {
+		return reuseAccepted(ctx, q, existing, addr, currentTask, managedInput, binding, hasBinding)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load accepted return: %w", err)
 	}
 
@@ -331,48 +376,21 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, ass
 		WorkspaceID:       ws,
 		IssueID:           issue,
 		DispatcherAgentID: dispatcher,
-		AssigneeType:      assignee.Type,
-		AssigneeID:        assigneeID,
 		ReturnKind:        string(addr.Kind),
 	}
 	switch addr.Kind {
 	case KindExternalSession:
-		sessionID, parseErr := util.ParseUUID(strings.TrimSpace(addr.ExternalSessionID))
+		sessionID, parseErr := util.ParseUUID(strings.TrimSpace(binding.SessionID))
 		if parseErr != nil {
-			return db.IssueDelegationReturn{}, fmt.Errorf("%w: external session id", ErrReturnInvalid)
-		}
-		// Reuse the reviewed binding: producers resolve the same
-		// (agent, issue) target, and an existing accepted binding is not
-		// overwritten by an ordinary dispatch. An explicit takeover is the
-		// only writer allowed to replace it, so the accepted return follows
-		// the binding's frozen target rather than the caller's current
-		// session.
-		binding, bindErr := sessionroute.Ensure(ctx, q, sessionroute.BindRequest{
-			WorkspaceID: util.UUIDToString(ws),
-			AgentID:     util.UUIDToString(dispatcher),
-			IssueID:     util.UUIDToString(issue),
-			SessionID:   util.UUIDToString(sessionID),
-			CreatedBy:   firstNonEmpty(createdBy, addr.CreatedBy),
-		})
-		if bindErr != nil {
-			if errors.Is(bindErr, sessionroute.ErrInvalidBinding) {
-				return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnInvalid, bindErr)
-			}
-			return db.IssueDelegationReturn{}, bindErr
-		}
-		bindingSession, bindParseErr := util.ParseUUID(binding.SessionID)
-		if bindParseErr != nil {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted binding session", ErrReturnInvalid)
 		}
-		params.ExternalSessionID = bindingSession
+		params.ExternalSessionID = sessionID
 	case KindManagedTask:
 		sourceTaskID, parseErr := util.ParseUUID(strings.TrimSpace(addr.SourceTaskID))
 		if parseErr != nil {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: source task id", ErrReturnInvalid)
 		}
 		params.SourceTaskID = sourceTaskID
-	default:
-		return db.IssueDelegationReturn{}, fmt.Errorf("%w: unknown return kind %q", ErrReturnInvalid, addr.Kind)
 	}
 
 	created, err := q.CreateIssueDelegationReturn(ctx, params)
@@ -380,11 +398,64 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, ass
 		if errors.Is(err, pgx.ErrNoRows) {
 			// A concurrent dispatch for the same key committed first. Its
 			// accepted recipient is the answer; never replace it.
-			return q.GetIssueDelegationReturnForDispatch(ctx, lookup)
+			winner, lockErr := q.LockIssueDelegationReturnForDispatcher(ctx, lookup)
+			if lockErr != nil {
+				return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load winning accepted return: %w", lockErr)
+			}
+			return reuseAccepted(ctx, q, winner, addr, currentTask, managedInput, binding, hasBinding)
 		}
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: record accepted return: %w", err)
 	}
 	return created, nil
+}
+
+// reuseAccepted applies the fixed-address rule to an existing row. The same
+// physical session is reusable even when a continuation turn carries a new task
+// id; a different session is a conflict.
+func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegationReturn, addr Address, currentTask db.AgentTaskQueue, managedInput bool, binding sessionroute.Binding, hasBinding bool) (db.IssueDelegationReturn, error) {
+	switch {
+	case existing.ReturnKind == string(KindManagedTask) && managedInput:
+		if uuidEqual(existing.SourceTaskID, currentTask.ID) {
+			return existing, nil
+		}
+		previous, err := q.GetAgentTask(ctx, existing.SourceTaskID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return db.IssueDelegationReturn{}, fmt.Errorf("%w: previously accepted source run is missing", ErrReturnConflict)
+			}
+			return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load accepted source: %w", err)
+		}
+		if previous.SessionID.Valid && currentTask.SessionID.Valid &&
+			previous.SessionID.String == currentTask.SessionID.String {
+			// A later turn in the original provider session. The stored task id
+			// stays the durable reference to that exact address; the new turn is
+			// not another address.
+			return existing, nil
+		}
+		return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted source session and current source session differ", ErrReturnConflict)
+	case existing.ReturnKind == string(KindExternalSession) && hasBinding:
+		if uuidEqual(existing.ExternalSessionID, parseUUIDOrZero(binding.SessionID)) {
+			return existing, nil
+		}
+		// The explicit takeover endpoint already moved the binding to the
+		// session this request authenticated from. Follow that explicit change;
+		// an ordinary dispatch from a different session never reaches here
+		// because it would not match the binding above.
+		sessionID, parseErr := util.ParseUUID(binding.SessionID)
+		if parseErr != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted binding session", ErrReturnInvalid)
+		}
+		updated, updateErr := q.UpdateIssueDelegationReturnExternalSession(ctx, db.UpdateIssueDelegationReturnExternalSessionParams{
+			ID:                existing.ID,
+			ExternalSessionID: sessionID,
+		})
+		if updateErr != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("delegation: follow explicit takeover: %w", updateErr)
+		}
+		return updated, nil
+	default:
+		return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted return kind %s does not match this dispatcher", ErrReturnConflict, existing.ReturnKind)
+	}
 }
 
 // recheckManagedSourceLocked is the authoritative admission check for a new
@@ -392,29 +463,28 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, ass
 // authorization, runtime, scope and pin are read from those locked rows. A
 // request that passed authentication before the run completed therefore cannot
 // keep dispatching after it.
-func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatcher pgtype.UUID, sourceTaskID string) error {
-	taskUUID, err := util.ParseUUID(strings.TrimSpace(sourceTaskID))
-	if err != nil {
-		return fmt.Errorf("%w: source task id", ErrReturnInvalid)
-	}
-	task, err := q.LockAgentTaskForDelegation(ctx, taskUUID)
+func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatcher pgtype.UUID, sourceTaskID pgtype.UUID) (db.AgentTaskQueue, error) {
+	task, err := q.LockAgentTaskForDelegation(ctx, sourceTaskID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: source run does not exist", ErrReturnInvalid)
+			return db.AgentTaskQueue{}, fmt.Errorf("%w: source run does not exist", ErrReturnInvalid)
 		}
-		return fmt.Errorf("delegation: lock source run: %w", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("delegation: lock source run: %w", err)
 	}
 	if task.AgentID != dispatcher {
-		return fmt.Errorf("%w: source run belongs to another agent", ErrReturnInvalid)
+		return db.AgentTaskQueue{}, fmt.Errorf("%w: source run belongs to another agent", ErrReturnInvalid)
 	}
 	actor, err := q.LockAgentForDelegation(ctx, db.LockAgentForDelegationParams{ID: dispatcher, WorkspaceID: ws})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: agent is not in this workspace", ErrReturnInvalid)
+			return db.AgentTaskQueue{}, fmt.Errorf("%w: agent is not in this workspace", ErrReturnInvalid)
 		}
-		return fmt.Errorf("delegation: lock agent: %w", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("delegation: lock agent: %w", err)
 	}
-	return validateManagedSource(ctx, q, ws, dispatcher, task, actor)
+	if err := validateManagedSource(ctx, q, ws, dispatcher, task, actor); err != nil {
+		return db.AgentTaskQueue{}, err
+	}
+	return task, nil
 }
 
 // RunReturnIDs returns every accepted relationship one run carries.
@@ -433,36 +503,167 @@ func RunReturnIDs(ctx context.Context, q *db.Queries, taskID pgtype.UUID) ([]pgt
 	return ids, nil
 }
 
-// ReturnIDsForAssignee returns the accepted relationships recorded for one
-// exact assignment slot. A run collects this explicit set instead of every
-// historical return on the issue: a backlog row for another worker is never
-// attached to this run, and a backlog row stays available after some other
-// worker's run already exists.
-func ReturnIDsForAssignee(ctx context.Context, q *db.Queries, workspaceID, issueID pgtype.UUID, assignee Assignee) ([]pgtype.UUID, error) {
-	if !workspaceID.Valid || !issueID.Valid {
+// CommentReturnIDs returns the accepted relationships one comment intent
+// carries. It is the only source new, folded, replayed, and retriggered runs
+// use for a comment.
+func CommentReturnIDs(ctx context.Context, q *db.Queries, commentID pgtype.UUID) ([]pgtype.UUID, error) {
+	if !commentID.Valid {
 		return nil, nil
 	}
-	if assignee.Type != "agent" && assignee.Type != "squad" {
+	ids, err := q.ListCommentDelegationReturnIDs(ctx, commentID)
+	if err != nil {
+		return nil, fmt.Errorf("delegation: list comment returns: %w", err)
+	}
+	return ids, nil
+}
+
+// AssignmentIntent is one assignment slot's persisted dispatch intent.
+type AssignmentIntent struct {
+	Assignee  Assignee
+	TaskID    pgtype.UUID
+	ReturnIDs []pgtype.UUID
+}
+
+// LoadAssignmentIntent returns the persisted intent for one assignment slot,
+// including the exact accepted relationships it carries. It returns nil when
+// the slot has no intent.
+func LoadAssignmentIntent(ctx context.Context, q *db.Queries, issueID pgtype.UUID, assignee Assignee) (*AssignmentIntent, error) {
+	if !issueID.Valid {
 		return nil, nil
 	}
 	assigneeID, err := util.ParseUUID(strings.TrimSpace(assignee.ID))
 	if err != nil {
 		return nil, fmt.Errorf("%w: assignee id", ErrReturnInvalid)
 	}
-	rows, err := q.ListIssueDelegationReturnsForAssignee(ctx, db.ListIssueDelegationReturnsForAssigneeParams{
-		WorkspaceID:  workspaceID,
+	header, err := q.GetIssueAssignmentDelegation(ctx, db.GetIssueAssignmentDelegationParams{
 		IssueID:      issueID,
 		AssigneeType: assignee.Type,
 		AssigneeID:   assigneeID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("delegation: list assignee returns: %w", err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("delegation: load assignment intent: %w", err)
 	}
-	ids := make([]pgtype.UUID, 0, len(rows))
-	for _, row := range rows {
-		ids = append(ids, row.ID)
+	ids, err := q.ListIssueAssignmentDelegationReturnIDs(ctx, db.ListIssueAssignmentDelegationReturnIDsParams{
+		IssueID:      issueID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("delegation: list assignment intent returns: %w", err)
 	}
-	return ids, nil
+	return &AssignmentIntent{Assignee: assignee, TaskID: header.TaskID, ReturnIDs: ids}, nil
+}
+
+// StoreAssignmentIntent replaces one slot's current intent with the exact set a
+// dispatch accepts. The header and set commit with the issue write.
+func StoreAssignmentIntent(ctx context.Context, q *db.Queries, workspaceID, issueID pgtype.UUID, assignee Assignee, returnIDs []pgtype.UUID, taskID pgtype.UUID) error {
+	assigneeID, err := util.ParseUUID(strings.TrimSpace(assignee.ID))
+	if err != nil {
+		return fmt.Errorf("%w: assignee id", ErrReturnInvalid)
+	}
+	params := db.UpsertIssueAssignmentDelegationParams{
+		IssueID:      issueID,
+		WorkspaceID:  workspaceID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+	}
+	if taskID.Valid {
+		params.TaskID = taskID
+	}
+	if _, err := q.UpsertIssueAssignmentDelegation(ctx, params); err != nil {
+		return fmt.Errorf("delegation: store assignment intent: %w", err)
+	}
+	if err := q.DeleteIssueAssignmentDelegationReturns(ctx, db.DeleteIssueAssignmentDelegationReturnsParams{
+		IssueID:      issueID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+	}); err != nil {
+		return fmt.Errorf("delegation: clear assignment intent returns: %w", err)
+	}
+	for _, returnID := range UnionReturnIDs(returnIDs) {
+		if _, err := q.LinkIssueAssignmentDelegationReturn(ctx, db.LinkIssueAssignmentDelegationReturnParams{
+			IssueID:            issueID,
+			AssigneeType:       assignee.Type,
+			AssigneeID:         assigneeID,
+			DelegationReturnID: returnID,
+		}); err != nil {
+			return fmt.Errorf("delegation: link assignment intent return: %w", err)
+		}
+	}
+	return nil
+}
+
+// SetAssignmentIntentTask records the run that finally carries a backlog intent.
+func SetAssignmentIntentTask(ctx context.Context, q *db.Queries, issueID pgtype.UUID, assignee Assignee, taskID pgtype.UUID) error {
+	assigneeID, err := util.ParseUUID(strings.TrimSpace(assignee.ID))
+	if err != nil {
+		return fmt.Errorf("%w: assignee id", ErrReturnInvalid)
+	}
+	return q.SetIssueAssignmentDelegationTask(ctx, db.SetIssueAssignmentDelegationTaskParams{
+		IssueID:      issueID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+		TaskID:       taskID,
+	})
+}
+
+// DeleteAssignmentIntent removes a replaced assignment's intent. Its accepted
+// relationships live on in the run that carried them; keeping the header would
+// resurrect a stale dispatcher if the slot were assigned again much later.
+func DeleteAssignmentIntent(ctx context.Context, q *db.Queries, issueID pgtype.UUID, assignee Assignee) error {
+	assigneeID, err := util.ParseUUID(strings.TrimSpace(assignee.ID))
+	if err != nil {
+		return fmt.Errorf("%w: assignee id", ErrReturnInvalid)
+	}
+	if err := q.DeleteIssueAssignmentDelegationReturns(ctx, db.DeleteIssueAssignmentDelegationReturnsParams{
+		IssueID:      issueID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+	}); err != nil {
+		return fmt.Errorf("delegation: clear assignment intent returns: %w", err)
+	}
+	return q.DeleteIssueAssignmentDelegation(ctx, db.DeleteIssueAssignmentDelegationParams{
+		IssueID:      issueID,
+		AssigneeType: assignee.Type,
+		AssigneeID:   assigneeID,
+	})
+}
+
+// LinkRun attaches the accepted relationships a run was dispatched under. The
+// insert is idempotent, so coalescing, reruns, and retries can add a
+// relationship without dropping the run's existing set. Callers pass the same
+// transaction that created or folded the run.
+func LinkRun(ctx context.Context, q *db.Queries, taskID pgtype.UUID, returnIDs ...pgtype.UUID) error {
+	if !taskID.Valid {
+		return nil
+	}
+	for _, returnID := range UnionReturnIDs(returnIDs) {
+		if _, err := q.LinkAgentTaskDelegationReturn(ctx, db.LinkAgentTaskDelegationReturnParams{
+			TaskID:             taskID,
+			DelegationReturnID: returnID,
+		}); err != nil {
+			return fmt.Errorf("delegation: link run return: %w", err)
+		}
+	}
+	return nil
+}
+
+// LinkCommentReturn records the accepted relation between one comment intent
+// and one dispatcher address. It is idempotent.
+func LinkCommentReturn(ctx context.Context, q *db.Queries, commentID, returnID pgtype.UUID) error {
+	if !commentID.Valid || !returnID.Valid {
+		return nil
+	}
+	if _, err := q.LinkCommentDelegationReturn(ctx, db.LinkCommentDelegationReturnParams{
+		CommentID:          commentID,
+		DelegationReturnID: returnID,
+	}); err != nil {
+		return fmt.Errorf("delegation: link comment return: %w", err)
+	}
+	return nil
 }
 
 // UnionReturnIDs merges return sets without duplicates, preserving first-seen
@@ -485,23 +686,19 @@ func UnionReturnIDs(sets ...[]pgtype.UUID) []pgtype.UUID {
 	return out
 }
 
-// LinkRun attaches the accepted relationships a run was dispatched under. The
-// insert is idempotent, so coalescing, reruns, and retries can add a
-// relationship without dropping the run's existing set. Callers pass the same
-// transaction that created or folded the run.
-func LinkRun(ctx context.Context, q *db.Queries, taskID pgtype.UUID, returnIDs ...pgtype.UUID) error {
-	if !taskID.Valid {
-		return nil
+func uuidEqual(a, b pgtype.UUID) bool {
+	if !a.Valid || !b.Valid {
+		return false
 	}
-	for _, returnID := range UnionReturnIDs(returnIDs) {
-		if _, err := q.LinkAgentTaskDelegationReturn(ctx, db.LinkAgentTaskDelegationReturnParams{
-			TaskID:             taskID,
-			DelegationReturnID: returnID,
-		}); err != nil {
-			return fmt.Errorf("delegation: link run return: %w", err)
-		}
+	return a == b
+}
+
+func parseUUIDOrZero(value string) pgtype.UUID {
+	id, err := util.ParseUUID(strings.TrimSpace(value))
+	if err != nil {
+		return pgtype.UUID{}
 	}
-	return nil
+	return id
 }
 
 func firstNonEmpty(values ...string) string {

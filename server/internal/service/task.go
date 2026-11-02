@@ -260,10 +260,18 @@ func (s *TaskService) forgetTaskReclaim(task db.AgentTaskQueue) {
 // reaching an enqueue/merge path must NOT leak another workspace's text even in
 // truncated form (MUL-4252).
 func (s *TaskService) buildCommentTriggerSummary(ctx context.Context, workspaceID, commentID pgtype.UUID) pgtype.Text {
+	return s.buildCommentTriggerSummaryWithQueries(ctx, s.Queries, workspaceID, commentID)
+}
+
+// buildCommentTriggerSummaryWithQueries reads the trigger comment through the
+// enqueue transaction. A run created in the comment's own transaction must see
+// that uncommitted row, or the daemon loses the instruction summary it was
+// enqueued to execute.
+func (s *TaskService) buildCommentTriggerSummaryWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID) pgtype.Text {
 	if !commentID.Valid {
 		return pgtype.Text{}
 	}
-	comment, err := s.Queries.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+	comment, err := q.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
 		ID:          commentID,
 		WorkspaceID: workspaceID,
 	})
@@ -512,6 +520,14 @@ func (s *TaskService) resolveOriginatorForIssueTask(ctx context.Context, issue d
 // authorization is unaffected. agentAuthoredSource labels the agent-authored
 // trigger comment case (see attributionFromTriggerComment).
 func (s *TaskService) attributionForIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, agentAuthoredSource attribution.Source, actorUserID pgtype.UUID) attribution.Result {
+	return s.attributionForIssueTaskWithQueries(ctx, s.Queries, issue, triggerCommentID, agentAuthoredSource, actorUserID)
+}
+
+// attributionForIssueTaskWithQueries is the same resolution against the
+// caller's query handle. Enqueue paths that create a run inside the trigger
+// comment's transaction must use it, or the uncommitted comment is invisible
+// and an agent-authored delegation loses its human.
+func (s *TaskService) attributionForIssueTaskWithQueries(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, agentAuthoredSource attribution.Source, actorUserID pgtype.UUID) attribution.Result {
 	// A direct member action is the accountable human AND originator, ahead of any
 	// trigger comment, origin, or rule (MUL-4302 §4/§5). This covers assign/promote,
 	// a manual autopilot trigger, and a manual rerun — the last of which may INHERIT
@@ -522,12 +538,12 @@ func (s *TaskService) attributionForIssueTask(ctx context.Context, issue db.Issu
 		return attribution.ClassifyDirect(attribution.DirectFacts{IssueID: issue.ID, ActorUserID: actorUserID})
 	}
 	if triggerCommentID.Valid {
-		if s == nil || s.Queries == nil {
+		if s == nil || q == nil {
 			return attribution.Result{Source: attribution.SourceUnattributed}
 		}
 		// workspace-scoped so a foreign comment UUID cannot resolve a human from
 		// another tenant (MUL-4252).
-		comment, err := s.Queries.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+		comment, err := q.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
 			ID:          triggerCommentID,
 			WorkspaceID: issue.WorkspaceID,
 		})
@@ -562,10 +578,10 @@ func (s *TaskService) attributionForIssueTask(ctx context.Context, issue db.Issu
 	// identically. (A manual trigger carries an actor and is already handled above.)
 	// The issue only stores the autopilot id, so bridge issue → latest run →
 	// trigger_id, including terminal runs so later handoffs retain the principal.
-	if s != nil && s.Queries != nil && issue.OriginType.Valid &&
+	if s != nil && q != nil && issue.OriginType.Valid &&
 		issue.OriginType.String == "autopilot" && issue.OriginID.Valid {
 		var triggerID pgtype.UUID
-		if run, err := s.Queries.GetLatestAutopilotRunForIssueAttribution(ctx, db.GetLatestAutopilotRunForIssueAttributionParams{
+		if run, err := q.GetLatestAutopilotRunForIssueAttribution(ctx, db.GetLatestAutopilotRunForIssueAttributionParams{
 			IssueID:     issue.ID,
 			AutopilotID: issue.OriginID,
 			WorkspaceID: issue.WorkspaceID,
@@ -1333,6 +1349,34 @@ func (s *TaskService) EnqueueAssignedTaskInTx(ctx context.Context, q *db.Queries
 	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs)
 }
 
+// EnqueueIssueAssignmentInTx inserts the run an explicit assignment starts
+// through the issue write's transaction. The run and every accepted return
+// relationship it carries commit with the assignment intent, so an enqueue
+// failure rolls the assignment back instead of leaving a half delegation.
+func (s *TaskService) EnqueueIssueAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs)
+}
+
+// EnqueueSquadLeaderAssignmentInTx is the squad equivalent of
+// EnqueueIssueAssignmentInTx.
+func (s *TaskService) EnqueueSquadLeaderAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, leaderID, squadID pgtype.UUID, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertMentionTask(ctx, q, issue, leaderID, pgtype.UUID{}, nil, true, squadID, false, handoffNote, actorUserID, pgtype.UUID{}, OriginDerived, delegationReturnIDs)
+}
+
+// EnqueueIssueCommentTriggerInTx creates the assigned-agent run one comment
+// starts inside the comment transaction. The comment, its accepted return
+// relation, and this run therefore commit as one outcome.
+func (s *TaskService) EnqueueIssueCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertIssueTask(ctx, q, issue, triggerCommentID, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs)
+}
+
+// EnqueueMentionCommentTriggerInTx creates a mention, thread-parent, squad
+// leader, or conversation-hop run one comment starts inside the comment
+// transaction.
+func (s *TaskService) EnqueueMentionCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, agentID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, origin RunOrigin, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, nil, isLeader, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturnIDs)
+}
+
 // PublishQueuedIssueTask broadcasts and wakes the runtime for a task inserted
 // by an in-transaction enqueue. Call it only after the transaction committed.
 func (s *TaskService) PublishQueuedIssueTask(ctx context.Context, task db.AgentTaskQueue, attr attribution.Result) {
@@ -1412,7 +1456,7 @@ func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue 
 	// comment or direct member assignment is direct_human. attr.UserID is the
 	// same value the pre-MUL-4302 resolver produced, so overlay/authorization
 	// are unchanged; the extra fields are audit provenance.
-	attr := s.attributionForIssueTask(ctx, issue, triggerCommentID, attribution.SourceCommentSource, actorUserID)
+	attr := s.attributionForIssueTaskWithQueries(ctx, q, issue, triggerCommentID, attribution.SourceCommentSource, actorUserID)
 	// No precise human resolved → owner_fallback (accountable = agent owner), or
 	// refuse the enqueue if the workspace is fail-closed (MUL-4302 §3.5).
 	attr, err = s.applyAttributionFallback(ctx, attr, agent)
@@ -1433,7 +1477,7 @@ func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue 
 		Priority:             priorityToInt(issue.Priority),
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
-		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
+		TriggerSummary:       s.buildCommentTriggerSummaryWithQueries(ctx, q, issue.WorkspaceID, triggerCommentID),
 		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
 		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
 		OriginatorUserID:     originatorUserID,
@@ -1559,12 +1603,6 @@ func (s *TaskService) EnqueueTaskForSquadLeaderByActor(ctx context.Context, issu
 	return s.enqueueMentionTask(ctx, issue, leaderID, pgtype.UUID{}, true, squadID, false, "", actorUserID, pgtype.UUID{}, OriginDerived)
 }
 
-// EnqueueTaskForSquadLeaderWithHandoff is the squad equivalent of
-// EnqueueTaskForIssueWithHandoff.
-func (s *TaskService) EnqueueTaskForSquadLeaderWithHandoff(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, squadID pgtype.UUID, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, leaderID, pgtype.UUID{}, true, squadID, false, handoffNote, actorUserID, pgtype.UUID{}, OriginDerived, delegationReturnIDs...)
-}
-
 func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
 	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, delegationReturnIDs...)
 }
@@ -1623,7 +1661,7 @@ func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issu
 	// agent-authored comment is a delegation (the parent task's human is
 	// copied); a member mention is direct_human. attr.UserID matches the
 	// pre-MUL-4302 value, so authorization is unchanged.
-	attr := s.attributionForIssueTask(ctx, issue, triggerCommentID, attribution.SourceDelegation, actorUserID)
+	attr := s.attributionForIssueTaskWithQueries(ctx, q, issue, triggerCommentID, attribution.SourceDelegation, actorUserID)
 	// No precise human resolved → owner_fallback (accountable = agent owner), or
 	// refuse the enqueue if the workspace is fail-closed (MUL-4302 §3.5).
 	attr, err = s.applyAttributionFallback(ctx, attr, agent)
@@ -1643,7 +1681,7 @@ func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issu
 		Priority:             priorityToInt(issue.Priority),
 		TriggerCommentID:     triggerCommentID,
 		CoalescedCommentIds:  coalescedCommentIDs,
-		TriggerSummary:       s.buildCommentTriggerSummary(ctx, issue.WorkspaceID, triggerCommentID),
+		TriggerSummary:       s.buildCommentTriggerSummaryWithQueries(ctx, q, issue.WorkspaceID, triggerCommentID),
 		IsLeaderTask:         pgtype.Bool{Bool: isLeader, Valid: isLeader},
 		ForceFreshSession:    pgtype.Bool{Bool: forceFreshSession, Valid: forceFreshSession},
 		HandoffNote:          pgtype.Text{String: handoffNote, Valid: handoffNote != ""},
@@ -6263,14 +6301,10 @@ func (s *TaskService) promoteNewestSurvivingComment(ctx context.Context, ids []p
 // (rerun_of_task_id) to reuse its workdir and, when the failure did not poison
 // the conversation, resume its session (MUL-4869).
 func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dispatch RerunDelegation) (db.AgentTaskQueue, error) {
-	target := delegation.Assignee{Type: "agent", ID: util.UUIDToString(agentID)}
-	if isLeader && squadID.Valid {
-		target = delegation.Assignee{Type: "squad", ID: util.UUIDToString(squadID)}
-	}
 	var task db.AgentTaskQueue
 	var attr attribution.Result
 	write := func(q *db.Queries) error {
-		returnIDs, err := s.rerunDelegationReturnIDs(ctx, q, issue, target, dispatch)
+		returnIDs, err := s.rerunDelegationReturnIDs(ctx, q, issue, dispatch)
 		if err != nil {
 			return err
 		}
@@ -6292,22 +6326,20 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 	return task, nil
 }
 
-// rerunDelegationReturnIDs accepts the rerunning actor's address (when it is
-// an agent) and builds the explicit set the new run carries: the target
-// assignment's relationships plus the named source run's complete set. It runs
-// in the enqueue transaction, so a managed source that completed since
-// authentication is refused by delegation.Ensure.
-func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, target delegation.Assignee, dispatch RerunDelegation) ([]pgtype.UUID, error) {
+// rerunDelegationReturnIDs builds the explicit set a rerun carries: the exact
+// source run's complete set plus the rerunning actor's accepted relationship.
+// It never substitutes the target assignment's history or a worker's latest
+// run. It runs in the enqueue transaction, so a managed source that completed
+// since authentication is refused by delegation.Ensure and leaves no return.
+func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, dispatch RerunDelegation) ([]pgtype.UUID, error) {
+	var sets [][]pgtype.UUID
 	if dispatch.Address != nil {
-		if _, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), target, *dispatch.Address, dispatch.CreatedBy); err != nil {
+		accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *dispatch.Address, dispatch.CreatedBy)
+		if err != nil {
 			return nil, err
 		}
+		sets = append(sets, []pgtype.UUID{accepted.ID})
 	}
-	targetIDs, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, target)
-	if err != nil {
-		return nil, err
-	}
-	sets := [][]pgtype.UUID{targetIDs}
 	if dispatch.InheritTaskID.Valid {
 		inherited, err := delegation.RunReturnIDs(ctx, q, dispatch.InheritTaskID)
 		if err != nil {

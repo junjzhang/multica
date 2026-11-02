@@ -966,7 +966,7 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
 	}
 
-	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, plan, delivered, nil)
+	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, plan, delivered)
 
 	// Usage telemetry is best-effort and deliberately outside the run's
 	// success path: a failed counter must never cost the user the run.

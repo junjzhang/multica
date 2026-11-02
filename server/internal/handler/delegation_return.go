@@ -80,93 +80,109 @@ func (h *Handler) prepareDelegationReturn(r *http.Request, issue db.Issue, actor
 	return &address, nil
 }
 
-// recordDelegationReturn records a prepared address for one exact assignment
-// slot through the caller's transaction and returns the accepted row's id. It
-// is a no-op when the dispatch needs no address. A managed address is locked
-// and re-checked by delegation.Ensure, so a source run that completed after
-// authentication cannot still accept this delegation.
-func recordDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, assignee delegation.Assignee, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
+// recordDelegationReturn records a prepared address for one (issue, dispatcher)
+// through the caller's transaction and returns the accepted row's id. A managed
+// address is locked and re-checked by delegation.Ensure, so a source run that
+// completed after authentication cannot still accept this delegation.
+func recordDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
 	if address == nil {
 		return pgtype.UUID{}, nil
 	}
-	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), assignee, *address, createdBy)
+	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *address, createdBy)
 	if err != nil {
 		return pgtype.UUID{}, err
 	}
 	return accepted.ID, nil
 }
 
-// commentTriggerAssignee names the assignment slot one computed comment trigger
-// dispatches to. A squad leader is recorded against the squad, not against the
-// leader's own agent id, so a direct assignment to that leader cannot borrow the
-// squad's accepted returns.
-func commentTriggerAssignee(issue db.Issue, trigger commentAgentTrigger) delegation.Assignee {
-	if trigger.Squad != nil {
-		return delegation.Assignee{Type: "squad", ID: uuidToString(trigger.Squad.ID)}
+// recordCommentDelegationReturn records the comment's accepted return in the
+// comment transaction and persists the comment -> return relation that every
+// later run path reads. A nil address (member author) is a no-op.
+func recordCommentDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
+	if address == nil {
+		return pgtype.UUID{}, nil
 	}
-	if trigger.Source == commentTriggerSourceIssueAssignee {
-		return delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *address, createdBy)
+	if err != nil {
+		return pgtype.UUID{}, err
 	}
-	return delegation.Assignee{Type: "agent", ID: uuidToString(trigger.Agent.ID)}
+	if err := delegation.LinkCommentReturn(ctx, q, commentID, accepted.ID); err != nil {
+		return pgtype.UUID{}, err
+	}
+	return accepted.ID, nil
 }
 
-// recordCommentDelegationReturns records the author's accepted return for every
-// executable trigger in the comment transaction. The result is keyed by the
-// executing agent id and carries the explicit return set for that assignment
-// slot, so a multi-target comment does not attach one target's relationship to
-// another target's run. A nil address (member author) returns nil.
-func recordCommentDelegationReturns(ctx context.Context, q *db.Queries, issue db.Issue, address *delegation.Address, plan commentTriggerPlan, createdBy string) (map[string][]pgtype.UUID, error) {
-	if address == nil || len(plan.triggers) == 0 {
-		return nil, nil
-	}
-	returns := make(map[string][]pgtype.UUID, len(plan.triggers))
-	for _, trigger := range plan.triggers {
-		assignee := commentTriggerAssignee(issue, trigger)
-		if _, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), assignee, *address, createdBy); err != nil {
-			return nil, err
-		}
-		ids, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, assignee)
-		if err != nil {
-			return nil, err
-		}
-		returns[uuidToString(trigger.Agent.ID)] = ids
-	}
-	return returns, nil
+// assignmentDispatch is the exact intent set one assignment write accepts:
+// the current actor's accepted return, the target slot's still-unstarted
+// backlog intent, and the replaced assignment's intent/run relationships.
+type assignmentDispatch struct {
+	target         delegation.Assignee
+	previous       *delegation.Assignee
+	previousIntent *delegation.AssignmentIntent
+	returnIDs      []pgtype.UUID
 }
 
-// collectDispatchReturns builds the explicit accepted set a run about to be
-// created must carry:
-//
-//   - the target assignment's own accepted relationships (which include the
-//     current dispatcher's row just recorded, plus a backlog row for this
-//     assignee that no run consumed yet);
-//   - the replaced assignment's relationships for an executor reassignment, so
-//     the original recipients still receive the result; and
-//   - the source run's complete set for a rerun or continuation.
-//
-// It never uses every historical return on the issue or every unlinked row:
-// those would attach another dispatcher's or another worker's relationship.
-func (h *Handler) collectDispatchReturns(ctx context.Context, q *db.Queries, issue db.Issue, assignee delegation.Assignee, previous *delegation.Assignee, sourceTaskID pgtype.UUID) ([]pgtype.UUID, error) {
-	ids, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, assignee)
+// prepareAssignmentDispatch computes the accepted set for one assignment
+// without writing. It deliberately never lists every return on the issue or
+// every run of the target worker: a backlog slot contributes only its own
+// unconsumed intent, and a reassignment contributes only the replaced
+// assignment's set and its corresponding run.
+func (h *Handler) prepareAssignmentDispatch(ctx context.Context, q *db.Queries, issue db.Issue, target delegation.Assignee, previous *delegation.Assignee, accepted pgtype.UUID) (*assignmentDispatch, error) {
+	dispatch := &assignmentDispatch{target: target, previous: previous}
+	sets := [][]pgtype.UUID{{accepted}}
+
+	current, err := delegation.LoadAssignmentIntent(ctx, q, issue.ID, target)
 	if err != nil {
 		return nil, err
 	}
-	sets := [][]pgtype.UUID{ids}
-	if previous != nil {
-		previousIDs, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, *previous)
+	if current != nil && !current.TaskID.Valid {
+		// The backlog intent for exactly this slot has not started yet.
+		sets = append(sets, current.ReturnIDs)
+	}
+	if previous != nil && !sameAssignee(*previous, target) {
+		intent, err := delegation.LoadAssignmentIntent(ctx, q, issue.ID, *previous)
 		if err != nil {
 			return nil, err
 		}
-		sets = append(sets, previousIDs)
-	}
-	if sourceTaskID.Valid {
-		inherited, err := delegation.RunReturnIDs(ctx, q, sourceTaskID)
-		if err != nil {
-			return nil, err
+		dispatch.previousIntent = intent
+		if intent != nil {
+			sets = append(sets, intent.ReturnIDs)
+			if intent.TaskID.Valid {
+				inherited, err := delegation.RunReturnIDs(ctx, q, intent.TaskID)
+				if err != nil {
+					return nil, err
+				}
+				sets = append(sets, inherited)
+			}
 		}
-		sets = append(sets, inherited)
 	}
-	return delegation.UnionReturnIDs(sets...), nil
+	dispatch.returnIDs = delegation.UnionReturnIDs(sets...)
+	return dispatch, nil
+}
+
+// commitAssignmentIntent persists the exact set before the run is created, then
+// records the run that carries it. A replaced assignment's intent is removed so
+// a much later assignment back to that slot cannot resurrect a stale
+// dispatcher.
+func commitAssignmentIntent(ctx context.Context, q *db.Queries, issue db.Issue, dispatch *assignmentDispatch, taskID pgtype.UUID) error {
+	if dispatch == nil {
+		return nil
+	}
+	if dispatch.previous != nil && !sameAssignee(*dispatch.previous, dispatch.target) {
+		if err := delegation.DeleteAssignmentIntent(ctx, q, issue.ID, *dispatch.previous); err != nil {
+			return err
+		}
+	}
+	if len(delegation.UnionReturnIDs(dispatch.returnIDs)) == 0 {
+		// A human assignment with no prior delegated intent dispatches work but
+		// accepts no return address. Do not leave an empty intent behind.
+		return nil
+	}
+	return delegation.StoreAssignmentIntent(ctx, q, issue.WorkspaceID, issue.ID, dispatch.target, dispatch.returnIDs, taskID)
+}
+
+func sameAssignee(a, b delegation.Assignee) bool {
+	return a.Type == b.Type && a.ID == b.ID
 }
 
 // previousAssignee returns the replaced assignment slot for a reassignment.
@@ -190,7 +206,8 @@ func asDelegationReturnError(err error) error {
 	case errors.Is(err, delegation.ErrReturnMissing),
 		errors.Is(err, delegation.ErrReturnInvalid),
 		errors.Is(err, delegation.ErrReturnNotReady),
-		errors.Is(err, delegation.ErrReturnSourceClosed):
+		errors.Is(err, delegation.ErrReturnSourceClosed),
+		errors.Is(err, delegation.ErrReturnConflict):
 		return err
 	default:
 		return nil
@@ -199,7 +216,8 @@ func asDelegationReturnError(err error) error {
 
 // writeDelegationReturnError reports a refused delegation with a stable code so
 // an agent can distinguish "retry after the session pin lands" from "your
-// address is wrong" and from "your run has already finished".
+// address is wrong", from "your run has already finished", and from an
+// existing different physical session that needs an explicit takeover.
 func writeDelegationReturnError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, delegation.ErrReturnNotReady):
@@ -211,6 +229,11 @@ func writeDelegationReturnError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"code":  "delegation_return_source_closed",
 			"error": "The delegating run is no longer active. No child work was created; delegate from an active run instead.",
+		})
+	case errors.Is(err, delegation.ErrReturnConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":  "delegation_return_conflict",
+			"error": "This agent already accepted a different physical return session on this issue. No child work was created; use an explicit session takeover to move the accepted address.",
 		})
 	case errors.Is(err, delegation.ErrReturnInvalid):
 		writeJSON(w, http.StatusBadRequest, map[string]any{

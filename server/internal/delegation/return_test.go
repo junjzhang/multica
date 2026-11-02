@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -247,7 +248,7 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 	agentID, sessionID, _ := externalSession(t, "ensure")
 	issueID := dbfx.Issue(t, "Delegation ensure")
 
-	first, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
+	first, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: sessionID,
 	}, testUserID)
 	if err != nil {
@@ -257,27 +258,38 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 		t.Fatalf("first row = %+v", first)
 	}
 
-	// A second session for the SAME dispatcher must not replace the first
-	// accepted address for this key.
+	// A second physical session for the SAME dispatcher is a conflict, not a
+	// silent reuse of the old session and not a silent overwrite.
 	secondSession := dbfx.Insert(t, "external_agent_session", testutil.Cols{
 		"workspace_id": testWorkspaceID, "owner_user_id": testUserID, "agent_id": agentID,
 		"provider": "paseo", "host_id": "ensure-second-host",
 		"session_id": "ensure-second-host-session", "display_name": "second",
 		"daemon_id": "ensure-second-daemon",
 	})
-	sameKey, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
+	if _, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: secondSession,
+	}, testUserID); !errors.Is(err, ErrReturnConflict) {
+		t.Fatalf("different session err = %v, want ErrReturnConflict", err)
+	}
+	// An explicit takeover moves the binding; the accepted address follows it.
+	if _, err := sessionroute.Bind(context.Background(), testQueries, sessionroute.BindRequest{
+		WorkspaceID: testWorkspaceID, AgentID: agentID, IssueID: issueID, SessionID: secondSession, CreatedBy: testUserID,
+	}); err != nil {
+		t.Fatalf("explicit takeover: %v", err)
+	}
+	takenOver, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: secondSession,
 	}, testUserID)
 	if err != nil {
-		t.Fatalf("same-key Ensure: %v", err)
+		t.Fatalf("Ensure after takeover: %v", err)
 	}
-	if sameKey.ID != first.ID || util.UUIDToString(sameKey.ExternalSessionID) != util.UUIDToString(first.ExternalSessionID) {
-		t.Fatalf("same dispatcher replaced its accepted return: %+v vs %+v", sameKey, first)
+	if takenOver.ID != first.ID || util.UUIDToString(takenOver.ExternalSessionID) != secondSession {
+		t.Fatalf("takeover did not move the accepted address: %+v", takenOver)
 	}
 
 	// A DIFFERENT dispatcher has its own key and its own accepted address.
 	otherAgent, otherSession, _ := externalSession(t, "ensure-other")
-	second, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(otherAgent), Address{
+	second, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 		DispatcherAgentID: otherAgent, Kind: KindExternalSession, ExternalSessionID: otherSession,
 	}, testUserID)
 	if err != nil {
@@ -309,7 +321,7 @@ func TestConcurrentEnsureIsPerDispatcher(t *testing.T) {
 	} {
 		go func(addr Address) {
 			<-start
-			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(addr.DispatcherAgentID), addr, testUserID)
+			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, addr, testUserID)
 			results <- result{row: row, err: err}
 		}(candidate)
 	}
@@ -336,7 +348,7 @@ func TestConcurrentEnsureSameDispatcherAcceptsOneRow(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			<-start
-			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
+			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 				DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: sessionID,
 			}, testUserID)
 			rows <- row

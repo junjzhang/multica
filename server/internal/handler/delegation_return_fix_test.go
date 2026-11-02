@@ -46,11 +46,26 @@ func lockHolderPID(t *testing.T, tx pgx.Tx) int32 {
 	return pid
 }
 
+// returnsForAssignee returns the accepted relationships the current assignment
+// intent for that slot carries. Comment runs use the dispatcher's address
+// directly; they never read this helper.
 func returnsForAssignee(t *testing.T, issueID string, assigneeType, assigneeID string) []db.IssueDelegationReturn {
 	t.Helper()
-	var out []db.IssueDelegationReturn
+	rows, err := testHandler.Queries.ListIssueAssignmentDelegationReturnIDs(context.Background(), db.ListIssueAssignmentDelegationReturnIDsParams{
+		IssueID:      parseUUID(issueID),
+		AssigneeType: assigneeType,
+		AssigneeID:   parseUUID(assigneeID),
+	})
+	if err != nil {
+		return nil
+	}
+	out := make([]db.IssueDelegationReturn, 0, len(rows))
+	intentIDs := make(map[string]bool, len(rows))
+	for _, id := range rows {
+		intentIDs[uuidToString(id)] = true
+	}
 	for _, row := range acceptedReturns(t, issueID) {
-		if row.AssigneeType == assigneeType && uuidToString(row.AssigneeID) == assigneeID {
+		if intentIDs[uuidToString(row.ID)] {
 			out = append(out, row)
 		}
 	}
@@ -177,9 +192,14 @@ func TestCoalescedCommentLinkRollsBackWithFold(t *testing.T) {
 		t.Fatalf("decode first comment: %v", err)
 	}
 	targetTaskID := latestTaskIDFor(t, issueID, target)
-	firstRows := returnsForAssignee(t, issueID, "agent", target)
-	if len(firstRows) != 1 || uuidToString(firstRows[0].DispatcherAgentID) != firstAgent || uuidToString(firstRows[0].SourceTaskID) != firstTask {
-		t.Fatalf("first accepted return = %+v, want %s/%s", firstRows, firstAgent, firstTask)
+	var firstRows []db.IssueDelegationReturn
+	for _, row := range acceptedReturns(t, issueID) {
+		if uuidToString(row.DispatcherAgentID) == firstAgent && uuidToString(row.SourceTaskID) == firstTask {
+			firstRows = append(firstRows, row)
+		}
+	}
+	if len(firstRows) != 1 {
+		t.Fatalf("first accepted return = %+v, want one row for %s/%s", firstRows, firstAgent, firstTask)
 	}
 
 	fn := "work86_fail_comment_link_" + strings.ReplaceAll(secondAgent, "-", "_")
@@ -220,15 +240,14 @@ func TestCoalescedCommentLinkRollsBackWithFold(t *testing.T) {
 	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE id = $1 AND $2::uuid = ANY(coalesced_comment_ids)`, targetTaskID, secondComment.ID); n != 0 {
 		t.Fatal("failed link left the comment folded into the run")
 	}
-	secondReturn := returnsForAssignee(t, issueID, "agent", target)
 	var secondAccepted db.IssueDelegationReturn
-	for _, row := range secondReturn {
-		if uuidToString(row.DispatcherAgentID) == secondAgent {
+	for _, row := range acceptedReturns(t, issueID) {
+		if uuidToString(row.DispatcherAgentID) == secondAgent && uuidToString(row.SourceTaskID) == secondTask {
 			secondAccepted = row
 		}
 	}
-	if !secondAccepted.ID.Valid || uuidToString(secondAccepted.SourceTaskID) != secondTask {
-		t.Fatalf("accepted return for the second dispatcher is missing: %+v", secondReturn)
+	if !secondAccepted.ID.Valid {
+		t.Fatalf("accepted return for the second dispatcher is missing: %+v", acceptedReturns(t, issueID))
 	}
 	if got := returnIDs(taskReturnIDs(t, targetTaskID)); got[uuidToString(secondAccepted.ID)] {
 		t.Fatal("failed link attached the second dispatcher to the run")
@@ -296,11 +315,13 @@ func TestBacklogReturnSurvivesAnotherDispatchAndStartsWithItsOwnRun(t *testing.T
 	}
 	cTaskID := latestTaskIDFor(t, issueID, targetC)
 	cReturns := taskReturnIDs(t, cTaskID)
-	if len(cReturns) != 1 {
-		t.Fatalf("other worker's run returns = %d, want only its own dispatch: %+v", len(cReturns), cReturns)
+	if len(cReturns) != 1 || uuidToString(cReturns[0].ID) != backlogReturnID {
+		t.Fatalf("C run returns = %+v, want the author's own accepted address %s", cReturns, backlogReturnID)
 	}
-	if got := returnIDs(cReturns); got[backlogReturnID] {
-		t.Fatal("other worker's run carried the backlog relationship")
+	// The comment run carries the author's address, but it must not consume the
+	// backlog intent: B's slot still has no run and still owns the relation.
+	if n := countValue(t, `SELECT count(*) FROM issue_assignment_delegation WHERE issue_id=$1 AND assignee_id=$2 AND task_id IS NULL`, issueID, targetB); n != 1 {
+		t.Fatal("another comment run consumed the unconsumed backlog intent")
 	}
 
 	// Unassign, then explicitly assign B while leaving backlog: the start must
@@ -366,30 +387,39 @@ func TestReassignmentKeepsOnlyReplacedAssignmentsReturns(t *testing.T) {
 	}
 	zTaskID := latestTaskIDFor(t, issueID, targetZ)
 
-	ax := returnsForAssignee(t, issueID, "agent", targetX)
-	by := returnsForAssignee(t, issueID, "agent", targetY)
-	az := returnsForAssignee(t, issueID, "agent", targetZ)
-	if len(ax) != 1 || uuidToString(ax[0].DispatcherAgentID) != dispatcherA || uuidToString(ax[0].SourceTaskID) != sourceA {
-		t.Fatalf("X return = %+v", ax)
+	var aReturn, bReturn db.IssueDelegationReturn
+	for _, row := range acceptedReturns(t, issueID) {
+		switch uuidToString(row.DispatcherAgentID) {
+		case dispatcherA:
+			aReturn = row
+		case dispatcherB:
+			bReturn = row
+		}
 	}
-	if len(by) != 1 || uuidToString(by[0].DispatcherAgentID) != dispatcherB || uuidToString(by[0].SourceTaskID) != sourceB {
-		t.Fatalf("Y return = %+v", by)
+	if !aReturn.ID.Valid || uuidToString(aReturn.SourceTaskID) != sourceA {
+		t.Fatalf("A return = %+v", aReturn)
 	}
-	if len(az) != 1 || uuidToString(az[0].DispatcherAgentID) != dispatcherA || uuidToString(az[0].SourceTaskID) != sourceA {
-		t.Fatalf("Z return = %+v", az)
+	if !bReturn.ID.Valid || uuidToString(bReturn.SourceTaskID) != sourceB {
+		t.Fatalf("B return = %+v", bReturn)
 	}
-	if got := returnIDs(taskReturnIDs(t, xTaskID)); len(got) != 1 || !got[uuidToString(ax[0].ID)] {
-		t.Fatalf("X run returns = %v, want only %s", got, uuidToString(ax[0].ID))
+	if got := returnIDs(taskReturnIDs(t, xTaskID)); len(got) != 1 || !got[uuidToString(aReturn.ID)] {
+		t.Fatalf("X run returns = %v, want only %s", got, uuidToString(aReturn.ID))
 	}
-	if got := returnIDs(taskReturnIDs(t, yTaskID)); len(got) != 1 || !got[uuidToString(by[0].ID)] {
-		t.Fatalf("Y run returns = %v, want only %s", got, uuidToString(by[0].ID))
+	if got := returnIDs(taskReturnIDs(t, yTaskID)); len(got) != 1 || !got[uuidToString(bReturn.ID)] {
+		t.Fatalf("Y run returns = %v, want only %s", got, uuidToString(bReturn.ID))
 	}
 	zReturns := returnIDs(taskReturnIDs(t, zTaskID))
-	if len(zReturns) != 2 || !zReturns[uuidToString(ax[0].ID)] || !zReturns[uuidToString(az[0].ID)] {
-		t.Fatalf("Z run returns = %v, want exactly the replaced X row and the reassigner's own row", zReturns)
+	if len(zReturns) != 1 || !zReturns[uuidToString(aReturn.ID)] {
+		t.Fatalf("Z run returns = %v, want only the replaced assignment's recipient %s", zReturns, uuidToString(aReturn.ID))
 	}
-	if zReturns[uuidToString(by[0].ID)] {
+	if zReturns[uuidToString(bReturn.ID)] {
 		t.Fatal("reassignment leaked the independent Y dispatch into Z's run")
+	}
+	if n := countValue(t, `SELECT count(*) FROM issue_assignment_delegation WHERE issue_id=$1 AND assignee_id=$2`, issueID, targetX); n != 0 {
+		t.Fatalf("replaced assignment intent rows = %d, want none", n)
+	}
+	if got := returnsForAssignee(t, issueID, "agent", targetZ); len(got) != 1 || uuidToString(got[0].ID) != uuidToString(aReturn.ID) {
+		t.Fatalf("Z assignment intent = %+v, want %s", got, uuidToString(aReturn.ID))
 	}
 }
 
@@ -532,9 +562,9 @@ func TestCompletedSourceRemainsStoredReturnTarget(t *testing.T) {
 	}
 }
 
-// One comment that mentions two workers is two dispatches. Each run carries the
-// accepted relationship for its own assignment slot; the other worker's row is
-// never attached to it.
+// One comment that mentions two workers is two dispatches by the SAME author.
+// Both runs carry that author's accepted address, but neither run invents a
+// second recipient nor attaches another dispatcher's address.
 func TestCommentToTwoTargetsKeepsEachReturnOnItsOwnRun(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -552,33 +582,26 @@ func TestCommentToTwoTargetsKeepsEachReturnOnItsOwnRun(t *testing.T) {
 		t.Fatalf("multi-target comment = %d: %s", w.Code, w.Body.String())
 	}
 	rows := acceptedReturns(t, issueID)
-	if len(rows) != 2 {
-		t.Fatalf("accepted returns = %d, want one per target: %+v", len(rows), rows)
+	if len(rows) != 1 {
+		t.Fatalf("accepted returns = %d, want one address per dispatcher: %+v", len(rows), rows)
 	}
-	byAssignee := map[string]db.IssueDelegationReturn{}
-	for _, row := range rows {
-		if uuidToString(row.DispatcherAgentID) != dispatcher || uuidToString(row.SourceTaskID) != sourceTask {
-			t.Fatalf("accepted return = %+v, want dispatcher %s source %s", row, dispatcher, sourceTask)
-		}
-		byAssignee[uuidToString(row.AssigneeID)] = row
+	accepted := rows[0]
+	if uuidToString(accepted.DispatcherAgentID) != dispatcher || uuidToString(accepted.SourceTaskID) != sourceTask {
+		t.Fatalf("accepted return = %+v, want dispatcher %s source %s", accepted, dispatcher, sourceTask)
 	}
 	for _, target := range []string{targetA, targetB} {
 		taskID := latestTaskIDFor(t, issueID, target)
 		got := taskReturnIDs(t, taskID)
-		own, ok := byAssignee[target]
-		if !ok {
-			t.Fatalf("no accepted return for target %s", target)
-		}
-		if len(got) != 1 || uuidToString(got[0].ID) != uuidToString(own.ID) {
-			t.Fatalf("target %s run returns = %+v, want only %s", target, got, uuidToString(own.ID))
+		if len(got) != 1 || uuidToString(got[0].ID) != uuidToString(accepted.ID) {
+			t.Fatalf("target %s run returns = %+v, want only %s", target, got, uuidToString(accepted.ID))
 		}
 	}
 }
 
-// A comment that starts a new run persists the run and its accepted return in
-// one transaction. A link failure rolls the run back, so executable work never
-// exists without the dispatcher it must return to.
-func TestNewCommentRunLinkFailureRollsBackRun(t *testing.T) {
+// A comment that starts a new run persists the comment, its accepted return
+// relation, and the run in one transaction. A link failure rolls all three
+// back, so a saved comment can never lose the dispatcher that made it work.
+func TestNewCommentRunLinkFailureRollsBackComment(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -606,16 +629,19 @@ func TestNewCommentRunLinkFailureRollsBackRun(t *testing.T) {
 	content := fmt.Sprintf("[@Target](mention://agent/%s) new run link %d", target, time.Now().UnixNano())
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateComment), http.MethodPost,
 		"/api/issues/"+issueID+"/comments", map[string]any{"content": content}, map[string]string{"id": issueID}, nil)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("comment = %d, want the comment saved: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("comment = %d, want the failed atomic write to roll back: %s", w.Code, w.Body.String())
 	}
-	if n := countValue(t, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content = $2`, issueID, content); n != 1 {
-		t.Fatalf("comment rows = %d, want 1", n)
+	if n := countValue(t, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content = $2`, issueID, content); n != 0 {
+		t.Fatalf("rolled-back comment rows = %d, want 0", n)
 	}
 	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target); n != 0 {
 		t.Fatalf("failed link left %d executable runs", n)
 	}
-	if n := countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id = $1 AND dispatcher_agent_id = $2`, issueID, dispatcher); n != 1 {
-		t.Fatalf("accepted return rows = %d, want the durable comment return", n)
+	if n := countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id = $1 AND dispatcher_agent_id = $2`, issueID, dispatcher); n != 0 {
+		t.Fatalf("rolled-back accepted return rows = %d, want 0", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM comment_delegation_return l JOIN issue_delegation_return r ON r.id=l.delegation_return_id WHERE r.issue_id=$1`, issueID); n != 0 {
+		t.Fatalf("rolled-back comment intent rows = %d, want 0", n)
 	}
 }

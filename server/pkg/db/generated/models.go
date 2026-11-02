@@ -661,6 +661,12 @@ type Comment struct {
 	SuppressedAgentIds []pgtype.UUID      `json:"suppressed_agent_ids"`
 }
 
+type CommentDelegationReturn struct {
+	CommentID          pgtype.UUID        `json:"comment_id"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type CommentReaction struct {
 	ID          pgtype.UUID        `json:"id"`
 	CommentID   pgtype.UUID        `json:"comment_id"`
@@ -947,6 +953,23 @@ type Issue struct {
 	MergeGrantedAt     pgtype.Timestamptz `json:"merge_granted_at"`
 }
 
+type IssueAssignmentDelegation struct {
+	IssueID      pgtype.UUID        `json:"issue_id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	AssigneeType string             `json:"assignee_type"`
+	AssigneeID   pgtype.UUID        `json:"assignee_id"`
+	TaskID       pgtype.UUID        `json:"task_id"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type IssueAssignmentDelegationReturn struct {
+	IssueID            pgtype.UUID        `json:"issue_id"`
+	AssigneeType       string             `json:"assignee_type"`
+	AssigneeID         pgtype.UUID        `json:"assignee_id"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type IssueChildEvent struct {
 	ID           pgtype.UUID        `json:"id"`
 	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
@@ -964,8 +987,6 @@ type IssueDelegationReturn struct {
 	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
 	IssueID           pgtype.UUID        `json:"issue_id"`
 	DispatcherAgentID pgtype.UUID        `json:"dispatcher_agent_id"`
-	AssigneeType      string             `json:"assignee_type"`
-	AssigneeID        pgtype.UUID        `json:"assignee_id"`
 	ReturnKind        string             `json:"return_kind"`
 	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
 	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
