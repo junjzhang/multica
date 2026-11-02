@@ -12,6 +12,7 @@ import (
 // the host's own server/connection id (not a hostname); SessionID is the
 // host-side agent id (for Paseo, the existing Paseo agent id).
 type ExternalSession struct {
+	ID          string  `json:"id,omitempty"`
 	Provider    string  `json:"provider"`
 	HostID      string  `json:"host_id"`
 	SessionID   string  `json:"session_id"`

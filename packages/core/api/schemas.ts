@@ -1238,6 +1238,7 @@ export const EMPTY_CREATE_FEEDBACK_RESPONSE: CreateFeedbackResponse = {
 };
 
 export const ExternalSessionSchema = z.object({
+  id: z.string().optional().catch(undefined),
   provider: z.string().default(""),
   host_id: z.string().default(""),
   session_id: z.string().default(""),

@@ -20,11 +20,13 @@ import (
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
-// ExternalSessionResponse is the frozen wire shape for a host session. host_id
+// ExternalSessionResponse identifies a registered host session. id names the
+// Multica session record used for issue bindings. host_id
 // is the Paseo server/connection id (never a hostname) and session_id is the
 // Paseo agent id (never the underlying Codex thread id). daemon_id names the
 // authorized Multica daemon that delivers mailbox work locally.
 type ExternalSessionResponse struct {
+	ID          string  `json:"id,omitempty"`
 	Provider    string  `json:"provider"`
 	HostID      string  `json:"host_id"`
 	SessionID   string  `json:"session_id"`
@@ -35,6 +37,7 @@ type ExternalSessionResponse struct {
 
 func externalSessionToResponse(s db.ExternalAgentSession) *ExternalSessionResponse {
 	return &ExternalSessionResponse{
+		ID:          uuidToString(s.ID),
 		Provider:    s.Provider,
 		HostID:      s.HostID,
 		SessionID:   s.SessionID,

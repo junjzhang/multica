@@ -101,6 +101,23 @@ describe("AgentSchema WORK-9 fields", () => {
     const parsed = AgentListSchema.parse([externalAgent, { name: "no id" }, { id: "agent-3" }]);
     expect(parsed.map((agent) => agent.id)).toEqual(["agent-1", "agent-3"]);
   });
+
+  it("keeps the registered session id distinct from the host id and tolerates older responses", () => {
+    const registered = AgentSchema.parse({
+      ...externalAgent,
+      external_session: { ...externalSession, id: "registered-session-1" },
+    });
+    expect(registered.external_session?.id).toBe("registered-session-1");
+    expect(registered.external_session?.session_id).toBe("agent-1");
+    expect(AgentSchema.parse(externalAgent).external_session?.id).toBeUndefined();
+
+    const malformed = AgentSchema.parse({
+      ...externalAgent,
+      external_session: { ...externalSession, id: 42 },
+    });
+    expect(malformed.external_session?.id).toBeUndefined();
+    expect(malformed.external_session?.session_id).toBe("agent-1");
+  });
 });
 
 describe("IssueSchema external collaboration projection", () => {
