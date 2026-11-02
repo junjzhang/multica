@@ -684,7 +684,7 @@ func TestReassignmentPreservesAcceptedReturn(t *testing.T) {
 	firstTarget, _ := executableTarget(t, "reassign-first")
 	secondTarget, _ := executableTarget(t, "reassign-second")
 	issueID := dbfx.Issue(t, "Reassign delegated issue")
-	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
+	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: firstTarget}, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {
@@ -724,7 +724,7 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 		"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
 		"session_id": "target-old-session", "work_dir": "/work/target",
 	})
-	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
+	accepted, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: target}, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {

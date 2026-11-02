@@ -211,19 +211,13 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 	// A rerun is a fresh dispatch, not a reason to change who receives the
 	// result: the source run's complete accepted set is preserved, and the
 	// rerunning agent's own accepted address is added. The address is validated
-	// before anything is cancelled or created.
+	// before anything is cancelled or created, but it is recorded only inside
+	// the enqueue transaction below, after eligibility has passed — a rerun
+	// refused by triage or the invoke gate must leave no accepted return.
 	dispatchReturn, derr := h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})
 	if derr != nil {
 		writeDelegationReturnError(w, derr)
 		return
-	}
-	var actorReturnID pgtype.UUID
-	if dispatchReturn != nil {
-		actorReturnID, derr = recordDelegationReturn(r.Context(), h.Queries, issue, dispatchReturn, requestUserID(r))
-		if derr != nil {
-			writeDelegationReturnError(w, derr)
-			return
-		}
 	}
 	// The source run is the named task, or the most recent earlier run for the
 	// rerun target when the request names none. A rerun never substitutes an
@@ -247,19 +241,21 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	returnIDs, collectErr := h.collectDispatchReturns(r.Context(), issue, actorReturnID, inheritTaskID, false)
-	if collectErr != nil {
-		writeDelegationReturnError(w, collectErr)
-		return
-	}
-
-	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, returnIDs...)
+	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, service.RerunDelegation{
+		Address:       dispatchReturn,
+		CreatedBy:     requestUserID(r),
+		InheritTaskID: inheritTaskID,
+	})
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
 		return
 	}
 	if errors.Is(err, service.ErrIssueInTriage) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonIssueInTriage)
+		return
+	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
 		return
 	}
 	// Not a dispatch refusal: the issue may well be runnable, and only the named

@@ -32,7 +32,7 @@ func TestCommentThreadQueuesMergeAndExecuteIndependently(t *testing.T) {
 	enqueue := func(commentID string, pending bool, want DispatchStatus) {
 		t.Helper()
 		result := testHandler.enqueueCommentAgentTriggers(ctx, issue, parseUUID(commentID),
-			[]commentAgentTrigger{{Agent: agent, Source: commentTriggerSourceMentionAgent, AlreadyPending: pending}})
+			[]commentAgentTrigger{{Agent: agent, Source: commentTriggerSourceMentionAgent, AlreadyPending: pending}}, nil)
 		if result[agentID].status != want {
 			t.Fatalf("enqueue %s: got %+v, want %s", commentID, result[agentID], want)
 		}

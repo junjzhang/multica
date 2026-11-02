@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -81,69 +80,106 @@ func (h *Handler) prepareDelegationReturn(r *http.Request, issue db.Issue, actor
 	return &address, nil
 }
 
-// recordDelegationReturn records a prepared address through the caller's
-// transaction and returns the accepted row's id. It is a no-op when the
-// dispatch needs no address.
-func recordDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
+// recordDelegationReturn records a prepared address for one exact assignment
+// slot through the caller's transaction and returns the accepted row's id. It
+// is a no-op when the dispatch needs no address. A managed address is locked
+// and re-checked by delegation.Ensure, so a source run that completed after
+// authentication cannot still accept this delegation.
+func recordDelegationReturn(ctx context.Context, q *db.Queries, issue db.Issue, assignee delegation.Assignee, address *delegation.Address, createdBy string) (pgtype.UUID, error) {
 	if address == nil {
 		return pgtype.UUID{}, nil
 	}
-	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *address, createdBy)
+	accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), assignee, *address, createdBy)
 	if err != nil {
 		return pgtype.UUID{}, err
 	}
 	return accepted.ID, nil
 }
 
-// collectDispatchReturns builds the complete set of accepted relationships the
-// run about to be created must carry:
-//
-//   - the current dispatcher's accepted return (when it is an agent);
-//   - the source run's complete set for a rerun or continuation;
-//   - every accepted return on the issue for an executor reassignment, so the
-//     original recipients still receive the result; or, otherwise, only
-//     relationships no run carries yet (a backlog delegation whose execution
-//     is only now starting).
-func (h *Handler) collectDispatchReturns(ctx context.Context, issue db.Issue, actorReturnID, sourceTaskID pgtype.UUID, inheritAll bool) ([]pgtype.UUID, error) {
-	ids := make([]pgtype.UUID, 0, 4)
-	if actorReturnID.Valid {
-		ids = append(ids, actorReturnID)
+// commentTriggerAssignee names the assignment slot one computed comment trigger
+// dispatches to. A squad leader is recorded against the squad, not against the
+// leader's own agent id, so a direct assignment to that leader cannot borrow the
+// squad's accepted returns.
+func commentTriggerAssignee(issue db.Issue, trigger commentAgentTrigger) delegation.Assignee {
+	if trigger.Squad != nil {
+		return delegation.Assignee{Type: "squad", ID: uuidToString(trigger.Squad.ID)}
 	}
-	if sourceTaskID.Valid {
-		inherited, err := delegation.RunReturnIDs(ctx, h.Queries, sourceTaskID)
+	if trigger.Source == commentTriggerSourceIssueAssignee {
+		return delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+	}
+	return delegation.Assignee{Type: "agent", ID: uuidToString(trigger.Agent.ID)}
+}
+
+// recordCommentDelegationReturns records the author's accepted return for every
+// executable trigger in the comment transaction. The result is keyed by the
+// executing agent id and carries the explicit return set for that assignment
+// slot, so a multi-target comment does not attach one target's relationship to
+// another target's run. A nil address (member author) returns nil.
+func recordCommentDelegationReturns(ctx context.Context, q *db.Queries, issue db.Issue, address *delegation.Address, plan commentTriggerPlan, createdBy string) (map[string][]pgtype.UUID, error) {
+	if address == nil || len(plan.triggers) == 0 {
+		return nil, nil
+	}
+	returns := make(map[string][]pgtype.UUID, len(plan.triggers))
+	for _, trigger := range plan.triggers {
+		assignee := commentTriggerAssignee(issue, trigger)
+		if _, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), assignee, *address, createdBy); err != nil {
+			return nil, err
+		}
+		ids, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, assignee)
 		if err != nil {
 			return nil, err
 		}
-		ids = append(ids, inherited...)
+		returns[uuidToString(trigger.Agent.ID)] = ids
 	}
-	var err error
-	if inheritAll {
-		var all []pgtype.UUID
-		all, err = delegation.IssueReturnIDs(ctx, h.Queries, issue.WorkspaceID, issue.ID)
-		ids = append(ids, all...)
-	} else {
-		var unlinked []pgtype.UUID
-		unlinked, err = delegation.UnlinkedReturnIDs(ctx, h.Queries, issue.WorkspaceID, issue.ID)
-		ids = append(ids, unlinked...)
-	}
+	return returns, nil
+}
+
+// collectDispatchReturns builds the explicit accepted set a run about to be
+// created must carry:
+//
+//   - the target assignment's own accepted relationships (which include the
+//     current dispatcher's row just recorded, plus a backlog row for this
+//     assignee that no run consumed yet);
+//   - the replaced assignment's relationships for an executor reassignment, so
+//     the original recipients still receive the result; and
+//   - the source run's complete set for a rerun or continuation.
+//
+// It never uses every historical return on the issue or every unlinked row:
+// those would attach another dispatcher's or another worker's relationship.
+func (h *Handler) collectDispatchReturns(ctx context.Context, q *db.Queries, issue db.Issue, assignee delegation.Assignee, previous *delegation.Assignee, sourceTaskID pgtype.UUID) ([]pgtype.UUID, error) {
+	ids, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, assignee)
 	if err != nil {
 		return nil, err
 	}
-	return ids, nil
+	sets := [][]pgtype.UUID{ids}
+	if previous != nil {
+		previousIDs, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, *previous)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, previousIDs)
+	}
+	if sourceTaskID.Valid {
+		inherited, err := delegation.RunReturnIDs(ctx, q, sourceTaskID)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, inherited)
+	}
+	return delegation.UnionReturnIDs(sets...), nil
 }
 
-// linkCommentTaskReturns attaches a comment's accepted relationship to the runs
-// that comment became part of, including a pending run it was folded into. The
-// relationship itself already committed with the comment; a link failure is
-// reported rather than rolled back into the saved comment.
-func (h *Handler) linkCommentTaskReturns(ctx context.Context, issue db.Issue, commentID, returnID pgtype.UUID) {
-	if err := delegation.LinkComment(ctx, h.Queries, issue.ID, commentID, returnID); err != nil {
-		slog.Warn("link comment tasks to accepted delegation return failed",
-			"issue_id", util.UUIDToString(issue.ID),
-			"comment_id", util.UUIDToString(commentID),
-			"delegation_return_id", util.UUIDToString(returnID),
-			"error", err)
+// previousAssignee returns the replaced assignment slot for a reassignment.
+// Only an agent/squad assignment owns returns; a member or unassigned issue has
+// none to preserve.
+func previousAssignee(issue db.Issue) *delegation.Assignee {
+	if !issue.AssigneeID.Valid {
+		return nil
 	}
+	if issue.AssigneeType.String != "agent" && issue.AssigneeType.String != "squad" {
+		return nil
+	}
+	return &delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
 }
 
 // asDelegationReturnError returns err when it is a delegation gate refusal, so
@@ -153,7 +189,8 @@ func asDelegationReturnError(err error) error {
 	switch {
 	case errors.Is(err, delegation.ErrReturnMissing),
 		errors.Is(err, delegation.ErrReturnInvalid),
-		errors.Is(err, delegation.ErrReturnNotReady):
+		errors.Is(err, delegation.ErrReturnNotReady),
+		errors.Is(err, delegation.ErrReturnSourceClosed):
 		return err
 	default:
 		return nil
@@ -162,13 +199,18 @@ func asDelegationReturnError(err error) error {
 
 // writeDelegationReturnError reports a refused delegation with a stable code so
 // an agent can distinguish "retry after the session pin lands" from "your
-// address is wrong".
+// address is wrong" and from "your run has already finished".
 func writeDelegationReturnError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, delegation.ErrReturnNotReady):
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"code":  "delegation_return_not_ready",
 			"error": "The delegating run has not recorded its provider session yet. Retry the delegation after this run's session is persisted; no child work was created.",
+		})
+	case errors.Is(err, delegation.ErrReturnSourceClosed):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":  "delegation_return_source_closed",
+			"error": "The delegating run is no longer active. No child work was created; delegate from an active run instead.",
 		})
 	case errors.Is(err, delegation.ErrReturnInvalid):
 		writeJSON(w, http.StatusBadRequest, map[string]any{

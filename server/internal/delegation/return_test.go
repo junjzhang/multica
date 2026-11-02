@@ -112,6 +112,10 @@ type managedRunOptions struct {
 	pinned  bool
 }
 
+func agentTarget(id string) Assignee {
+	return Assignee{Type: "agent", ID: id}
+}
+
 func externalSession(t *testing.T, name string) (agentID, sessionID, hostSessionID string) {
 	t.Helper()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
@@ -171,28 +175,26 @@ func TestResolveManagedRejectsForeignAgentAndScope(t *testing.T) {
 	}
 }
 
-// A completed source run is still an address: the result-handling turn resumes
-// its recorded provider session. The task token is what retires the credential,
-// not the status column, so the resolver must not reject the row.
-func TestResolveManagedAcceptsCompletedPinnedRun(t *testing.T) {
+// A completed source run is NOT an eligible dispatcher for a new delegation:
+// its provider session and pin are still stored, but the run has finished and
+// must not keep creating child work. A relationship it already accepted stays
+// readable as a stored target (see the handler regression test), which is a
+// different question from admitting a new dispatch.
+func TestResolveManagedRejectsCompletedSourceForNewDelegation(t *testing.T) {
 	requireDB(t)
 	agentID, taskID := managedRun(t, managedRunOptions{name: "terminal", pinned: true})
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'completed' WHERE id = $1`, taskID)
-	addr, err := ResolveManaged(context.Background(), testQueries, testWorkspaceID, agentID, taskID)
-	if err != nil {
-		t.Fatalf("completed pinned run: %v", err)
-	}
-	if addr.SourceTaskID != taskID {
-		t.Fatalf("address = %+v, want source task %s", addr, taskID)
+	if _, err := ResolveManaged(context.Background(), testQueries, testWorkspaceID, agentID, taskID); !errors.Is(err, ErrReturnSourceClosed) {
+		t.Fatalf("err = %v, want ErrReturnSourceClosed", err)
 	}
 }
 
-func TestResolveManagedRefusesCompletedRunWithoutPin(t *testing.T) {
+func TestResolveManagedRefusesCompletedRunBeforePin(t *testing.T) {
 	requireDB(t)
 	agentID, taskID := managedRun(t, managedRunOptions{name: "terminal-unpinned", pinned: false})
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'completed' WHERE id = $1`, taskID)
-	if _, err := ResolveManaged(context.Background(), testQueries, testWorkspaceID, agentID, taskID); !errors.Is(err, ErrReturnNotReady) {
-		t.Fatalf("err = %v, want ErrReturnNotReady", err)
+	if _, err := ResolveManaged(context.Background(), testQueries, testWorkspaceID, agentID, taskID); !errors.Is(err, ErrReturnSourceClosed) {
+		t.Fatalf("err = %v, want ErrReturnSourceClosed", err)
 	}
 }
 
@@ -245,7 +247,7 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 	agentID, sessionID, _ := externalSession(t, "ensure")
 	issueID := dbfx.Issue(t, "Delegation ensure")
 
-	first, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+	first, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
 		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: sessionID,
 	}, testUserID)
 	if err != nil {
@@ -263,7 +265,7 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 		"session_id": "ensure-second-host-session", "display_name": "second",
 		"daemon_id": "ensure-second-daemon",
 	})
-	sameKey, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+	sameKey, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
 		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: secondSession,
 	}, testUserID)
 	if err != nil {
@@ -275,7 +277,7 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 
 	// A DIFFERENT dispatcher has its own key and its own accepted address.
 	otherAgent, otherSession, _ := externalSession(t, "ensure-other")
-	second, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+	second, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(otherAgent), Address{
 		DispatcherAgentID: otherAgent, Kind: KindExternalSession, ExternalSessionID: otherSession,
 	}, testUserID)
 	if err != nil {
@@ -307,7 +309,7 @@ func TestConcurrentEnsureIsPerDispatcher(t *testing.T) {
 	} {
 		go func(addr Address) {
 			<-start
-			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, addr, testUserID)
+			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(addr.DispatcherAgentID), addr, testUserID)
 			results <- result{row: row, err: err}
 		}(candidate)
 	}
@@ -334,7 +336,7 @@ func TestConcurrentEnsureSameDispatcherAcceptsOneRow(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			<-start
-			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+			row, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, agentTarget(agentID), Address{
 				DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: sessionID,
 			}, testUserID)
 			rows <- row

@@ -3622,6 +3622,10 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	if writeIssueLimitReached(w, err) {
 		return
 	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
 	if err != nil {
 		slog.Warn("create issue failed", append(logger.RequestAttrs(r), "error", err, "workspace_id", workspaceID)...)
 		writeError(w, http.StatusInternalServerError, "failed to create issue")
@@ -4187,10 +4191,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		writeDelegationReturnError(w, derr)
 		return
 	}
-	var dispatchReturnID pgtype.UUID
 	afterIssueWrite := func(q *db.Queries, issue db.Issue) error {
-		var recordErr error
-		dispatchReturnID, recordErr = recordDelegationReturn(r.Context(), q, issue, dispatchReturn, requestUserID(r))
+		_, recordErr := recordDelegationReturn(r.Context(), q, issue,
+			delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)},
+			dispatchReturn, requestUserID(r))
 		return recordErr
 	}
 
@@ -4354,11 +4358,17 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, actorType, actorID)
 	}
 	if willRun {
-		// Reassignment preserves the original recipients; any other dispatch
-		// carries the current actor's relationship plus backlog relationships
-		// that no run has consumed yet.
-		inheritAll := explicitAssigneeChanged && prevIssue.AssigneeID.Valid
-		returnIDs, collectErr := h.collectDispatchReturns(r.Context(), issue, dispatchReturnID, pgtype.UUID{}, inheritAll)
+		// Reassignment preserves the replaced assignment's recipients; any
+		// other dispatch carries this assignment slot's explicit relationships
+		// (including a backlog row for this assignee). Never every historical
+		// return on the issue.
+		var replaced *delegation.Assignee
+		if explicitAssigneeChanged {
+			replaced = previousAssignee(prevIssue)
+		}
+		returnIDs, collectErr := h.collectDispatchReturns(r.Context(), h.Queries, issue,
+			delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)},
+			replaced, pgtype.UUID{})
 		if collectErr != nil {
 			slog.Warn("collect delegation returns for dispatch failed",
 				append(logger.RequestAttrs(r), "issue_id", uuidToString(issue.ID), "error", collectErr)...)
@@ -5016,10 +5026,10 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
 			continue
 		}
-		var dispatchReturnID pgtype.UUID
 		afterIssueWrite := func(q *db.Queries, issue db.Issue) error {
-			var recordErr error
-			dispatchReturnID, recordErr = recordDelegationReturn(r.Context(), q, issue, dispatchReturn, requestUserID(r))
+			_, recordErr := recordDelegationReturn(r.Context(), q, issue,
+				delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)},
+				dispatchReturn, requestUserID(r))
 			return recordErr
 		}
 
@@ -5103,8 +5113,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, callerType, callerActorID)
 		}
 		if willRun {
-			inheritAll := explicitAssigneeChanged && prevIssue.AssigneeID.Valid
-			returnIDs, collectErr := h.collectDispatchReturns(r.Context(), issue, dispatchReturnID, pgtype.UUID{}, inheritAll)
+			var replaced *delegation.Assignee
+			if explicitAssigneeChanged {
+				replaced = previousAssignee(prevIssue)
+			}
+			returnIDs, collectErr := h.collectDispatchReturns(r.Context(), h.Queries, issue,
+				delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)},
+				replaced, pgtype.UUID{})
 			if collectErr != nil {
 				// The item is already written; report the failure loudly and
 				// still record its child/stage change below. Never queue a run

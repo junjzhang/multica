@@ -1867,10 +1867,10 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		writeDelegationReturnError(w, derr)
 		return
 	}
-	var commentReturnID pgtype.UUID
+	var commentReturns map[string][]pgtype.UUID
 	recordCommentReturn := func(q *db.Queries) error {
 		var recordErr error
-		commentReturnID, recordErr = recordDelegationReturn(r.Context(), q, issue, commentAddress, requestUserID(r))
+		commentReturns, recordErr = recordCommentDelegationReturns(r.Context(), q, issue, commentAddress, triggerPlan, requestUserID(r))
 		return recordErr
 	}
 	var mailboxDelivered mailboxDeliveryResults
@@ -1965,6 +1965,10 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "issue not found")
 		return
 	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
 	if err != nil {
 		slog.Warn("create comment failed", append(logger.RequestAttrs(r), "error", err, "issue_id", issueID)...)
 		writeError(w, http.StatusInternalServerError, "failed to create comment")
@@ -1999,8 +2003,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// The comment and its valid external handoffs are committed. Resolve the
 	// native runs now; a blocked mention must not fail the saved comment and is
 	// surfaced per target instead (MUL-4525 §2).
-	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered, commentReturnID)
-	h.linkCommentTaskReturns(r.Context(), issue, comment.ID, commentReturnID)
+	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered, commentReturns)
 	if len(steerTaskIDs) > 0 {
 		applyCommentSupplements(&resp, h.listCommentSupplements(r.Context(), issue.WorkspaceID, []pgtype.UUID{comment.ID})[uuidToString(comment.ID)])
 	}
@@ -2114,16 +2117,16 @@ func (h *Handler) triggerTasksForComment(ctx context.Context, issue db.Issue, co
 			h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
 		}
 	}
-	return h.applyCommentTriggers(ctx, issue, comment, actorType, steerTaskIDs, plan, delivered)
+	return h.applyCommentTriggers(ctx, issue, comment, actorType, steerTaskIDs, plan, delivered, nil)
 }
 
 // applyCommentTriggers runs the native trigger side after the comment (and any
 // mailbox deliveries) committed. Mailbox outcomes only report what the
 // transaction persisted.
-func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered mailboxDeliveryResults, delegationReturnIDs ...pgtype.UUID) []CommentTriggerOutcome {
+func (h *Handler) applyCommentTriggers(ctx context.Context, issue db.Issue, comment db.Comment, actorType string, steerTaskIDs []pgtype.UUID, plan commentTriggerPlan, delivered mailboxDeliveryResults, returns map[string][]pgtype.UUID) []CommentTriggerOutcome {
 	h.noteBlockedRuntimeTargets(ctx, issue, plan.targets)
 	triggers, steered := h.steerCommentAgentTriggers(ctx, issue, comment, actorType, plan.triggers, steerTaskIDs)
-	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers, delegationReturnIDs...)
+	enqueued := h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, triggers, returns)
 	for agentID, result := range steered {
 		enqueued[agentID] = result
 	}
@@ -2249,7 +2252,7 @@ type commentEnqueueResult struct {
 // target that resolved to the agent, so coalescing a run never drops a named
 // target's outcome. queued / coalesced / deferred are success-shaped (the run
 // was handled, no duplicate task); only a real enqueue failure is blocked.
-func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, triggers []commentAgentTrigger, delegationReturnIDs ...pgtype.UUID) map[string]commentEnqueueResult {
+func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, triggers []commentAgentTrigger, returns map[string][]pgtype.UUID) map[string]commentEnqueueResult {
 	results := make(map[string]commentEnqueueResult, len(triggers))
 	record := func(trigger commentAgentTrigger, status DispatchStatus, reason DispatchReasonCode) {
 		execSquadID := ""
@@ -2259,7 +2262,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 		results[uuidToString(trigger.Agent.ID)] = commentEnqueueResult{status: status, reason: reason, execSquadID: execSquadID}
 	}
 	for _, trigger := range triggers {
-		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, delegationReturnIDs...)
+		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, returns[uuidToString(trigger.Agent.ID)])
 		record(trigger, status, reason)
 	}
 	return results
@@ -2301,7 +2304,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 // A duplicate that cannot yet be resolved re-loops (bounded by maxAttempts); on
 // genuine non-convergence it returns a truthful internal_error, never a fabricated
 // deferred that would silently drop the comment.
-func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, delegationReturnIDs ...pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
+func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
 	pending := trigger.AlreadyPending
 	lostRace := false
 	// Resolve the reviewed HEAD lazily and at most once — the common
@@ -2337,7 +2340,7 @@ func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Iss
 			// reports HOW it resolved: coalesced on success; blocked on a
 			// fail-closed / failed merge — never mislabeled as success (MUL-4525 §2).
 			if status, reason, terminal := commentMergeTerminalOutcome(
-				h.mergeCommentIntoPendingTask(ctx, issue, trigger, triggerCommentID, getHeadSha()),
+				h.mergeCommentIntoPendingTask(ctx, issue, trigger, triggerCommentID, getHeadSha(), delegationReturnIDs...),
 			); terminal {
 				return status, reason
 			}
@@ -2585,7 +2588,7 @@ func commentMergeTerminalOutcome(result commentMergeResult) (status DispatchStat
 // refreshed — so a different member's comment safely folds into a task another
 // member created, the coalescing run carrying the latest instruction's
 // originator and matching connected-app overlay.
-func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text) commentMergeResult {
+func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text, delegationReturnIDs ...pgtype.UUID) commentMergeResult {
 	// Re-attribute the coalescing run to the new comment's human atomically: the
 	// whole attribution snapshot moves, not just the person columns (MUL-4302). An
 	// issue-assignee reaction is comment_source; a mention / thread-parent /
@@ -2609,7 +2612,7 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		return commentMergeError
 	}
 	overlay, connectedApps := h.TaskService.BuildRuntimeMCPOverlayForMerge(ctx, attr.UserID, trigger.Agent)
-	row, err := h.Queries.MergeCommentIntoPendingTask(ctx, db.MergeCommentIntoPendingTaskParams{
+	params := db.MergeCommentIntoPendingTaskParams{
 		IssueID:                 issue.ID,
 		AgentID:                 trigger.Agent.ID,
 		NewTriggerCommentID:     newTriggerCommentID,
@@ -2624,7 +2627,38 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		NewRuntimeMcpOverlay:    overlay,
 		NewRuntimeConnectedApps: connectedApps,
 		HeadSha:                 headSha,
-	})
+	}
+	// The fold and every accepted relationship it adds to the run are ONE
+	// durable outcome. Linking after the merge committed would let a crash lose
+	// an accepted dispatcher from a run that already carries its comment.
+	merge := func(q *db.Queries) (db.MergeCommentIntoPendingTaskRow, error) {
+		row, err := q.MergeCommentIntoPendingTask(ctx, params)
+		if err != nil {
+			return db.MergeCommentIntoPendingTaskRow{}, err
+		}
+		if err := delegation.LinkRun(ctx, q, row.ID, delegationReturnIDs...); err != nil {
+			return db.MergeCommentIntoPendingTaskRow{}, err
+		}
+		return row, nil
+	}
+	var row db.MergeCommentIntoPendingTaskRow
+	if len(delegationReturnIDs) > 0 {
+		tx, beginErr := h.TxStarter.Begin(ctx)
+		if beginErr != nil {
+			slog.Warn("merge comment into pending task: begin transaction failed",
+				"issue_id", uuidToString(issue.ID),
+				"agent_id", uuidToString(trigger.Agent.ID),
+				"error", beginErr)
+			return commentMergeError
+		}
+		defer tx.Rollback(ctx)
+		row, err = merge(h.Queries.WithTx(tx))
+		if err == nil {
+			err = tx.Commit(ctx)
+		}
+	} else {
+		row, err = merge(h.Queries)
+	}
 	if err != nil {
 		if isNotFound(err) {
 			// No pre-claim (queued/deferred) task to merge into. The caller
@@ -3271,7 +3305,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// content. mailboxDelivered is what that transaction actually committed.
 	var triggerPlan commentTriggerPlan
 	var commentAddress *delegation.Address
-	var commentReturnID pgtype.UUID
+	var commentReturns map[string][]pgtype.UUID
 	var mailboxDelivered mailboxDeliveryResults
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
@@ -3364,7 +3398,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			comment = updated.Comment()
 			issueRevision = updated.IssueRevision
 			if commentAddress != nil && triggerIssue != nil {
-				commentReturnID, err = recordDelegationReturn(r.Context(), qtx, *triggerIssue, commentAddress, requestUserID(r))
+				commentReturns, err = recordCommentDelegationReturns(r.Context(), qtx, *triggerIssue, commentAddress, triggerPlan, requestUserID(r))
 			}
 		}
 		if err == nil && oldContent != req.Content && strictContentEdit {
@@ -3407,7 +3441,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				return commentEditWriteResult{}, err
 			}
 			if commentAddress != nil && triggerIssue != nil {
-				commentReturnID, err = recordDelegationReturn(r.Context(), q, *triggerIssue, commentAddress, requestUserID(r))
+				commentReturns, err = recordCommentDelegationReturns(r.Context(), q, *triggerIssue, commentAddress, triggerPlan, requestUserID(r))
 				if err != nil {
 					return commentEditWriteResult{}, err
 				}
@@ -3433,6 +3467,10 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 			// Cancellation committed but the edit did not. Restore the complete
 			// original batch, including the still-valid unchanged comment.
 			h.retriggerCancelledTaskSurvivors(r.Context(), *triggerIssue, cancelled, pgtype.UUID{})
+		}
+		if derr := asDelegationReturnError(err); derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			current, reloadErr := h.Queries.GetCommentInWorkspace(r.Context(), db.GetCommentInWorkspaceParams{ID: commentUUID, WorkspaceID: wsUUID})
@@ -3465,8 +3503,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		// Native runs resolve after commit: a blocked mention must not fail the
 		// saved edit. Mailbox outcomes only report what the transaction
 		// committed, so the caller never sees "queued" for a rolled-back row.
-		outcomes := h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered, commentReturnID)
-		h.linkCommentTaskReturns(r.Context(), issue, comment.ID, commentReturnID)
+		outcomes := h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered, commentReturns)
 		return outcomes
 	}
 
@@ -3903,7 +3940,7 @@ func (h *Handler) retriggerCancelledTaskSurvivors(ctx context.Context, issue db.
 			}
 		}
 		if len(scoped) > 0 {
-			h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, scoped)
+			h.enqueueCommentAgentTriggers(ctx, issue, comment.ID, scoped, nil)
 		}
 	}
 }

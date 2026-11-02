@@ -964,6 +964,8 @@ type IssueDelegationReturn struct {
 	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
 	IssueID           pgtype.UUID        `json:"issue_id"`
 	DispatcherAgentID pgtype.UUID        `json:"dispatcher_agent_id"`
+	AssigneeType      string             `json:"assignee_type"`
+	AssigneeID        pgtype.UUID        `json:"assignee_id"`
 	ReturnKind        string             `json:"return_kind"`
 	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
 	SourceTaskID      pgtype.UUID        `json:"source_task_id"`

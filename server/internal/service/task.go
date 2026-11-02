@@ -5965,6 +5965,26 @@ func transferPendingSourceContextToRetry(ctx context.Context, q *db.Queries, par
 // to a structured 403 (no task was cancelled or created).
 var ErrRerunInvokeNotAllowed = errors.New("rerun: operator not allowed to invoke target agent")
 
+// RerunDelegation is the return context a rerun must persist with its new run.
+// Address is nil when the rerunning actor is a member; the source run's set is
+// still inherited. The accepted address and the run link are written only
+// inside the enqueue transaction, after eligibility passed.
+type RerunDelegation struct {
+	Address       *delegation.Address
+	CreatedBy     string
+	InheritTaskID pgtype.UUID
+}
+
+// RerunIssue is an ordinary human rerun: it inherits the source run's accepted
+// set but records no new dispatcher address.
+func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourceTaskID pgtype.UUID, triggerCommentID pgtype.UUID, actorUserID pgtype.UUID, canInvoke func(agent db.Agent) bool) (*db.AgentTaskQueue, error) {
+	return s.RerunIssueWithDelegation(ctx, issueID, sourceTaskID, triggerCommentID, actorUserID, canInvoke, RerunDelegation{})
+}
+
+// RerunIssueWithDelegation reruns for an actor that may carry an accepted
+// return address. The address and the run's complete return set commit with
+// the enqueue.
+//
 // Only tasks belonging to the target agent on this issue are cancelled.
 // Tasks owned by other agents on the same issue (e.g. a parallel
 // @-mention agent) are left alone — rerun must not collateral-cancel
@@ -5977,7 +5997,7 @@ var ErrRerunInvokeNotAllowed = errors.New("rerun: operator not allowed to invoke
 // caller who can see the issue but cannot invoke its private agent cannot use
 // rerun as a back door — and a blocked rerun mutates nothing. Pass nil only
 // from trusted internal callers (tests, backfill) that have already gated.
-func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourceTaskID pgtype.UUID, triggerCommentID pgtype.UUID, actorUserID pgtype.UUID, canInvoke func(agent db.Agent) bool, delegationReturnIDs ...pgtype.UUID) (*db.AgentTaskQueue, error) {
+func (s *TaskService) RerunIssueWithDelegation(ctx context.Context, issueID pgtype.UUID, sourceTaskID pgtype.UUID, triggerCommentID pgtype.UUID, actorUserID pgtype.UUID, canInvoke func(agent db.Agent) bool, dispatch RerunDelegation) (*db.AgentTaskQueue, error) {
 	issue, err := s.Queries.GetIssue(ctx, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("load issue: %w", err)
@@ -6142,7 +6162,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 	// sourceTaskID is the rerun lineage: it rides the CreateAgentTask insert
 	// (rerun_of_task_id) so the queued event / daemon claim never sees a NULL
 	// lineage, and it stays distinct from system-retry's retry_of_task_id (§5).
-	task, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, delegationReturnIDs...)
+	task, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
 	if pendingSlotTakenErr(err) {
 		// The clear above and this enqueue are separate commits, so a system
 		// retry created by a concurrent FailTask can take the pending slot in
@@ -6158,7 +6178,7 @@ func (s *TaskService) RerunIssue(ctx context.Context, issueID pgtype.UUID, sourc
 			"agent_id", util.UUIDToString(agentID),
 		)
 		cancelledCount += clearPendingSlot()
-		task, err = s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, delegationReturnIDs...)
+		task, err = s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
 	}
 	if err != nil {
 		return nil, err
@@ -6242,12 +6262,60 @@ func (s *TaskService) promoteNewestSurvivingComment(ctx context.Context, ids []p
 // handler ignores this flag for reruns and instead reads the exact source task
 // (rerun_of_task_id) to reuse its workdir and, when the failure did not poison
 // the conversation, resume its session (MUL-4869).
-func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
-		util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
-		return s.enqueueIssueTaskWithCommentPlan(ctx, issue, triggerCommentID, coalescedCommentIDs, true, "", actorUserID, rerunOfTaskID, pgtype.Timestamptz{}, origin, delegationReturnIDs...)
+func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dispatch RerunDelegation) (db.AgentTaskQueue, error) {
+	target := delegation.Assignee{Type: "agent", ID: util.UUIDToString(agentID)}
+	if isLeader && squadID.Valid {
+		target = delegation.Assignee{Type: "squad", ID: util.UUIDToString(squadID)}
 	}
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", actorUserID, rerunOfTaskID, origin, delegationReturnIDs...)
+	var task db.AgentTaskQueue
+	var attr attribution.Result
+	write := func(q *db.Queries) error {
+		returnIDs, err := s.rerunDelegationReturnIDs(ctx, q, issue, target, dispatch)
+		if err != nil {
+			return err
+		}
+		if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
+			util.UUIDToString(issue.AssigneeID) == util.UUIDToString(agentID) {
+			task, attr, err = s.insertIssueTask(ctx, q, issue, triggerCommentID, coalescedCommentIDs, true, "", actorUserID, rerunOfTaskID, pgtype.Timestamptz{}, origin, returnIDs)
+			return err
+		}
+		task, attr, err = s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", actorUserID, rerunOfTaskID, origin, returnIDs)
+		return err
+	}
+	// The accepted return, the run, and every inherited relationship commit
+	// together. A refusal above this point leaves no accepted return behind.
+	if err := s.runInTx(ctx, write); err != nil {
+		return db.AgentTaskQueue{}, err
+	}
+	s.applyQueuedIssueTaskOverlay(ctx, s.Queries, &task)
+	s.publishQueuedIssueTask(ctx, task, attr)
+	return task, nil
+}
+
+// rerunDelegationReturnIDs accepts the rerunning actor's address (when it is
+// an agent) and builds the explicit set the new run carries: the target
+// assignment's relationships plus the named source run's complete set. It runs
+// in the enqueue transaction, so a managed source that completed since
+// authentication is refused by delegation.Ensure.
+func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, target delegation.Assignee, dispatch RerunDelegation) ([]pgtype.UUID, error) {
+	if dispatch.Address != nil {
+		if _, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), target, *dispatch.Address, dispatch.CreatedBy); err != nil {
+			return nil, err
+		}
+	}
+	targetIDs, err := delegation.ReturnIDsForAssignee(ctx, q, issue.WorkspaceID, issue.ID, target)
+	if err != nil {
+		return nil, err
+	}
+	sets := [][]pgtype.UUID{targetIDs}
+	if dispatch.InheritTaskID.Valid {
+		inherited, err := delegation.RunReturnIDs(ctx, q, dispatch.InheritTaskID)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, inherited)
+	}
+	return delegation.UnionReturnIDs(sets...), nil
 }
 
 // The bulk terminal writes below are the sweeper, archive and daemon-recovery

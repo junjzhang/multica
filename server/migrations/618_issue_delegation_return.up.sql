@@ -1,20 +1,25 @@
--- A delegated issue names each actor its results return to and the address that
--- actor accepted when it dispatched work on the issue. The address is either a
--- registered external host session or the managed run that dispatched the
--- work; an Agent identity alone is not an address.
+-- A delegated issue names each actor its results return to, the address that
+-- actor accepted, and the assignment the work was dispatched to. The address is
+-- either a registered external host session or the managed run that dispatched
+-- the work; an Agent identity alone is not an address.
 --
--- The row is keyed by (workspace, issue, dispatcher agent): every real
--- dispatcher keeps its own accepted relationship, so a second agent delegating
--- on the same issue is never addressed back to the first. The first accepted
--- delegation for one key owns that key's recipient; an ordinary reassignment,
--- rerun, or folded comment reuses it, and only explicit takeover changes the
--- external binding. The delegated issue and this row are written in the same
--- transaction.
+-- The row is keyed by (workspace, issue, dispatcher agent, assignee): every
+-- real dispatcher keeps its own accepted relationship for the exact assignment
+-- slot it dispatched to. A second agent delegating on the same issue, or the
+-- same agent delegating to a different worker, therefore never reuses an
+-- unrelated dispatch's recipient. Backlog records this row before a run exists;
+-- a later run for that assignee attaches it directly instead of guessing from
+-- issue history. The first accepted delegation for one key owns that key's
+-- recipient; an ordinary reassignment, rerun, or folded comment reuses it, and
+-- only explicit takeover changes the external binding. The delegated issue and
+-- this row are written in the same transaction.
 CREATE TABLE issue_delegation_return (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workspace_id UUID NOT NULL,
     issue_id UUID NOT NULL,
     dispatcher_agent_id UUID NOT NULL,
+    assignee_type TEXT NOT NULL CHECK (assignee_type IN ('agent', 'squad')),
+    assignee_id UUID NOT NULL,
     return_kind TEXT NOT NULL
         CHECK (return_kind IN ('external_session', 'managed_task')),
     external_session_id UUID,

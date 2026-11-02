@@ -1,12 +1,13 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
-
-	"github.com/multica-ai/multica/server/internal/cli"
 )
 
 func newIdentityTestCmd() *cobra.Command {
@@ -18,29 +19,38 @@ func newIdentityTestCmd() *cobra.Command {
 	return cmd
 }
 
-// A Paseo session that only has the human profile must not let a business
-// command silently authenticate as that human: the server would classify it as
-// a member and exempt the delegation gate. Explicit owner commands and a
-// session with an agent credential keep working.
-func TestAgentBusinessCommandInPaseoSessionRejectsHumanProfile(t *testing.T) {
+// Every business client fails closed when a Paseo session only has the human
+// profile: the server would classify it as a member and exempt the delegation
+// gate. The explicit owner entry, a session with an agent credential, and
+// ordinary human flows outside a Paseo session keep working.
+func TestAgentSessionBusinessClientRejectsHumanProfile(t *testing.T) {
 	// /tmp has no daemon task marker above it; the worktree does, because this
 	// suite runs inside a managed task of the authoring session.
 	t.Chdir("/tmp")
-	setCLITestServerEnv(t, "http://127.0.0.1:1")
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "00000000-0000-0000-0000-000000000001")
 	t.Setenv("PASEO_AGENT_ID", "paseo-session-1")
 	t.Setenv("MULTICA_TOKEN", "mul_human_profile")
 	t.Setenv("MULTICA_AGENT_ID", "")
 	t.Setenv("MULTICA_TASK_ID", "")
 
 	business := newIdentityTestCmd()
-	cli.MarkAgentBusinessCommand(business)
 	if _, err := newAPIClient(business); err == nil || !strings.Contains(err.Error(), "Paseo agent session") {
 		t.Fatalf("business command with human profile: err = %v, want a Paseo identity refusal", err)
 	}
+	if requests.Load() != 0 {
+		t.Fatalf("refused client sent %d requests; the refusal must precede the side effect", requests.Load())
+	}
 
 	owner := newIdentityTestCmd()
-	if _, err := newAPIClient(owner); err != nil {
-		t.Fatalf("unmarked owner/credential command was blocked: %v", err)
+	if _, err := newOwnerAPIClient(owner); err != nil {
+		t.Fatalf("explicit owner/credential entry was blocked: %v", err)
 	}
 
 	t.Setenv("MULTICA_TOKEN", "mea_external_agent")
@@ -50,6 +60,20 @@ func TestAgentBusinessCommandInPaseoSessionRejectsHumanProfile(t *testing.T) {
 	}
 	if client.ReturnSession != "paseo-session-1" {
 		t.Fatalf("return session = %q, want the current Paseo session", client.ReturnSession)
+	}
+}
+
+// Outside a Paseo session the ordinary human flow is unchanged.
+func TestHumanClientOutsidePaseoSessionUsesHumanProfile(t *testing.T) {
+	t.Chdir("/tmp")
+	setCLITestServerEnv(t, "http://127.0.0.1:1")
+	t.Setenv("PASEO_AGENT_ID", "")
+	t.Setenv("MULTICA_AGENT_ID", "")
+	t.Setenv("MULTICA_TASK_ID", "")
+	t.Setenv("MULTICA_TOKEN", "mul_human_profile")
+
+	if _, err := newAPIClient(newIdentityTestCmd()); err != nil {
+		t.Fatalf("human command outside a Paseo session was blocked: %v", err)
 	}
 }
 
@@ -63,9 +87,7 @@ func TestManagedTaskIdentityOverridesInheritedSession(t *testing.T) {
 	t.Setenv("MULTICA_AGENT_ID", "agent-1")
 	t.Setenv("MULTICA_TASK_ID", "task-1")
 
-	business := newIdentityTestCmd()
-	cli.MarkAgentBusinessCommand(business)
-	client, err := newAPIClient(business)
+	client, err := newAPIClient(newIdentityTestCmd())
 	if err != nil {
 		t.Fatalf("managed task client: %v", err)
 	}
@@ -74,7 +96,6 @@ func TestManagedTaskIdentityOverridesInheritedSession(t *testing.T) {
 	}
 
 	explicit := newIdentityTestCmd()
-	cli.MarkAgentBusinessCommand(explicit)
 	if err := explicit.Flags().Set("return-session", "paseo-other"); err != nil {
 		t.Fatal(err)
 	}

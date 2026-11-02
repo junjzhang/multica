@@ -527,15 +527,21 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		}
 	}
 
-	// A delegated create records the dispatcher's accepted return in this same
-	// transaction. The binding cannot be added after commit: a crash between the
-	// issue and its address would leave work nobody is accountable for.
-	var acceptedReturn db.IssueDelegationReturn
+	// A delegated create records the dispatcher's accepted return for this
+	// exact assignment slot in the same transaction. The binding cannot be
+	// added after commit: a crash between the issue and its address would leave
+	// work nobody is accountable for. The target list is the explicit dispatch
+	// set for that slot, not every historical return on the issue.
+	var delegationReturnIDs []pgtype.UUID
 	delegationRecorded := false
 	if p.DelegationReturn != nil {
-		acceptedReturn, err = delegation.Ensure(ctx, qtx, util.UUIDToString(p.WorkspaceID), util.UUIDToString(issue.ID), *p.DelegationReturn, p.DelegationCreatedBy)
-		if err != nil {
+		target := delegation.Assignee{Type: issue.AssigneeType.String, ID: util.UUIDToString(issue.AssigneeID)}
+		if _, err = delegation.Ensure(ctx, qtx, util.UUIDToString(p.WorkspaceID), util.UUIDToString(issue.ID), target, *p.DelegationReturn, p.DelegationCreatedBy); err != nil {
 			return IssueCreateResult{}, fmt.Errorf("record delegation return: %w", err)
+		}
+		delegationReturnIDs, err = delegation.ReturnIDsForAssignee(ctx, qtx, p.WorkspaceID, issue.ID, target)
+		if err != nil {
+			return IssueCreateResult{}, fmt.Errorf("collect delegation returns: %w", err)
 		}
 		delegationRecorded = true
 	}
@@ -556,7 +562,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		switch issue.AssigneeType.String {
 		case "agent":
 			if s.shouldEnqueueAgentTaskWithQueries(ctx, qtx, issue) {
-				task, attr, taskErr := s.TaskService.EnqueueAssignedTaskInTx(ctx, qtx, issue, []pgtype.UUID{acceptedReturn.ID})
+				task, attr, taskErr := s.TaskService.EnqueueAssignedTaskInTx(ctx, qtx, issue, delegationReturnIDs)
 				switch {
 				case taskErr == nil:
 					delegatedTask = task
@@ -571,7 +577,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			}
 		case "squad":
 			if s.shouldEnqueueSquadLeaderOnAssignWithQueries(ctx, qtx, issue) {
-				task, attr, inserted, taskErr := s.enqueueSquadLeaderTaskInTx(ctx, qtx, issue, pgtype.UUID{}, p.CreatorType, actorID, []pgtype.UUID{acceptedReturn.ID})
+				task, attr, inserted, taskErr := s.enqueueSquadLeaderTaskInTx(ctx, qtx, issue, pgtype.UUID{}, p.CreatorType, actorID, delegationReturnIDs)
 				if taskErr != nil {
 					return IssueCreateResult{}, fmt.Errorf("enqueue delegated squad leader task: %w", taskErr)
 				}
@@ -622,9 +628,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 			// always resolves an agent assignee. Preserve the ordinary squad path
 			// for any future caller that supplies the option with a squad.
 			var squadReturnIDs []pgtype.UUID
-			if acceptedReturn.ID.Valid {
-				squadReturnIDs = []pgtype.UUID{acceptedReturn.ID}
-			}
+			squadReturnIDs = delegationReturnIDs
 			s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, p.CreatorType, actorID, squadReturnIDs)
 		}
 	}
@@ -638,7 +642,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		s.TaskService.ApplyQueuedIssueTaskOverlay(ctx, delegatedTask)
 		s.TaskService.PublishQueuedIssueTask(ctx, delegatedTask, acceptedTaskAttr)
 	} else if opts.AssignedAgentRunFireAt.IsZero() {
-		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt, acceptedReturn.ID)
+		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt, delegationReturnIDs)
 	}
 	// Creating an issue already assigned to an agent is the member delegating
 	// work. The run itself is attributed through the creator fallback, which
@@ -951,7 +955,7 @@ func (s *IssueService) createWorkflow(ctx context.Context, qtx *db.Queries, p Is
 	return def, err
 }
 
-func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue, creatorType, actorID string, agentRunFireAt time.Time, delegationReturnID pgtype.UUID) pgtype.UUID {
+func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue, creatorType, actorID string, agentRunFireAt time.Time, delegationReturnIDs []pgtype.UUID) pgtype.UUID {
 	if !issue.AssigneeType.Valid || !issue.AssigneeID.Valid {
 		return pgtype.UUID{}
 	}
@@ -976,8 +980,8 @@ func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue,
 		var task db.AgentTaskQueue
 		var err error
 		if agentRunFireAt.IsZero() {
-			if delegationReturnID.Valid {
-				task, err = s.TaskService.EnqueueTaskForIssueWithReturns(ctx, issue, []pgtype.UUID{delegationReturnID})
+			if len(delegationReturnIDs) > 0 {
+				task, err = s.TaskService.EnqueueTaskForIssueWithReturns(ctx, issue, delegationReturnIDs)
 			} else {
 				task, err = s.TaskService.EnqueueTaskForIssue(ctx, issue)
 			}
@@ -993,11 +997,7 @@ func (s *IssueService) maybeEnqueueOnAssign(ctx context.Context, issue db.Issue,
 		}
 	}
 	if s.shouldEnqueueSquadLeaderOnAssign(ctx, issue) {
-		var returnIDs []pgtype.UUID
-		if delegationReturnID.Valid {
-			returnIDs = []pgtype.UUID{delegationReturnID}
-		}
-		s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, creatorType, actorID, returnIDs)
+		s.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, creatorType, actorID, delegationReturnIDs)
 	}
 	return pgtype.UUID{}
 }

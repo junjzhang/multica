@@ -578,18 +578,6 @@ func validateIssueEnum(field, value string, allowed []string) error {
 }
 
 func init() {
-	// Commands whose effect is the agent's own delegation work. In a Paseo
-	// session they must authenticate as that agent, never as the human profile.
-	for _, cmd := range []*cobra.Command{
-		issueCreateCmd,
-		issueUpdateCmd,
-		issueAssignCmd,
-		issueCommentAddCmd,
-		issueCommentUpdateCmd,
-		issueRerunCmd,
-	} {
-		cli.MarkAgentBusinessCommand(cmd)
-	}
 	issueCmd.AddCommand(issueListCmd)
 	issueCmd.AddCommand(issueGetCmd)
 	issueCmd.AddCommand(issuePullRequestsCmd)

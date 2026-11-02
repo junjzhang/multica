@@ -363,7 +363,7 @@ func TestRerunInheritsSourceRunReturns(t *testing.T) {
 		"issue_id": issueID, "runtime_id": runtimeID, "status": "completed",
 		"session_id": "rerun-inherit-session", "work_dir": "/work/rerun-inherit",
 	})
-	inherited, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Address{
+	inherited, err := delegation.Ensure(context.Background(), testHandler.Queries, testWorkspaceID, issueID, delegation.Assignee{Type: "agent", ID: target}, delegation.Address{
 		DispatcherAgentID: externalAgent, Kind: delegation.KindExternalSession, ExternalSessionID: externalSessionID,
 	}, testUserID)
 	if err != nil {
@@ -410,14 +410,8 @@ func TestCLIPaseoHumanProfileCannotBypassDelegationGate(t *testing.T) {
 
 	humanToken, _ := insertTestPAT(t, time.Now().Add(time.Hour))
 	business := &cobra.Command{Use: "issue-create"}
-	cli.MarkAgentBusinessCommand(business)
-	if err := cli.RequireAgentBusinessIdentity(business, humanToken, true, false); err == nil {
-		t.Fatal("a Paseo business command accepted the human profile credential")
-	}
-	// An explicit credential/owner command is not marked and stays usable.
-	ownerCommand := &cobra.Command{Use: "agent-external-register"}
-	if err := cli.RequireAgentBusinessIdentity(ownerCommand, humanToken, true, false); err != nil {
-		t.Fatalf("owner credential command was blocked: %v", err)
+	if err := cli.RequireAgentSessionIdentity(business, humanToken, true, false); err == nil {
+		t.Fatal("a Paseo business client accepted the human profile credential")
 	}
 
 	// With the human credential the server sees a member and creates the issue
@@ -443,7 +437,7 @@ func TestCLIPaseoHumanProfileCannotBypassDelegationGate(t *testing.T) {
 		t.Fatalf("load host session: %v", err)
 	}
 	agentToken := externalTokenFixture(t, agentID, ownerID, time.Now().Add(time.Hour))
-	if err := cli.RequireAgentBusinessIdentity(business, agentToken, true, false); err != nil {
+	if err := cli.RequireAgentSessionIdentity(business, agentToken, true, false); err != nil {
 		t.Fatalf("external agent credential was refused: %v", err)
 	}
 	agentClient := cli.NewAPIClient(srv.URL, testWorkspaceID, agentToken)

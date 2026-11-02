@@ -141,7 +141,7 @@ func TestCommentEnqueueRaceQueuedWinnerFoldsLoser(t *testing.T) {
 			t.Cleanup(func() { slog.SetDefault(prev) })
 
 			trigger := commentAgentTrigger{Agent: agent, Source: tc.source}
-			results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger})
+			results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger}, nil)
 
 			// Guards the service hunk: the lost race must coalesce, not block.
 			if res := results[agentID]; res.status != DispatchCoalesced {
@@ -202,7 +202,7 @@ func TestCommentEnqueueRaceDispatchedWinnerDurablyCoversLoser(t *testing.T) {
 	}
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
-	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger})
+	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger}, nil)
 
 	// Truthful outcome: deferred (a follow-up will cover it), NOT coalesced.
 	if res := results[agentID]; res.status != DispatchDeferred {
@@ -296,7 +296,7 @@ func TestCommentEnqueueRaceDifferentHeadNotCoalesced(t *testing.T) {
 	headBcommentID := insertDupRaceComment(t, issueID, "[@Agent](mention://agent/"+agentID+") please review head B", "1 minute")
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
-	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(headBcommentID), []commentAgentTrigger{trigger})
+	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(headBcommentID), []commentAgentTrigger{trigger}, nil)
 
 	// Not coalesced into the head-A run, and NOT a fabricated deferred either — a
 	// snapshot cannot durably promise the head-A task's reconcile will still cover
@@ -454,7 +454,7 @@ func TestCommentEnqueueRaceQueuedWinnerReattributesOriginator(t *testing.T) {
 	dbfx.Exec(t, `UPDATE comment SET parent_id=$2 WHERE id=$1`, loserCommentID, winnerCommentID)
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
-	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger})
+	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger}, nil)
 	if res := results[agentID]; res.status != DispatchCoalesced {
 		t.Fatalf("queued-winner reattribution race: got status %q reason %q, want coalesced", res.status, res.reason)
 	}
@@ -528,7 +528,7 @@ func TestCommentEnqueueRaceNewerDifferentHeadNotDeferred(t *testing.T) {
 	}
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
-	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger})
+	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger}, nil)
 
 	// Must NOT be a fabricated deferred — the newer head-A task cannot cover C.
 	res := results[agentID]
@@ -617,7 +617,7 @@ func TestCommentEnqueueRaceMixedCoveringAndNewerNotDeferred(t *testing.T) {
 	}
 
 	trigger := commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent}
-	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger})
+	results := testHandler.enqueueCommentAgentTriggers(ctx, issue, util.MustParseUUID(loserCommentID), []commentAgentTrigger{trigger}, nil)
 
 	// Even though a covering (older) task exists, the newer one forbids deferral.
 	res := results[agentID]

@@ -144,7 +144,7 @@ var concurrentIndexCleanups = map[string]string{
 	"616_agent_mailbox_target_session_index":                    "idx_agent_mailbox_target_session",
 	"615_agent_mailbox_notification_key_index":                  "uq_agent_mailbox_notification_key",
 	"614_agent_session_binding_active_index":                    "uq_agent_session_binding_active",
-	"619_issue_delegation_return_issue_index":                   "uq_issue_delegation_return_dispatcher",
+	"619_issue_delegation_return_issue_index":                   "uq_issue_delegation_return_dispatch",
 	"596_external_agent_session_identity_index":                 "uq_external_agent_session_identity",
 	"597_external_agent_session_agent_index":                    "uq_external_agent_session_agent",
 	"598_external_agent_token_hash_index":                       "uq_external_agent_token_hash",
