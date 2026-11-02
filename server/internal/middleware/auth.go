@@ -146,6 +146,62 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				return
 			}
 
+			// External agent token: "mea_" prefix. A long-lived machine
+			// credential for one registered host session. Unlike mat_ it
+			// carries no task id, so it authenticates authorship only —
+			// downstream code must not invent a task or treat it as a
+			// managed run. Revocation, expiry, archive and loss of the
+			// owner's membership are re-checked on EVERY request so an
+			// already-issued credential cannot outlive any of them.
+			if strings.HasPrefix(tokenString, auth.ExternalAgentTokenPrefix) {
+				if queries == nil {
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				hash := auth.HashToken(tokenString)
+				et, err := queries.GetExternalAgentTokenByHash(r.Context(), hash)
+				if err != nil {
+					slog.Warn("auth: invalid external agent token", "path", r.URL.Path, "error", err)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				ownerID := uuidToString(et.OwnerUserID)
+				if rejectTemporarilyDisabledUser(w, r, ownerID, "", "external_agent_token") {
+					return
+				}
+				boundWorkspaceID := uuidToString(et.WorkspaceID)
+				if checkExternalAgentTokenWorkspaceTarget(w, r, queries, boundWorkspaceID) {
+					return
+				}
+				// The token's authority is its owner's membership. Losing that
+				// membership invalidates the credential immediately.
+				if _, err := queries.GetMemberByUserAndWorkspace(r.Context(), db.GetMemberByUserAndWorkspaceParams{
+					UserID:      et.OwnerUserID,
+					WorkspaceID: et.WorkspaceID,
+				}); err != nil {
+					slog.Warn("auth: external agent token owner is no longer a member", "path", r.URL.Path, "workspace_id", boundWorkspaceID, "error", err)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				agent, err := queries.GetAgent(r.Context(), et.AgentID)
+				if err != nil || uuidToString(agent.WorkspaceID) != boundWorkspaceID ||
+					agent.ExecutionKind != "external" || agent.ArchivedAt.Valid {
+					slog.Warn("auth: external agent token target is not a live external agent", "path", r.URL.Path, "agent_id", uuidToString(et.AgentID))
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				r.Header.Set("X-User-ID", ownerID)
+				r.Header.Set("X-Agent-ID", uuidToString(et.AgentID))
+				// Deliberately no X-Task-ID: an external session has no
+				// managed run, and a synthetic task id would corrupt task
+				// attribution and run/claim guards.
+				r.Header.Del("X-Task-ID")
+				r.Header.Set("X-Workspace-ID", boundWorkspaceID)
+				r.Header.Set("X-Actor-Source", "external_agent")
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Cloud Node PAT: "mcn_" prefix. Verified by calling the
 			// Multica Cloud Fleet service — Cloud (not us) is the
 			// authoritative owner of the token's status and owner_id

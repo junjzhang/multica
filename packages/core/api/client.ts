@@ -259,6 +259,7 @@ import { parseWithFallback } from "./schema";
 import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
+  AgentListSchema,
   AgentTaskListSchema,
   AgentTaskPageSchema,
   AgentActivityBucketListSchema,
@@ -1846,7 +1847,10 @@ export class ApiClient {
     const search = new URLSearchParams();
     if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
-    return this.fetch(`/api/agents?${search}`);
+    const raw = await this.fetch<unknown>(`/api/agents?${search}`);
+    return parseWithFallback<Agent[]>(raw, AgentListSchema, [], {
+      endpoint: "GET /api/agents",
+    });
   }
 
   async getAgent(id: string): Promise<Agent> {

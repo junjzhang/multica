@@ -389,6 +389,18 @@ deleted_issue_pr_automation AS (
 deleted_issue_pr_exclusions AS (
     DELETE FROM issue_pull_request_exclusion WHERE workspace_id = $1
 ),
+deleted_agent_mailbox_messages AS (
+    DELETE FROM agent_mailbox_message WHERE workspace_id = $1
+),
+deleted_external_agent_tokens AS (
+    DELETE FROM external_agent_token WHERE workspace_id = $1
+),
+deleted_external_agent_sessions AS (
+    DELETE FROM external_agent_session WHERE workspace_id = $1
+),
+deleted_external_agent_session_bindings AS (
+    DELETE FROM external_agent_session_binding WHERE workspace_id = $1
+),
 deleted_agent_invocation_targets AS (
     DELETE FROM agent_invocation_target
     WHERE agent_id IN (SELECT id FROM ws_agents)

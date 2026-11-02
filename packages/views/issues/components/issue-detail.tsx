@@ -14,6 +14,7 @@ import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { AppLink, useBackOrReplace } from "../../navigation";
 import { IssueDuplicateBanner, IssueDuplicatesSection, isDuplicateIssue } from "./issue-duplicates";
+import { IssueExternalCollaboration } from "./issue-external-collaboration";
 import {
   Archive,
   Calendar,
@@ -2992,6 +2993,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
       <IssueDuplicatesSection issueId={issue.id} />
 
+      <IssueExternalCollaboration issue={issue} agents={agents} />
+
       {/* Pull requests — hidden when the workspace disables the PR sidebar
           (or the GitHub master switch is off). Backend data is kept either
           way so re-enabling restores the section instantly. */}
@@ -3129,6 +3132,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             replies={timelineView.threadReplies.get(item.id) ?? EMPTY_REPLIES}
             currentUserId={user?.id}
             canModerate={canModerateComments}
+            externalAgents={agents}
             onReply={submitReply}
             onReplyAccepted={scrollToTimelineBottom}
             onEdit={editComment}

@@ -1606,6 +1606,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
 
+		// The one delivery worker consumes every source through this entry.
+		// DaemonAuth identifies the machine; the handler binds each claim to
+		// that verified daemon/workspace/owner.
+		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
+		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
+
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
 		r.Get("/chat-sessions/{sessionId}/gc-check", h.GetChatSessionGCCheck)
@@ -2275,6 +2281,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Route("/api/agents", func(r chi.Router) {
 				r.Get("/", h.ListAgents)
 				r.Post("/", h.CreateAgent)
+				// Register one existing host session as an external agent
+				// identity. Human owner/admin only; no runtime is bound.
+				r.With(handler.RequireHumanActor).Post("/external", h.CreateExternalAgent)
 				// The workspace's built-in Chief of Staff. Server-owned: the
 				// caller supplies only a runtime and a language, so a client
 				// cannot mint an agent carrying `system_key` and thereby claim
@@ -2287,6 +2296,18 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/restore", h.RestoreAgent)
 					r.Post("/cancel-tasks", h.CancelAgentTasks)
 					r.Get("/tasks", h.ListAgentTasks)
+					// Independently revocable machine credential for an
+					// external agent. Raw token is returned once, hash only.
+					r.With(handler.RequireHumanActor).Post("/tokens", h.CreateExternalAgentToken)
+					r.With(handler.RequireHumanActor).Delete("/tokens/{tokenId}", h.RevokeExternalAgentToken)
+					// Explicit (issue -> session) target for this external
+					// agent. Producers resolve it before enqueueing; a
+					// rebind never retargets an existing delivery.
+					r.With(handler.RequireHumanActor).Post("/session-bindings", h.BindAgentSession)
+					// Mailbox: the recipient's own external credential or an
+					// authorized human owner/admin.
+					r.Get("/mailbox", h.ListAgentMailbox)
+					r.Post("/mailbox/{messageId}/ack", h.AckAgentMailbox)
 					r.Get("/dingtalk/groups", h.ListDingTalkGroupsForAgent)
 					r.Get("/skills", h.ListAgentSkills)
 					r.Put("/skills", h.SetAgentSkills)
