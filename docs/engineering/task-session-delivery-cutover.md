@@ -47,7 +47,7 @@ Take the final consistent backup and delivery inventory only after the write fen
 
 Apply the reviewed migration artifacts while old readers and writers remain fenced. Complete and verify every concurrent index before starting candidate consumers. Do not reuse occupied migration numbers or declare success from the last migration's exit code alone.
 
-Install the tested backend, calling CLI, and delivery daemon as one compatible set; rebuild/update the frontend for the new issue controls and schemas. The host must satisfy the idle-only delivery and receipt contract. Do not replace the host merely because the Multica application changed. Preserve host instance identity, existing sessions, receipts, daemon identity, and credential profiles.
+Install the tested backend, calling CLI, and delivery daemon as one compatible set; rebuild/update the frontend for the new issue controls and schemas. Start and verify the upgraded backend before starting the upgraded daemon. The daemon requires `workspace_id` in each delivery claim response; an older backend leaves all such claims unusable and prevents delivery. The host must satisfy the idle-only delivery and receipt contract. Do not replace the host merely because the Multica application changed. Preserve host instance identity, existing sessions, receipts, daemon identity, and credential profiles.
 
 Before reopening normal traffic:
 
