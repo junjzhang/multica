@@ -192,10 +192,11 @@ func (w *Worker) round(ctx context.Context) {
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrNotFound):
-				// The server has not rolled out the generic entry for this
-				// workspace yet; other workspaces and the legacy mailbox loop
-				// keep working.
-				w.logger.Debug("generic delivery claim unavailable; skipping", "workspace_id", workspaceID, "error", err)
+				// This is the only claim entry, so a missing route stalls every
+				// delivery source for the workspace: comments and generic
+				// events alike. Keep the loop alive for other workspaces, but
+				// make the outage visible instead of debug noise.
+				w.logger.Warn("delivery claim endpoint unavailable; every delivery source for this workspace is stalled", "workspace_id", workspaceID, "error", err)
 			case ctx.Err() == nil:
 				// A revoked membership or removed workspace must not stop the
 				// other workspaces this daemon serves.

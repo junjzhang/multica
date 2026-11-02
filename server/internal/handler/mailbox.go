@@ -59,8 +59,8 @@ const (
 	mailboxLimitDefault = 50
 	mailboxLimitMax     = 100
 
-	daemonMailboxClaimDefault = 10
-	daemonMailboxClaimMax     = 50
+	daemonDeliveryClaimDefault = 10
+	daemonDeliveryClaimMax     = 50
 )
 
 // encodeMailboxCursor renders the opaque keyset cursor (created_at, id).
@@ -245,7 +245,8 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
 }
 
-// daemonMailboxContext resolves the verified daemon identity for claim/ack.
+// daemonMailboxContext resolves the verified daemon identity for delivery
+// claim/outcome.
 // Device tokens carry the daemon identity. User credentials require a selector
 // whose ownership is checked in the selected workspace.
 func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (workspaceID string, wsUUID pgtype.UUID, daemonID string, ownerID string, ok bool) {
@@ -308,206 +309,12 @@ func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (
 	return workspaceID, wsUUID, daemonID, ownerID, true
 }
 
-type claimDaemonMailboxRequest struct {
-	Limit int `json:"limit"`
-}
-
-type daemonMailboxClaimItem struct {
-	Message         MailboxMessageResponse  `json:"message"`
-	ExternalSession ExternalSessionResponse `json:"external_session"`
-	DeliveryToken   string                  `json:"delivery_token"`
-	LeaseExpiresAt  string                  `json:"lease_expires_at"`
-	Content         string                  `json:"content"`
-}
-
-// ClaimDaemonMailbox leases deliverable requests for the verified daemon and
-// returns a rendered notification. The claim is fenced: each message gets a
-// fresh delivery token, stored hashed, and only the daemon that holds the lease
-// can acknowledge it.
-func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
-	workspaceID, wsUUID, daemonID, ownerID, ok := h.daemonMailboxContext(w, r)
-	if !ok {
-		return
-	}
-	var req claimDaemonMailboxRequest
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = daemonMailboxClaimDefault
-	}
-	limit = min(limit, daemonMailboxClaimMax)
-
-	claims, err := delivery.NewQueue(h.Queries, h.TxStarter).Claim(r.Context(), delivery.ClaimRequest{
-		Scope:       delivery.Scope{WorkspaceID: workspaceID},
-		DaemonID:    daemonID,
-		OwnerUserID: ownerID,
-		Limit:       limit,
-		Projection:  delivery.CommentProjection,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to claim mailbox")
-		return
-	}
-	items := make([]daemonMailboxClaimItem, 0, len(claims))
-	for _, claim := range claims {
-		leased, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-			ID:          parseUUID(claim.ID),
-			WorkspaceID: wsUUID,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load claimed mailbox message")
-			return
-		}
-		// The lease carries the target the producer froze. Loading it by id
-		// keeps a rebind from changing where an existing message is delivered.
-		session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
-			ID:          parseUUID(claim.Delivery.Target.SessionID),
-			WorkspaceID: wsUUID,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load external session")
-			return
-		}
-		content := renderMailboxNotification(leased)
-		var source *ExternalSessionResponse
-		if leased.SourceSessionID.Valid {
-			if row, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
-				ID:          leased.SourceSessionID,
-				WorkspaceID: wsUUID,
-			}); err == nil {
-				source = externalSessionToResponse(row)
-			}
-		}
-		items = append(items, daemonMailboxClaimItem{
-			Message:         mailboxMessageToResponse(leased, source),
-			ExternalSession: *externalSessionToResponse(session),
-			DeliveryToken:   claim.LeaseToken,
-			LeaseExpiresAt:  timestampToString(pgtype.Timestamptz{Time: claim.LeaseExpiresAt, Valid: true}),
-			Content:         content,
-		})
-	}
-	issues := make(map[string]struct{})
-	for _, item := range items {
-		issues[item.Message.IssueID] = struct{}{}
-	}
-	for issueID := range issues {
-		h.publishMailboxChanged(wsUUID, issueID)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
-}
-
-// Stable references keep the host's idempotency fingerprint unchanged when
-// an issue is renamed or its discussion is edited between delivery attempts.
-func renderMailboxNotification(m db.AgentMailboxMessage) string {
-	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
-		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n"+
-		"Read: multica --profile <registered-external-profile> issue get %[3]s --output json\n"+
-		"Read comments: multica --profile <registered-external-profile> issue comment list %[3]s --output json\n"+
-		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
-		uuidToString(m.ID), uuidToString(m.WorkspaceID), uuidToString(m.IssueID), uuidToString(m.CommentID), uuidToString(m.RecipientAgentID))
-}
-
-type ackDaemonMailboxRequest struct {
-	DeliveryToken string `json:"delivery_token"`
-	Status        string `json:"status"`
-	HostReceipt   string `json:"host_receipt"`
-	Error         string `json:"error"`
-	// RetryClass separates a busy session from a broken dependency. Older
-	// daemons omit it and keep the failure backoff.
-	RetryClass string `json:"retry_class,omitempty"`
-}
-
-// AckDaemonMailbox records the daemon's delivery result. The lease token fences
-// the write: a stale or foreign ack matches no row and cannot overwrite a later
-// lease.
-func (h *Handler) AckDaemonMailbox(w http.ResponseWriter, r *http.Request) {
-	workspaceID, wsUUID, daemonID, _, ok := h.daemonMailboxContext(w, r)
-	if !ok {
-		return
-	}
-	messageID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "messageId"), "message id")
-	if !ok {
-		return
-	}
-	var req ackDaemonMailboxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.DeliveryToken == "" {
-		writeError(w, http.StatusBadRequest, "delivery_token is required")
-		return
-	}
-	state, ok := mailboxAckState(req.Status)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "status must be 'delivered', 'retry' or 'failed'")
-		return
-	}
-	if !validRetryClass(req.RetryClass) {
-		writeError(w, http.StatusBadRequest, "retry_class must be 'busy', 'unavailable' or 'dependency'")
-		return
-	}
-	if _, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-		ID:          messageID,
-		WorkspaceID: wsUUID,
-	}); err != nil {
-		writeError(w, http.StatusNotFound, "mailbox message not found")
-		return
-	}
-	// Both device credentials and owner-verified selectors fence the lease.
-	if _, err := delivery.NewQueue(h.Queries, h.TxStarter).RecordOutcome(r.Context(), delivery.OutcomeRequest{
-		Scope:       delivery.Scope{WorkspaceID: workspaceID},
-		DeliveryID:  uuidToString(messageID),
-		DaemonID:    daemonID,
-		LeaseToken:  req.DeliveryToken,
-		State:       state,
-		RetryClass:  delivery.RetryClass(req.RetryClass),
-		HostReceipt: req.HostReceipt,
-		Error:       req.Error,
-	}); err != nil {
-		if errors.Is(err, delivery.ErrLeaseLost) {
-			writeError(w, http.StatusConflict, "delivery lease is stale or does not belong to this daemon")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to acknowledge delivery")
-		return
-	}
-	updated, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-		ID:          messageID,
-		WorkspaceID: wsUUID,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load acknowledged mailbox message")
-		return
-	}
-	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
-	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
-}
-
 func validRetryClass(class string) bool {
 	switch class {
 	case "", "busy", "unavailable", "dependency":
 		return true
 	default:
 		return false
-	}
-}
-
-// mailboxAckState maps the frozen mailbox ack vocabulary onto the delivery
-// core's outcome states.
-func mailboxAckState(status string) (delivery.OutcomeState, bool) {
-	switch status {
-	case "delivered":
-		return delivery.OutcomeDelivered, true
-	case "retry":
-		return delivery.OutcomeRetry, true
-	case "failed":
-		return delivery.OutcomeRejected, true
-	default:
-		return "", false
 	}
 }
 

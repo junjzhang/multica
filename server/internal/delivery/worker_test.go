@@ -655,17 +655,13 @@ func TestWorkerUnusableClaimPreservesPendingDeliveredOutcome(t *testing.T) {
 	}
 }
 
-func TestVerifyOnlyDependsOnProjection(t *testing.T) {
-	if !verifyOnly(GenericProjection, "leased") {
-		t.Fatal("a reclaimed generic lease must be verification-only")
+func TestVerifyOnlyCoversEverySource(t *testing.T) {
+	for _, status := range []string{"leased", "unknown", ""} {
+		if !verifyOnly(status) {
+			t.Fatalf("status %q must be verification-only: the host may have accepted it", status)
+		}
 	}
-	if !verifyOnly(GenericProjection, "unknown") || !verifyOnly(CommentProjection, "unknown") {
-		t.Fatal("an unknown outcome must be verification-only for every projection")
-	}
-	if verifyOnly(CommentProjection, "leased") {
-		t.Fatal("the legacy comment projection keeps replaying expired leases")
-	}
-	if verifyOnly(GenericProjection, "pending") {
+	if verifyOnly("pending") {
 		t.Fatal("a known no-effect row is deliverable again")
 	}
 }

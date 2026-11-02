@@ -102,7 +102,7 @@ type wakeupQueueClient struct {
 func (c wakeupQueueClient) ClaimDeliveries(ctx context.Context, workspaceID string, limit int) ([]delivery.Claim, error) {
 	return c.q.Claim(ctx, delivery.ClaimRequest{
 		Scope: delivery.Scope{WorkspaceID: workspaceID}, DaemonID: c.daemon,
-		OwnerUserID: c.owner, Limit: limit, Projection: delivery.GenericProjection,
+		OwnerUserID: c.owner, Limit: limit,
 	})
 }
 
@@ -311,7 +311,7 @@ func TestWakeupExternalDeliveryWaitsBehindBusySession(t *testing.T) {
 		t.Helper()
 		claims, err := delivery.NewQueue(f.q, f.Pool).Claim(ctx, delivery.ClaimRequest{
 			Scope: delivery.Scope{WorkspaceID: f.WorkspaceID}, DaemonID: daemonID,
-			OwnerUserID: f.UserID, Limit: 5, Projection: delivery.GenericProjection,
+			OwnerUserID: f.UserID, Limit: 5,
 		})
 		if err != nil {
 			t.Fatalf("claim: %v", err)

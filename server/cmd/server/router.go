@@ -1606,12 +1606,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
 
-		// External-agent mailbox delivery. DaemonAuth identifies the machine;
-		// the handler binds each claim to that verified daemon/workspace/owner.
-		r.Post("/mailbox/claim", h.ClaimDaemonMailbox)
-		r.Post("/mailbox/{messageId}/ack", h.AckDaemonMailbox)
-		// Generic delivery worker. It claims non-comment deliveries only, so it
-		// and the frozen mailbox entry never lease the same row.
+		// The one delivery worker consumes every source through this entry.
+		// DaemonAuth identifies the machine; the handler binds each claim to
+		// that verified daemon/workspace/owner.
 		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
 		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
 
