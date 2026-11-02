@@ -15,6 +15,16 @@ This contract covers delegations issued through Multica. Sub-agents created insi
 - Managed executors' sessions are managed by Multica. Leaders do not register harness-internal sessions or sub-agents.
 - Reassignment of the executor does not change the recorded return recipient. Explicit takeover identifies the replacement recipient for future notifications; it does not rewrite earlier delivery envelopes.
 
+## Managed dispatchers
+
+When a managed Agent explicitly delegates through Multica, derive its return identity from the authenticated task token and server-owned task/session record. The original issue or chat scope, runtime, provider session, and work directory remain the return destination; the delegated issue is not a replacement scope. Harness-internal sub-agent creation remains outside this contract.
+
+Reuse the existing managed task queue and provider resume path for a result-handling turn. Bind that turn to the recorded source task/session, rather than looking up the latest session for an Agent and issue. A new queue record or CLI process for a turn in the original provider session does not mean rerunning the delegated implementation.
+
+While the source turn is busy, the result-handling turn waits. If its fixed session or work directory is no longer recoverable, preserve the submitted result and expose delivery failure; do not silently select a newer session or use the normal fresh-session fallback. Other ordinary managed work retains its existing recovery policy.
+
+The first provider session pin can arrive after the Agent starts using tools. Until a reliable return identity is persisted, the delegation gate must return a specific not-ready outcome without creating executable child work. Do not fill that gap with an older session. Exercise this window along with session replacement, busy return, and missing-session failure in integration tests.
+
 ## Delivery contract
 
 Application producers resolve an authorized issue binding before enqueue. The delivery core receives a workspace, an opaque canonical target reference, an idempotency key, a transport kind, immutable payload, and optional business references. It must not resolve a recipient's current binding during claim, retry, or receipt lookup.
