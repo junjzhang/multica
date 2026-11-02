@@ -205,11 +205,17 @@ func buildDshMCPServers(raw json.RawMessage, logger interface {
 }
 
 func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
-	// DSH protocol v1 carries the prompt and resume_session_id in one execute
-	// frame; resume_rejected only arrives in the terminal result. There is no
-	// pre-prompt RPC this adapter can use to prove the session, so strict mode
-	// must fail instead of submitting the prompt to a possible fresh session.
-	if err := requireStrictResumeSupport("dsh", opts); err != nil {
+	// DSH protocol v1 carries the prompt and resume_session_id in the same
+	// execute frame, so there is no separate preflight RPC. Strict mode is
+	// still supported because the Multica DSH runtime treats a non-empty
+	// resume_session_id as resume-only: createOrResumeAgent never calls
+	// agents.create on that path, the JSONL persistence backend refuses a
+	// missing session instead of creating it, and followup(prompt) runs only
+	// after the resumed agent is idle. The runtime then reports
+	// session{session_id, resumed:true} before that first followup. The
+	// adapter requires that evidence and never falls back to a fresh session;
+	// see enforceStrictResumeResult for the failure contract.
+	if err := requireStrictResume(opts); err != nil {
 		return nil, err
 	}
 	execPath := b.cfg.ExecutablePath
@@ -312,7 +318,11 @@ func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 		defer close(resCh)
 		defer func() { _ = stdin.Close() }()
 		started := time.Now()
-		state := dshRunState{usage: make(map[string]TokenUsage)}
+		state := dshRunState{
+			usage:             make(map[string]TokenUsage),
+			strictResume:      opts.RequireResume,
+			requestedResumeID: opts.ResumeSessionID,
+		}
 		scanner := newAgentStreamScanner(stdout)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -357,6 +367,7 @@ func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 				result.Error = "dsh exited without a terminal result"
 			}
 		}
+		state.enforceStrictResumeResult(result)
 		if result.Error != "" {
 			result.Error = withAgentStderr(result.Error, "dsh", stderrBuf.Tail())
 		}
@@ -378,6 +389,40 @@ type dshRunState struct {
 	invalidFrames int
 	usage         map[string]TokenUsage
 	result        *Result
+
+	// Strict resume evidence. DSH reports the session only after it has
+	// resumed the requested one, so this frame is the pre-prompt proof the
+	// adapter accepts; a terminal result's session_id is not a substitute.
+	strictResume      bool
+	requestedResumeID string
+	resumeConfirmed   bool
+	strictResumeErr   string
+}
+
+// enforceStrictResumeResult fails a strict run that did not prove it resumed
+// exactly the requested session. It deliberately drops the observed SessionID:
+// a fresh session must never be adopted as the continuation of the requested
+// one, and ResumeRejected tells the caller that a fresh retry would violate the
+// strict contract. Cancellation and timeout keep their status because neither
+// is a resume result and a fresh retry is not implied by them.
+func (s *dshRunState) enforceStrictResumeResult(result *Result) {
+	if !s.strictResume || (s.resumeConfirmed && s.strictResumeErr == "") {
+		return
+	}
+	if result.Status == "cancelled" || result.Status == "timeout" {
+		return
+	}
+	reason := s.strictResumeErr
+	if reason == "" {
+		reason = fmt.Sprintf("%v: dsh finished without confirming session %q before the first prompt", ErrResumeRequired, s.requestedResumeID)
+	}
+	if result.Error != "" {
+		reason += ": " + result.Error
+	}
+	result.Status = "failed"
+	result.Error = reason
+	result.SessionID = ""
+	result.ResumeRejected = true
 }
 
 func handleDshFrame(frame dshFrame, requestID string, ch chan<- Message, state *dshRunState) {
@@ -392,6 +437,20 @@ func handleDshFrame(frame dshFrame, requestID string, ch chan<- Message, state *
 	case "ready":
 		state.ready = frame.Runtime == "dsh"
 	case "session":
+		if state.strictResume {
+			switch {
+			case !frame.Resumed:
+				state.strictResumeErr = fmt.Sprintf("%v: dsh reported a new session %q instead of resuming %q", ErrResumeRequired, frame.SessionID, state.requestedResumeID)
+			case frame.SessionID != state.requestedResumeID:
+				state.strictResumeErr = fmt.Sprintf("%v: dsh resumed session %q, requested %q", ErrResumeRequired, frame.SessionID, state.requestedResumeID)
+			default:
+				state.resumeConfirmed = true
+			}
+			if state.strictResumeErr != "" {
+				// Do not publish a session the strict run must not continue.
+				return
+			}
+		}
 		state.sessionID = frame.SessionID
 		trySend(ch, Message{Type: MessageStatus, Status: "running", SessionID: frame.SessionID})
 	case "text":

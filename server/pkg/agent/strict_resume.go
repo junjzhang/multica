@@ -32,9 +32,37 @@ func requireStrictResume(opts ExecOptions) error {
 	return nil
 }
 
-// requireStrictResumeSupport is the fail-closed guard for backends that have no
-// pre-prompt way to confirm a resumed session. It returns nil when strict mode
-// is off, so ordinary fallback behaviour is untouched.
+// Strict-resume support follows each backend's real resume contract, not the
+// presence of a separate preflight call:
+//
+//   - ACP (Hermes, TraeCLI, Kimi, Dim, Qoder CN, Reasonix, Kiro, MCode, QwenPaw,
+//     ZeroClaw, Grok, Muse): session/load or session/resume completes before
+//     session/prompt and reports the served id. checkStrictACPResumedSessionID
+//     rejects an empty or changed id. MCode additionally needs loadSession.
+//   - Codex: thread/resume returns the thread id before turn/start.
+//   - DSH: the runtime resumes exactly the non-empty resume_session_id before
+//     followup and reports session{resumed:true, session_id} first; see
+//     dsh.go.
+//   - Claude: --resume loads the named transcript before the turn. The adapter
+//     pre-checks the same transcript file so a missing session fails before
+//     launch. File existence only moves that failure earlier; the guarantee
+//     that the prompt lands in the requested session is the CLI's native
+//     resume, and a CLI that ignored the id would already have the prompt.
+//   - Pi: --session points at the persisted transcript, which the adapter
+//     stats (and locks) before launch. Same boundary as Claude: the native
+//     load is the guarantee, the stat only proves the file exists.
+//   - OpenCode: `opencode export <id>` proves the id exists, then --session
+//     loads it before the turn. Export is existence, not replay; a CLI version
+//     that silently rebound instead would not be caught before the prompt.
+//   - antigravity, codearts, codebuddy, copilot, cursor, deveco, openclaw and
+//     qwen only pass a resume flag (or --conversation) and infer the outcome
+//     from the final stream/stderr. None has a verified pre-prompt existence or
+//     identity proof, so strict mode stays fail-closed here rather than
+//     claiming support from local files the CLI may ignore.
+//
+// requireStrictResumeSupport is the fail-closed guard for the last group. It
+// returns nil when strict mode is off, so ordinary fallback behaviour is
+// untouched.
 func requireStrictResumeSupport(backend string, opts ExecOptions) error {
 	if err := requireStrictResume(opts); err != nil {
 		return err

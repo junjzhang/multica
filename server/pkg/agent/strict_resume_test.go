@@ -110,7 +110,6 @@ func TestStrictResumeUnsupportedBackendsFailBeforeLaunch(t *testing.T) {
 		"copilot",
 		"cursor",
 		"deveco",
-		"dsh",
 		"openclaw",
 		"qwen",
 	}
@@ -758,6 +757,112 @@ func TestStrictMuseResumeIdentity(t *testing.T) {
 	}
 	if museRequestByMethod(requests, "session/start") != nil {
 		t.Fatalf("changed muse resume started a new session: %v", requests)
+	}
+}
+
+// TestStrictDshResumeIdentity pins the DSH protocol contract: the execute
+// frame carries the prompt and resume_session_id together, and strict mode
+// accepts the run only after the runtime reports session{resumed:true} for the
+// exact requested id before the prompt. A terminal result's session id is not
+// evidence on its own, and no failure path may adopt a fresh session.
+func TestStrictDshResumeIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	cases := []struct {
+		name         string
+		mode         string
+		wantStatus   string
+		wantRejected bool
+	}{
+		{name: "exact", mode: "exact", wantStatus: "completed"},
+		{name: "changed id", mode: "changed", wantStatus: "failed", wantRejected: true},
+		{name: "fresh session", mode: "fresh", wantStatus: "failed", wantRejected: true},
+		{name: "missing session", mode: "missing", wantStatus: "failed", wantRejected: true},
+		{name: "result id only", mode: "result-only", wantStatus: "failed", wantRejected: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			record := filepath.Join(dir, "execute.log")
+			bin := writeDshFixture(t, `
+if [ "$1" != "--profile" ] || [ "$2" != "multica" ] || [ "$3" != "--stdio" ]; then exit 9; fi
+printf '%s\n' '{"v":1,"type":"ready","runtime":"dsh","plugin_version":"test","capabilities":{}}'
+IFS= read -r execute
+printf '%s\n' "$execute" > "$DSH_STRICT_RECORD"
+case "$DSH_STRICT_MODE" in
+  exact)
+    printf '%s\n' '{"v":1,"type":"session","request_id":"task-1","session_id":"ses_requested","resumed":true}'
+    printf '%s\n' '{"v":1,"type":"text","request_id":"task-1","content":"OK"}'
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_requested","output":"OK","resume_rejected":false}'
+    ;;
+  changed)
+    printf '%s\n' '{"v":1,"type":"session","request_id":"task-1","session_id":"ses_other","resumed":true}'
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_other","output":"wrong","resume_rejected":false}'
+    ;;
+  fresh)
+    printf '%s\n' '{"v":1,"type":"session","request_id":"task-1","session_id":"ses_new","resumed":false}'
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_new","output":"wrong","resume_rejected":false}'
+    ;;
+  missing)
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"failed","output":"","resume_rejected":true,"error":{"code":"DSH_RESUME_REJECTED","message":"could not resume DSH session ses_requested"}}'
+    ;;
+  result-only)
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_requested","output":"no session frame","resume_rejected":false}'
+    ;;
+esac
+`)
+			backend, err := New("dsh", Config{
+				ExecutablePath: bin,
+				TaskID:         "task-1",
+				Logger:         slog.Default(),
+				Env: map[string]string{
+					"DSH_STRICT_MODE":   tc.mode,
+					"DSH_STRICT_RECORD": record,
+				},
+			})
+			if err != nil {
+				t.Fatalf("New(dsh): %v", err)
+			}
+			result, err := runStrictBackend(t, backend, ExecOptions{
+				RequireResume:   true,
+				ResumeSessionID: "ses_requested",
+				Timeout:         5 * time.Second,
+				Cwd:             t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			raw, readErr := os.ReadFile(record)
+			if readErr != nil {
+				t.Fatalf("read execute frame: %v", readErr)
+			}
+			var command dshExecuteCommand
+			if err := json.Unmarshal(raw, &command); err != nil {
+				t.Fatalf("execute frame is not JSON: %v", err)
+			}
+			if command.ResumeSessionID != "ses_requested" {
+				t.Fatalf("execute resume_session_id = %q, want ses_requested", command.ResumeSessionID)
+			}
+			if command.Prompt != "strict resume test prompt" {
+				t.Fatalf("execute prompt = %q, want the task prompt", command.Prompt)
+			}
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (error %q)", result.Status, tc.wantStatus, result.Error)
+			}
+			if tc.wantRejected {
+				if !result.ResumeRejected || result.SessionID != "" {
+					t.Fatalf("strict failure = %+v, want ResumeRejected with no adopted session", result)
+				}
+				if !strings.Contains(result.Error, "ses_requested") {
+					t.Fatalf("strict failure error %q does not name the requested session", result.Error)
+				}
+				return
+			}
+			if result.SessionID != "ses_requested" || result.ResumeRejected {
+				t.Fatalf("strict success result = %+v, want exact requested session", result)
+			}
+		})
 	}
 }
 
