@@ -167,16 +167,21 @@ status rules of your runtime brief for this issue.
   statuses; any other status write fails with `status_not_in_workflow`, and
   the error lists the allowed keys. The workspace Default workflow accepts
   every status, so issues on statuses it no longer lists keep working.
-- **Changing the status is the handoff.** Entering a column that hands off
-  reassigns the issue to that column's handler and starts their run; a member
-  handler is assigned and runs nothing. Nothing advances the status when a run
-  ends: finishing a step means moving the issue to the next status yourself,
-  with the command the block names. A column can also name a "needs changes"
-  status that sends the issue back.
-- **Entering a step you handle starts your run.** Even when your own run makes
-  the move, a run for the new step queues behind the current one, and the
-  write skips your own event wakeups so one change starts one run. Do not add
-  a wakeup to catch it.
+- **Changing the status assigns the handler; it does not start a run.** Entering
+  a column that hands off reassigns the issue to that column's handler. A member
+  handler is assigned and runs nothing; an agent handler is assigned but starts
+  only when someone explicitly `@`-mentions it or reruns the issue. Nothing
+  advances the status when a run ends: finishing a step means moving the issue
+  to the next status yourself, with the command the block names. A column can
+  also name a "needs changes" status that sends the issue back.
+- **A status move you make does not start the next step.** When your own run
+  moves the issue into a handoff column, the write skips your own event wakeups
+  and starts no run for the new handler. In your final comment, explicitly
+  `@`-mention the next handler and state the request; otherwise the issue is
+  only assigned. Do not add a wakeup to catch a status change.
+- **Creation is the exception.** Creating an issue directly in a handoff column,
+  or assigning an agent at creation, is an explicit assignment and starts the
+  handler unless the issue is parked in `backlog`.
 - **A run works one step.** A run is bound to the status the issue was at when
   it was queued, and moves along with your own status changes. If someone else
   moves the issue while you work, your status changes are refused with

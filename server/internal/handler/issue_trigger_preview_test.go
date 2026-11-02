@@ -117,7 +117,7 @@ func TestPreviewIssueTrigger_MemberNoTrigger(t *testing.T) {
 
 // TestPreviewIssueTrigger_BatchAggregates verifies the batch shape: two
 // agent-assigned issues moving out of backlog preview two distinct runs.
-func TestPreviewIssueTrigger_BatchAggregates(t *testing.T) {
+func TestPreviewIssueTrigger_StatusOnlyBatchPredictsNoRuns(t *testing.T) {
 	agentID := seededReadyAgentID(t)
 	i1 := createIssueForTest(t, map[string]any{"title": "batch preview 1", "status": "backlog", "assignee_type": "agent", "assignee_id": agentID})
 	i2 := createIssueForTest(t, map[string]any{"title": "batch preview 2", "status": "backlog", "assignee_type": "agent", "assignee_id": agentID})
@@ -126,18 +126,10 @@ func TestPreviewIssueTrigger_BatchAggregates(t *testing.T) {
 		"issue_ids": []string{i1.ID, i2.ID},
 		"status":    "todo",
 	})
-	if resp.TotalCount != 2 {
-		t.Fatalf("batch promote: expected total_count 2, got %+v", resp)
-	}
-	seen := map[string]bool{}
-	for _, tr := range resp.Triggers {
-		if tr.Source != "status" {
-			t.Fatalf("batch promote: expected source=status, got %q", tr.Source)
-		}
-		seen[tr.IssueID] = true
-	}
-	if !seen[i1.ID] || !seen[i2.ID] {
-		t.Fatalf("batch promote: missing an issue in %+v", resp.Triggers)
+	// A batch status promotion is state-only: the preview must promise no run,
+	// matching the write path.
+	if resp.TotalCount != 0 || len(resp.Triggers) != 0 {
+		t.Fatalf("status-only batch preview = %+v, want no triggers", resp)
 	}
 }
 

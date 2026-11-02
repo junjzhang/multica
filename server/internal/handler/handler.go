@@ -885,6 +885,14 @@ func (h *Handler) resolveActor(r *http.Request, userID, workspaceID string) (act
 		// it directly without re-querying.
 		return "agent", r.Header.Get("X-Agent-ID")
 	}
+	if r.Header.Get("X-Actor-Source") == "external_agent" {
+		// A mea_ credential authenticates one concrete external agent and
+		// carries no task. The middleware re-stamped X-Agent-ID after
+		// checking expiry/revocation, membership and archive state, so the
+		// identity is authoritative; deriving a task here would fabricate
+		// execution that never happened.
+		return "agent", r.Header.Get("X-Agent-ID")
+	}
 	agentID := r.Header.Get("X-Agent-ID")
 	if agentID == "" {
 		return "member", userID

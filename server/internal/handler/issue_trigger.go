@@ -21,13 +21,10 @@ const maxPreviewTriggerIssues = 500
 // WillEnqueueRun. The private-agent gate is already enforced at the HTTP
 // boundary (validateAssigneePair on assign) and inside enqueueSquadLeaderTask
 // (canEnqueueSquadLeader), so a write must NOT re-run or sink it — it passes
-// allow-all. The self-loop check needs the request's X-Task-ID header.
+// allow-all.
 func (h *Handler) issueTriggerWriteProbe(r *http.Request, actorType, actorID string, issue db.Issue) service.IssueTriggerProbe {
 	return service.IssueTriggerProbe{
 		CanAccessAgent: nil, // allow-all; gate lives at the write boundary
-		IsSelfLoop: func() bool {
-			return h.isAgentRunningOnIssue(r, actorType, issue)
-		},
 		SuppressActiveSelfAssignment: func(agentID pgtype.UUID) bool {
 			suppress := h.shouldSuppressActiveSelfAssignment(r.Context(), actorType, actorID, issue.ID, agentID)
 			if suppress {
@@ -44,15 +41,12 @@ func (h *Handler) issueTriggerWriteProbe(r *http.Request, actorType, actorID str
 // issueTriggerPreviewProbe mirrors the real write-time gates for the read-only
 // preview: the private-agent gate (so preview never leaks a private agent's
 // readiness to a member who cannot see it — matching validateAssigneePair /
-// canEnqueueSquadLeader) and the same self-loop guard.
+// canEnqueueSquadLeader).
 func (h *Handler) issueTriggerPreviewProbe(r *http.Request, actorType, actorID, workspaceID string, issue db.Issue) service.IssueTriggerProbe {
 	originatorUserID := h.invokeOriginatorFromRequest(r, actorType, actorID)
 	return service.IssueTriggerProbe{
 		CanAccessAgent: func(agent db.Agent) bool {
 			return h.canInvokeAgent(r.Context(), agent, actorType, actorID, originatorUserID, workspaceID)
-		},
-		IsSelfLoop: func() bool {
-			return h.isAgentRunningOnIssue(r, actorType, issue)
 		},
 		SuppressActiveSelfAssignment: func(agentID pgtype.UUID) bool {
 			return h.shouldSuppressActiveSelfAssignment(r.Context(), actorType, actorID, issue.ID, agentID)
@@ -249,7 +243,7 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 
 		post := loaded
-		in := service.IssueTriggerInput{PrevStatus: loaded.Status}
+		in := service.IssueTriggerInput{}
 		if hasNewAssignee {
 			post.AssigneeType = newAssigneeType
 			post.AssigneeID = newAssigneeID
@@ -258,7 +252,6 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Status != nil && *req.Status != "" {
 			post.Status = *req.Status
-			in.StatusChanged = loaded.Status != *req.Status
 			// A status that enters a workflow handoff step reassigns the
 			// issue, exactly as UpdateIssue will. (MUL-7420)
 			if !hasNewAssignee {

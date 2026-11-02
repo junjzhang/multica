@@ -5002,11 +5002,10 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 			OriginatorUserID:        originatorUserID,
 		})
 		// Agent replies discovered only by timestamp must not start a new
-		// conversation. Replay explicit mentions, or a worker reply that the
-		// creation path already accepted and recorded in this run's input plan.
-		// Recomputed routing still checks current permissions and the self guard.
+		// conversation. Replay only explicit mentions; recomputed routing still
+		// checks current permissions and the self guard.
 		if actorType != "member" {
-			triggers = keepReplayableAgentTriggers(triggers, slices.Contains(plannedCommentIDs, c.ID))
+			triggers = keepReplayableAgentTriggers(triggers)
 		}
 		scoped := make([]commentAgentTrigger, 0, 1)
 		for _, trigger := range triggers {
@@ -5053,11 +5052,11 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 	}
 }
 
-// keepReplayableAgentTriggers preserves explicit mentions (MUL-4304) and
-// accepted worker replies recorded in the completing run's plan. A timestamp
-// alone never authorizes replay of an implicit agent route. Member comments
-// retain their full routing and do not pass through this filter.
-func keepReplayableAgentTriggers(triggers []commentAgentTrigger, planned bool) []commentAgentTrigger {
+// keepReplayableAgentTriggers preserves explicit mentions (MUL-4304). A
+// timestamp alone never authorizes replay of an unmentioned comment: replies
+// are discussion, not requests, and completion must not turn one into a run.
+// Member comments retain their full routing and do not pass through this filter.
+func keepReplayableAgentTriggers(triggers []commentAgentTrigger) []commentAgentTrigger {
 	if len(triggers) == 0 {
 		return triggers
 	}
@@ -5066,10 +5065,6 @@ func keepReplayableAgentTriggers(triggers []commentAgentTrigger, planned bool) [
 		switch trigger.Source {
 		case commentTriggerSourceMentionAgent, commentTriggerSourceMentionSquadLeader:
 			filtered = append(filtered, trigger)
-		case commentTriggerSourceIssueAssignee, commentTriggerSourceThreadParent:
-			if planned && trigger.NonLeaderAgentReply {
-				filtered = append(filtered, trigger)
-			}
 		}
 	}
 	return filtered

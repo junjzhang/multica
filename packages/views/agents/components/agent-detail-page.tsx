@@ -22,9 +22,12 @@ import type {
 } from "@multica/core/types";
 import {
   type AgentPresenceDetail,
-  isAgentRuntimeBound,
   useWorkspacePresenceMap,
 } from "@multica/core/agents";
+import {
+  agentExecutionKind,
+  agentNeedsRuntime,
+} from "@multica/core/agents/execution-kind";
 import { api, ApiError } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -64,6 +67,7 @@ import { ActorAvatar } from "../../common/actor-avatar";
 import { AgentPresenceIndicator } from "./agent-presence-indicator";
 import { VisibilityBadge } from "./visibility-badge";
 import { AgentOverviewPane, type DetailTab } from "./agent-overview-pane";
+import { AgentExecutionStatus } from "../../issues/components/agent-execution-identity";
 import { ExpandableDescription } from "../../common/expandable-description";
 import { useT, useTimeAgo } from "../../i18n";
 
@@ -299,10 +303,15 @@ export function AgentDetailPage({ agentId }: AgentDetailPageProps) {
   }
 
   const isArchived = !!agent.archived_at;
-  const runtimeBound = isAgentRuntimeBound(agent);
-  const runtime = runtimeBound
-    ? runtimes.find((r) => r.id === agent.runtime_id) ?? null
-    : null;
+  const executionKind = agentExecutionKind(agent);
+  const needsRuntime = agentNeedsRuntime(agent);
+  const canRunNatively = executionKind === "managed";
+  // External and unknown identities never borrow a managed runtime, even if a
+  // stale runtime_id survived on the row.
+  const runtime =
+    canRunNatively && !needsRuntime
+      ? runtimes.find((r) => r.id === agent.runtime_id) ?? null
+      : null;
   const owner = agent.owner_id
     ? members.find((m) => m.user_id === agent.owner_id) ?? null
     : null;
@@ -325,13 +334,18 @@ export function AgentDetailPage({ agentId }: AgentDetailPageProps) {
       toast.error(t(($) => $.detail.dm_no_permission_toast));
       return;
     }
-    if (!runtimeBound) {
+    if (!canRunNatively) {
+      e.preventDefault();
+      return;
+    }
+    if (needsRuntime) {
       e.preventDefault();
       toast.error(t(($) => $.detail.runtime_required_toast));
     }
   };
   const handleAssign = () => {
-    if (!runtimeBound) {
+    if (!canRunNatively) return;
+    if (needsRuntime) {
       toast.error(t(($) => $.detail.runtime_required_toast));
       return;
     }
@@ -389,7 +403,7 @@ export function AgentDetailPage({ agentId }: AgentDetailPageProps) {
         </div>
       )}
 
-      {!isArchived && !runtimeBound && (
+      {!isArchived && needsRuntime && (
         <div className="shrink-0 border-b border-amber-500/30 bg-amber-500/10 py-2 text-caption text-amber-900 dark:text-amber-100">
           <div className={cn(PAGE_RAIL, PAGE_GUTTER, "flex items-center gap-2")}>
             <Server className="h-3.5 w-3.5 shrink-0" />
@@ -406,6 +420,17 @@ export function AgentDetailPage({ agentId }: AgentDetailPageProps) {
                 {t(($) => $.detail.bind_runtime)}
               </Button>
             )}
+          </div>
+        </div>
+      )}
+
+      {!isArchived && executionKind === "unknown" && (
+        <div className="shrink-0 border-b border-destructive/30 bg-destructive/10 py-2 text-caption text-destructive">
+          <div className={cn(PAGE_RAIL, PAGE_GUTTER, "flex items-center gap-2")}>
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">
+              {t(($) => $.detail.execution_unknown_banner)}
+            </span>
           </div>
         </div>
       )}
@@ -503,6 +528,7 @@ function DetailHeader({
   const { t } = useT("agents");
   const timeAgo = useTimeAgo();
   const isArchived = !!agent.archived_at;
+  const managedExecution = agentExecutionKind(agent) === "managed";
   const hasMoreActions = !!onArchive;
 
   return (
@@ -548,14 +574,18 @@ function DetailHeader({
                     <span className="truncate">{agent.model || t(($) => $.pickers.model_default)}</span>
                   </span>
                 )}
-                <span className="inline-flex min-w-0 items-center gap-1.5">
-                  <Server className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">
-                    {runtime
-                      ? runtimeDisplayLabel(runtime)
-                      : t(($) => $.pickers.runtime_none)}
+                {managedExecution ? (
+                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <Server className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span className="truncate">
+                      {runtime
+                        ? runtimeDisplayLabel(runtime)
+                        : t(($) => $.pickers.runtime_none)}
+                    </span>
                   </span>
-                </span>
+                ) : (
+                  <AgentExecutionStatus agent={agent} detailed={false} />
+                )}
                 <VisibilityBadge value={agent.visibility} />
                 <span className="inline-flex items-center gap-1.5">
                   <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -566,7 +596,7 @@ function DetailHeader({
           </div>
 
           <div className="flex shrink-0 items-center gap-2 self-end lg:self-start">
-            {!isArchived && (
+            {!isArchived && managedExecution && (
               <Button
                 variant="outline"
                 size="sm"
@@ -582,7 +612,7 @@ function DetailHeader({
                 {t(($) => $.detail.dm)}
               </Button>
             )}
-            {!isArchived && canAssign && (
+            {!isArchived && managedExecution && canAssign && (
               <Button type="button" size="sm" onClick={onAssign}>
                 <Plus className="h-4 w-4" aria-hidden="true" />
                 {t(($) => $.detail.assign_work)}

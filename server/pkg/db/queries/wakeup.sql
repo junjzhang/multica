@@ -320,3 +320,50 @@ WHERE id= @id AND status='dispatched' AND dispatched_at= @dispatched_at RETURNIN
 -- not finished: the run that made a change still knows about it.
 SELECT count(*) FROM agent_task_queue WHERE id=ANY(@ids::uuid[]) AND agent_id= @agent_id AND issue_id= @issue_id
  AND status IN ('dispatched','running','waiting_local_directory');
+
+-- name: WithdrawUnclaimedWakeupDeliveries :execrows
+-- Withdraws notifications from one disabled or replaced rule that no host has
+-- accepted yet. A pending row has no lease: recording any outcome clears it.
+-- A leased or unknown row is left to its outcome because the host may already
+-- have accepted it; a reclaimed row is verify-only and is never sent again.
+-- That is not absolute: an in-flight attempt the host answers with busy or
+-- unavailable returns to pending as a retry, and the next claim delivers it
+-- once more after the rule was disabled.
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = @reason, updated_at = now()
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL;
+
+-- name: WithdrawIssueWakeupDeliveries :execrows
+-- The same withdrawal for every wakeup of a closed issue, which is disabled
+-- without loading each rule. The leased/unknown boundary and its busy-retry
+-- caveat are the same as above.
+UPDATE agent_mailbox_message
+SET delivery_status = 'failed', last_error = @reason, updated_at = now()
+WHERE workspace_id = @workspace_id AND issue_id = @issue_id
+  AND source_type = 'issue_wakeup'
+  AND delivery_status = 'pending' AND lease_token_hash IS NULL;
+
+-- name: FindUndecidedWakeupDelivery :one
+-- An external target has no task that a later firing could join. While a
+-- notification for the rule has not reached a terminal transport state, the
+-- rule keeps its inputs instead of queueing another notification, just as a
+-- managed rule waits for its claimed run. Terminal states (delivered, failed)
+-- never block a new firing. The row is reported so last_error names the
+-- delivery; unknown is fail-closed and waits for an operator, never a replay
+-- under a new id.
+SELECT id, delivery_status FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND delivery_status IN ('pending','leased','unknown')
+ORDER BY (delivery_status = 'unknown') DESC, created_at ASC
+LIMIT 1;
+
+-- name: CountRecentWakeupDeliveries :one
+-- The hourly firing cap for an external target. It starts no runs, so the
+-- managed-run count cannot see its firings.
+SELECT count(*) FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND created_at > @since;

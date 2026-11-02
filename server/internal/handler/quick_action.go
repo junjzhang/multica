@@ -910,8 +910,22 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 
 	body := sanitizeNullBytes(buildQuickActionBody(qa, target))
 
-	created, err := h.Queries.CreateComment(r.Context(), db.CreateCommentParams{
-		ID:          dbid.NewV7(),
+	commentID := dbid.NewV7()
+	plan := h.planCommentTriggers(r.Context(), issue, body, nil, actorType, actorID, commentID, pgtype.UUID{}, pgtype.UUID{}, originatorUserID, nil, true)
+
+	// The rendered comment and any mailbox handoff are one database outcome:
+	// a saved quick-action comment whose external delivery was lost is the same
+	// gap the generic comment endpoint closes.
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		slog.Warn("quick action comment create failed", append(logger.RequestAttrs(r), "error", err, "quick_action_id", uuidToString(qa.ID))...)
+		writeError(w, http.StatusInternalServerError, "failed to run quick action")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	created, err := qtx.CreateComment(r.Context(), db.CreateCommentParams{
+		ID:          commentID,
 		IssueID:     issue.ID,
 		WorkspaceID: issue.WorkspaceID,
 		AuthorType:  actorType,
@@ -924,6 +938,13 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		Type:          "comment",
 		QuickActionID: qa.ID,
 	})
+	var delivered map[string]struct{}
+	if err == nil {
+		delivered, err = h.enqueueMailboxDeliveries(r.Context(), qtx, issue, commentID, plan.mailboxTargets, actorType, actorID)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
 	if err != nil {
 		slog.Warn("quick action comment create failed", append(logger.RequestAttrs(r), "error", err, "quick_action_id", uuidToString(qa.ID))...)
 		writeError(w, http.StatusInternalServerError, "failed to run quick action")
@@ -941,8 +962,11 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		"issue_status":        issue.Status,
 		"issue_revision":      created.IssueRevision,
 	})
+	if len(delivered) > 0 {
+		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
+	}
 
-	resp.TriggerOutcomes = h.triggerTasksForComment(r.Context(), issue, comment, nil, actorType, actorID, originatorUserID, nil, nil)
+	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, plan, delivered)
 
 	// Usage telemetry is best-effort and deliberately outside the run's
 	// success path: a failed counter must never cost the user the run.
