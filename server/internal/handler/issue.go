@@ -294,14 +294,14 @@ func assertIssueStatusStillActive(ctx context.Context, qtx *db.Queries, workspac
 // inside a transaction that re-verifies the status under the shared catalog
 // lock (see assertIssueStatusStillActive). Request writes also carry trusted
 // wakeup actor identity in transaction-local settings, including built-in targets.
-func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(q *db.Queries) error) error {
+func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(q *db.Queries, inTx bool) error) error {
 	_, hasActor := ctx.Value(wakeupActorKey{}).(wakeupActor)
 	// A built-in non-terminal status has nothing to clean up, so it can take the
 	// fast path. done and cancelled do withdraw notifications, and that
 	// withdrawal must commit with the status write even when no wakeup actor is
 	// installed.
 	if !hasActor && !closeStatusNeedsTransaction(statusKey) && (statusKey == "" || issuestatus.IsBuiltIn(statusKey)) {
-		return fn(h.Queries)
+		return fn(h.Queries, false)
 	}
 	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
@@ -313,7 +313,7 @@ func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtyp
 	if err := assertIssueStatusStillActive(ctx, qtx, workspaceID, statusKey); err != nil {
 		return err
 	}
-	if err := fn(qtx); err != nil {
+	if err := fn(qtx, true); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -327,16 +327,34 @@ func closeStatusNeedsTransaction(statusKey string) bool {
 }
 
 // updateIssueWithStatusGuard writes params under the status-archive guard.
-// previousStatus is the status the issue had before this write; the close rule
-// only runs when the write actually changes it.
-func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey, previousStatus string, params db.UpdateIssueParams) (db.Issue, error) {
+// The close rule compares the status read under the write transaction's issue
+// row lock. The request read the issue before this transaction, and another
+// writer can reopen it (and queue a new notification) in between; deciding
+// "same status, skip the close rule" from that snapshot would swallow a real
+// todo->cancelled transition.
+func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams) (db.Issue, error) {
 	var issue db.Issue
 	var cancelledWakeups []db.AgentTaskQueue
-	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(q *db.Queries) error {
+	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(q *db.Queries, inTx bool) error {
 		if params.DuplicateOfIssueID.Valid {
 			if err := lockAndCheckDuplicateMark(ctx, q, workspaceID, params.ID, params.DuplicateOfIssueID); err != nil {
 				return err
 			}
+		}
+		// The fast path only carries built-in non-terminal statuses, where the
+		// close rule cannot run. Every write that can reach it holds the issue
+		// row lock, so previousStatus is the row's committed state under this
+		// transaction rather than the request's earlier read.
+		previousStatus := ""
+		if inTx && params.Status.Valid {
+			current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
+				ID:          params.ID,
+				WorkspaceID: workspaceID,
+			})
+			if err != nil {
+				return fmt.Errorf("lock issue for status write: %w", err)
+			}
+			previousStatus = current.Status
 		}
 		var innerErr error
 		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params, previousStatus)
@@ -4158,7 +4176,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			prevIssue = lockedPrev
 		}
 	} else {
-		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, prevIssue.Status, params)
+		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, params)
 	}
 	if err != nil {
 		if writeIssueStatusRaceError(w, err) {
@@ -4926,7 +4944,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				prevIssue = lockedPrev
 			}
 		} else {
-			issue, err = h.updateIssueWithStatusGuard(writeCtx, wsUUID, issueStatusGuard, prevIssue.Status, params)
+			issue, err = h.updateIssueWithStatusGuard(writeCtx, wsUUID, issueStatusGuard, params)
 		}
 		if err != nil {
 			// The archive race is a property of the batch's shared target
