@@ -709,7 +709,6 @@ const listClaimableDeliveryIDs = `-- name: ListClaimableDeliveryIDs :many
 WITH ranked AS (
     SELECT m.id,
            m.target_session_id,
-           m.delivery_status,
            m.next_attempt_at,
            m.created_at,
            row_number() OVER (
@@ -741,7 +740,7 @@ WITH ranked AS (
             AND inflight.lease_expires_at > now()
       )
 )
-SELECT id, target_session_id, delivery_status
+SELECT id, target_session_id
 FROM ranked
 WHERE target_rank = 1
 ORDER BY next_attempt_at ASC, created_at ASC, id ASC
@@ -758,16 +757,16 @@ type ListClaimableDeliveryIDsParams struct {
 type ListClaimableDeliveryIDsRow struct {
 	ID              pgtype.UUID `json:"id"`
 	TargetSessionID pgtype.UUID `json:"target_session_id"`
-	DeliveryStatus  string      `json:"delivery_status"`
 }
 
 // Candidates for one claim round, at most one per physical session. This list
-// is only a pre-lock hint: the conditional lease re-checks both row
-// eligibility and the same session's in-flight rows after taking the advisory
-// lock, so a candidate that lost a race is skipped. An inflated lease is
-// reclaimable so a crashed worker does not strand a request. An ambiguous row
-// (unknown) is claimable again only for receipt verification, never for a
-// second send.
+// is only a pre-lock hint and deliberately carries no delivery status: the
+// status that decides send versus verify-only is read under the row lock after
+// the advisory lock. The conditional lease re-checks row eligibility and the
+// same session's in-flight rows after the advisory lock, so a candidate that
+// lost a race is skipped. An inflated lease is reclaimable so a crashed worker
+// does not strand a request. An ambiguous row (unknown) is claimable again only
+// for receipt verification, never for a second send.
 //
 // Every source type shares this one list: a comment notification and a generic
 // event are delivered by the same worker and the same lease/outcome state
@@ -791,7 +790,7 @@ func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimabl
 	items := []ListClaimableDeliveryIDsRow{}
 	for rows.Next() {
 		var i ListClaimableDeliveryIDsRow
-		if err := rows.Scan(&i.ID, &i.TargetSessionID, &i.DeliveryStatus); err != nil {
+		if err := rows.Scan(&i.ID, &i.TargetSessionID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -959,6 +958,41 @@ func (q *Queries) ListIssueMailboxDeliveries(ctx context.Context, arg ListIssueM
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockClaimableDelivery = `-- name: LockClaimableDelivery :one
+SELECT delivery_status, withdrawn_at
+FROM agent_mailbox_message
+WHERE id = $1
+  AND workspace_id = $2
+  AND target_session_id = $3
+FOR UPDATE
+`
+
+type LockClaimableDeliveryParams struct {
+	ID              pgtype.UUID `json:"id"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	TargetSessionID pgtype.UUID `json:"target_session_id"`
+}
+
+type LockClaimableDeliveryRow struct {
+	DeliveryStatus string             `json:"delivery_status"`
+	WithdrawnAt    pgtype.Timestamptz `json:"withdrawn_at"`
+}
+
+// Reads the status the row has just before this claim leases it, while taking
+// the row lock the lease UPDATE will reuse. The candidate list is a pre-lock
+// hint: another worker may have leased and sent this row, then lost the ack or
+// recorded unknown and let the lease expire. Judging send versus verify-only
+// from the candidate status would turn that possibly-accepted row into a blind
+// resend; this locked read is the authoritative answer. The row lock also
+// serialises this read with a concurrent withdrawal, so the marker it returns
+// is the state the lease is granted under.
+func (q *Queries) LockClaimableDelivery(ctx context.Context, arg LockClaimableDeliveryParams) (LockClaimableDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, lockClaimableDelivery, arg.ID, arg.WorkspaceID, arg.TargetSessionID)
+	var i LockClaimableDeliveryRow
+	err := row.Scan(&i.DeliveryStatus, &i.WithdrawnAt)
+	return i, err
 }
 
 const recordDeliveryOutcome = `-- name: RecordDeliveryOutcome :one

@@ -96,12 +96,13 @@ LIMIT @page_limit;
 
 -- name: ListClaimableDeliveryIDs :many
 -- Candidates for one claim round, at most one per physical session. This list
--- is only a pre-lock hint: the conditional lease re-checks both row
--- eligibility and the same session's in-flight rows after taking the advisory
--- lock, so a candidate that lost a race is skipped. An inflated lease is
--- reclaimable so a crashed worker does not strand a request. An ambiguous row
--- (unknown) is claimable again only for receipt verification, never for a
--- second send.
+-- is only a pre-lock hint and deliberately carries no delivery status: the
+-- status that decides send versus verify-only is read under the row lock after
+-- the advisory lock. The conditional lease re-checks row eligibility and the
+-- same session's in-flight rows after the advisory lock, so a candidate that
+-- lost a race is skipped. An inflated lease is reclaimable so a crashed worker
+-- does not strand a request. An ambiguous row (unknown) is claimable again only
+-- for receipt verification, never for a second send.
 --
 -- Every source type shares this one list: a comment notification and a generic
 -- event are delivered by the same worker and the same lease/outcome state
@@ -114,7 +115,6 @@ LIMIT @page_limit;
 WITH ranked AS (
     SELECT m.id,
            m.target_session_id,
-           m.delivery_status,
            m.next_attempt_at,
            m.created_at,
            row_number() OVER (
@@ -146,7 +146,7 @@ WITH ranked AS (
             AND inflight.lease_expires_at > now()
       )
 )
-SELECT id, target_session_id, delivery_status
+SELECT id, target_session_id
 FROM ranked
 WHERE target_rank = 1
 ORDER BY next_attempt_at ASC, created_at ASC, id ASC
@@ -158,6 +158,22 @@ LIMIT @row_limit;
 -- once. Two sessions of the same agent are different keys and proceed
 -- independently.
 SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('target_session_id')::text, 0)) AS locked;
+
+-- name: LockClaimableDelivery :one
+-- Reads the status the row has just before this claim leases it, while taking
+-- the row lock the lease UPDATE will reuse. The candidate list is a pre-lock
+-- hint: another worker may have leased and sent this row, then lost the ack or
+-- recorded unknown and let the lease expire. Judging send versus verify-only
+-- from the candidate status would turn that possibly-accepted row into a blind
+-- resend; this locked read is the authoritative answer. The row lock also
+-- serialises this read with a concurrent withdrawal, so the marker it returns
+-- is the state the lease is granted under.
+SELECT delivery_status, withdrawn_at
+FROM agent_mailbox_message
+WHERE id = @id
+  AND workspace_id = @workspace_id
+  AND target_session_id = @target_session_id
+FOR UPDATE;
 
 -- name: LeaseClaimableDelivery :one
 -- Conditional lease: only a row that is still eligible at this instant is

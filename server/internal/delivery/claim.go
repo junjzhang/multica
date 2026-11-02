@@ -244,6 +244,23 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			// Another claim transaction is already leasing this session.
 			continue
 		}
+		// The candidate list carried no status on purpose. Read the row under
+		// the same lock the lease takes: another worker may have leased and sent
+		// it, then lost the ack or recorded unknown and let the lease expire.
+		// That row is now a verification, even though the candidate hint that
+		// queued this claim still said pending.
+		previous, err := qtx.LockClaimableDelivery(ctx, db.LockClaimableDeliveryParams{
+			ID:              candidate.ID,
+			WorkspaceID:     workspaceID,
+			TargetSessionID: candidate.TargetSessionID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The row is no longer this target's to lease.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("delivery: lock %s: %w", util.UUIDToString(candidate.ID), err)
+		}
 		token, err := newLeaseToken()
 		if err != nil {
 			return nil, err
@@ -284,12 +301,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			},
 			LeaseToken:     token,
 			LeaseExpiresAt: leased.LeaseExpiresAt.Time,
-			// The leased row, not the pre-lock candidate, is authoritative: a
-			// cancellation can commit between the candidate list and this lease
-			// (the withdrawal and this UPDATE serialise on the row), and a stale
-			// candidate that still said pending must not turn a withdrawn
-			// notification into a send.
-			VerifyOnly: verifyOnly(candidate.DeliveryStatus, leased.WithdrawnAt.Valid),
+			// The row read under the row lock, not the pre-lock candidate, is
+			// authoritative for both the prior delivery status and the
+			// withdrawal marker. A cancellation or another worker's send can
+			// commit between the candidate list and this lease; either must
+			// turn the lease into verification-only, never a second send.
+			VerifyOnly: verifyOnly(previous.DeliveryStatus, previous.WithdrawnAt.Valid),
 		})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -303,9 +320,9 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 // the request before the worker or its acknowledgement disappeared. The same
 // holds for a row already marked unknown. Only a row the host explicitly
 // refused (pending, with a known no-effect result) is safe to deliver again.
-// A withdrawn row is never safe to send, whatever status the candidate list
-// recorded earlier. This applies to every source: a comment notification
-// recovers exactly like a generic event, by looking up its original receipt.
+// A withdrawn row is never safe to send, whatever the candidate list suggested
+// earlier. This applies to every source: a comment notification recovers
+// exactly like a generic event, by looking up its original receipt.
 func verifyOnly(previousStatus string, withdrawn bool) bool {
 	if withdrawn {
 		return true
