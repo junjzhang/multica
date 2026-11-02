@@ -328,6 +328,9 @@ SELECT count(*) FROM agent_task_queue WHERE id=ANY(@ids::uuid[]) AND agent_id= @
 -- already have acted; it is marked withdrawn instead, which stops the record
 -- outcome from returning a known no-effect answer to claimable delivery. The
 -- marker is the one durable expression of "this notification was withdrawn".
+-- Only delivery-core rows are touched: a legacy internal-mailbox row has no
+-- target session and is consumed through processing_status, so rewriting its
+-- delivery_status would only publish a failure nothing can clear.
 UPDATE agent_mailbox_message
 SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
     withdrawn_at = COALESCE(withdrawn_at, now()),
@@ -339,6 +342,7 @@ SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE d
     updated_at = now()
 WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
   AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND target_session_id IS NOT NULL
   AND delivery_status IN ('pending','leased','unknown')
   AND withdrawn_at IS NULL;
 
@@ -350,6 +354,8 @@ WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
 -- after this transaction are new explicit requests and are untouched. The
 -- pending/leased boundary is the same as the rule-scoped withdrawal: pending
 -- becomes failed, leased and unknown keep their state and are marked withdrawn.
+-- target_session_id scopes this to rows the delivery core can actually claim;
+-- the legacy internal-mailbox projection is left alone.
 UPDATE agent_mailbox_message
 SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
     withdrawn_at = COALESCE(withdrawn_at, now()),
@@ -360,6 +366,7 @@ SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE d
                       ELSE COALESCE(NULLIF(last_error, ''), @reason) END,
     updated_at = now()
 WHERE workspace_id = @workspace_id AND issue_id = @issue_id
+  AND target_session_id IS NOT NULL
   AND delivery_status IN ('pending','leased','unknown')
   AND withdrawn_at IS NULL;
 

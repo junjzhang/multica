@@ -98,6 +98,14 @@ func TestIssueCancelWithdrawsUnclaimedNotificationsForEverySource(t *testing.T) 
 	f, _, issue, agent, daemonID := externalWakeFixture(t)
 	comment := enqueueCommentNotification(t, f, issue, agent, "before")
 	generic := enqueueWakeupNotification(t, f, issue, agent, "before")
+	// A legacy internal-mailbox row has no target session and is consumed
+	// through processing_status; the delivery-core withdrawal must not rewrite
+	// its delivery status into a failure nothing can clear.
+	legacyID := uuid.NewString()
+	f.Exec(t, `INSERT INTO agent_mailbox_message
+			(id, workspace_id, issue_id, recipient_agent_id, recipient_type, source_type, source_key, kind, payload, sender_type, sender_id)
+		VALUES ($1,$2,$3,$4,'agent','comment',$5,'comment_mention','{}'::jsonb,'member',$6)`,
+		legacyID, f.WorkspaceID, util.UUIDToString(issue), agent, "legacy:"+legacyID, f.UserID)
 
 	wakeSetStatus(t, f, issue, "cancelled")
 
@@ -115,6 +123,9 @@ func TestIssueCancelWithdrawsUnclaimedNotificationsForEverySource(t *testing.T) 
 	}
 	if claims := claimIssueNotifications(t, f, daemonID); len(claims) != 0 {
 		t.Fatalf("cancellation left %d send-authorizing claims: %+v", len(claims), claims)
+	}
+	if legacy := readMailboxState(t, f, legacyID); legacy.Status != "pending" || legacy.WithdrawnAt.Valid {
+		t.Fatalf("the legacy internal-mailbox row was rewritten: status %q withdrawn %+v", legacy.Status, legacy.WithdrawnAt)
 	}
 
 	// A new explicit mention is a new request. It must still be deliverable on

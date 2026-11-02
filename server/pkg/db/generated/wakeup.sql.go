@@ -2093,6 +2093,7 @@ SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE d
                       ELSE COALESCE(NULLIF(last_error, ''), $1) END,
     updated_at = now()
 WHERE workspace_id = $2 AND issue_id = $3
+  AND target_session_id IS NOT NULL
   AND delivery_status IN ('pending','leased','unknown')
   AND withdrawn_at IS NULL
 `
@@ -2110,6 +2111,8 @@ type WithdrawIssueDeliveriesParams struct {
 // after this transaction are new explicit requests and are untouched. The
 // pending/leased boundary is the same as the rule-scoped withdrawal: pending
 // becomes failed, leased and unknown keep their state and are marked withdrawn.
+// target_session_id scopes this to rows the delivery core can actually claim;
+// the legacy internal-mailbox projection is left alone.
 func (q *Queries) WithdrawIssueDeliveries(ctx context.Context, arg WithdrawIssueDeliveriesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, withdrawIssueDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
 	if err != nil {
@@ -2130,6 +2133,7 @@ SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE d
     updated_at = now()
 WHERE workspace_id = $2 AND recipient_agent_id = $3
   AND source_type = 'issue_wakeup' AND source_key LIKE $4::text
+  AND target_session_id IS NOT NULL
   AND delivery_status IN ('pending','leased','unknown')
   AND withdrawn_at IS NULL
 `
@@ -2147,6 +2151,9 @@ type WithdrawUnclaimedWakeupDeliveriesParams struct {
 // already have acted; it is marked withdrawn instead, which stops the record
 // outcome from returning a known no-effect answer to claimable delivery. The
 // marker is the one durable expression of "this notification was withdrawn".
+// Only delivery-core rows are touched: a legacy internal-mailbox row has no
+// target session and is consumed through processing_status, so rewriting its
+// delivery_status would only publish a failure nothing can clear.
 func (q *Queries) WithdrawUnclaimedWakeupDeliveries(ctx context.Context, arg WithdrawUnclaimedWakeupDeliveriesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, withdrawUnclaimedWakeupDeliveries,
 		arg.Reason,

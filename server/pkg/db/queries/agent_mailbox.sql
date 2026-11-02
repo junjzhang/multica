@@ -265,7 +265,9 @@ RETURNING *;
 -- a notification it should have withdrawn stays claimable. Pending rows become
 -- failed; leased and unknown rows keep their transport state (the host may
 -- already have acted) and carry withdrawn_at so a known no-effect answer can
--- never return them to claimable delivery.
+-- never return them to claimable delivery. target_session_id scopes it to the
+-- delivery core: legacy internal-mailbox rows have no target and are consumed
+-- through processing_status, so their delivery_status must stay untouched.
 UPDATE agent_mailbox_message
 SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
     withdrawn_at = COALESCE(withdrawn_at, now()),
@@ -276,6 +278,7 @@ SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE d
                       ELSE COALESCE(NULLIF(last_error, ''), @reason) END,
     updated_at = now()
 WHERE recipient_agent_id = ANY(@agent_ids::uuid[])
+  AND target_session_id IS NOT NULL
   AND delivery_status IN ('pending','leased','unknown')
   AND withdrawn_at IS NULL;
 
