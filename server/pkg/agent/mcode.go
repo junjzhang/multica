@@ -76,6 +76,9 @@ func (s *mcodeMessageStream) close() {
 }
 
 func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "mcode"
@@ -237,23 +240,27 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if !mcodeLoadSessionSupported(initResult) {
 				finalStatus = "failed"
 				finalError = "mcode ACP does not support session loading; retry with a fresh session"
+				if opts.RequireResume {
+					finalError = fmt.Sprintf("%v: mcode ACP cannot load the requested session", ErrResumeRequired)
+				}
 				resumeRejected = true
 				resCh <- Result{
-					Status:         finalStatus,
-					Error:          finalError,
-					DurationMs:     time.Since(startTime).Milliseconds(),
-					ResumeRejected: true,
+					Status:            finalStatus,
+					Error:             finalError,
+					DurationMs:        time.Since(startTime).Milliseconds(),
+					ResumeRejected:    true,
+					StrictResumeUnmet: opts.RequireResume,
 				}
 				return
 			}
 			if err := mcodeWaitForSessionStartup(runCtx); err != nil {
 				finalStatus, finalError = mcodeRequestFailure(runCtx, opts.Timeout, "session/load", err)
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         finalStatus,
 					Error:          finalError,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: resumeRejected,
-				}
+				}, opts)
 				return
 			}
 			result, loadErr := c.request(runCtx, "session/load", map[string]any{
@@ -266,15 +273,24 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				if finalStatus == "failed" && isACPSessionNotFound(loadErr) {
 					resumeRejected = true
 				}
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         finalStatus,
 					Error:          finalError,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: resumeRejected,
-				}
+				}, opts)
 				return
 			}
 			sessionID, _ = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResume(opts, result, "session/load"); strictErr != nil {
+				b.cfg.Logger.Warn("mcode strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 		} else {
 			if err := mcodeWaitForSessionStartup(runCtx); err != nil {
 				finalStatus, finalError = mcodeRequestFailure(runCtx, opts.Timeout, "session/new", err)
