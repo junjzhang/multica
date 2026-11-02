@@ -25,6 +25,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -107,7 +108,10 @@ type GitHubPullRequestResponse struct {
 	// statusCheckRollup is null". Only the last case may render "no checks".
 	// It is omitted for non-GitHub providers, which keep their webhook-derived
 	// checks_conclusion compatibility path.
-	SnapshotAvailable *bool `json:"snapshot_available,omitempty"`
+	SnapshotAvailable *bool           `json:"snapshot_available,omitempty"`
+	Review            *vcs.TGitReview `json:"review,omitempty"`
+	CheckDetails      []vcs.TGitCheck `json:"check_details,omitempty"`
+	CommitGate        *vcs.TGitGate   `json:"commit_gate,omitempty"`
 	// ChecksRollup is GitHub's overall CI verdict, lowercased: "success" |
 	// "failure" | "pending" | "error" | "expected" | null. null means
 	// statusCheckRollup was null (no checks yet) and must NEVER render as
@@ -1010,6 +1014,9 @@ func (h *Handler) ListPullRequestsForIssue(w http.ResponseWriter, r *http.Reques
 		resp := vcsPullRequestRowToResponse(row)
 		resp.LinkSource = prLinkSource(row.LinkedByType, identifier, row.Title, row.Branch.String)
 		out = append(out, resp)
+		if row.Provider == "tgit" {
+			h.TGitSnapshots.Enqueue(row.ID)
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].PRCreatedAt > out[j].PRCreatedAt

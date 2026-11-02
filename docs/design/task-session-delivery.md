@@ -51,7 +51,7 @@ Use isolated databases and dedicated host sessions. Cover:
 
 ## Development and release
 
-Implement in an isolated worktree from `b0a38078f9b9af97477a276833fbb6e3d07b1b51`. The integration worktree is `repos/multica-mailbox-redesign`; managed task worktrees remain owned by their runtime. Existing WORK-49/50/51 and their worktrees retain their ownership. Inspect reusable CLI identity work without restarting those tasks or importing unrelated plugin changes.
+Implement in isolated worktrees based on the deployed application revision `5f61732052390f17077868536e053cf0b080f9a2`, retaining its TGit integration and migrations through 610. The integration branch is `feat/task-session-delivery`; its worktree is `repos/multica-mailbox-redesign`. Managed task worktrees remain owned by their runtime. Existing WORK-49/50/51 and their worktrees retain their ownership. Inspect reusable CLI identity work without restarting those tasks or importing unrelated plugin changes.
 
 Deliver three coordinated slices: session model and frozen-target delivery; transactional delegation/result notification and CLI; issue UI plus explicit takeover, migration rehearsal, and end-to-end qualification. Review the first tested production slice before expanding. The final version must satisfy all sections, not merely the first slice. Agent-built PRs stay Draft pending user verification; no merge or production deployment is authorized by the development task.
 
