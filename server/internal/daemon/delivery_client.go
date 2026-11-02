@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -18,6 +19,9 @@ type deliveryClaimDTO struct {
 	ID               string          `json:"id"`
 	Kind             string          `json:"kind"`
 	Payload          json.RawMessage `json:"payload"`
+	SourceType       string          `json:"source_type"`
+	IssueID          string          `json:"issue_id"`
+	CommentID        string          `json:"comment_id"`
 	RecipientAgentID string          `json:"recipient_agent_id"`
 	RecipientType    string          `json:"recipient_type"`
 	ExternalSession  struct {
@@ -42,12 +46,24 @@ type deliveryOutcomeDTO struct {
 	ProcessingStatus string  `json:"processing_status"`
 }
 
-// ClaimDeliveries leases generic (non-comment) deliveries for this daemon.
+// mailboxStatus extracts the HTTP status from the daemon client's request
+// error so claim/outcome failures can be classified without string matching.
+func mailboxStatus(err error) int {
+	var reqErr *requestError
+	if !errors.As(err, &reqErr) {
+		return 0
+	}
+	return reqErr.StatusCode
+}
+
+// ClaimDeliveries leases every deliverable source for this daemon: comment
+// notifications and generic events arrive through the same claim and outcome
+// contract.
 func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit int) ([]delivery.Claim, error) {
 	var resp struct {
 		Deliveries []deliveryClaimDTO `json:"deliveries"`
 	}
-	if err := c.postDaemonMailboxJSON(ctx, workspaceID, "/api/daemon/deliveries/claim", map[string]any{"limit": limit}, &resp); err != nil {
+	if err := c.postDaemonDeliveryJSON(ctx, workspaceID, "/api/daemon/deliveries/claim", map[string]any{"limit": limit}, &resp); err != nil {
 		if mailboxStatus(err) == http.StatusNotFound {
 			return nil, fmt.Errorf("%w: %v", delivery.ErrNotFound, err)
 		}
@@ -64,9 +80,11 @@ func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit 
 			Delivery: delivery.Delivery{
 				ID:             item.ID,
 				Scope:          delivery.Scope{WorkspaceID: workspaceID},
+				Source:         delivery.Source{Type: item.SourceType},
 				Recipient:      recipient,
 				Kind:           item.Kind,
 				Payload:        item.Payload,
+				Refs:           delivery.Refs{IssueID: item.IssueID, CommentID: item.CommentID},
 				DeliveryStatus: item.DeliveryStatus,
 				Attempts:       item.Attempts,
 			},
@@ -111,7 +129,7 @@ func (c *Client) RecordDeliveryOutcome(ctx context.Context, workspaceID string, 
 	}
 	path := "/api/daemon/deliveries/" + url.PathEscape(req.DeliveryID) + "/outcome"
 	var resp deliveryOutcomeDTO
-	if err := c.postDaemonMailboxJSON(ctx, workspaceID, path, body, &resp); err != nil {
+	if err := c.postDaemonDeliveryJSON(ctx, workspaceID, path, body, &resp); err != nil {
 		switch mailboxStatus(err) {
 		case http.StatusConflict:
 			return delivery.Delivery{}, fmt.Errorf("%w: %v", delivery.ErrLeaseLost, err)

@@ -280,8 +280,6 @@ func unsupportedIfIdleCLI(stderr []byte) bool {
 	return strings.Contains(text, "unknown option") || strings.Contains(text, "unrecognized option")
 }
 
-var _ MailboxHostTransport = (*paseoCliTransport)(nil)
-
 // paseoReceiptResult is the frozen `paseo agent receipt --json` document. The
 // lookup is read-only: it never sends, resumes, creates or archives a session.
 type paseoReceiptResult struct {

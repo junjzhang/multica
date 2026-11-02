@@ -8,21 +8,49 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
-// TestGenericDeliveryClaimAndOutcome pins the generic consumer contract: it
-// leases only non-comment rows, exposes no issue/comment fields, fences the
-// outcome by the lease token, and marks a reclaimed lease verify_only instead
-// of making the row deliverable again.
-func TestGenericDeliveryClaimAndOutcome(t *testing.T) {
+// TestDeliveryClaimCoversCommentAndGeneric pins the one consumer contract:
+// comment notifications and generic events are leased by the same claim, each
+// carrying its stable source references, and an expired lease for either is
+// verification-only instead of deliverable again.
+func TestDeliveryClaimCoversCommentAndGeneric(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	agentID, sessionID, ownerID := externalAgentFixture(t, "Generic Delivery Target", "daemon-generic-worker")
-	created, err := delivery.NewPostgres(testHandler.Queries).Enqueue(t.Context(), delivery.EnqueueRequest{
+	agentID, sessionID, ownerID := externalAgentFixture(t, "Unified Delivery Target", "daemon-unified-worker")
+	secondSessionID := dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id":  testWorkspaceID,
+		"owner_user_id": ownerID,
+		"agent_id":      agentID,
+		"provider":      "paseo",
+		"host_id":       "unified-second-host-" + agentID,
+		"session_id":    "unified-second-session-" + agentID,
+		"display_name":  "Unified Second Session",
+		"daemon_id":     "daemon-unified-worker",
+	})
+	issueID := dbfx.Issue(t, "unified delivery claim")
+	commentID := dbfx.Comment(t, issueID, "please pick this up")
+	store := delivery.NewPostgres(testHandler.Queries)
+	comment, err := store.Enqueue(t.Context(), delivery.EnqueueRequest{
+		Scope:           delivery.Scope{WorkspaceID: testWorkspaceID},
+		Source:          delivery.Source{Type: "comment", Key: commentID},
+		Target:          delivery.Target{SessionID: sessionID},
+		Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "comment:" + commentID + ":agent:" + agentID,
+		Kind:            "comment_mention",
+		Payload:         json.RawMessage(`{"schema":"comment_mention.v1","issue_id":"` + issueID + `","comment_id":"` + commentID + `"}`),
+		Refs:            delivery.Refs{IssueID: issueID, CommentID: commentID},
+	})
+	if err != nil {
+		t.Fatalf("enqueue comment: %v", err)
+	}
+	dbfx.Cleanup(t, `DELETE FROM agent_mailbox_message WHERE id = $1`, comment.ID)
+	generic, err := store.Enqueue(t.Context(), delivery.EnqueueRequest{
 		Scope:           delivery.Scope{WorkspaceID: testWorkspaceID},
 		Source:          delivery.Source{Type: "ci_run", Key: "generic-claim-run-1"},
-		Target:          delivery.Target{SessionID: sessionID},
+		Target:          delivery.Target{SessionID: secondSessionID},
 		Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
 		NotificationKey: "ci:generic-claim-run-1",
 		Kind:            "ci_terminal",
@@ -31,92 +59,88 @@ func TestGenericDeliveryClaimAndOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue generic: %v", err)
 	}
-	dbfx.Cleanup(t, `DELETE FROM agent_mailbox_message WHERE id = $1`, created.ID)
+	dbfx.Cleanup(t, `DELETE FROM agent_mailbox_message WHERE id = $1`, generic.ID)
 
-	claim := func(handler func(http.ResponseWriter, *http.Request)) []map[string]any {
+	claim := func(sessionFilter string) []daemonDeliveryClaim {
 		t.Helper()
 		w := httptest.NewRecorder()
 		r := newRequest(http.MethodPost, "/api/daemon/deliveries/claim", map[string]any{"limit": 10})
-		ctx := middleware.WithDaemonContext(r.Context(), testWorkspaceID, "daemon-generic-worker")
+		ctx := middleware.WithDaemonContext(r.Context(), testWorkspaceID, "daemon-unified-worker")
 		ctx = middleware.WithDaemonTokenOwnerID(ctx, ownerID)
-		handler(w, r.WithContext(ctx))
+		testHandler.ClaimDaemonDeliveries(w, r.WithContext(ctx))
 		if w.Code != http.StatusOK {
 			t.Fatalf("claim: %d %s", w.Code, w.Body.String())
 		}
 		var resp struct {
-			Deliveries []map[string]any `json:"deliveries"`
+			Deliveries []daemonDeliveryClaim `json:"deliveries"`
 		}
 		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 			t.Fatalf("decode claim: %v", err)
 		}
-		return resp.Deliveries
-	}
-
-	// The frozen comment entry never sees the generic row.
-	v := httptest.NewRecorder()
-	vr := newRequest(http.MethodPost, "/api/daemon/mailbox/claim", map[string]any{"limit": 10})
-	vctx := middleware.WithDaemonContext(vr.Context(), testWorkspaceID, "daemon-generic-worker")
-	vctx = middleware.WithDaemonTokenOwnerID(vctx, ownerID)
-	testHandler.ClaimDaemonMailbox(v, vr.WithContext(vctx))
-	if v.Code != http.StatusOK {
-		t.Fatalf("legacy claim: %d %s", v.Code, v.Body.String())
-	}
-	var legacy struct {
-		Messages []daemonMailboxClaimItem `json:"messages"`
-	}
-	if err := json.NewDecoder(v.Body).Decode(&legacy); err != nil {
-		t.Fatalf("decode legacy claim: %v", err)
-	}
-	if len(legacy.Messages) != 0 {
-		t.Fatalf("legacy claim leaked a generic delivery: %+v", legacy.Messages)
-	}
-
-	deliveries := claim(testHandler.ClaimDaemonDeliveries)
-	if len(deliveries) != 1 {
-		t.Fatalf("generic claim = %+v, want one delivery", deliveries)
-	}
-	item := deliveries[0]
-	for _, forbidden := range []string{"issue_id", "comment_id"} {
-		if _, present := item[forbidden]; present {
-			t.Fatalf("generic claim exposes %s: %+v", forbidden, item)
+		if sessionFilter == "" {
+			return resp.Deliveries
 		}
-	}
-	if item["id"] != created.ID || item["kind"] != "ci_terminal" || item["verify_only"] != false {
-		t.Fatalf("generic claim item = %+v", item)
-	}
-	token, _ := item["delivery_token"].(string)
-	if token == "" {
-		t.Fatal("generic claim has no delivery token")
+		var filtered []daemonDeliveryClaim
+		for _, item := range resp.Deliveries {
+			if item.ExternalSession.SessionID == sessionFilter {
+				filtered = append(filtered, item)
+			}
+		}
+		return filtered
 	}
 
-	outcome := func(token, state, diagnostic string) int {
+	deliveries := claim("")
+	byID := map[string]daemonDeliveryClaim{}
+	for _, item := range deliveries {
+		byID[item.ID] = item
+	}
+	commentItem, ok := byID[comment.ID]
+	if !ok {
+		t.Fatalf("unified claim did not lease the comment delivery: %+v", deliveries)
+	}
+	if commentItem.IssueID != issueID || commentItem.CommentID != commentID || commentItem.SourceType != "comment" {
+		t.Fatalf("comment claim refs = %+v, want the issue/comment ids", commentItem)
+	}
+	genericItem, ok := byID[generic.ID]
+	if !ok {
+		t.Fatalf("unified claim did not lease the generic delivery: %+v", deliveries)
+	}
+	if genericItem.IssueID != "" || genericItem.CommentID != "" || genericItem.SourceType != "ci_run" {
+		t.Fatalf("generic claim refs = %+v, want no fabricated issue/comment", genericItem)
+	}
+	if commentItem.VerifyOnly || genericItem.VerifyOnly {
+		t.Fatalf("first claim marked a fresh delivery verification-only: %+v", deliveries)
+	}
+
+	outcome := func(item daemonDeliveryClaim, state, diagnostic string) int {
 		t.Helper()
 		body := map[string]any{
-			"delivery_token": token,
+			"delivery_token": item.DeliveryToken,
 			"outcome":        state,
 		}
 		if diagnostic != "" {
 			body["error"] = diagnostic
 		}
 		w := httptest.NewRecorder()
-		r := newRequest(http.MethodPost, "/api/daemon/deliveries/"+created.ID+"/outcome", body)
-		ctx := middleware.WithDaemonContext(r.Context(), testWorkspaceID, "daemon-generic-worker")
+		r := newRequest(http.MethodPost, "/api/daemon/deliveries/"+item.ID+"/outcome", body)
+		ctx := middleware.WithDaemonContext(r.Context(), testWorkspaceID, "daemon-unified-worker")
 		ctx = middleware.WithDaemonTokenOwnerID(ctx, ownerID)
 		r = r.WithContext(ctx)
-		r = withURLParam(r, "deliveryId", created.ID)
+		r = withURLParam(r, "deliveryId", item.ID)
 		testHandler.RecordDaemonDeliveryOutcome(w, r)
 		return w.Code
 	}
-	if code := outcome(token, "delivered", ""); code != http.StatusOK {
+	if code := outcome(genericItem, "delivered", ""); code != http.StatusOK {
 		t.Fatalf("delivered outcome = %d", code)
 	}
-	if code := outcome(token, "delivered", ""); code != http.StatusConflict {
+	if code := outcome(genericItem, "delivered", ""); code != http.StatusConflict {
 		t.Fatalf("replayed outcome status = %d, want 409", code)
 	}
-	if code := outcome(token, "delivered", "unexpected error"); code != http.StatusBadRequest {
+	if code := outcome(genericItem, "delivered", "unexpected error"); code != http.StatusBadRequest {
 		t.Fatalf("delivered-with-error status = %d, want 400", code)
 	}
-	stored, err := delivery.NewPostgres(testHandler.Queries).Get(t.Context(), created.Scope, created.ID)
+
+	stored, err := store.Get(t.Context(), generic.Scope, generic.ID)
 	if err != nil {
 		t.Fatalf("read delivery: %v", err)
 	}
@@ -124,12 +148,18 @@ func TestGenericDeliveryClaimAndOutcome(t *testing.T) {
 		t.Fatalf("stored delivery = %+v, want delivered", stored)
 	}
 
-	// An expired lease makes the next claim verification-only: the worker must
-	// look up the original receipt instead of sending it again.
-	dbfx.Exec(t, `UPDATE agent_mailbox_message SET delivery_status = 'leased', lease_expires_at = now() - interval '1 minute' WHERE id = $1`, created.ID)
-	reclaimed := claim(testHandler.ClaimDaemonDeliveries)
-	if len(reclaimed) != 1 || reclaimed[0]["verify_only"] != true {
-		t.Fatalf("reclaimed = %+v, want verify_only", reclaimed)
+	// An expired comment lease is ambiguous: the server itself marks it
+	// verification-only, so the worker looks up the receipt instead of sending
+	// the comment a second time.
+	dbfx.Exec(t, `UPDATE agent_mailbox_message SET lease_expires_at = now() - interval '1 minute' WHERE id = $1`, comment.ID)
+	reclaimed := claim("")
+	reclaimedByID := map[string]daemonDeliveryClaim{}
+	for _, item := range reclaimed {
+		reclaimedByID[item.ID] = item
+	}
+	reclaimedComment, ok := reclaimedByID[comment.ID]
+	if !ok || !reclaimedComment.VerifyOnly {
+		t.Fatalf("reclaimed comment = %+v, want verify_only", reclaimedComment)
 	}
 }
 

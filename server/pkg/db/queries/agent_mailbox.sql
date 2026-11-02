@@ -103,6 +103,10 @@ LIMIT @page_limit;
 -- (unknown) is claimable again only for receipt verification, never for a
 -- second send.
 --
+-- Every source type shares this one list: a comment notification and a generic
+-- event are delivered by the same worker and the same lease/outcome state
+-- machine, so no source can be excluded from receipt recovery.
+--
 -- external_agent_session is joined by the frozen target_session_id, never by
 -- the agent's current binding: the host's provider/host/session identity is
 -- immutable, while daemon_id only decides which authorized worker can reach
@@ -122,7 +126,6 @@ WITH ranked AS (
     JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = @workspace_id
       AND m.target_session_id IS NOT NULL
-      AND (m.source_type = 'comment') = @comment_projection::boolean
       AND s.workspace_id = @workspace_id
       AND a.workspace_id = @workspace_id
       AND a.execution_kind = 'external'
@@ -163,10 +166,10 @@ SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('target_session_id'):
 --
 -- The in-flight check is repeated here, not only in the candidate list. Under
 -- READ COMMITTED this statement takes a fresh snapshot after the caller's
--- per-session advisory lock, so it sees a lease another entry committed while
--- this claim was being prepared. The candidate list alone only proves the
--- session had no in-flight row before the lock: two disjoint projections
--- (comment and generic) could otherwise each lease a row for the same session.
+-- per-session advisory lock, so it sees a lease another claim transaction
+-- committed while this claim was being prepared. The candidate list alone only
+-- proves the session had no in-flight row before the lock: two claim rounds for
+-- different rows of one session could otherwise lease both.
 UPDATE agent_mailbox_message
 SET delivery_status = 'leased',
     lease_token_hash = @lease_token_hash,

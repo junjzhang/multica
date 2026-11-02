@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
 func paseoTestSession() ExternalSession {
@@ -47,8 +49,14 @@ func TestPaseoHostProbeFailureRemainsRetryable(t *testing.T) {
 	}}
 	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "request")
 	var failure *MailboxDeliveryError
-	if !errors.As(err, &failure) || !mailboxDeliveryRetryable(failure.Kind) || sent {
+	if !errors.As(err, &failure) || failure.Kind != MailboxDeliveryUnavailable || sent {
 		t.Fatalf("read-only probe failure must retry without sending: err=%v sent=%v", err, sent)
+	}
+	// The worker's host contract must see the same known no-effect result, not
+	// an ambiguous accepted outcome.
+	var hostErr *delivery.HostError
+	if !errors.As(hostErrorFromMailbox(err), &hostErr) || hostErr.Kind != delivery.HostUnavailable {
+		t.Fatalf("probe failure mapped to %v, want HostUnavailable", hostErrorFromMailbox(err))
 	}
 }
 

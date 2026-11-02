@@ -8,19 +8,30 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
-// TestGenericDeliveryHiddenFromLegacyMailboxReaders pins the compatibility
-// boundary of the shared storage. The frozen mailbox DTO and the daemon claim
-// render an issue/comment prompt; a generic (non-comment) delivery has neither,
-// so both legacy readers must hide it even though its row and GetDelivery are
-// live. Listing and claiming a real comment delivery in the same test proves
-// the readers still work rather than returning nothing at all.
-func TestGenericDeliveryHiddenFromLegacyMailboxReaders(t *testing.T) {
+// TestGenericDeliveryStaysOutOfLegacyMailboxList pins the compatibility
+// boundary of the shared storage. The frozen user-side mailbox DTO renders an
+// issue/comment notification and a generic (non-comment) delivery has neither,
+// so the list must hide it even though the delivery worker claims it through
+// the same path. Listing a real comment delivery proves the reader still works,
+// and claiming both proves there is only one delivery consumer.
+func TestGenericDeliveryStaysOutOfLegacyMailboxList(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 	agentID, sessionID, ownerID := externalAgentFixture(t, "Generic Visibility Target", "daemon-generic")
+	genericSessionID := dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id":  testWorkspaceID,
+		"owner_user_id": ownerID,
+		"agent_id":      agentID,
+		"provider":      "paseo",
+		"host_id":       "generic-visibility-host-" + agentID,
+		"session_id":    "generic-visibility-session-" + agentID,
+		"display_name":  "Generic Visibility Second Session",
+		"daemon_id":     "daemon-generic",
+	})
 	issueID := dbfx.Issue(t, "generic visibility")
 	bindExternalSession(t, agentID, sessionID, issueID)
 	if w, _ := postMentionComment(t, issueID, agentID); w.Code != http.StatusCreated {
@@ -37,7 +48,7 @@ func TestGenericDeliveryHiddenFromLegacyMailboxReaders(t *testing.T) {
 	generic, err := store.Enqueue(t.Context(), delivery.EnqueueRequest{
 		Scope:           delivery.Scope{WorkspaceID: testWorkspaceID},
 		Source:          delivery.Source{Type: "ci", Key: "generic-visibility-run-1"},
-		Target:          delivery.Target{SessionID: sessionID},
+		Target:          delivery.Target{SessionID: genericSessionID},
 		Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
 		NotificationKey: "ci:generic-visibility-run-1",
 		Kind:            "ci_terminal",
@@ -68,29 +79,38 @@ func TestGenericDeliveryHiddenFromLegacyMailboxReaders(t *testing.T) {
 		t.Fatalf("listed messages = %+v, want only comment delivery %s", listed.Messages, commentDeliveryID)
 	}
 
-	// The daemon claim leases only the comment row; the generic row is neither
-	// returned nor touched.
+	// The one delivery claim leases both rows: the comment notification no
+	// longer has a consumer of its own, and the generic row is no longer hidden
+	// from delivery.
 	cw := httptest.NewRecorder()
-	cr := newRequest(http.MethodPost, "/api/daemon/mailbox/claim", map[string]any{"limit": 10})
+	cr := newRequest(http.MethodPost, "/api/daemon/deliveries/claim", map[string]any{"limit": 10})
 	ctx := middleware.WithDaemonContext(cr.Context(), testWorkspaceID, "daemon-generic")
 	ctx = middleware.WithDaemonTokenOwnerID(ctx, ownerID)
-	testHandler.ClaimDaemonMailbox(cw, cr.WithContext(ctx))
+	testHandler.ClaimDaemonDeliveries(cw, cr.WithContext(ctx))
 	if cw.Code != http.StatusOK {
 		t.Fatalf("claim: %d %s", cw.Code, cw.Body.String())
 	}
 	var claim struct {
-		Messages []daemonMailboxClaimItem `json:"messages"`
+		Deliveries []daemonDeliveryClaim `json:"deliveries"`
 	}
 	if err := json.NewDecoder(cw.Body).Decode(&claim); err != nil {
 		t.Fatalf("decode claim: %v", err)
 	}
-	if len(claim.Messages) != 1 || claim.Messages[0].Message.ID != commentDeliveryID {
-		t.Fatalf("claimed messages = %+v, want only comment delivery %s", claim.Messages, commentDeliveryID)
+	claimed := map[string]daemonDeliveryClaim{}
+	for _, item := range claim.Deliveries {
+		claimed[item.ID] = item
 	}
-	if n := countRows(t, `SELECT attempts FROM agent_mailbox_message WHERE id = $1`, generic.ID); n != 0 {
-		t.Fatalf("generic row attempts = %d, want 0: the claim must not touch it", n)
+	if _, ok := claimed[commentDeliveryID]; !ok {
+		t.Fatalf("claimed deliveries = %+v, want comment delivery %s", claim.Deliveries, commentDeliveryID)
 	}
-	if n := countRows(t, `SELECT count(*) FROM agent_mailbox_message WHERE id = $1 AND delivery_status = 'pending'`, generic.ID); n != 1 {
-		t.Fatalf("generic delivery status changed; want still pending")
+	genericClaim, ok := claimed[generic.ID]
+	if !ok {
+		t.Fatalf("claimed deliveries = %+v, want generic delivery %s", claim.Deliveries, generic.ID)
+	}
+	if genericClaim.SourceType != "ci" || genericClaim.IssueID != "" {
+		t.Fatalf("generic claim = %+v, want its own source and no issue ref", genericClaim)
+	}
+	if n := countRows(t, `SELECT attempts FROM agent_mailbox_message WHERE id = $1`, generic.ID); n != 1 {
+		t.Fatalf("generic row attempts = %d, want 1: the unified claim must lease it", n)
 	}
 }

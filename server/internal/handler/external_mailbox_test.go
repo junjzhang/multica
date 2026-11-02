@@ -361,6 +361,9 @@ func TestPlainCommentAndReplyDoNotLaunch(t *testing.T) {
 
 // TestMailboxDaemonClaimAndFencing covers dedup, daemon/owner binding and
 // lease fencing: a stale or foreign ack cannot overwrite a later lease.
+// TestMailboxDaemonClaimAndFencing covers dedup, daemon/owner binding and
+// lease fencing for a comment delivery on the one unified claim path: a stale or
+// foreign outcome cannot overwrite a later lease.
 func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -406,35 +409,35 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		t.Fatalf("mailbox rows = %d, want 1", n)
 	}
 
-	claim := func(daemonID, owner string) (int, []daemonMailboxClaimItem) {
+	claim := func(daemonID, owner string) (int, []daemonDeliveryClaim) {
 		w := httptest.NewRecorder()
-		r := newRequest(http.MethodPost, "/api/daemon/mailbox/claim", map[string]any{"limit": 10})
+		r := newRequest(http.MethodPost, "/api/daemon/deliveries/claim", map[string]any{"limit": 10})
 		c := middleware.WithDaemonContext(r.Context(), testWorkspaceID, daemonID)
 		c = middleware.WithDaemonTokenOwnerID(c, owner)
 		r = r.WithContext(c)
-		testHandler.ClaimDaemonMailbox(w, r)
+		testHandler.ClaimDaemonDeliveries(w, r)
 		if w.Code != http.StatusOK {
 			t.Fatalf("claim as %s: %d %s", daemonID, w.Code, w.Body.String())
 		}
 		var resp struct {
-			Messages []daemonMailboxClaimItem `json:"messages"`
+			Deliveries []daemonDeliveryClaim `json:"deliveries"`
 		}
 		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 			t.Fatalf("decode claim: %v", err)
 		}
-		return w.Code, resp.Messages
+		return w.Code, resp.Deliveries
 	}
-	ack := func(daemonID, owner, messageID, token, status string) int {
+	outcome := func(daemonID, owner, messageID, token, state string) int {
 		w := httptest.NewRecorder()
-		r := newRequest(http.MethodPost, "/api/daemon/mailbox/"+messageID+"/ack", map[string]any{
+		r := newRequest(http.MethodPost, "/api/daemon/deliveries/"+messageID+"/outcome", map[string]any{
 			"delivery_token": token,
-			"status":         status,
+			"outcome":        state,
 		})
 		c := middleware.WithDaemonContext(r.Context(), testWorkspaceID, daemonID)
 		c = middleware.WithDaemonTokenOwnerID(c, owner)
 		r = r.WithContext(c)
-		r = withURLParam(r, "messageId", messageID)
-		testHandler.AckDaemonMailbox(w, r)
+		r = withURLParam(r, "deliveryId", messageID)
+		testHandler.RecordDaemonDeliveryOutcome(w, r)
 		return w.Code
 	}
 
@@ -445,31 +448,31 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	}
 
 	_, claimed := claim("daemon-claim", ownerID)
-	if len(claimed) != 1 || claimed[0].Message.ID != uuidToString(first.ID) {
+	if len(claimed) != 1 || claimed[0].ID != uuidToString(first.ID) {
 		t.Fatalf("claimed = %+v, want one message %s", claimed, uuidToString(first.ID))
 	}
-	if claimed[0].ExternalSession.SessionID == "" || claimed[0].Content == "" {
-		t.Fatalf("claim missing session/content: %+v", claimed[0])
+	if claimed[0].IssueID != issueID || claimed[0].CommentID != commentID || claimed[0].Payload == nil {
+		t.Fatalf("claim missing stable references: %+v", claimed[0])
 	}
 	if changes() != 1 {
 		t.Fatal("claim must notify the issue detail")
 	}
-	messageID := claimed[0].Message.ID
+	messageID := claimed[0].ID
 	token := claimed[0].DeliveryToken
 
-	// Another daemon cannot ack this lease.
-	if code := ack("daemon-other", ownerID, messageID, token, "delivered"); code != http.StatusConflict {
-		t.Fatalf("foreign daemon ack status = %d, want 409", code)
+	// Another daemon cannot acknowledge this lease.
+	if code := outcome("daemon-other", ownerID, messageID, token, "delivered"); code != http.StatusConflict {
+		t.Fatalf("foreign daemon outcome status = %d, want 409", code)
 	}
 	if changes() != 1 {
-		t.Fatal("rejected ack must not publish a change")
+		t.Fatal("rejected outcome must not publish a change")
 	}
-	if code := ack("daemon-claim", ownerID, messageID, token, "retry"); code != http.StatusOK {
-		t.Fatalf("retry ack status = %d, want 200", code)
+	if code := outcome("daemon-claim", ownerID, messageID, token, "retry"); code != http.StatusOK {
+		t.Fatalf("retry outcome status = %d, want 200", code)
 	}
 
 	if changes() != 2 {
-		t.Fatal("delivery ack must notify the issue detail")
+		t.Fatal("delivery outcome must notify the issue detail")
 	}
 	// A retry returns the message to pending with bounded backoff; after the
 	// backoff elapses it is claimable again.
@@ -487,7 +490,7 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if len(reclaimed) != 1 {
 		t.Fatalf("reclaimed = %+v, want 1", reclaimed)
 	}
-	if reclaimed[0].Content != claimed[0].Content {
+	if string(reclaimed[0].Payload) != string(claimed[0].Payload) {
 		t.Fatal("retry changed the payload for the same host idempotency key")
 	}
 	newToken := reclaimed[0].DeliveryToken
@@ -501,11 +504,14 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if len(reReclaimed) != 1 {
 		t.Fatalf("re-reclaimed = %+v, want 1", reReclaimed)
 	}
-	if code := ack("daemon-claim", ownerID, messageID, newToken, "delivered"); code != http.StatusConflict {
-		t.Fatalf("stale lease ack status = %d, want 409", code)
+	if !reReclaimed[0].VerifyOnly {
+		t.Fatal("an expired comment lease must be verification-only, not deliverable again")
 	}
-	if code := ack("daemon-claim", ownerID, messageID, reReclaimed[0].DeliveryToken, "delivered"); code != http.StatusOK {
-		t.Fatalf("current lease ack status = %d, want 200", code)
+	if code := outcome("daemon-claim", ownerID, messageID, newToken, "delivered"); code != http.StatusConflict {
+		t.Fatalf("stale lease outcome status = %d, want 409", code)
+	}
+	if code := outcome("daemon-claim", ownerID, messageID, reReclaimed[0].DeliveryToken, "delivered"); code != http.StatusOK {
+		t.Fatalf("current lease outcome status = %d, want 200", code)
 	}
 	var deliveryStatus string
 	if err := testPool.QueryRow(ctx, `SELECT delivery_status FROM agent_mailbox_message WHERE id = $1`, messageID).Scan(&deliveryStatus); err != nil {
@@ -515,7 +521,6 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		t.Fatalf("delivery status = %s, want delivered", deliveryStatus)
 	}
 }
-
 func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -537,11 +542,11 @@ func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 		})
 	}
 	claim := func(selector string) *httptest.ResponseRecorder {
-		r := newRequest(http.MethodPost, "/api/daemon/mailbox/claim", map[string]any{"limit": 10})
+		r := newRequest(http.MethodPost, "/api/daemon/deliveries/claim", map[string]any{"limit": 10})
 		r.Header.Set("X-User-ID", owner)
 		r.Header.Set("X-Multica-Daemon-ID", selector)
 		w := httptest.NewRecorder()
-		testHandler.ClaimDaemonMailbox(w, r)
+		testHandler.ClaimDaemonDeliveries(w, r)
 		return w
 	}
 	if w := claim(""); w.Code != http.StatusBadRequest {
@@ -556,19 +561,16 @@ func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 			t.Fatalf("claim %s: %d %s", tc.daemon, w.Code, w.Body.String())
 		}
 		var result struct {
-			Messages []daemonMailboxClaimItem `json:"messages"`
+			Deliveries []daemonDeliveryClaim `json:"deliveries"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Messages) != 1 || result.Messages[0].Message.RecipientAgentID != tc.recipient {
-			t.Fatalf("claim crossed daemon binding: %+v", result.Messages)
+		if len(result.Deliveries) != 1 || result.Deliveries[0].RecipientAgentID != tc.recipient {
+			t.Fatalf("claim crossed daemon binding: %+v", result.Deliveries)
 		}
 	}
 }
-
-// TestMailboxProcessingAckIsMonotonic pins unread -> read -> handled and the
-// rule that read can never undo handled.
 func TestMailboxProcessingAckIsMonotonic(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")

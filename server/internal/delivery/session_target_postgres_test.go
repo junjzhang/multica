@@ -56,7 +56,6 @@ func TestClaimLeasesTwoSessionsOfOneAgentIndependently(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 		Limit:       5,
 	})
 	if err != nil {
@@ -91,7 +90,6 @@ func TestClaimSerializesOneSessionAcrossIssues(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  CommentProjection,
 	}
 	claims, err := queue.Claim(context.Background(), request)
 	if err != nil {
@@ -146,7 +144,6 @@ func TestClaimSkipsLegacyRowWithoutFrozenTarget(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  CommentProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim: %v", err)
@@ -239,7 +236,6 @@ func TestRebindKeepsExistingDeliveryOnOriginalSession(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonA,
 		OwnerUserID: ownerID,
-		Projection:  CommentProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim daemon A: %v", err)
@@ -251,7 +247,6 @@ func TestRebindKeepsExistingDeliveryOnOriginalSession(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonB,
 		OwnerUserID: ownerID,
-		Projection:  CommentProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim daemon B: %v", err)
@@ -279,7 +274,6 @@ func TestDaemonReassignmentKeepsTargetAndDeliveryID(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonA,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim old daemon: %v", err)
@@ -291,7 +285,6 @@ func TestDaemonReassignmentKeepsTargetAndDeliveryID(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonB,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim new daemon: %v", err)
@@ -322,7 +315,6 @@ func TestClaimSkipsArchivedAgent(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	})
 	if err != nil {
 		t.Fatalf("claim: %v", err)

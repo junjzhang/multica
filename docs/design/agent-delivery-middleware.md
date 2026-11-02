@@ -245,28 +245,32 @@ GitHub pull-request conditions are reused unchanged. They evaluate the stored
 no fresh snapshots and the existing "condition pending" diagnostic says so. The
 delivery path never reads GitHub itself.
 
-## Consuming a generic delivery
+## Consuming a delivery
 
-Two entries consume the one table and their filters are disjoint, so the same
-row can never be leased twice:
+One entry consumes the table for every source: a comment notification and a
+generic event differ only in `kind` and payload, not in how they are claimed,
+leased, acknowledged or recovered.
 
 | Entry | Filter | DTO |
 | --- | --- | --- |
-| `POST /api/daemon/mailbox/claim` (legacy) | `source_type = 'comment'` | Frozen `MailboxMessageResponse` + rendered comment notification |
-| `POST /api/daemon/deliveries/claim` (generic) | `source_type <> 'comment'` | `id`, `kind`, `payload`, recipient, bound session, lease and `verify_only` |
+| `POST /api/daemon/deliveries/claim` | none by source | `id`, `kind`, `payload`, `source_type`, issue/comment references, recipient, bound session, lease and `verify_only` |
 
-`delivery.Queue.Claim` leases for either entry. It takes a per-recipient
+`delivery.Queue.Claim` leases a row for that entry. It takes a per-recipient
 transaction-scoped advisory lock, leases at most one row per recipient session,
 and only leases a row that is still eligible (`pending` due, `leased` expired, or
 `unknown` due). The candidate list is only a pre-lock hint: the conditional
 `UPDATE` re-checks both eligibility and the recipient's in-flight rows after the
 lock, under READ COMMITTED's fresh statement snapshot. A lost race is a no-op,
-and the comment and generic entries cannot each lease a row for the same session
-even though neither candidate list contains the other projection's rows. This
-keeps two workers or daemons from delivering to one session at the same time and
-stops one unreachable recipient from consuming more than one slot. The worker
-runs a bounded number of sessions concurrently; the claim itself is the fairness
-bound, not a priority scheduler.
+and two claim rounds cannot lease different rows of the same session. This keeps
+two workers or daemons from delivering to one session at the same time and stops
+one unreachable recipient from consuming more than one slot. The worker runs a
+bounded number of sessions concurrently; the claim itself is the fairness bound,
+not a priority scheduler.
+
+The daemon renders the notification from `kind` and the stable references. A
+`comment_mention` row keeps the exact envelope the old mailbox consumer sent, so
+an in-flight row's host idempotency fingerprint does not change; every other
+kind is the neutral envelope with its issue reference and payload.
 
 The issue-detail projection (`ListIssueMailboxDeliveries`) also keeps the
 `source_type = 'comment'` filter. A generic delivery may legitimately reference
@@ -304,9 +308,8 @@ that lacks the capability is reported as unsupported, not as an absent receipt.
 The failure backoff is `attempts² × 15s`, bounded to 15 seconds … 15 minutes.
 Only a proven no-effect result returns a row to claimable delivery. A row whose
 lease expired without a recorded outcome is ambiguous: on reclaim the worker
-looks up the receipt instead of sending again (the legacy comment projection
-keeps its existing replay behavior because its frozen consumer has no receipt
-path).
+looks up the receipt instead of sending again, for every source. There is no
+comment-specific replay path.
 
 An `unknown` row is reclaimed for verification only. `accepted` completes it;
 `pending`, `absent`, an unsupported lookup or a failed lookup all leave it

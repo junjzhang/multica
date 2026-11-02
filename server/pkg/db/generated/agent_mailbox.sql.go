@@ -538,10 +538,10 @@ type LeaseClaimableDeliveryParams struct {
 //
 // The in-flight check is repeated here, not only in the candidate list. Under
 // READ COMMITTED this statement takes a fresh snapshot after the caller's
-// per-session advisory lock, so it sees a lease another entry committed while
-// this claim was being prepared. The candidate list alone only proves the
-// session had no in-flight row before the lock: two disjoint projections
-// (comment and generic) could otherwise each lease a row for the same session.
+// per-session advisory lock, so it sees a lease another claim transaction
+// committed while this claim was being prepared. The candidate list alone only
+// proves the session had no in-flight row before the lock: two claim rounds for
+// different rows of one session could otherwise lease both.
 func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimableDeliveryParams) (AgentMailboxMessage, error) {
 	row := q.db.QueryRow(ctx, leaseClaimableDelivery,
 		arg.LeaseTokenHash,
@@ -687,13 +687,12 @@ WITH ranked AS (
     JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = $2
       AND m.target_session_id IS NOT NULL
-      AND (m.source_type = 'comment') = $3::boolean
       AND s.workspace_id = $2
       AND a.workspace_id = $2
       AND a.execution_kind = 'external'
       AND a.archived_at IS NULL
-      AND s.owner_user_id = $4
-      AND s.daemon_id = $5
+      AND s.owner_user_id = $3
+      AND s.daemon_id = $4
       AND (
           (m.delivery_status = 'pending' AND m.next_attempt_at <= now())
           OR (m.delivery_status = 'leased' AND m.lease_expires_at <= now())
@@ -716,11 +715,10 @@ LIMIT $1
 `
 
 type ListClaimableDeliveryIDsParams struct {
-	RowLimit          int32       `json:"row_limit"`
-	WorkspaceID       pgtype.UUID `json:"workspace_id"`
-	CommentProjection bool        `json:"comment_projection"`
-	OwnerUserID       pgtype.UUID `json:"owner_user_id"`
-	DaemonID          string      `json:"daemon_id"`
+	RowLimit    int32       `json:"row_limit"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	OwnerUserID pgtype.UUID `json:"owner_user_id"`
+	DaemonID    string      `json:"daemon_id"`
 }
 
 type ListClaimableDeliveryIDsRow struct {
@@ -737,6 +735,10 @@ type ListClaimableDeliveryIDsRow struct {
 // (unknown) is claimable again only for receipt verification, never for a
 // second send.
 //
+// Every source type shares this one list: a comment notification and a generic
+// event are delivered by the same worker and the same lease/outcome state
+// machine, so no source can be excluded from receipt recovery.
+//
 // external_agent_session is joined by the frozen target_session_id, never by
 // the agent's current binding: the host's provider/host/session identity is
 // immutable, while daemon_id only decides which authorized worker can reach
@@ -745,7 +747,6 @@ func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimabl
 	rows, err := q.db.Query(ctx, listClaimableDeliveryIDs,
 		arg.RowLimit,
 		arg.WorkspaceID,
-		arg.CommentProjection,
 		arg.OwnerUserID,
 		arg.DaemonID,
 	)
