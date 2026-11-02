@@ -234,7 +234,7 @@ func TestIssuePartialProjectionsPreserveCollaborationState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			keys := jsonKeys(t, value)
-			for _, field := range []string{"coordinator", "merge_authorization", "external_participants", "mailbox_deliveries"} {
+			for _, field := range []string{"coordinator", "merge_authorization", "external_participants", "mailbox_deliveries", "external_session_bindings"} {
 				if hasKey(keys, field) {
 					t.Errorf("unloaded field %s would overwrite detail state", field)
 				}
@@ -257,7 +257,7 @@ func TestIssuePartialProjectionsPreserveCollaborationState(t *testing.T) {
 			if string(fields["coordinator"]) != "null" {
 				t.Fatal("full row must clear an absent coordinator")
 			}
-			for _, field := range []string{"external_participants", "mailbox_deliveries"} {
+			for _, field := range []string{"external_participants", "mailbox_deliveries", "external_session_bindings"} {
 				if _, exists := fields[field]; exists {
 					t.Errorf("unloaded %s would erase detail state", field)
 				}
@@ -279,11 +279,11 @@ func TestIssueExternalProjectionFailureDoesNotClearCache(t *testing.T) {
 	cancel()
 	resp := issueToResponse(row, "MUL")
 	testHandler.projectIssueExternalState(ctx, row, &resp)
-	if resp.ExternalParticipants != nil || resp.MailboxDeliveries != nil {
+	if resp.ExternalParticipants != nil || resp.MailboxDeliveries != nil || resp.ExternalSessionBindings != nil {
 		t.Fatal("failed queries must omit projections")
 	}
 	testHandler.projectIssueExternalState(context.Background(), row, &resp)
-	if resp.ExternalParticipants == nil || len(*resp.ExternalParticipants) != 0 || resp.MailboxDeliveries == nil || len(*resp.MailboxDeliveries) != 0 {
+	if resp.ExternalParticipants == nil || len(*resp.ExternalParticipants) != 0 || resp.MailboxDeliveries == nil || len(*resp.MailboxDeliveries) != 0 || resp.ExternalSessionBindings == nil || len(*resp.ExternalSessionBindings) != 0 {
 		t.Fatal("successful empty queries must authoritatively clear projections")
 	}
 }

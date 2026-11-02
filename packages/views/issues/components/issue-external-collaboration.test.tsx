@@ -1,9 +1,34 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen } from "@testing-library/react";
-import type { Agent, Issue } from "@multica/core/types";
+import type { ReactElement } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { Agent, ExternalSession, Issue } from "@multica/core/types";
 import { renderWithI18n } from "../../test/i18n";
+
+const permissions = vi.hoisted(() => ({ canManage: true }));
+const apiMock = vi.hoisted(() => ({
+  listAgentSessions: vi.fn(),
+  bindAgentSession: vi.fn(),
+}));
+
+vi.mock("@multica/core/permissions", () => ({
+  useAgentPermissions: () => ({
+    canEdit: {
+      allowed: permissions.canManage,
+      reason: permissions.canManage ? "allowed" : "not_resource_owner",
+      message: "",
+    },
+    canAssign: { allowed: true, reason: "allowed", message: "" },
+    isLoading: false,
+  }),
+}));
+
+vi.mock("@multica/core/hooks", () => ({
+  useWorkspaceId: () => "ws-1",
+}));
 
 vi.mock("@multica/core/workspace/hooks", () => ({
   useActorName: () => ({
@@ -11,6 +36,8 @@ vi.mock("@multica/core/workspace/hooks", () => ({
     getMemberName: (id: string) => (id === "user-1" ? "Ada" : id),
   }),
 }));
+
+vi.mock("@multica/core/api", () => ({ api: apiMock }));
 
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: () => <span data-testid="avatar" />,
@@ -22,6 +49,36 @@ vi.mock("../../platform", () => ({
 }));
 
 import { IssueExternalCollaboration } from "./issue-external-collaboration";
+
+const boundSession: ExternalSession = {
+  id: "session-bound",
+  provider: "paseo",
+  host_id: "server-1",
+  session_id: "paseo-bound",
+  display_name: "Issue route",
+  url: "paseo://h/server-1/agent/paseo-bound",
+  daemon_id: "daemon-1",
+};
+
+const secondSession: ExternalSession = {
+  id: "session-second",
+  provider: "paseo",
+  host_id: "server-2",
+  session_id: "paseo-second",
+  display_name: "Second route",
+  url: "paseo://h/server-2/agent/paseo-second",
+  daemon_id: "daemon-2",
+};
+
+const sourceSession: ExternalSession = {
+  id: "session-source",
+  provider: "paseo",
+  host_id: "server-3",
+  session_id: "paseo-source",
+  display_name: "Sender route",
+  url: "paseo://h/server-3/agent/paseo-source",
+  daemon_id: "daemon-3",
+};
 
 const externalAgent: Agent = {
   id: "agent-1",
@@ -52,10 +109,17 @@ const externalAgent: Agent = {
     provider: "paseo",
     host_id: "server-1",
     session_id: "paseo-agent-1",
-    display_name: "Review session",
+    display_name: "Agent detail route",
     url: "paseo://h/server-1/agent/paseo-agent-1",
     daemon_id: "daemon-1",
   },
+};
+
+const secondAgent: Agent = {
+  ...externalAgent,
+  id: "agent-2",
+  name: "Planner",
+  external_session: { ...externalAgent.external_session!, display_name: "Planner detail route" },
 };
 
 function issue(overrides: Partial<Issue> = {}): Issue {
@@ -86,22 +150,64 @@ function issue(overrides: Partial<Issue> = {}): Issue {
   };
 }
 
-afterEach(cleanup);
+function binding(agentId: string, session: ExternalSession) {
+  return {
+    id: `binding-${agentId}`,
+    agent_id: agentId,
+    issue_id: "issue-1",
+    session,
+    deliverable: true,
+    unavailable_reason: "",
+    created_at: "2026-01-02T00:00:00Z",
+  };
+}
+
+function renderCollaboration(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return renderWithI18n(
+    <QueryClientProvider client={client}>{ui}</QueryClientProvider>,
+  );
+}
+
+afterEach(() => {
+  cleanup();
+  permissions.canManage = true;
+  apiMock.listAgentSessions.mockReset();
+  apiMock.bindAgentSession.mockReset();
+});
+
+beforeEach(() => {
+  apiMock.listAgentSessions.mockResolvedValue([
+    {
+      ...boundSession,
+      deliverable: true,
+      unavailable_reason: "",
+    },
+    {
+      ...secondSession,
+      deliverable: true,
+      unavailable_reason: "",
+    },
+  ]);
+});
 
 describe("IssueExternalCollaboration", () => {
-  it("renders nothing without coordinator, participants or deliveries", () => {
-    const { container } = renderWithI18n(
+  it("renders nothing without coordinator, participants, bindings or deliveries", () => {
+    const { container } = renderCollaboration(
       <IssueExternalCollaboration issue={issue()} agents={[]} />,
     );
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("shows the fixed coordinator, external participants and their sessions", () => {
-    renderWithI18n(
+  it("shows the issue binding instead of the agent's single detail session", () => {
+    renderCollaboration(
       <IssueExternalCollaboration
         issue={issue({
           coordinator: { type: "member", id: "user-1" },
           external_participants: [externalAgent],
+          external_session_bindings: [binding("agent-1", boundSession)],
         })}
         agents={[externalAgent]}
       />,
@@ -112,13 +218,123 @@ describe("IssueExternalCollaboration", () => {
     expect(screen.getByText("Ada")).toBeInTheDocument();
     expect(screen.getByText("External participants")).toBeInTheDocument();
     expect(screen.getByText("Reviewer")).toBeInTheDocument();
-    expect(screen.getByText("Review session")).toBeInTheDocument();
-    // An external participant never renders the managed missing-runtime error.
-    expect(screen.queryByText("Needs a runtime")).not.toBeInTheDocument();
+    expect(screen.getByText("Issue session")).toBeInTheDocument();
+    expect(screen.getByText("Issue route")).toBeInTheDocument();
+    // The agent-detail lookup picks one arbitrary session; it must not stand
+    // in for the real issue binding.
+    expect(screen.queryByText("Agent detail route")).not.toBeInTheDocument();
+  });
+
+  it("renders the correct address for two agents on the same issue", () => {
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent, secondAgent],
+          external_session_bindings: [
+            binding("agent-1", boundSession),
+            binding("agent-2", secondSession),
+          ],
+        })}
+        agents={[externalAgent, secondAgent]}
+      />,
+    );
+
+    expect(screen.getByText("Issue route")).toBeInTheDocument();
+    expect(screen.getByText("Second route")).toBeInTheDocument();
+  });
+
+  it("is read-only without agent management permission", () => {
+    permissions.canManage = false;
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent],
+          external_session_bindings: [binding("agent-1", boundSession)],
+        })}
+        agents={[externalAgent]}
+      />,
+    );
+
+    expect(screen.getByText("Issue route")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /change session/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the displayed binding when the save is rejected", async () => {
+    const user = userEvent.setup();
+    apiMock.bindAgentSession.mockRejectedValue(new Error("forbidden"));
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent],
+          external_session_bindings: [binding("agent-1", boundSession)],
+        })}
+        agents={[externalAgent]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /change session/i }));
+    expect(await screen.findByText("Second route")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /second route/i }));
+    await user.click(screen.getByRole("button", { name: /save session/i }));
+
+    await waitFor(() => {
+      expect(apiMock.bindAgentSession).toHaveBeenCalledWith("agent-1", {
+        issue_id: "issue-1",
+        session_id: "session-second",
+      });
+    });
+    expect(
+      await screen.findByText("Could not save the session. The current binding is unchanged."),
+    ).toBeInTheDocument();
+    // The dialog stays open and the old binding is still the displayed target.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getAllByText("Issue route").length).toBeGreaterThan(0);
+  });
+
+  it("explains a generic unknown delivery without inventing a comment or a resend", () => {
+    permissions.canManage = false;
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent],
+          mailbox_deliveries: [
+            {
+              id: "msg-future",
+              issue_id: "issue-1",
+              comment_id: "",
+              recipient_agent_id: "agent-1",
+              source_session: sourceSession,
+              target_session: boundSession,
+              source_type: "issue_wakeup",
+              kind: "future_result",
+              delivery_status: "unknown",
+              processing_status: "unread",
+              created_at: "2026-01-02T00:00:00Z",
+              delivered_at: null,
+              last_error: "host outcome not confirmed",
+            },
+          ],
+        })}
+        agents={[externalAgent]}
+      />,
+    );
+
+    expect(screen.getByText("Other notification")).toBeInTheDocument();
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    expect(
+      screen.getByText("Outcome unconfirmed. The host may have accepted it; this view does not resend it."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Sent to")).toBeInTheDocument();
+    expect(screen.getByText("Sent from")).toBeInTheDocument();
+    expect(screen.getByText("Issue route")).toBeInTheDocument();
+    expect(screen.getByText("Sender route")).toBeInTheDocument();
+    expect(screen.getByText("host outcome not confirmed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resend|retry/i })).not.toBeInTheDocument();
   });
 
   it("renders delivery and processing as separate states, never as completion", () => {
-    renderWithI18n(
+    permissions.canManage = false;
+    renderCollaboration(
       <IssueExternalCollaboration
         issue={issue({
           external_participants: [externalAgent],
@@ -128,7 +344,10 @@ describe("IssueExternalCollaboration", () => {
               issue_id: "issue-1",
               comment_id: "comment-1",
               recipient_agent_id: "agent-1",
-              source_session: externalAgent.external_session ?? null,
+              source_session: sourceSession,
+              target_session: boundSession,
+              source_type: "comment",
+              kind: "comment_mention",
               delivery_status: "delivered",
               processing_status: "unread",
               created_at: "2026-01-02T00:00:00Z",
@@ -141,6 +360,9 @@ describe("IssueExternalCollaboration", () => {
               comment_id: "comment-2",
               recipient_agent_id: "agent-1",
               source_session: null,
+              target_session: boundSession,
+              source_type: "comment",
+              kind: "comment_mention",
               delivery_status: "failed",
               processing_status: "handled",
               created_at: "2026-01-02T00:00:00Z",
@@ -154,28 +376,32 @@ describe("IssueExternalCollaboration", () => {
     );
 
     expect(screen.getByText("Mailbox deliveries")).toBeInTheDocument();
-    expect(screen.getByText("Delivered to mailbox")).toBeInTheDocument();
+    expect(screen.getAllByText("Comment mention")).toHaveLength(2);
+    expect(screen.getAllByText("Delivered to mailbox")).toHaveLength(1);
     expect(screen.getByText("Unread")).toBeInTheDocument();
     expect(screen.getByText("Delivery failed")).toBeInTheDocument();
     expect(screen.getByText("Handled")).toBeInTheDocument();
     expect(screen.getByText("host offline")).toBeInTheDocument();
     // Delivered is not completion: it must not imply the recipient handled it.
     expect(screen.getAllByText("Handled")).toHaveLength(1);
+    expect(
+      screen.getByText("Delivery means the host accepted the notification, not that the task finished or passed acceptance."),
+    ).toBeInTheDocument();
   });
 
   it("keeps a managed coordinator's missing-runtime error", () => {
     const managed = {
       ...externalAgent,
-      id: "agent-2",
+      id: "agent-3",
       name: "Planner",
       execution_kind: undefined,
       external_session: undefined,
       runtime_id: "",
       runtime_bound: false,
     } satisfies Agent;
-    renderWithI18n(
+    renderCollaboration(
       <IssueExternalCollaboration
-        issue={issue({ coordinator: { type: "agent", id: "agent-2" } })}
+        issue={issue({ coordinator: { type: "agent", id: "agent-3" } })}
         agents={[managed]}
       />,
     );
@@ -185,13 +411,13 @@ describe("IssueExternalCollaboration", () => {
   });
 
   it("identifies an external agent coordinator by its session", () => {
-    renderWithI18n(
+    renderCollaboration(
       <IssueExternalCollaboration
         issue={issue({ coordinator: { type: "agent", id: "agent-1" } })}
         agents={[externalAgent]}
       />,
     );
     expect(screen.getByText("External session")).toBeInTheDocument();
-    expect(screen.getByText("Review session")).toBeInTheDocument();
+    expect(screen.getByText("Agent detail route")).toBeInTheDocument();
   });
 });

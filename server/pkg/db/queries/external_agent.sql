@@ -56,6 +56,22 @@ SELECT * FROM external_agent_session WHERE agent_id = ANY(@agent_ids::uuid[]);
 -- name: ListExternalAgentSessionsByIDs :many
 SELECT * FROM external_agent_session WHERE id = ANY(@ids::uuid[]);
 
+-- name: ListExternalAgentSessionsForRead :many
+-- All registered host sessions of one external agent, with the two conditions
+-- that make a session undeliverable at read time: the agent was archived, or
+-- the session owner is no longer a workspace member. A missing binding is not
+-- an error; the UI shows the agent's sessions without a current target.
+SELECT s.*,
+       (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+       EXISTS (
+           SELECT 1 FROM member m
+           WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
+       )::boolean AS owner_is_member
+FROM external_agent_session s
+JOIN agent a ON a.id = s.agent_id AND a.workspace_id = s.workspace_id
+WHERE s.workspace_id = @workspace_id AND s.agent_id = @agent_id
+ORDER BY s.created_at ASC, s.id ASC;
+
 -- name: UpdateExternalAgentSessionProfile :one
 -- Only presentation and the delivering daemon are mutable; the identity tuple
 -- is immutable once registered. The exact session id scopes the write: an

@@ -864,7 +864,6 @@ func (q *Queries) ListIssueExternalParticipants(ctx context.Context, arg ListIss
 const listIssueMailboxDeliveries = `-- name: ListIssueMailboxDeliveries :many
 SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key FROM agent_mailbox_message
 WHERE issue_id = $1 AND workspace_id = $2
-  AND source_type = 'comment'
 ORDER BY created_at DESC, id DESC
 LIMIT 50
 `
@@ -875,9 +874,10 @@ type ListIssueMailboxDeliveriesParams struct {
 }
 
 // Bounded recent projection for the issue response. Complete history is the
-// mailbox API's keyset pagination. Only the legacy comment projection is
-// included: the frozen issue DTO has no way to render a generic delivery, and a
-// generic row may legitimately carry only an issue reference.
+// mailbox API's keyset pagination. Every source type is included: a generic
+// issue_wakeup delivery has an issue reference and a frozen target but no
+// comment, and the issue view must not hide it. comment_id is NULL for those
+// rows; the response keeps it empty instead of inventing a comment.
 func (q *Queries) ListIssueMailboxDeliveries(ctx context.Context, arg ListIssueMailboxDeliveriesParams) ([]AgentMailboxMessage, error) {
 	rows, err := q.db.Query(ctx, listIssueMailboxDeliveries, arg.IssueID, arg.WorkspaceID)
 	if err != nil {

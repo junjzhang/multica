@@ -481,7 +481,7 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 		t.Fatalf("in-flight rows = %d (lease %s), want only %s", inflightRows, leasedID, inflight.ID)
 	}
 }
-func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
+func TestListIssueMailboxDeliveriesIncludesGenericRows(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, _, _ := newClaimFixture(t, pool)
 	issueID := uuid.NewString()
@@ -490,13 +490,13 @@ func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
 	store := NewPostgres(db.New(pool))
 	generic, err := store.Enqueue(context.Background(), EnqueueRequest{
 		Scope:           Scope{WorkspaceID: workspaceID},
-		Source:          Source{Type: "ci_run", Key: "run-issue-" + uuid.NewString()},
+		Source:          Source{Type: "issue_wakeup", Key: "wakeup-issue-" + uuid.NewString()},
 		Target:          Target{SessionID: fixtureSessionID(t, pool, agentID)},
 		Recipient:       Recipient{Type: "agent", ID: agentID},
-		NotificationKey: "ci:run-issue:" + uuid.NewString(),
-		Kind:            "ci_terminal",
+		NotificationKey: "wakeup:run-issue:" + uuid.NewString(),
+		Kind:            "issue_wakeup",
 		Refs:            Refs{IssueID: issueID},
-		Payload:         json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Payload:         json.RawMessage(`{"schema":"issue_wakeup.v1","issue_id":"` + issueID + `"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic delivery with an issue reference: %v", err)
@@ -509,12 +509,16 @@ func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list issue mailbox deliveries: %v", err)
 	}
-	if len(rows) != 1 || util.UUIDToString(rows[0].ID) != comment.ID {
+	got := map[string]bool{}
+	for _, row := range rows {
+		got[util.UUIDToString(row.ID)] = true
+	}
+	if len(rows) != 2 || !got[comment.ID] || !got[generic.ID] {
 		ids := make([]string, 0, len(rows))
 		for _, row := range rows {
 			ids = append(ids, util.UUIDToString(row.ID))
 		}
-		t.Fatalf("issue deliveries = %v, want only the comment row %s (generic %s must not leak)", ids, comment.ID, generic.ID)
+		t.Fatalf("issue deliveries = %v, want the comment %s and generic %s", ids, comment.ID, generic.ID)
 	}
 }
 

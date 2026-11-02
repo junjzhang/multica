@@ -183,12 +183,40 @@ func (h *Handler) projectIssueExternalState(ctx context.Context, issue db.Issue,
 		IssueID:     issue.ID,
 		WorkspaceID: issue.WorkspaceID,
 	}); err == nil {
-		sources := h.externalSessionsByID(ctx, mailboxSourceSessionIDs(deliveries))
+		sessions := h.externalSessionsByID(ctx, mailboxDeliverySessionIDs(deliveries))
 		out := make([]MailboxMessageResponse, 0, len(deliveries))
 		for _, delivery := range deliveries {
-			out = append(out, mailboxMessageToResponse(delivery, sources[uuidToString(delivery.SourceSessionID)]))
+			out = append(out, mailboxMessageToResponse(
+				delivery,
+				sessions[uuidToString(delivery.SourceSessionID)],
+				sessions[uuidToString(delivery.TargetSessionID)],
+			))
 		}
 		resp.MailboxDeliveries = &out
+	}
+	if bindings, err := h.Queries.ListIssueActiveSessionBindings(ctx, db.ListIssueActiveSessionBindingsParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+	}); err == nil {
+		out := make([]AgentSessionBindingViewResponse, 0, len(bindings))
+		for _, binding := range bindings {
+			out = append(out, sessionBindingViewToResponse(sessionBindingView{
+				BindingID:     binding.BindingID,
+				AgentID:       binding.AgentID,
+				IssueID:       binding.IssueID,
+				SessionID:     binding.SessionID,
+				CreatedAt:     binding.CreatedAt,
+				Provider:      binding.Provider,
+				HostID:        binding.HostID,
+				HostSessionID: binding.HostSessionID,
+				DisplayName:   binding.DisplayName,
+				URL:           binding.Url,
+				DaemonID:      binding.DaemonID,
+				AgentArchived: binding.AgentArchived,
+				OwnerIsMember: binding.OwnerIsMember,
+			}))
+		}
+		resp.ExternalSessionBindings = &out
 	}
 }
 

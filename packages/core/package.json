@@ -86,6 +86,7 @@
     "./agents/visibility-label": "./agents/visibility-label.ts",
     "./agents/execution-kind": "./agents/execution-kind.ts",
     "./agents/paseo-session-url": "./agents/paseo-session-url.ts",
+    "./agents/session-bindings": "./agents/session-bindings.ts",
     "./agents/stores": "./agents/stores/index.ts",
     "./squads": "./squads/index.ts",
     "./squads/stores": "./squads/stores/index.ts",

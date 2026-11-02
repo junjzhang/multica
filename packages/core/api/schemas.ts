@@ -1330,9 +1330,12 @@ const IssueMergeAuthorizationSchema = z.object({
 export const MailboxMessageSchema = z.object({
   id: z.string(),
   issue_id: z.string().default(""),
-  comment_id: z.string().default(""),
+  comment_id: z.string().nullish().transform((value) => value ?? "").catch(""),
   recipient_agent_id: z.string().default(""),
   source_session: ExternalSessionSchema.nullable().default(null).catch(null),
+  target_session: ExternalSessionSchema.nullable().default(null).catch(null),
+  source_type: z.string().default("").catch(""),
+  kind: z.string().default("").catch(""),
   delivery_status: z.enum(["pending", "leased", "delivered", "failed", "unknown"]).catch("unknown"),
   processing_status: z.enum(["unread", "read", "handled", "unknown"]).catch("unknown"),
   created_at: z.string().default(""),
@@ -1349,6 +1352,56 @@ export const MailboxMessageListSchema = z.array(z.unknown())
       return parsed.success ? [parsed.data] : [];
     }),
   );
+
+export const AgentSessionSummarySchema = ExternalSessionSchema.extend({
+  id: z.string(),
+  deliverable: z.boolean().default(false).catch(false),
+  unavailable_reason: z.string().default("").catch(""),
+}).loose();
+
+/** Drop one malformed session without hiding the agent's other sessions. */
+export const AgentSessionListResponseSchema = z
+  .object({ sessions: z.array(z.unknown()).default([]) })
+  .loose()
+  .transform((value) => ({
+    sessions: value.sessions.flatMap((item) => {
+      const parsed = AgentSessionSummarySchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  }));
+
+export const AgentSessionBindingSchema = z.object({
+  id: z.string(),
+  agent_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  session_id: z.string().default(""),
+  created_at: z.string().default(""),
+}).loose();
+
+export const IssueSessionBindingSchema = z.object({
+  id: z.string(),
+  agent_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  session: ExternalSessionSchema.nullable().default(null).catch(null),
+  deliverable: z.boolean().default(false).catch(false),
+  unavailable_reason: z.string().default("").catch(""),
+  created_at: z.string().default(""),
+}).loose();
+
+/** Drop malformed bindings instead of failing the whole issue response. */
+export const IssueSessionBindingListSchema = z.array(z.unknown())
+  .catch([])
+  .transform((items) =>
+    items.flatMap((item) => {
+      const parsed = IssueSessionBindingSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  );
+
+export const AgentSessionBindingResponseSchema = z
+  .object({ binding: IssueSessionBindingSchema.nullable().default(null) })
+  .loose()
+  .catch({ binding: null });
 
 export const CommentSchema = z.object({
   id: z.string(),
@@ -1634,6 +1687,7 @@ export const IssueSchema = z.object({
     )
     .optional().catch(undefined),
   mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
+  external_session_bindings: z.array(z.unknown()).pipe(IssueSessionBindingListSchema).optional().catch(undefined),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

@@ -33,6 +33,9 @@ import type {
   IssueTableRowsRequest,
   IssueTableRowsResponse,
   Agent,
+  AgentSessionSummary,
+  AgentSessionBinding,
+  IssueSessionBinding,
   MikaBootstrapResponse,
   CreateAgentRequest,
   AgentBuilderRuntimeSwitch,
@@ -260,6 +263,9 @@ import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
   AgentListSchema,
+  AgentSessionListResponseSchema,
+  AgentSessionBindingSchema,
+  AgentSessionBindingResponseSchema,
   AgentTaskListSchema,
   AgentTaskPageSchema,
   AgentActivityBucketListSchema,
@@ -1855,6 +1861,59 @@ export class ApiClient {
 
   async getAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}`);
+  }
+
+  /** All registered host sessions of one external agent, never a single guess. */
+  async listAgentSessions(agentId: string): Promise<AgentSessionSummary[]> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions`);
+    return parseWithFallback(
+      raw,
+      AgentSessionListResponseSchema,
+      { sessions: [] },
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    ).sessions;
+  }
+
+  /** The exact active (agent, issue) target. Null means no binding, not failure. */
+  async getAgentIssueSessionBinding(
+    agentId: string,
+    issueId: string,
+  ): Promise<IssueSessionBinding | null> {
+    const search = new URLSearchParams({ issue_id: issueId });
+    const raw = await this.fetch<unknown>(
+      `/api/agents/${agentId}/session-bindings?${search}`,
+    );
+    return parseWithFallback(
+      raw,
+      AgentSessionBindingResponseSchema,
+      { binding: null },
+      { endpoint: "GET /api/agents/{id}/session-bindings" },
+    ).binding;
+  }
+
+  /**
+   * Saves the target for FUTURE notifications. No local cache is changed here:
+   * callers must surface a failed save instead of pretending the old binding
+   * moved, and a successful save never rewrites an existing delivery.
+   */
+  async bindAgentSession(
+    agentId: string,
+    data: { issue_id: string; session_id: string },
+  ): Promise<AgentSessionBinding> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/session-bindings`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<AgentSessionBinding | null>(
+      raw,
+      AgentSessionBindingSchema,
+      null,
+      { endpoint: "POST /api/agents/{id}/session-bindings" },
+    );
+    if (!parsed) {
+      throw new Error("The server did not confirm the session binding.");
+    }
+    return parsed;
   }
 
   async createAgent(data: CreateAgentRequest): Promise<Agent> {

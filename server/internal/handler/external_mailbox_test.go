@@ -652,7 +652,7 @@ func TestIssueCoordinatorAndMergePolicy(t *testing.T) {
 	if created.MergeAuthorization.Allowed {
 		t.Fatal("merge authorization defaults to allowed; want disallowed")
 	}
-	if created.ExternalParticipants == nil || created.MailboxDeliveries == nil {
+	if created.ExternalParticipants == nil || created.MailboxDeliveries == nil || created.ExternalSessionBindings == nil {
 		t.Fatal("external projections must default to empty slices, not null")
 	}
 
