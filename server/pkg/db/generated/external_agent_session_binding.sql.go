@@ -157,6 +157,179 @@ func (q *Queries) GetActiveAgentSessionBinding(ctx context.Context, arg GetActiv
 	return i, err
 }
 
+const getActiveAgentSessionBindingView = `-- name: GetActiveAgentSessionBindingView :one
+SELECT b.id AS binding_id,
+       b.workspace_id,
+       b.agent_id,
+       b.issue_id,
+       b.session_id,
+       b.created_at,
+       s.provider,
+       s.host_id,
+       s.session_id AS host_session_id,
+       s.display_name,
+       s.url,
+       s.daemon_id,
+       (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+       EXISTS (
+           SELECT 1 FROM member m
+           WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id
+       )::boolean AS owner_is_member
+FROM external_agent_session_binding b
+JOIN external_agent_session s
+  ON s.id = b.session_id
+ AND s.workspace_id = b.workspace_id
+ AND s.agent_id = b.agent_id
+JOIN agent a
+  ON a.id = b.agent_id
+ AND a.workspace_id = b.workspace_id
+WHERE b.workspace_id = $1
+  AND b.agent_id = $2
+  AND b.issue_id = $3
+  AND b.revoked_at IS NULL
+`
+
+type GetActiveAgentSessionBindingViewParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+}
+
+type GetActiveAgentSessionBindingViewRow struct {
+	BindingID     pgtype.UUID        `json:"binding_id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	AgentID       pgtype.UUID        `json:"agent_id"`
+	IssueID       pgtype.UUID        `json:"issue_id"`
+	SessionID     pgtype.UUID        `json:"session_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Provider      string             `json:"provider"`
+	HostID        string             `json:"host_id"`
+	HostSessionID string             `json:"host_session_id"`
+	DisplayName   string             `json:"display_name"`
+	Url           pgtype.Text        `json:"url"`
+	DaemonID      string             `json:"daemon_id"`
+	AgentArchived bool               `json:"agent_archived"`
+	OwnerIsMember bool               `json:"owner_is_member"`
+}
+
+// Read-only projection of the exact (workspace, agent, issue) target. Unlike
+// GetActiveAgentSessionBinding it does not hide a binding whose agent was
+// archived or whose owner left: the task view must show that the recorded
+// target is no longer deliverable instead of pretending no binding exists.
+func (q *Queries) GetActiveAgentSessionBindingView(ctx context.Context, arg GetActiveAgentSessionBindingViewParams) (GetActiveAgentSessionBindingViewRow, error) {
+	row := q.db.QueryRow(ctx, getActiveAgentSessionBindingView, arg.WorkspaceID, arg.AgentID, arg.IssueID)
+	var i GetActiveAgentSessionBindingViewRow
+	err := row.Scan(
+		&i.BindingID,
+		&i.WorkspaceID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.SessionID,
+		&i.CreatedAt,
+		&i.Provider,
+		&i.HostID,
+		&i.HostSessionID,
+		&i.DisplayName,
+		&i.Url,
+		&i.DaemonID,
+		&i.AgentArchived,
+		&i.OwnerIsMember,
+	)
+	return i, err
+}
+
+const listIssueActiveSessionBindings = `-- name: ListIssueActiveSessionBindings :many
+SELECT b.id AS binding_id,
+       b.workspace_id,
+       b.agent_id,
+       b.issue_id,
+       b.session_id,
+       b.created_at,
+       s.provider,
+       s.host_id,
+       s.session_id AS host_session_id,
+       s.display_name,
+       s.url,
+       s.daemon_id,
+       (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+       EXISTS (
+           SELECT 1 FROM member m
+           WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id
+       )::boolean AS owner_is_member
+FROM external_agent_session_binding b
+JOIN external_agent_session s
+  ON s.id = b.session_id
+ AND s.workspace_id = b.workspace_id
+ AND s.agent_id = b.agent_id
+JOIN agent a
+  ON a.id = b.agent_id
+ AND a.workspace_id = b.workspace_id
+WHERE b.workspace_id = $1
+  AND b.issue_id = $2
+  AND b.revoked_at IS NULL
+ORDER BY b.created_at DESC, b.id DESC
+`
+
+type ListIssueActiveSessionBindingsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+}
+
+type ListIssueActiveSessionBindingsRow struct {
+	BindingID     pgtype.UUID        `json:"binding_id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	AgentID       pgtype.UUID        `json:"agent_id"`
+	IssueID       pgtype.UUID        `json:"issue_id"`
+	SessionID     pgtype.UUID        `json:"session_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Provider      string             `json:"provider"`
+	HostID        string             `json:"host_id"`
+	HostSessionID string             `json:"host_session_id"`
+	DisplayName   string             `json:"display_name"`
+	Url           pgtype.Text        `json:"url"`
+	DaemonID      string             `json:"daemon_id"`
+	AgentArchived bool               `json:"agent_archived"`
+	OwnerIsMember bool               `json:"owner_is_member"`
+}
+
+// Every active target recorded for this issue, regardless of whether the
+// agent still appears as a participant. Each row names the exact session a new
+// notification would use; earlier deliveries keep their own frozen target.
+func (q *Queries) ListIssueActiveSessionBindings(ctx context.Context, arg ListIssueActiveSessionBindingsParams) ([]ListIssueActiveSessionBindingsRow, error) {
+	rows, err := q.db.Query(ctx, listIssueActiveSessionBindings, arg.WorkspaceID, arg.IssueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIssueActiveSessionBindingsRow{}
+	for rows.Next() {
+		var i ListIssueActiveSessionBindingsRow
+		if err := rows.Scan(
+			&i.BindingID,
+			&i.WorkspaceID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.SessionID,
+			&i.CreatedAt,
+			&i.Provider,
+			&i.HostID,
+			&i.HostSessionID,
+			&i.DisplayName,
+			&i.Url,
+			&i.DaemonID,
+			&i.AgentArchived,
+			&i.OwnerIsMember,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const revokeActiveAgentSessionBindings = `-- name: RevokeActiveAgentSessionBindings :execrows
 UPDATE external_agent_session_binding
 SET revoked_at = now()

@@ -114,6 +114,11 @@ type IssueResponse struct {
 	MergeAuthorization   *IssueMergeAuthorizationResponse `json:"merge_authorization,omitempty"`
 	ExternalParticipants *[]AgentResponse                 `json:"external_participants,omitempty"`
 	MailboxDeliveries    *[]MailboxMessageResponse        `json:"mailbox_deliveries,omitempty"`
+	// ExternalSessionBindings is the active target for each (agent, issue)
+	// pair. It is separate from the participant's single agent-detail session:
+	// one agent may serve several issues from different sessions, and an
+	// existing delivery keeps the target it froze when it was created.
+	ExternalSessionBindings *[]AgentSessionBindingViewResponse `json:"external_session_bindings,omitempty"`
 	// duplicateOfIssueID is the raw mark, kept off the wire; see DuplicateOf.
 	duplicateOfIssueID pgtype.UUID
 }

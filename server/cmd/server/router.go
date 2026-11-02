@@ -2304,6 +2304,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// agent. Producers resolve it before enqueueing; a
 					// rebind never retargets an existing delivery.
 					r.With(handler.RequireHumanActor).Post("/session-bindings", h.BindAgentSession)
+					// Read-only projections for the task view. The agent's
+					// own external credential or a human manager may read
+					// them; every session is listed and the exact
+					// (agent, issue) binding is its own read.
+					r.Get("/sessions", h.ListAgentSessions)
+					r.Get("/session-bindings", h.GetAgentSessionBinding)
 					// Mailbox: the recipient's own external credential or an
 					// authorized human owner/admin.
 					r.Get("/mailbox", h.ListAgentMailbox)

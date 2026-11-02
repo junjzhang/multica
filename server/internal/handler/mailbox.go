@@ -33,6 +33,9 @@ type MailboxMessageResponse struct {
 	CommentID        string                   `json:"comment_id"`
 	RecipientAgentID string                   `json:"recipient_agent_id"`
 	SourceSession    *ExternalSessionResponse `json:"source_session"`
+	TargetSession    *ExternalSessionResponse `json:"target_session"`
+	SourceType       string                   `json:"source_type"`
+	Kind             string                   `json:"kind"`
 	DeliveryStatus   string                   `json:"delivery_status"`
 	ProcessingStatus string                   `json:"processing_status"`
 	CreatedAt        string                   `json:"created_at"`
@@ -40,13 +43,16 @@ type MailboxMessageResponse struct {
 	LastError        *string                  `json:"last_error"`
 }
 
-func mailboxMessageToResponse(m db.AgentMailboxMessage, source *ExternalSessionResponse) MailboxMessageResponse {
+func mailboxMessageToResponse(m db.AgentMailboxMessage, source, target *ExternalSessionResponse) MailboxMessageResponse {
 	return MailboxMessageResponse{
 		ID:               uuidToString(m.ID),
 		IssueID:          uuidToString(m.IssueID),
 		CommentID:        uuidToString(m.CommentID),
 		RecipientAgentID: uuidToString(m.RecipientAgentID),
 		SourceSession:    source,
+		TargetSession:    target,
+		SourceType:       m.SourceType,
+		Kind:             m.Kind,
 		DeliveryStatus:   m.DeliveryStatus,
 		ProcessingStatus: m.ProcessingStatus,
 		CreatedAt:        timestampToString(m.CreatedAt),
@@ -160,10 +166,14 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list mailbox")
 		return
 	}
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs(rows))
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
 	messages := make([]MailboxMessageResponse, 0, len(rows))
 	for _, row := range rows {
-		messages = append(messages, mailboxMessageToResponse(row, sources[uuidToString(row.SourceSessionID)]))
+		messages = append(messages, mailboxMessageToResponse(
+			row,
+			sessions[uuidToString(row.SourceSessionID)],
+			sessions[uuidToString(row.TargetSessionID)],
+		))
 	}
 	var nextCursor *string
 	if len(rows) == limit {
@@ -177,12 +187,23 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func mailboxSourceSessionIDs(rows []db.AgentMailboxMessage) []pgtype.UUID {
-	out := make([]pgtype.UUID, 0, len(rows))
-	for _, row := range rows {
-		if row.SourceSessionID.Valid {
-			out = append(out, row.SourceSessionID)
+func mailboxDeliverySessionIDs(rows []db.AgentMailboxMessage) []pgtype.UUID {
+	out := make([]pgtype.UUID, 0, len(rows)*2)
+	seen := make(map[string]struct{}, len(rows)*2)
+	add := func(id pgtype.UUID) {
+		if !id.Valid {
+			return
 		}
+		key := uuidToString(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, id)
+	}
+	for _, row := range rows {
+		add(row.SourceSessionID)
+		add(row.TargetSessionID)
 	}
 	return out
 }
@@ -241,8 +262,12 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
-	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs([]db.AgentMailboxMessage{updated}))
+	writeJSON(w, http.StatusOK, mailboxMessageToResponse(
+		updated,
+		sessions[uuidToString(updated.SourceSessionID)],
+		sessions[uuidToString(updated.TargetSessionID)],
+	))
 }
 
 // daemonMailboxContext resolves the verified daemon identity for delivery

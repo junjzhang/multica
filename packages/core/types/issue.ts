@@ -201,14 +201,45 @@ export type MailboxProcessingStatus = "unread" | "read" | "handled" | "unknown";
 export interface MailboxMessage {
   id: string;
   issue_id: string;
+  /**
+   * Empty for a generic delivery. A generic notification has no comment and
+   * must never be shown as if it carried one.
+   */
   comment_id: string;
   recipient_agent_id: string;
+  /** The session that sent the notification, when the producer had one. */
   source_session: ExternalSession | null;
+  /**
+   * The session frozen at enqueue time. It never follows a later rebind, so an
+   * old notification keeps the address it was actually sent to.
+   */
+  target_session?: ExternalSession | null;
+  /** Producer family, for example `comment` or `issue_wakeup`. */
+  source_type?: string;
+  /** Notification kind, for example `comment_mention` or `issue_wakeup`. */
+  kind?: string;
   delivery_status: MailboxDeliveryStatus;
   processing_status: MailboxProcessingStatus;
   created_at: string;
   delivered_at: string | null;
   last_error: string | null;
+}
+
+/**
+ * The active (agent, issue) target used for FUTURE notifications. A saved
+ * binding never moves an existing delivery; each message keeps its frozen
+ * target.
+ */
+export interface IssueSessionBinding {
+  id: string;
+  agent_id: string;
+  issue_id: string;
+  session: ExternalSession | null;
+  /** False when the agent is archived or the session owner left the workspace. */
+  deliverable: boolean;
+  /** `agent_archived` or `owner_not_member` when not deliverable; "" otherwise. */
+  unavailable_reason?: string;
+  created_at: string;
 }
 
 export interface Issue {
@@ -289,4 +320,6 @@ export interface Issue {
   external_participants?: Agent[];
   /** Bounded recent deliveries (server caps this; mailbox API paginates). */
   mailbox_deliveries?: MailboxMessage[];
+  /** Active targets for future notifications, one per external agent. */
+  external_session_bindings?: IssueSessionBinding[];
 }

@@ -50,6 +50,26 @@ export interface ExternalSession {
 }
 
 /**
+ * One registered session of an external agent. The read projection adds
+ * deliverability so the task view can explain an archived agent or an owner
+ * who left the workspace instead of silently offering an unreachable target.
+ */
+export interface AgentSessionSummary extends ExternalSession {
+  id: string;
+  deliverable: boolean;
+  unavailable_reason?: string;
+}
+
+/** The frozen wire shape returned when an explicit binding is saved. */
+export interface AgentSessionBinding {
+  id: string;
+  agent_id: string;
+  issue_id: string;
+  session_id: string;
+  created_at: string;
+}
+
+/**
  * A single invocation grant on an agent. `target_id` is `null` for the
  * workspace target (the grant covers every workspace member); it carries the
  * member / team id for the scoped grants.

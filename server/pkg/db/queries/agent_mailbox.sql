@@ -243,12 +243,12 @@ RETURNING *;
 
 -- name: ListIssueMailboxDeliveries :many
 -- Bounded recent projection for the issue response. Complete history is the
--- mailbox API's keyset pagination. Only the legacy comment projection is
--- included: the frozen issue DTO has no way to render a generic delivery, and a
--- generic row may legitimately carry only an issue reference.
+-- mailbox API's keyset pagination. Every source type is included: a generic
+-- issue_wakeup delivery has an issue reference and a frozen target but no
+-- comment, and the issue view must not hide it. comment_id is NULL for those
+-- rows; the response keeps it empty instead of inventing a comment.
 SELECT * FROM agent_mailbox_message
 WHERE issue_id = @issue_id AND workspace_id = @workspace_id
-  AND source_type = 'comment'
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 
