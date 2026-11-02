@@ -205,6 +205,13 @@ func buildDshMCPServers(raw json.RawMessage, logger interface {
 }
 
 func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	// DSH protocol v1 carries the prompt and resume_session_id in one execute
+	// frame; resume_rejected only arrives in the terminal result. There is no
+	// pre-prompt RPC this adapter can use to prove the session, so strict mode
+	// must fail instead of submitting the prompt to a possible fresh session.
+	if err := requireStrictResumeSupport("dsh", opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "dsh"

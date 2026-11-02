@@ -348,6 +348,9 @@ func isPiToolNameByte(b byte) bool {
 }
 
 func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	label := b.providerLabel
 	if label == "" {
 		label = "pi"
@@ -396,6 +399,19 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 			sessionPath, err = newPiSessionPath()
 			if err != nil {
 				return nil, fmt.Errorf("%s session path: %w", label, err)
+			}
+		}
+		if opts.RequireResume {
+			// Pi's --session points at the persisted transcript and its resume
+			// path refuses a missing one before running a turn. Check the same
+			// file up front so strict mode never launches a process that would
+			// have to start over.
+			info, statErr := os.Stat(sessionPath)
+			if statErr != nil {
+				return nil, fmt.Errorf("%w: %s has no session transcript %q: %v", ErrResumeRequired, label, sessionPath, statErr)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%w: %s session transcript %q is not a regular file", ErrResumeRequired, label, sessionPath)
 			}
 		}
 		if label != "omp" {

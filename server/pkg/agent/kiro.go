@@ -110,6 +110,9 @@ func (s *kiroSupplementSession) send(ctx context.Context, text string) error {
 }
 
 func (b *kiroBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "kiro-cli"
@@ -369,6 +372,15 @@ func (b *kiroBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 			// silent state reset is handled the same way as hermes/kimi.
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+				b.cfg.Logger.Warn("kiro strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 			if changed {
 				b.cfg.Logger.Warn("agent returned a different session id on resume — original was likely lost; continuing with the new id",
 					"backend", "kiro",
