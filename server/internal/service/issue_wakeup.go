@@ -252,9 +252,12 @@ func wakeupIssueActive(ctx context.Context, q *db.Queries, i db.Issue) (bool, er
 // StopClosedIssueWakeups applies the close rule after a status write: once an
 // issue is done or closed, every wakeup on it is disabled and wakeup runs that
 // have not started are cancelled. Running work keeps its ordinary Stop
-// control. Call it in the transaction that wrote the status, after that write
-// locked the issue row, so the close and this cleanup commit together. The
-// returned runs are for the caller's post-commit broadcast.
+// control. Notifications no host has accepted yet — comment mentions, generic
+// wakeups and any later producer — are withdrawn in this same transaction, so
+// a cancelled issue can never still wake an external agent. Call it in the
+// transaction that wrote the status, after that write locked the issue row, so
+// the close and this cleanup commit together. The returned runs are for the
+// caller's post-commit broadcast.
 func StopClosedIssueWakeups(ctx context.Context, q *db.Queries, issue db.Issue) ([]db.AgentTaskQueue, error) {
 	active, err := wakeupIssueActive(ctx, q, issue)
 	if err != nil || active {
@@ -263,10 +266,13 @@ func StopClosedIssueWakeups(ctx context.Context, q *db.Queries, issue db.Issue) 
 	if err = q.DisableIssueWakeups(ctx, issue.ID); err != nil {
 		return nil, err
 	}
-	// An external target has no queued run to cancel. Withdraw notifications
-	// no host has accepted yet so closing an issue cannot still wake it.
-	if _, err = q.WithdrawIssueWakeupDeliveries(ctx, db.WithdrawIssueWakeupDeliveriesParams{
-		Reason:      pgtype.Text{String: "Issue closed before the wakeup notification was accepted", Valid: true},
+	// Not every notification of a closed issue comes from a wakeup rule: a
+	// comment mention is claimable on its own. Withdraw all of them, whatever
+	// their source, so closing an issue cannot still wake an external agent.
+	// A notification created after this transaction is a new explicit request
+	// and stays deliverable.
+	if _, err = q.WithdrawIssueDeliveries(ctx, db.WithdrawIssueDeliveriesParams{
+		Reason:      pgtype.Text{String: "Issue closed before the notification was accepted", Valid: true},
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     issue.ID,
 	}); err != nil {

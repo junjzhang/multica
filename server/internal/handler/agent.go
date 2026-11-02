@@ -2748,12 +2748,38 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := requestUserID(r)
-	archived, err := h.Queries.ArchiveAgent(r.Context(), db.ArchiveAgentParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		slog.Warn("begin archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	queries := h.Queries.WithTx(tx)
+	archived, err := queries.ArchiveAgent(r.Context(), db.ArchiveAgentParams{
 		ID:         agent.ID,
 		ArchivedBy: parseUUID(userID),
 	})
 	if err != nil {
 		slog.Warn("archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	// Withdraw the agent's unaccepted notifications in the same transaction as
+	// the archive. The claim re-checks the archive at the final lease, but a
+	// notification leased just before this commit would otherwise survive as a
+	// claimable retry after a known no-effect answer. The marker keeps that
+	// retry from sending to an agent that no longer exists.
+	if _, err := queries.WithdrawAgentDeliveries(r.Context(), db.WithdrawAgentDeliveriesParams{
+		AgentIds: []pgtype.UUID{agent.ID},
+		Reason:   pgtype.Text{String: "Agent archived before the notification was accepted", Valid: true},
+	}); err != nil {
+		slog.Warn("withdraw agent deliveries on archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		slog.Warn("commit archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to archive agent")
 		return
 	}

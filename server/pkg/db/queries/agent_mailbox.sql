@@ -96,12 +96,13 @@ LIMIT @page_limit;
 
 -- name: ListClaimableDeliveryIDs :many
 -- Candidates for one claim round, at most one per physical session. This list
--- is only a pre-lock hint: the conditional lease re-checks both row
--- eligibility and the same session's in-flight rows after taking the advisory
--- lock, so a candidate that lost a race is skipped. An inflated lease is
--- reclaimable so a crashed worker does not strand a request. An ambiguous row
--- (unknown) is claimable again only for receipt verification, never for a
--- second send.
+-- is only a pre-lock hint and deliberately carries no delivery status: the
+-- status that decides send versus verify-only is read under the row lock after
+-- the advisory lock. The conditional lease re-checks row eligibility and the
+-- same session's in-flight rows after the advisory lock, so a candidate that
+-- lost a race is skipped. An inflated lease is reclaimable so a crashed worker
+-- does not strand a request. An ambiguous row (unknown) is claimable again only
+-- for receipt verification, never for a second send.
 --
 -- Every source type shares this one list: a comment notification and a generic
 -- event are delivered by the same worker and the same lease/outcome state
@@ -114,7 +115,6 @@ LIMIT @page_limit;
 WITH ranked AS (
     SELECT m.id,
            m.target_session_id,
-           m.delivery_status,
            m.next_attempt_at,
            m.created_at,
            row_number() OVER (
@@ -146,7 +146,7 @@ WITH ranked AS (
             AND inflight.lease_expires_at > now()
       )
 )
-SELECT id, target_session_id, delivery_status
+SELECT id, target_session_id
 FROM ranked
 WHERE target_rank = 1
 ORDER BY next_attempt_at ASC, created_at ASC, id ASC
@@ -159,6 +159,22 @@ LIMIT @row_limit;
 -- independently.
 SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('target_session_id')::text, 0)) AS locked;
 
+-- name: LockClaimableDelivery :one
+-- Reads the status the row has just before this claim leases it, while taking
+-- the row lock the lease UPDATE will reuse. The candidate list is a pre-lock
+-- hint: another worker may have leased and sent this row, then lost the ack or
+-- recorded unknown and let the lease expire. Judging send versus verify-only
+-- from the candidate status would turn that possibly-accepted row into a blind
+-- resend; this locked read is the authoritative answer. The row lock also
+-- serialises this read with a concurrent withdrawal, so the marker it returns
+-- is the state the lease is granted under.
+SELECT delivery_status, withdrawn_at
+FROM agent_mailbox_message
+WHERE id = @id
+  AND workspace_id = @workspace_id
+  AND target_session_id = @target_session_id
+FOR UPDATE;
+
 -- name: LeaseClaimableDelivery :one
 -- Conditional lease: only a row that is still eligible at this instant is
 -- leased. A concurrent claimant that already leased or acknowledged it makes
@@ -170,6 +186,14 @@ SELECT pg_try_advisory_xact_lock(hashtextextended(sqlc.arg('target_session_id'):
 -- committed while this claim was being prepared. The candidate list alone only
 -- proves the session had no in-flight row before the lock: two claim rounds for
 -- different rows of one session could otherwise lease both.
+--
+-- Authorization is re-checked here too. The candidate list is a snapshot taken
+-- before the advisory lock, and an archive or a session rebind can commit in
+-- between; leasing must not trust that snapshot. This is the same owner,
+-- workspace and daemon gate the candidate list applies, so an unauthorized
+-- target can never be handed a lease. Withdrawal races are settled by the row
+-- lock itself: this UPDATE and the withdrawal UPDATE serialise on the row, so
+-- whichever commits first decides, and the loser re-evaluates the row.
 UPDATE agent_mailbox_message
 SET delivery_status = 'leased',
     lease_token_hash = @lease_token_hash,
@@ -184,6 +208,18 @@ WHERE agent_mailbox_message.id = @id
       (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
       OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
       OR (agent_mailbox_message.delivery_status = 'unknown' AND agent_mailbox_message.next_attempt_at <= now())
+  )
+  AND EXISTS (
+      SELECT 1
+      FROM external_agent_session s
+      JOIN agent a ON a.id = s.agent_id
+      WHERE s.id = agent_mailbox_message.target_session_id
+        AND s.workspace_id = agent_mailbox_message.workspace_id
+        AND a.workspace_id = agent_mailbox_message.workspace_id
+        AND a.execution_kind = 'external'
+        AND a.archived_at IS NULL
+        AND s.owner_user_id = @owner_user_id
+        AND s.daemon_id = @daemon_id
   )
   AND NOT EXISTS (
       SELECT 1
@@ -200,14 +236,28 @@ RETURNING *;
 -- fence the update: a stale or foreign ack matches no row and cannot overwrite
 -- a later lease. The retry schedule separates a busy host (short fixed delay)
 -- from an unreachable host or a not-yet-confirmed outcome (bounded failure
--- backoff). Only rows whose prior outcome was a known no-effect return to
--- claimable delivery; unknown rows are re-claimed for verification.
+-- backoff).
+--
+-- A withdrawn notification never returns to claimable delivery. A known
+-- no-effect answer (pending) to a row withdrawn while it was leased becomes
+-- failed and keeps the withdrawal reason; the host did not accept it, and the
+-- producer already withdrew it. Delivered and unknown keep their own truthful
+-- state: the marker cannot rewrite an accepted send, and an unconfirmed one is
+-- only ever looked up by its original id.
 UPDATE agent_mailbox_message
-SET delivery_status = @status,
+SET delivery_status = CASE
+        WHEN @status = 'pending' AND withdrawn_at IS NOT NULL THEN 'failed'
+        ELSE @status
+    END,
     delivered_at = CASE WHEN @status = 'delivered' THEN now() ELSE delivered_at END,
     host_receipt = COALESCE(sqlc.narg('host_receipt'), host_receipt),
-    last_error = sqlc.narg('last_error'),
+    last_error = CASE
+        WHEN @status = 'pending' AND withdrawn_at IS NOT NULL
+            THEN COALESCE(last_error, 'Notification withdrawn before it was accepted')
+        ELSE sqlc.narg('last_error')
+    END,
     next_attempt_at = CASE
+        WHEN @status = 'pending' AND withdrawn_at IS NOT NULL THEN next_attempt_at
         WHEN @status = 'pending' AND @retry_class::text = 'busy' THEN now() + interval '5 seconds'
         WHEN @status = 'pending' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
         WHEN @status = 'unknown' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
@@ -224,6 +274,29 @@ WHERE id = @id
   AND lease_expires_at > now()
   AND lease_owner = @daemon_id
 RETURNING *;
+
+-- name: WithdrawAgentDeliveries :execrows
+-- Withdraws the unaccepted notifications of archived agents. It runs in the
+-- same transaction as the archive write, so an archive can never commit while
+-- a notification it should have withdrawn stays claimable. Pending rows become
+-- failed; leased and unknown rows keep their transport state (the host may
+-- already have acted) and carry withdrawn_at so a known no-effect answer can
+-- never return them to claimable delivery. target_session_id scopes it to the
+-- delivery core: legacy internal-mailbox rows have no target and are consumed
+-- through processing_status, so their delivery_status must stay untouched.
+UPDATE agent_mailbox_message
+SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = COALESCE(withdrawn_at, now()),
+    -- A pending row's withdrawal is certain, so the reason is the reason. A
+    -- leased or unknown row keeps any diagnostic it already had (the host may
+    -- have said something useful); the marker still records the withdrawal.
+    last_error = CASE WHEN delivery_status = 'pending' THEN @reason
+                      ELSE COALESCE(NULLIF(last_error, ''), @reason) END,
+    updated_at = now()
+WHERE recipient_agent_id = ANY(@agent_ids::uuid[])
+  AND target_session_id IS NOT NULL
+  AND delivery_status IN ('pending','leased','unknown')
+  AND withdrawn_at IS NULL;
 
 -- name: AckAgentMailboxProcessing :one
 -- Monotonic processing state: read can never undo handled, and handled is

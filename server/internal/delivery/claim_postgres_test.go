@@ -394,6 +394,8 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 			ID:              mustParseUUID(t, deliveryID),
 			WorkspaceID:     workspaceUUID,
 			TargetSessionID: targetSessionUUID,
+			OwnerUserID:     ownerUUID,
+			DaemonID:        daemonID,
 			LeaseTokenHash:  pgtype.Text{String: token, Valid: true},
 			LeaseOwner:      pgtype.Text{String: daemonID, Valid: true},
 			LeaseExpiresAt:  pgtypeTime(time.Now().Add(time.Minute)),

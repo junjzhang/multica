@@ -299,10 +299,14 @@ func assertIssueStatusStillActive(ctx context.Context, qtx *db.Queries, workspac
 // inside a transaction that re-verifies the status under the shared catalog
 // lock (see assertIssueStatusStillActive). Request writes also carry trusted
 // wakeup actor identity in transaction-local settings, including built-in targets.
-func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(q *db.Queries) error) error {
+func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(q *db.Queries, inTx bool) error) error {
 	_, hasActor := ctx.Value(wakeupActorKey{}).(wakeupActor)
-	if !hasActor && (statusKey == "" || issuestatus.IsBuiltIn(statusKey)) {
-		return fn(h.Queries)
+	// A built-in non-terminal status has nothing to clean up, so it can take the
+	// fast path. done and cancelled do withdraw notifications, and that
+	// withdrawal must commit with the status write even when no wakeup actor is
+	// installed.
+	if !hasActor && !closeStatusNeedsTransaction(statusKey) && (statusKey == "" || issuestatus.IsBuiltIn(statusKey)) {
+		return fn(h.Queries, false)
 	}
 	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
@@ -314,24 +318,51 @@ func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtyp
 	if err := assertIssueStatusStillActive(ctx, qtx, workspaceID, statusKey); err != nil {
 		return err
 	}
-	if err := fn(qtx); err != nil {
+	if err := fn(qtx, true); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
+// closeStatusNeedsTransaction reports whether a built-in status write can run
+// the close rule. done and cancelled are the only terminal built-ins; a custom
+// status already takes the guarded transaction because it is not built in.
+func closeStatusNeedsTransaction(statusKey string) bool {
+	return statusKey == issuestatus.Done || statusKey == issuestatus.Cancelled
+}
+
 // updateIssueWithStatusGuard writes params under the status-archive guard.
+// The close rule compares the status read under the write transaction's issue
+// row lock. The request read the issue before this transaction, and another
+// writer can reopen it (and queue a new notification) in between; deciding
+// "same status, skip the close rule" from that snapshot would swallow a real
+// todo->cancelled transition.
 func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams) (db.Issue, error) {
 	var issue db.Issue
 	var cancelledWakeups []db.AgentTaskQueue
-	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(q *db.Queries) error {
+	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(q *db.Queries, inTx bool) error {
 		if params.DuplicateOfIssueID.Valid {
 			if err := lockAndCheckDuplicateMark(ctx, q, workspaceID, params.ID, params.DuplicateOfIssueID); err != nil {
 				return err
 			}
 		}
+		// The fast path only carries built-in non-terminal statuses, where the
+		// close rule cannot run. Every write that can reach it holds the issue
+		// row lock, so previousStatus is the row's committed state under this
+		// transaction rather than the request's earlier read.
+		previousStatus := ""
+		if inTx && params.Status.Valid {
+			current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
+				ID:          params.ID,
+				WorkspaceID: workspaceID,
+			})
+			if err != nil {
+				return fmt.Errorf("lock issue for status write: %w", err)
+			}
+			previousStatus = current.Status
+		}
 		var innerErr error
-		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params)
+		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params, previousStatus)
 		return innerErr
 	})
 	if err != nil {
@@ -344,11 +375,16 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 // updateIssueStoppingWakeups writes params and, when the write moves the issue
 // into a done/closed status, ends its wakeups with the same queries. Callers
 // run it inside the status write's transaction and broadcast the returned runs
-// after commit.
-func updateIssueStoppingWakeups(ctx context.Context, q *db.Queries, params db.UpdateIssueParams) (db.Issue, []db.AgentTaskQueue, error) {
+// after commit. A write that resends the status the issue already has is not a
+// new cancellation: a full-object client editing an already-cancelled issue
+// must not withdraw a notification created after that cancellation.
+func updateIssueStoppingWakeups(ctx context.Context, q *db.Queries, params db.UpdateIssueParams, previousStatus string) (db.Issue, []db.AgentTaskQueue, error) {
 	issue, err := q.UpdateIssue(ctx, params)
 	if err != nil || !params.Status.Valid {
 		return issue, nil, err
+	}
+	if previousStatus != "" && previousStatus == issue.Status {
+		return issue, nil, nil
 	}
 	cancelled, err := service.StopClosedIssueWakeups(ctx, q, issue)
 	if err != nil {
@@ -3836,7 +3872,7 @@ func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.
 	}
 	refreshUntouchedNullableIssueParams(&params, current, rawFields)
 
-	issue, cancelledWakeups, err := updateIssueStoppingWakeups(ctx, qtx, params)
+	issue, cancelledWakeups, err := updateIssueStoppingWakeups(ctx, qtx, params, current.Status)
 	if err != nil {
 		return db.Issue{}, current, false, fmt.Errorf("update locked issue: %w", err)
 	}
