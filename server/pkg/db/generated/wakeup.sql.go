@@ -2082,25 +2082,36 @@ func (q *Queries) TryLockIssueWakeup(ctx context.Context, id pgtype.UUID) (Issue
 	return i, err
 }
 
-const withdrawIssueWakeupDeliveries = `-- name: WithdrawIssueWakeupDeliveries :execrows
+const withdrawIssueDeliveries = `-- name: WithdrawIssueDeliveries :execrows
 UPDATE agent_mailbox_message
-SET delivery_status = 'failed', last_error = $1, updated_at = now()
+SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = COALESCE(withdrawn_at, now()),
+    -- A pending row's withdrawal is certain, so the reason is the reason. A
+    -- leased or unknown row keeps any diagnostic it already had (the host may
+    -- have said something useful); the marker still records the withdrawal.
+    last_error = CASE WHEN delivery_status = 'pending' THEN $1
+                      ELSE COALESCE(NULLIF(last_error, ''), $1) END,
+    updated_at = now()
 WHERE workspace_id = $2 AND issue_id = $3
-  AND source_type = 'issue_wakeup'
-  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+  AND delivery_status IN ('pending','leased','unknown')
+  AND withdrawn_at IS NULL
 `
 
-type WithdrawIssueWakeupDeliveriesParams struct {
+type WithdrawIssueDeliveriesParams struct {
 	Reason      pgtype.Text `json:"reason"`
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 	IssueID     pgtype.UUID `json:"issue_id"`
 }
 
-// The same withdrawal for every wakeup of a closed issue, which is disabled
-// without loading each rule. The leased/unknown boundary and its busy-retry
-// caveat are the same as above.
-func (q *Queries) WithdrawIssueWakeupDeliveries(ctx context.Context, arg WithdrawIssueWakeupDeliveriesParams) (int64, error) {
-	result, err := q.db.Exec(ctx, withdrawIssueWakeupDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
+// Withdraws every notification of a closed or cancelled issue that no host has
+// accepted yet. Cancellation is about the notification, not about its source:
+// comment mentions, generic wakeups and any future producer share this one
+// statement, so no source type can keep waking a closed issue. Rows created
+// after this transaction are new explicit requests and are untouched. The
+// pending/leased boundary is the same as the rule-scoped withdrawal: pending
+// becomes failed, leased and unknown keep their state and are marked withdrawn.
+func (q *Queries) WithdrawIssueDeliveries(ctx context.Context, arg WithdrawIssueDeliveriesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, withdrawIssueDeliveries, arg.Reason, arg.WorkspaceID, arg.IssueID)
 	if err != nil {
 		return 0, err
 	}
@@ -2109,10 +2120,18 @@ func (q *Queries) WithdrawIssueWakeupDeliveries(ctx context.Context, arg Withdra
 
 const withdrawUnclaimedWakeupDeliveries = `-- name: WithdrawUnclaimedWakeupDeliveries :execrows
 UPDATE agent_mailbox_message
-SET delivery_status = 'failed', last_error = $1, updated_at = now()
+SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = COALESCE(withdrawn_at, now()),
+    -- A pending row's withdrawal is certain, so the reason is the reason. A
+    -- leased or unknown row keeps any diagnostic it already had (the host may
+    -- have said something useful); the marker still records the withdrawal.
+    last_error = CASE WHEN delivery_status = 'pending' THEN $1
+                      ELSE COALESCE(NULLIF(last_error, ''), $1) END,
+    updated_at = now()
 WHERE workspace_id = $2 AND recipient_agent_id = $3
   AND source_type = 'issue_wakeup' AND source_key LIKE $4::text
-  AND delivery_status = 'pending' AND lease_token_hash IS NULL
+  AND delivery_status IN ('pending','leased','unknown')
+  AND withdrawn_at IS NULL
 `
 
 type WithdrawUnclaimedWakeupDeliveriesParams struct {
@@ -2122,13 +2141,12 @@ type WithdrawUnclaimedWakeupDeliveriesParams struct {
 	SourcePattern    string      `json:"source_pattern"`
 }
 
-// Withdraws notifications from one disabled or replaced rule that no host has
-// accepted yet. A pending row has no lease: recording any outcome clears it.
-// A leased or unknown row is left to its outcome because the host may already
-// have accepted it; a reclaimed row is verify-only and is never sent again.
-// That is not absolute: an in-flight attempt the host answers with busy or
-// unavailable returns to pending as a retry, and the next claim delivers it
-// once more after the rule was disabled.
+// Withdraws every notification from one disabled or replaced rule that no host
+// has accepted yet. A pending row has no lease, so it becomes failed at once.
+// A leased or unknown row keeps its transport state because the host may
+// already have acted; it is marked withdrawn instead, which stops the record
+// outcome from returning a known no-effect answer to claimable delivery. The
+// marker is the one durable expression of "this notification was withdrawn".
 func (q *Queries) WithdrawUnclaimedWakeupDeliveries(ctx context.Context, arg WithdrawUnclaimedWakeupDeliveriesParams) (int64, error) {
 	result, err := q.db.Exec(ctx, withdrawUnclaimedWakeupDeliveries,
 		arg.Reason,

@@ -252,6 +252,8 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			ID:              candidate.ID,
 			WorkspaceID:     workspaceID,
 			TargetSessionID: candidate.TargetSessionID,
+			OwnerUserID:     ownerID,
+			DaemonID:        req.DaemonID,
 			LeaseTokenHash:  pgtype.Text{String: auth.HashToken(token), Valid: true},
 			LeaseOwner:      pgtype.Text{String: req.DaemonID, Valid: true},
 			LeaseExpiresAt:  pgtypeTime(time.Now().Add(leaseDuration)),
