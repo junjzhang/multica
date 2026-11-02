@@ -330,11 +330,11 @@ func TestStrictACPResumeAcceptsRealEmptyResult(t *testing.T) {
 	}
 }
 
-// TestStrictACPResumeEchoContract keeps both non-empty response shapes honest:
-// an exact echo confirms, and a different id is a silent rebind that strict
-// mode must refuse before the prompt. The load and resume RPCs share this
-// check, so one provider of each kind is enough here; the empty-result matrix
-// above covers the real per-provider shapes.
+// TestStrictACPResumeEchoContract keeps non-empty response shapes honest. The
+// exact-echo cases use resume providers whose existing fakes captured that
+// shape; the load case only proves the shared check refuses a different id (a
+// silent rebind no real dim fake emits), while the empty-result matrix above
+// covers the real per-provider load shape.
 func TestStrictACPResumeEchoContract(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fixture is POSIX-only")
@@ -346,7 +346,6 @@ func TestStrictACPResumeEchoContract(t *testing.T) {
 		wantStatus string
 		wantPrompt bool
 	}{
-		{name: "load exact echo", provider: "dim", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
 		{name: "load different id", provider: "dim", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
 		{name: "resume exact echo kimi", provider: "kimi", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
 		{name: "resume different id kimi", provider: "kimi", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
