@@ -27,6 +27,29 @@ export type AgentVisibility = "workspace" | "private";
 export type AgentPermissionMode = "private" | "public_to";
 
 /**
+ * Where an agent's turns execute. Missing means "managed" for older servers;
+ * an unknown value is kept as a string and must not be rendered as either
+ * kind (see agentExecutionKind).
+ */
+export type AgentExecutionKind = "managed" | "external";
+
+/**
+ * The concrete host session behind an external agent identity (WORK-9).
+ * `host_id` is the host/connection id, NOT a hostname; `session_id` is the
+ * host's agent id, NOT an underlying CLI thread id. `url` points at this exact
+ * session, and `daemon_id` names the Multica daemon that delivers to it.
+ */
+export interface ExternalSession {
+  id?: string;
+  provider: string;
+  host_id: string;
+  session_id: string;
+  display_name: string;
+  url: string | null;
+  daemon_id: string;
+}
+
+/**
  * A single invocation grant on an agent. `target_id` is `null` for the
  * workspace target (the grant covers every workspace member); it carries the
  * member / team id for the scoped grants.
@@ -505,6 +528,14 @@ export interface Agent {
   runtime_bound?: boolean;
   /** Privacy-safe coarse liveness for a runtime hidden from the runtime list. */
   runtime_availability?: "online" | "unstable" | "offline";
+  /**
+   * Execution boundary (WORK-9). Older servers omit it; use
+   * agentExecutionKind so a missing value reads as managed and an unknown one
+   * is never executed or presented as external.
+   */
+  execution_kind?: AgentExecutionKind | string;
+  /** Set only for an external agent; managed agents never carry one. */
+  external_session?: ExternalSession | null;
   name: string;
   description: string;
   /** What this agent's owner wrote. For a system agent this holds only the

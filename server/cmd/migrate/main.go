@@ -140,6 +140,20 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"610_tgit_snapshot_refresh_index":                           "idx_tgit_snapshot_refresh",
+	"616_agent_mailbox_target_session_index":                    "idx_agent_mailbox_target_session",
+	"615_agent_mailbox_notification_key_index":                  "uq_agent_mailbox_notification_key",
+	"614_agent_session_binding_active_index":                    "uq_agent_session_binding_active",
+	"596_external_agent_session_identity_index":                 "uq_external_agent_session_identity",
+	"597_external_agent_session_agent_index":                    "uq_external_agent_session_agent",
+	"598_external_agent_token_hash_index":                       "uq_external_agent_token_hash",
+	"599_external_agent_token_agent_index":                      "idx_external_agent_token_agent",
+	"600_agent_mailbox_recipient_comment_index":                 "uq_agent_mailbox_recipient_comment",
+	"601_agent_mailbox_claim_index":                             "idx_agent_mailbox_claim",
+	"602_agent_mailbox_recipient_index":                         "idx_agent_mailbox_recipient",
+	"603_agent_mailbox_issue_index":                             "idx_agent_mailbox_issue",
+	"605_agent_mailbox_delivery_idempotency_index":              "uq_agent_mailbox_delivery_idempotency",
+	"607_agent_mailbox_verify_index":                            "idx_agent_mailbox_verify",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -367,6 +381,8 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"617_drop_mailbox_source_key_unique":                    "uq_agent_mailbox_delivery_idempotency",
+	"613_drop_external_agent_session_agent_unique":          "uq_external_agent_session_agent",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",

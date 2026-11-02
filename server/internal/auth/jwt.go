@@ -88,6 +88,21 @@ func GenerateAgentTaskToken() (string, error) {
 	return "mat_" + hex.EncodeToString(b), nil
 }
 
+// ExternalAgentTokenPrefix identifies a long-lived external-agent mailbox
+// credential. It is a machine credential bound to one registered host session;
+// it carries no task and must never be treated as human authority.
+const ExternalAgentTokenPrefix = "mea_"
+
+// GenerateExternalAgentToken creates an external-agent token:
+// "mea_" + 40 random hex chars.
+func GenerateExternalAgentToken() (string, error) {
+	b := make([]byte, 20)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate external agent token: %w", err)
+	}
+	return ExternalAgentTokenPrefix + hex.EncodeToString(b), nil
+}
+
 // HashToken returns the hex-encoded SHA-256 hash of a token string.
 func HashToken(token string) string {
 	h := sha256.Sum256([]byte(token))

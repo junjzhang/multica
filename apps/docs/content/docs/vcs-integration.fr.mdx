@@ -22,6 +22,26 @@ Ces fournisseurs fonctionnent en parallèle de GitHub : un espace de travail peu
 Contrairement à GitHub, ces fournisseurs n'ont pas de modèle « App ». Chaque espace de travail stocke sa propre URL d'instance et un jeton d'accès, et enregistre un webhook sur son dépôt ou son organisation. Le jeton et le secret du webhook sont chiffrés au repos.
 </Callout>
 
+## TGit (工蜂)
+
+Sélectionnez **TGit (工蜂)** dans Paramètres → Code, puis saisissez l’URL de l’instance et un jeton personnel autorisé à lire votre compte via l’API. La validation utilise `GET /api/v3/user`.
+
+Ajoutez un webhook au dépôt avec l’URL fournie, placez le secret dans **Token** et activez les événements **Merge request**. TGit utilise `X-Event: Merge Request Hook` et `X-Token`. Voir l’[API Webhook TGit](https://git.tencent.com/help/menu/api/hooks.html).
+
+Les cartes affichent les états brouillon, ouvert, fermé et fusionné. Les MR de forks appartiennent au dépôt cible. L’acteur de l’événement n’est pas affiché comme auteur de la MR. Les heures de fusion et de fermeture restent inconnues.
+
+Les MR existantes apparaissent après réception d’un webhook ; aucun historique ni hook de dépôt n’est créé automatiquement. Les liens HTTP et HTTPS du même hôte, avec `/merge_requests/N` ou `/-/merge_requests/N`, permettent l’association manuelle après synchronisation.
+
+TGit lit aussi les **vérifications CI, l’état de revue et les conflits** via l’API. Les vérifications sont limitées au commit source et à la branche cible, avec contrôle séparé de la règle CI de la MR. Une approbation manuelle de pipeline reste en attente. La revue utilise la décision globale du fournisseur ; les conflits viennent de l’API dédiée.
+
+Chaque instantané appartient à une MR et à ses révisions source/cible. Les résultats absents ou d’une autre révision restent indisponibles ; un échec de rafraîchissement marque l’ancien résultat comme obsolète. Les détails des vérifications et des votes sont dépliables. Ils ne prouvent pas à eux seuls que la fusion est autorisée.
+
+Seules les MR ouvertes déjà synchronisées sont actualisées : balayage toutes les 30 secondes, au plus une tentative par MR et par minute, quatre lectures simultanées. Les visites et webhooks peuvent demander une actualisation. Les erreurs déclenchent un délai et Retry-After est respecté. La reconnexion réinitialise le délai des erreurs d’accès. Aucun historique ni nouvelle condition de réveil n’est ajouté.
+
+La capacité est partagée par le service : quatre workers, 100 candidats par balayage et une file de 256 MR. Une file importante ou des réponses lentes peuvent dépasser la fenêtre de fraîcheur de deux minutes ; les MR non mises en file restent éligibles aux balayages suivants. Les visites et webhooks respectent le même délai, donc une nouvelle révision peut rester indisponible jusqu’au prochain rafraîchissement autorisé. Les instantanés inchangés ne sont pas diffusés ; les changements et le retour à des données à jour le sont.
+
+Pour `git.woa.com`, utilisez le port de callback 80, 443, 8080 ou 8081. Si Multica utilise un autre port, exposez le chemin webhook authentifié via un proxy inverse sur un port accepté.
+
 ## Prérequis (serveur)
 
 Activez l'intégration pour ce déploiement. Elle est désactivée par défaut : la section reste masquée tant que vous n'avez pas défini :

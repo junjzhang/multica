@@ -82,6 +82,9 @@
     "you": "Vous",
     "archived": "Archivé",
     "needs_runtime": "Runtime requis",
+    "external": "Externe",
+    "execution_unknown": "Type d'exécution non pris en charge",
+    "external_session_unavailable": "Détails de session indisponibles",
     "no_description": "Aucune description",
     "fallback_runtime_cloud": "Cloud",
     "fallback_runtime_local": "Local",
@@ -147,6 +150,7 @@
     "try_again": "Réessayer",
     "archived_banner": "Cet agent est archivé. Il ne peut être ni assigné ni mentionné.",
     "runtime_required_banner": "Cet agent a conservé sa configuration et son historique, mais il lui faut un runtime pour pouvoir s'exécuter.",
+    "execution_unknown_banner": "Le type d'exécution de cet agent est inconnu ; les actions d'exécution sont désactivées.",
     "bind_runtime": "Associer un runtime",
     "restore": "Restaurer",
     "archive_dialog_title": "Archiver l'agent ?",
@@ -882,6 +886,7 @@
     "composio_switch_hint": "Attention — cet agent a des applications Composio activées. Le partager permet à toute personne y ayant accès d'utiliser ces applications via cet agent."
   },
   "profile_card": {
+    "session_label": "Session externe",
     "unavailable": "Agent indisponible",
     "detail_link": "Détail →",
     "runtime_label": "Runtime",
