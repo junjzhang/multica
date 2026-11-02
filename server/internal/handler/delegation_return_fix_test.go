@@ -601,13 +601,13 @@ func TestCommentToTwoTargetsKeepsEachReturnOnItsOwnRun(t *testing.T) {
 // A comment that starts a new run persists the comment, its accepted return
 // relation, and the run in one transaction. A link failure rolls all three
 // back, so a saved comment can never lose the dispatcher that made it work.
-func TestNewCommentRunLinkFailureRollsBackComment(t *testing.T) {
+func TestNewCommentLinkFailureLeavesDurableObligation(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
 	dispatcher, _, token := managedDispatcherFixture(t, "new-run-link")
 	target, _ := executableTarget(t, "new-run-link")
-	issueID := dbfx.Issue(t, "New run link atomic")
+	issueID := dbfx.Issue(t, "New run link durable")
 	t.Cleanup(func() { cleanupDelegatedIssue(t, issueID) })
 	fn := "work86_fail_new_run_link_" + strings.ReplaceAll(dispatcher, "-", "_")
 	dbfx.Exec(t, fmt.Sprintf(`
@@ -622,26 +622,60 @@ func TestNewCommentRunLinkFailureRollsBackComment(t *testing.T) {
 		CREATE TRIGGER %s_trg BEFORE INSERT ON agent_task_delegation_return
 		FOR EACH ROW EXECUTE FUNCTION %s();
 	`, fn, dispatcher, fn, fn))
-	t.Cleanup(func() {
+	drop := func() {
 		dbfx.Exec(t, fmt.Sprintf(`DROP TRIGGER IF EXISTS %s_trg ON agent_task_delegation_return; DROP FUNCTION IF EXISTS %s();`, fn, fn))
-	})
+	}
+	t.Cleanup(drop)
 
 	content := fmt.Sprintf("[@Target](mention://agent/%s) new run link %d", target, time.Now().UnixNano())
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateComment), http.MethodPost,
 		"/api/issues/"+issueID+"/comments", map[string]any{"content": content}, map[string]string{"id": issueID}, nil)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("comment = %d, want the failed atomic write to roll back: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("comment = %d, want a durable comment with a pending obligation: %s", w.Code, w.Body.String())
 	}
-	if n := countValue(t, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content = $2`, issueID, content); n != 0 {
-		t.Fatalf("rolled-back comment rows = %d, want 0", n)
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode comment: %v", err)
+	}
+	commentID := created.ID
+	if n := countValue(t, `SELECT count(*) FROM comment WHERE issue_id = $1 AND content = $2`, issueID, content); n != 1 {
+		t.Fatalf("durable comment rows = %d, want 1", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id = $1 AND dispatcher_agent_id = $2`, issueID, dispatcher); n != 1 {
+		t.Fatalf("accepted return rows = %d, want 1", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM comment_delegation_return l JOIN issue_delegation_return r ON r.id=l.delegation_return_id WHERE r.issue_id=$1`, issueID); n != 1 {
+		t.Fatalf("comment intent rows = %d, want 1", n)
 	}
 	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, target); n != 0 {
 		t.Fatalf("failed link left %d executable runs", n)
 	}
-	if n := countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id = $1 AND dispatcher_agent_id = $2`, issueID, dispatcher); n != 0 {
-		t.Fatalf("rolled-back accepted return rows = %d, want 0", n)
+	if n := countValue(t, `SELECT count(*) FROM comment_dispatch_obligation WHERE comment_id=$1 AND agent_id=$2 AND status='pending'`, commentID, target); n != 1 {
+		t.Fatalf("pending recovery obligation rows = %d, want 1", n)
 	}
-	if n := countValue(t, `SELECT count(*) FROM comment_delegation_return l JOIN issue_delegation_return r ON r.id=l.delegation_return_id WHERE r.issue_id=$1`, issueID); n != 0 {
-		t.Fatalf("rolled-back comment intent rows = %d, want 0", n)
+	drop()
+
+	// No run completion, no edit, no new event: only the durable obligation
+	// consumer can advance the accepted comment after the failed link.
+	stats, err := testHandler.ConsumeCommentDispatchObligations(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("consume obligation: %v", err)
+	}
+	if stats.Covered != 1 {
+		t.Fatalf("consumer covered %d obligations, want 1", stats.Covered)
+	}
+	runID := latestTaskIDFor(t, issueID, target)
+	if runID == "" {
+		t.Fatal("consumer created no run")
+	}
+	accepted, ok := acceptedReturn(t, issueID)
+	if !ok {
+		t.Fatal("accepted return missing")
+	}
+	requireTaskReturns(t, runID, accepted)
+	if n := countValue(t, `SELECT count(*) FROM comment_dispatch_obligation WHERE comment_id=$1 AND status='settled'`, commentID); n != 1 {
+		t.Fatalf("settled obligation rows = %d, want 1", n)
 	}
 }

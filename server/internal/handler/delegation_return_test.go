@@ -754,6 +754,12 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(sourceRun), accepted.ID); err != nil {
 		t.Fatalf("link source run return: %v", err)
 	}
+	// The no-task_id rerun follows the current assignment intent, not the
+	// target worker's latest run.
+	if err := delegation.StoreAssignmentIntent(context.Background(), testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(issueID),
+		delegation.Assignee{Type: "agent", ID: target}, []pgtype.UUID{accepted.ID}, parseUUID(sourceRun)); err != nil {
+		t.Fatalf("store assignment intent: %v", err)
+	}
 
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.RerunIssue), http.MethodPost, "/api/issues/"+issueID+"/rerun", map[string]any{}, map[string]string{"id": issueID}, nil)
 	if w.Code != http.StatusAccepted {

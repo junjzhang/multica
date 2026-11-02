@@ -117,13 +117,19 @@ ORDER BY created_at, delegation_return_id;
 
 -- name: GetPendingAssignmentTaskForIssueAndAgent :one
 -- The run an assignment coalesces into when its own insert loses the pending
--- slot. Assignment runs have no comment thread, so this never picks up a
--- comment-triggered run from another thread.
+-- slot. The predicate must match idx_one_pending_task_per_issue_agent_thread
+-- exactly, including the channel-media deferred exception; a narrower read
+-- turns an existing occupant into a silent no-run success. Assignment runs
+-- have no comment thread, so this never picks up a comment-triggered run from
+-- another thread.
 SELECT * FROM agent_task_queue
 WHERE issue_id = @issue_id
   AND agent_id = @agent_id
   AND comment_thread_id IS NULL
-  AND status IN ('queued', 'dispatched')
+  AND (
+      status IN ('queued', 'dispatched')
+      OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -171,3 +177,85 @@ SELECT * FROM agent_task_queue WHERE id = @id FOR SHARE;
 -- archived, no longer managed, or moved to another runtime all invalidate the
 -- address between authentication and the write.
 SELECT * FROM agent WHERE id = @id AND workspace_id = @workspace_id FOR SHARE;
+-- name: InsertCommentDispatchObligation :one
+INSERT INTO comment_dispatch_obligation (
+    id, workspace_id, issue_id, comment_id, agent_id, squad_id,
+    trigger_source, delegation_return_id
+) VALUES (
+    @id, @workspace_id, @issue_id, @comment_id, @agent_id, sqlc.narg('squad_id'),
+    @trigger_source, sqlc.narg('delegation_return_id')
+)
+ON CONFLICT (comment_id, agent_id) DO UPDATE
+SET workspace_id = EXCLUDED.workspace_id,
+    issue_id = EXCLUDED.issue_id,
+    squad_id = EXCLUDED.squad_id,
+    trigger_source = EXCLUDED.trigger_source,
+    delegation_return_id = EXCLUDED.delegation_return_id,
+    status = 'pending',
+    attempts = 0,
+    last_error = NULL,
+    settled_task_id = NULL,
+    next_attempt_at = now(),
+    updated_at = now()
+RETURNING *;
+
+-- name: DeleteCommentDispatchObligations :exec
+DELETE FROM comment_dispatch_obligation WHERE comment_id = @comment_id;
+
+-- name: GetCommentDispatchObligation :one
+SELECT * FROM comment_dispatch_obligation WHERE id = @id;
+
+-- name: ListPendingCommentDispatchObligations :many
+SELECT * FROM comment_dispatch_obligation
+WHERE status = 'pending' AND next_attempt_at <= now()
+ORDER BY next_attempt_at, created_at, id
+LIMIT @batch_size;
+
+-- name: LockCommentDispatchObligation :one
+SELECT * FROM comment_dispatch_obligation
+WHERE id = @id AND status = 'pending'
+FOR UPDATE SKIP LOCKED;
+
+-- name: SettleCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation
+SET status = 'settled', settled_task_id = sqlc.narg('task_id'), last_error = NULL, updated_at = now()
+WHERE id = @id AND status = 'pending';
+
+-- name: SettleCommentDispatchObligationsForTarget :exec
+UPDATE comment_dispatch_obligation
+SET status = 'settled', settled_task_id = sqlc.narg('task_id'), last_error = NULL, updated_at = now()
+WHERE comment_id = @comment_id AND agent_id = @agent_id AND status = 'pending';
+
+-- name: FailCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation
+SET status = 'failed', last_error = @last_error, updated_at = now()
+WHERE id = @id AND status = 'pending';
+
+-- name: RecordCommentDispatchObligationAttempt :exec
+-- Leaves a transiently failed obligation pending with the backoff the consumer
+-- computed. The comment and accepted relation are already durable; only the
+-- covering run is missing.
+UPDATE comment_dispatch_obligation
+SET attempts = attempts + 1,
+    last_error = @last_error,
+    next_attempt_at = @next_attempt_at,
+    updated_at = now()
+WHERE id = @id AND status = 'pending';
+
+-- name: GetNewestActiveTaskForIssueAgentThread :one
+-- The active run in one comment thread. A comment newer than that run is
+-- already inside completion reconcile's timestamp window, so the comment
+-- transaction must not append it as a planned id (that would create a second
+-- replay path); the durable obligation waits for reconcile or the sweeper. A
+-- comment older than the task is the lost-race shape that must be registered as
+-- a planned input or its completion replay cannot see it.
+SELECT * FROM agent_task_queue
+WHERE issue_id = @issue_id
+  AND agent_id = @agent_id
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id)
+  AND (
+      status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
+ORDER BY created_at DESC
+LIMIT 1;

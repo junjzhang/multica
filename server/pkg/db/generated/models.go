@@ -667,6 +667,24 @@ type CommentDelegationReturn struct {
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 }
 
+type CommentDispatchObligation struct {
+	ID                 pgtype.UUID        `json:"id"`
+	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
+	IssueID            pgtype.UUID        `json:"issue_id"`
+	CommentID          pgtype.UUID        `json:"comment_id"`
+	AgentID            pgtype.UUID        `json:"agent_id"`
+	SquadID            pgtype.UUID        `json:"squad_id"`
+	TriggerSource      string             `json:"trigger_source"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	Status             string             `json:"status"`
+	Attempts           int32              `json:"attempts"`
+	LastError          pgtype.Text        `json:"last_error"`
+	SettledTaskID      pgtype.UUID        `json:"settled_task_id"`
+	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+}
+
 type CommentReaction struct {
 	ID          pgtype.UUID        `json:"id"`
 	CommentID   pgtype.UUID        `json:"comment_id"`

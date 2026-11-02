@@ -7,46 +7,81 @@ returns to, and that address is accepted before any child work exists. Result
 submission, notification delivery, takeover UI, and the maintenance-window
 cutover remain later slices.
 
-## Accepted returns
+## Canonical binding, intents, and runs
 
-`issue_delegation_return` records one accepted relationship per
-`(workspace, issue, dispatcher agent, assignee)` dispatch
-(`uq_issue_delegation_return_dispatch`). The assignee is the exact assignment
-slot that was handed the work (`agent`/`squad` and its id). Each row names the
-dispatcher Agent and either:
+The accepted address is one row per `(workspace, issue, dispatcher agent)` in
+`issue_delegation_return` (`uq_issue_delegation_return_dispatch`). It does not
+include the assignee: the address belongs to the dispatcher, and the worker a
+dispatcher chooses does not change where that dispatcher's results go. Each row
+names either:
 
 - `managed_task` — the source run (`source_task_id`) identified by the
   server-stamped `X-Task-ID` of a `mat_` task token; or
 - `external_session` — the registered external host session the dispatcher
   named explicitly.
 
-A different dispatcher, and the same dispatcher handing work to a different
-worker, keep their own rows. A row is never addressed back to an unrelated
-dispatch. The first accepted address for one key is fixed: reassignment, rerun,
-or an ordinary mention by that actor cannot rewrite it. Explicit takeover
-(`POST /api/agents/{id}/session-bindings`) still changes the external binding,
-and the accepted row follows the binding's frozen target.
+Which dispatch an accepted relationship belongs to is recorded separately:
 
-`agent_task_delegation_return` links a dispatched run to every accepted
-relationship it carries. An independent dispatch carries its assignment slot's
-relationships. When several dispatchers' requests coalesce into one pending run,
-the run keeps every relationship, so a later result can notify each party
-instead of silently only the first. A rerun preserves the source run's set and
-adds its target assignment's relationships. An executor reassignment preserves
-the **replaced assignment's** relationships, then adds the reassigning
-dispatcher's row for the new assignment; an unrelated worker's dispatch on the
-same issue is not copied.
+- `comment_delegation_return(comment_id, delegation_return_id)` is the comment
+  intent. A comment is a stable business id, so new/fold/reconcile/retrigger
+  can all read the same relation instead of an in-memory set.
+- `issue_assignment_delegation(issue_id, assignee_type, assignee_id, task_id)`
+  plus `issue_assignment_delegation_return` is the current assignment intent.
+  `task_id` is empty for a backlog assignment and points at the run once it
+  starts.
+- `agent_task_delegation_return(task_id, delegation_return_id)` is the set of
+  accepted relationships a run actually carries.
 
-A backlog delegation records its row with no run yet. The relationship is keyed
-to the assignment it was dispatched to, so the later run for that assignee
-attaches it directly. It is never inferred from "every return on the issue" or
-from "whatever row no run happens to carry": another worker's run cannot consume
-it, and another dispatcher's relationship cannot be substituted for it.
+A run links only the intents it covers:
 
-The fold of a comment into a pending run and the return link that fold adds are
-one transaction. If the link fails, the fold rolls back too, so a run never
-carries a comment while silently missing one of its accepted dispatchers. The
-accepted return row itself stays durable and a later fold attaches it.
+- a new comment run links that comment's relationships;
+- a fold links every folded comment's relationships;
+- completion replay and edit retrigger link the replayed comment's
+  relationships;
+- a rerun links the exact source run's set plus the rerunning actor's
+  relationship;
+- a reassignment links the replaced assignment's intent and corresponding run,
+  plus the reassigning actor's relationship.
+
+Nothing collects "all returns for this issue", "all returns for this worker", or
+"the worker's latest run". That is what keeps two independent requests to the
+same worker from inheriting each other's recipient.
+
+## Comment recovery closure
+
+An agent-authored comment with at least one executable target records one
+`comment_dispatch_obligation` per target in the comment's own transaction. The
+row names the exact executing agent, optional squad, trigger source and accepted
+return; replay never re-derives them from mutable comment text or the issue's
+current assignee. The same transaction then tries to cover the target through
+the one normal rule:
+
+1. fold into a pre-claim run in the same thread (`MergeCommentIntoPendingTask`,
+   with the folded comment's return links);
+2. register a planned input on a claim-receipt run only when the comment
+   predates that run (the lost enqueue race);
+3. otherwise create the run and its return links in the comment transaction.
+
+Every attempt is a savepoint. A target that cannot be covered yet leaves its
+obligation pending; the comment and accepted return still commit. There is no
+"active run means rely on an event, no active run means be atomic" branch.
+
+The pending obligation is consumed by a real periodic consumer,
+`runCommentDispatchObligationSweeper` (wired in `cmd/server`), which locks one
+row, re-checks the target's current authorization/runtime state, runs the same
+intent -> run rule, and settles the row only when a run covers it. A crash after
+the comment commit therefore leaves a row the restarted server can advance
+without another run completion and without a person editing the comment.
+Transient failures are retried with bounded backoff; a revoked target or deleted
+issue fails the obligation instead of retrying forever. This is a small durable
+work row consumed by an existing sweeper pattern, not a second broker or generic
+execution queue.
+
+A comment written while an active run already exists is newer than that run and
+is already visible to completion reconcile's timestamp window; it is not also
+appended as a planned id (that would give one comment two replay paths). If that
+run finishes before the comment commits, or the post-insert enqueue fails, the
+pending obligation is what recovers the comment.
 
 ## Resolution and refusal
 
@@ -69,12 +104,17 @@ active but waited on another writer until the run completed is refused, and
 nothing is written. This is separate from a relationship the run already
 accepted: that stored row remains a valid delivery target after the source
 completes, because the result-handling turn resumes its recorded provider
-session by id. It is only new delegations that require an active source.
+session by id. It is only new delegations that require an active source. The
+sweeper's replay of an accepted comment executes that stored intent and does not
+accept a new delegation from a closed source; it still applies the current
+revocation/runtime checks.
 
 A managed run's source scope is its original issue, chat, or autopilot; the
 delegated issue is not a substitute scope. A run with no business scope (for
 example a quick create) is still an exact runtime/provider session/work
-directory, and the task token's workspace binding proves tenancy.
+directory, and the task token's workspace binding proves tenancy. A continuation
+turn in the same provider session reuses the stored `source_task_id`; a turn
+from a different physical session is a conflict that needs explicit takeover.
 
 ## Entry points
 
@@ -86,21 +126,28 @@ directory, and the task token's workspace binding proves tenancy.
   nothing.
 - **Assignment / workflow handoff**: an explicit assignee change validates the
   address before the issue update commits and records it inside that update's
-  transaction. A status-only workflow handoff is not an assignment and starts no
-  run, so it is not gated. A backlog assignment records the address without a
-  run.
-- **Rerun**: preserves the source run's accepted set and adds the rerunning
-  dispatcher's address. The address is recorded and linked only in the enqueue
-  transaction, after triage and invoke eligibility have passed; a refused rerun
-  leaves no accepted return.
-- **Managed mention**: a comment that resolves to at least one executable native
-  run requires the same address before the comment is written. The return rows
-  are inserted inside the comment transaction, one per assignment slot, so a
-  failed comment leaves no phantom accepted return and a multi-target comment
-  does not attach one target's relationship to another target's run. A mention
-  that resolves only to blocked targets keeps the comment and reports the
-  per-target blocked outcome. A comment folded into a pending run adds the new
-  dispatcher's relationship in the same transaction as the fold.
+  transaction. The assignment intent and the run's links commit with the issue
+  write. A status-only workflow handoff is not an assignment and starts no run,
+  so it is not gated.
+- **Assignment conflict**: the fallback read matches
+  `idx_one_pending_task_per_issue_agent_thread` exactly, including the
+  channel-media deferred exception. A conflict is re-observed in a bounded loop:
+  a still-pending occupant is linked, a run that started or disappeared lets the
+  retry insert a covering run, and an occupant that cannot be resolved rolls the
+  whole issue write back. `inserted=false` with no covering run is never
+  committed.
+- **Rerun**: with a `task_id`, the named run is used exactly. Without one, the
+  rerun follows the current assignment intent's `task_id` (the run that
+  assignment actually started), not the worker's latest run. With no
+  determinable delegated assignment source the request is refused with a 400
+  requiring `task_id`; the legacy latest-run fallback is kept only for an issue
+  that has never accepted a delegation return and whose latest run carries none.
+  The source run's set and the rerunning actor's address are recorded and linked
+  only in the enqueue transaction, after triage and invoke eligibility pass.
+- **Managed mention / comment**: the gate runs before the comment is written.
+  The comment, its accepted return, and its durable dispatch obligations commit
+  together. A mention that resolves only to blocked targets keeps the comment
+  and reports the per-target blocked outcome, with no obligation.
 - **Batch update**: each item's prospective run and address are validated before
   its write. A refused item keeps its assignee, status, parent, and stage
   unchanged, is not broadcast, and is not counted as updated; other items still
@@ -131,7 +178,7 @@ being added to a list.
 Result submission that consumes `agent_task_delegation_return` and persists the
 notification obligation atomically, delivery through the existing managed
 queue/resume path or mailbox, visible failure after session deletion, explicit
-takeover UI, and the isolated qualification described in the cutover runbook are
-not part of this slice. The local worktree Finalize/report ordering and
-directory-retention race remain with the result-submission slice; the source-row
-lock here does not claim to fix the whole resource lifecycle.
+managed takeover UI, and the isolated qualification described in the cutover
+runbook are not part of this slice. The local worktree Finalize/report ordering
+and directory-retention race remain with the result-submission slice; the
+source-row lock here does not claim to fix the whole resource lifecycle.

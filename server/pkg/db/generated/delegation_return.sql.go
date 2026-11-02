@@ -72,6 +72,15 @@ func (q *Queries) DeleteCommentDelegationReturns(ctx context.Context, commentID 
 	return err
 }
 
+const deleteCommentDispatchObligations = `-- name: DeleteCommentDispatchObligations :exec
+DELETE FROM comment_dispatch_obligation WHERE comment_id = $1
+`
+
+func (q *Queries) DeleteCommentDispatchObligations(ctx context.Context, commentID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteCommentDispatchObligations, commentID)
+	return err
+}
+
 const deleteIssueAssignmentDelegation = `-- name: DeleteIssueAssignmentDelegation :exec
 DELETE FROM issue_assignment_delegation
 WHERE issue_id = $1
@@ -106,6 +115,49 @@ type DeleteIssueAssignmentDelegationReturnsParams struct {
 func (q *Queries) DeleteIssueAssignmentDelegationReturns(ctx context.Context, arg DeleteIssueAssignmentDelegationReturnsParams) error {
 	_, err := q.db.Exec(ctx, deleteIssueAssignmentDelegationReturns, arg.IssueID, arg.AssigneeType, arg.AssigneeID)
 	return err
+}
+
+const failCommentDispatchObligation = `-- name: FailCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation
+SET status = 'failed', last_error = $1, updated_at = now()
+WHERE id = $2 AND status = 'pending'
+`
+
+type FailCommentDispatchObligationParams struct {
+	LastError pgtype.Text `json:"last_error"`
+	ID        pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) FailCommentDispatchObligation(ctx context.Context, arg FailCommentDispatchObligationParams) error {
+	_, err := q.db.Exec(ctx, failCommentDispatchObligation, arg.LastError, arg.ID)
+	return err
+}
+
+const getCommentDispatchObligation = `-- name: GetCommentDispatchObligation :one
+SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at FROM comment_dispatch_obligation WHERE id = $1
+`
+
+func (q *Queries) GetCommentDispatchObligation(ctx context.Context, id pgtype.UUID) (CommentDispatchObligation, error) {
+	row := q.db.QueryRow(ctx, getCommentDispatchObligation, id)
+	var i CommentDispatchObligation
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.AgentID,
+		&i.SquadID,
+		&i.TriggerSource,
+		&i.DelegationReturnID,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.SettledTaskID,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getIssueAssignmentDelegation = `-- name: GetIssueAssignmentDelegation :one
@@ -193,12 +245,108 @@ func (q *Queries) GetLatestTaskIDForIssueAndAgent(ctx context.Context, arg GetLa
 	return id, err
 }
 
+const getNewestActiveTaskForIssueAgentThread = `-- name: GetNewestActiveTaskForIssueAgentThread :one
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step FROM agent_task_queue
+WHERE issue_id = $1
+  AND agent_id = $2
+  AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($3)
+  AND (
+      status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetNewestActiveTaskForIssueAgentThreadParams struct {
+	IssueID   pgtype.UUID `json:"issue_id"`
+	AgentID   pgtype.UUID `json:"agent_id"`
+	CommentID pgtype.UUID `json:"comment_id"`
+}
+
+// The active run in one comment thread. A comment newer than that run is
+// already inside completion reconcile's timestamp window, so the comment
+// transaction must not append it as a planned id (that would create a second
+// replay path); the durable obligation waits for reconcile or the sweeper. A
+// comment older than the task is the lost-race shape that must be registered as
+// a planned input or its completion replay cannot see it.
+func (q *Queries) GetNewestActiveTaskForIssueAgentThread(ctx context.Context, arg GetNewestActiveTaskForIssueAgentThreadParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, getNewestActiveTaskForIssueAgentThread, arg.IssueID, arg.AgentID, arg.CommentID)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CommentThreadID,
+		&i.CancelledByType,
+		&i.CancelledByID,
+		&i.CancelledByName,
+		&i.IssueSnapshot,
+		&i.WorkflowStep,
+	)
+	return i, err
+}
+
 const getPendingAssignmentTaskForIssueAndAgent = `-- name: GetPendingAssignmentTaskForIssueAndAgent :one
 SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step FROM agent_task_queue
 WHERE issue_id = $1
   AND agent_id = $2
   AND comment_thread_id IS NULL
-  AND status IN ('queued', 'dispatched')
+  AND (
+      status IN ('queued', 'dispatched')
+      OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+  )
 ORDER BY created_at DESC
 LIMIT 1
 `
@@ -209,8 +357,11 @@ type GetPendingAssignmentTaskForIssueAndAgentParams struct {
 }
 
 // The run an assignment coalesces into when its own insert loses the pending
-// slot. Assignment runs have no comment thread, so this never picks up a
-// comment-triggered run from another thread.
+// slot. The predicate must match idx_one_pending_task_per_issue_agent_thread
+// exactly, including the channel-media deferred exception; a narrower read
+// turns an existing occupant into a silent no-run success. Assignment runs
+// have no comment thread, so this never picks up a comment-triggered run from
+// another thread.
 func (q *Queries) GetPendingAssignmentTaskForIssueAndAgent(ctx context.Context, arg GetPendingAssignmentTaskForIssueAndAgentParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, getPendingAssignmentTaskForIssueAndAgent, arg.IssueID, arg.AgentID)
 	var i AgentTaskQueue
@@ -275,6 +426,72 @@ func (q *Queries) GetPendingAssignmentTaskForIssueAndAgent(ctx context.Context, 
 		&i.CancelledByName,
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
+	)
+	return i, err
+}
+
+const insertCommentDispatchObligation = `-- name: InsertCommentDispatchObligation :one
+INSERT INTO comment_dispatch_obligation (
+    id, workspace_id, issue_id, comment_id, agent_id, squad_id,
+    trigger_source, delegation_return_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8
+)
+ON CONFLICT (comment_id, agent_id) DO UPDATE
+SET workspace_id = EXCLUDED.workspace_id,
+    issue_id = EXCLUDED.issue_id,
+    squad_id = EXCLUDED.squad_id,
+    trigger_source = EXCLUDED.trigger_source,
+    delegation_return_id = EXCLUDED.delegation_return_id,
+    status = 'pending',
+    attempts = 0,
+    last_error = NULL,
+    settled_task_id = NULL,
+    next_attempt_at = now(),
+    updated_at = now()
+RETURNING id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at
+`
+
+type InsertCommentDispatchObligationParams struct {
+	ID                 pgtype.UUID `json:"id"`
+	WorkspaceID        pgtype.UUID `json:"workspace_id"`
+	IssueID            pgtype.UUID `json:"issue_id"`
+	CommentID          pgtype.UUID `json:"comment_id"`
+	AgentID            pgtype.UUID `json:"agent_id"`
+	SquadID            pgtype.UUID `json:"squad_id"`
+	TriggerSource      string      `json:"trigger_source"`
+	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+}
+
+func (q *Queries) InsertCommentDispatchObligation(ctx context.Context, arg InsertCommentDispatchObligationParams) (CommentDispatchObligation, error) {
+	row := q.db.QueryRow(ctx, insertCommentDispatchObligation,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.IssueID,
+		arg.CommentID,
+		arg.AgentID,
+		arg.SquadID,
+		arg.TriggerSource,
+		arg.DelegationReturnID,
+	)
+	var i CommentDispatchObligation
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.AgentID,
+		&i.SquadID,
+		&i.TriggerSource,
+		&i.DelegationReturnID,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.SettledTaskID,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -491,6 +708,49 @@ func (q *Queries) ListIssueDelegationReturns(ctx context.Context, arg ListIssueD
 	return items, nil
 }
 
+const listPendingCommentDispatchObligations = `-- name: ListPendingCommentDispatchObligations :many
+SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at FROM comment_dispatch_obligation
+WHERE status = 'pending' AND next_attempt_at <= now()
+ORDER BY next_attempt_at, created_at, id
+LIMIT $1
+`
+
+func (q *Queries) ListPendingCommentDispatchObligations(ctx context.Context, batchSize int32) ([]CommentDispatchObligation, error) {
+	rows, err := q.db.Query(ctx, listPendingCommentDispatchObligations, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CommentDispatchObligation{}
+	for rows.Next() {
+		var i CommentDispatchObligation
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.CommentID,
+			&i.AgentID,
+			&i.SquadID,
+			&i.TriggerSource,
+			&i.DelegationReturnID,
+			&i.Status,
+			&i.Attempts,
+			&i.LastError,
+			&i.SettledTaskID,
+			&i.NextAttemptAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAgentForDelegation = `-- name: LockAgentForDelegation :one
 SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind FROM agent WHERE id = $1 AND workspace_id = $2 FOR SHARE
 `
@@ -619,6 +879,35 @@ func (q *Queries) LockAgentTaskForDelegation(ctx context.Context, id pgtype.UUID
 	return i, err
 }
 
+const lockCommentDispatchObligation = `-- name: LockCommentDispatchObligation :one
+SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at FROM comment_dispatch_obligation
+WHERE id = $1 AND status = 'pending'
+FOR UPDATE SKIP LOCKED
+`
+
+func (q *Queries) LockCommentDispatchObligation(ctx context.Context, id pgtype.UUID) (CommentDispatchObligation, error) {
+	row := q.db.QueryRow(ctx, lockCommentDispatchObligation, id)
+	var i CommentDispatchObligation
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.AgentID,
+		&i.SquadID,
+		&i.TriggerSource,
+		&i.DelegationReturnID,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.SettledTaskID,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockIssueDelegationReturnForDispatcher = `-- name: LockIssueDelegationReturnForDispatcher :one
 SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, created_at FROM issue_delegation_return
 WHERE workspace_id = $1
@@ -652,6 +941,29 @@ func (q *Queries) LockIssueDelegationReturnForDispatcher(ctx context.Context, ar
 	return i, err
 }
 
+const recordCommentDispatchObligationAttempt = `-- name: RecordCommentDispatchObligationAttempt :exec
+UPDATE comment_dispatch_obligation
+SET attempts = attempts + 1,
+    last_error = $1,
+    next_attempt_at = $2,
+    updated_at = now()
+WHERE id = $3 AND status = 'pending'
+`
+
+type RecordCommentDispatchObligationAttemptParams struct {
+	LastError     pgtype.Text        `json:"last_error"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	ID            pgtype.UUID        `json:"id"`
+}
+
+// Leaves a transiently failed obligation pending with the backoff the consumer
+// computed. The comment and accepted relation are already durable; only the
+// covering run is missing.
+func (q *Queries) RecordCommentDispatchObligationAttempt(ctx context.Context, arg RecordCommentDispatchObligationAttemptParams) error {
+	_, err := q.db.Exec(ctx, recordCommentDispatchObligationAttempt, arg.LastError, arg.NextAttemptAt, arg.ID)
+	return err
+}
+
 const setIssueAssignmentDelegationTask = `-- name: SetIssueAssignmentDelegationTask :exec
 UPDATE issue_assignment_delegation
 SET task_id = $1
@@ -674,6 +986,39 @@ func (q *Queries) SetIssueAssignmentDelegationTask(ctx context.Context, arg SetI
 		arg.AssigneeType,
 		arg.AssigneeID,
 	)
+	return err
+}
+
+const settleCommentDispatchObligation = `-- name: SettleCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation
+SET status = 'settled', settled_task_id = $1, last_error = NULL, updated_at = now()
+WHERE id = $2 AND status = 'pending'
+`
+
+type SettleCommentDispatchObligationParams struct {
+	TaskID pgtype.UUID `json:"task_id"`
+	ID     pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) SettleCommentDispatchObligation(ctx context.Context, arg SettleCommentDispatchObligationParams) error {
+	_, err := q.db.Exec(ctx, settleCommentDispatchObligation, arg.TaskID, arg.ID)
+	return err
+}
+
+const settleCommentDispatchObligationsForTarget = `-- name: SettleCommentDispatchObligationsForTarget :exec
+UPDATE comment_dispatch_obligation
+SET status = 'settled', settled_task_id = $1, last_error = NULL, updated_at = now()
+WHERE comment_id = $2 AND agent_id = $3 AND status = 'pending'
+`
+
+type SettleCommentDispatchObligationsForTargetParams struct {
+	TaskID    pgtype.UUID `json:"task_id"`
+	CommentID pgtype.UUID `json:"comment_id"`
+	AgentID   pgtype.UUID `json:"agent_id"`
+}
+
+func (q *Queries) SettleCommentDispatchObligationsForTarget(ctx context.Context, arg SettleCommentDispatchObligationsForTargetParams) error {
+	_, err := q.db.Exec(ctx, settleCommentDispatchObligationsForTarget, arg.TaskID, arg.CommentID, arg.AgentID)
 	return err
 }
 

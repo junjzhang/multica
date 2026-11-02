@@ -320,11 +320,45 @@ func (s *TaskService) AttributionForMergedComment(ctx context.Context, workspace
 	return s.applyAttributionFallback(ctx, attr, agent)
 }
 
+// AttributionForMergedCommentWithQueries is the in-transaction variant. A
+// comment folded inside its own write transaction is not visible to
+// s.Queries yet; reading it through q keeps the merge's re-attribution and
+// trigger summary based on the actual new comment instead of an unattributed
+// fallback.
+func (s *TaskService) AttributionForMergedCommentWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID, isMention bool, agent db.Agent) (attribution.Result, error) {
+	agentAuthoredSource := attribution.SourceCommentSource
+	if isMention {
+		agentAuthoredSource = attribution.SourceDelegation
+	}
+	attr := s.attributionFromTriggerCommentWithQueries(ctx, q, workspaceID, commentID, agentAuthoredSource)
+	return s.applyAttributionFallback(ctx, attr, agent)
+}
+
+func (s *TaskService) attributionFromTriggerCommentWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID, agentAuthoredSource attribution.Source) attribution.Result {
+	if s == nil || q == nil || !commentID.Valid {
+		return attribution.Result{Source: attribution.SourceUnattributed}
+	}
+	comment, err := q.GetCommentInWorkspace(ctx, db.GetCommentInWorkspaceParams{
+		ID:          commentID,
+		WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return attribution.Result{Source: attribution.SourceUnattributed}
+	}
+	return s.attributionFromComment(ctx, comment, agentAuthoredSource)
+}
+
 // BuildCommentTriggerSummary is the exported wrapper used by the comment-merge
 // path (MUL-4195) to refresh a coalesced task's trigger_summary to the newest
 // trigger comment's snapshot. workspaceID scopes the lookup (MUL-4252).
 func (s *TaskService) BuildCommentTriggerSummary(ctx context.Context, workspaceID, commentID pgtype.UUID) pgtype.Text {
 	return s.buildCommentTriggerSummary(ctx, workspaceID, commentID)
+}
+
+// BuildCommentTriggerSummaryWithQueries reads the comment through the caller's
+// transaction, for a fold that happens before the comment commits.
+func (s *TaskService) BuildCommentTriggerSummaryWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID) pgtype.Text {
+	return s.buildCommentTriggerSummaryWithQueries(ctx, q, workspaceID, commentID)
 }
 
 // BuildRuntimeMCPOverlayForMerge recomputes the Composio MCP overlay +

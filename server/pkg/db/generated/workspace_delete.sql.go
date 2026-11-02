@@ -401,6 +401,9 @@ deleted_external_agent_sessions AS (
 deleted_external_agent_session_bindings AS (
     DELETE FROM external_agent_session_binding WHERE workspace_id = $1
 ),
+deleted_comment_dispatch_obligations AS (
+    DELETE FROM comment_dispatch_obligation WHERE workspace_id = $1
+),
 deleted_comment_delegation_returns AS (
     DELETE FROM comment_delegation_return
     WHERE comment_id IN (SELECT id FROM comment WHERE workspace_id = $1)
