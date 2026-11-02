@@ -6,6 +6,7 @@ import { cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Agent, ExternalSession, Issue } from "@multica/core/types";
+import { issueKeys } from "@multica/core/issues/queries";
 import { renderWithI18n } from "../../test/i18n";
 
 const permissions = vi.hoisted(() => ({ canManage: true }));
@@ -162,12 +163,14 @@ function binding(agentId: string, session: ExternalSession) {
   };
 }
 
-function renderCollaboration(ui: ReactElement) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+function renderCollaboration(ui: ReactElement, client?: QueryClient) {
+  const queryClient =
+    client ??
+    new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
   return renderWithI18n(
-    <QueryClientProvider client={client}>{ui}</QueryClientProvider>,
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
 }
 
@@ -284,7 +287,7 @@ describe("IssueExternalCollaboration", () => {
       });
     });
     expect(
-      await screen.findByText("Could not save the session. The current binding is unchanged."),
+      await screen.findByText("Could not confirm the session save. The displayed binding has not changed."),
     ).toBeInTheDocument();
     // The dialog stays open and the old binding is still the displayed target.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -410,14 +413,74 @@ describe("IssueExternalCollaboration", () => {
     expect(screen.queryByText("External session")).not.toBeInTheDocument();
   });
 
-  it("identifies an external agent coordinator by its session", () => {
+  it("shows an external coordinator's issue binding, not its detail session", () => {
     renderCollaboration(
       <IssueExternalCollaboration
-        issue={issue({ coordinator: { type: "agent", id: "agent-1" } })}
+        issue={issue({
+          coordinator: { type: "agent", id: "agent-1" },
+          external_session_bindings: [binding("agent-1", boundSession)],
+        })}
         agents={[externalAgent]}
       />,
     );
-    expect(screen.getByText("External session")).toBeInTheDocument();
-    expect(screen.getByText("Agent detail route")).toBeInTheDocument();
+    expect(screen.getByText("Issue session")).toBeInTheDocument();
+    expect(screen.getByText("Issue route")).toBeInTheDocument();
+    expect(screen.queryByText("Agent detail route")).not.toBeInTheDocument();
+  });
+
+  it("does not present a failed binding projection as no binding", () => {
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({ external_participants: [externalAgent] })}
+        agents={[externalAgent]}
+      />,
+    );
+    expect(
+      screen.getByText("Could not load the current issue binding. Refresh the issue to try again."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No session bound. New notifications for this agent on this issue are blocked until an owner or admin binds one."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /change session/i })).not.toBeInTheDocument();
+  });
+
+  it("closes after a confirmed save and invalidates the issue projection", async () => {
+    const user = userEvent.setup();
+    apiMock.bindAgentSession.mockResolvedValue({
+      id: "binding-new",
+      agent_id: "agent-1",
+      issue_id: "issue-1",
+      session_id: "session-second",
+      created_at: "2026-01-02T00:00:00Z",
+    });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    client.setQueryData(
+      issueKeys.detail("ws-1", "issue-1"),
+      issue({
+        external_participants: [externalAgent],
+        external_session_bindings: [binding("agent-1", boundSession)],
+      }),
+    );
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent],
+          external_session_bindings: [binding("agent-1", boundSession)],
+        })}
+        agents={[externalAgent]}
+      />,
+      client,
+    );
+
+    await user.click(screen.getByRole("button", { name: /change session/i }));
+    await user.click(await screen.findByRole("radio", { name: /second route/i }));
+    await user.click(screen.getByRole("button", { name: /save session/i }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(client.getQueryState(issueKeys.detail("ws-1", "issue-1"))?.isInvalidated).toBe(true),
+    );
   });
 });

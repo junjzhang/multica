@@ -1247,6 +1247,16 @@ export const ExternalSessionSchema = z.object({
   daemon_id: z.string().default(""),
 }).loose();
 
+/**
+ * A frozen target or active binding must name a real session record. The
+ * legacy actor-level `external_session` may omit `id` for older backends, but
+ * a target that cannot be identified is not a usable address: parse it as
+ * absent instead of rendering a blank link.
+ */
+const IdentifiedExternalSessionSchema = ExternalSessionSchema.extend({
+  id: z.string().min(1),
+});
+
 const AgentInvocationTargetSchema = z.object({
   target_type: z.string().default("workspace"),
   target_id: z.string().nullable().default(null),
@@ -1333,7 +1343,7 @@ export const MailboxMessageSchema = z.object({
   comment_id: z.string().nullish().transform((value) => value ?? "").catch(""),
   recipient_agent_id: z.string().default(""),
   source_session: ExternalSessionSchema.nullable().default(null).catch(null),
-  target_session: ExternalSessionSchema.nullable().default(null).catch(null),
+  target_session: IdentifiedExternalSessionSchema.nullable().default(null).catch(null),
   source_type: z.string().default("").catch(""),
   kind: z.string().default("").catch(""),
   delivery_status: z.enum(["pending", "leased", "delivered", "failed", "unknown"]).catch("unknown"),
@@ -1382,7 +1392,7 @@ export const IssueSessionBindingSchema = z.object({
   id: z.string(),
   agent_id: z.string().default(""),
   issue_id: z.string().default(""),
-  session: ExternalSessionSchema.nullable().default(null).catch(null),
+  session: IdentifiedExternalSessionSchema.nullable().default(null).catch(null),
   deliverable: z.boolean().default(false).catch(false),
   unavailable_reason: z.string().default("").catch(""),
   created_at: z.string().default(""),

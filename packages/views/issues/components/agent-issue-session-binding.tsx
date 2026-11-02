@@ -187,7 +187,8 @@ export function AgentIssueSessionBinding({
 }: {
   agent: Agent;
   issueId: string;
-  binding: IssueSessionBinding | null;
+  /** `undefined` means the issue projection could not be read. */
+  binding: IssueSessionBinding | null | undefined;
 }) {
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
@@ -200,7 +201,11 @@ export function AgentIssueSessionBinding({
       <div className="text-micro font-medium text-muted-foreground">
         {t(($) => $.detail.external_binding_title)}
       </div>
-      {binding?.session ? (
+      {binding === undefined ? (
+        <p className="text-micro text-muted-foreground">
+          {t(($) => $.detail.external_binding_projection_unavailable)}
+        </p>
+      ) : binding?.session ? (
         <div className="space-y-1">
           <ExternalSessionLink session={binding.session} detailed />
           {!binding.deliverable && reason && (
@@ -210,13 +215,17 @@ export function AgentIssueSessionBinding({
             {t(($) => $.detail.external_binding_future_only)}
           </p>
         </div>
+      ) : binding ? (
+        <p className="text-micro text-destructive">
+          {t(($) => $.detail.external_binding_unavailable)}
+        </p>
       ) : (
         <p className="text-micro text-muted-foreground">
           {t(($) => $.detail.external_binding_none)}
         </p>
       )}
 
-      {canEdit.allowed && !isLoading && (
+      {binding !== undefined && canEdit.allowed && !isLoading && (
         <Dialog
           open={open}
           onOpenChange={(next) => {

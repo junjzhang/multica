@@ -207,6 +207,14 @@ func TestGetAgentSessionBindingReadAPI(t *testing.T) {
 		t.Fatalf("rebound read = %d/%+v, want the replacement", code, binding)
 	}
 
+	// A recorded binding whose agent is archived is still shown, but marked
+	// undeliverable instead of pretending the binding does not exist.
+	dbfx.Exec(t, `UPDATE agent SET archived_at = now() WHERE id = $1`, agentID)
+	code, binding = getAgentIssueBinding(t, req(testUserID, issueID), agentID)
+	if code != http.StatusOK || binding == nil || binding.Deliverable || binding.UnavailableReason != "agent_archived" {
+		t.Fatalf("archived binding read = %d/%+v, want deliverable=false agent_archived", code, binding)
+	}
+
 	// A different issue in this workspace has no binding; a foreign workspace
 	// issue is not silently treated as unbound.
 	otherIssue := dbfx.Issue(t, "read binding other issue")

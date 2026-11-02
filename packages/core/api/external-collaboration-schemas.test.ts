@@ -357,7 +357,7 @@ describe("task session read projections", () => {
     ]);
     expect(row?.kind).toBe("");
     expect(row?.source_type).toBe("");
-    expect(row?.target_session?.id).toBeUndefined();
+    expect(row?.target_session).toBeNull();
     expect(row?.delivery_status).toBe("unknown");
     expect(row?.processing_status).toBe("unknown");
   });
@@ -401,9 +401,18 @@ describe("task session read projections", () => {
         unavailable_reason: "",
         created_at: "2026-01-02T00:00:00Z",
       },
+      {
+        id: "binding-2",
+        agent_id: "agent-2",
+        issue_id: "issue-1",
+        session: { id: 42, provider: "paseo" },
+        deliverable: true,
+      },
       { agent_id: "missing-id" },
     ]);
-    expect(parsed).toHaveLength(1);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[1]?.id).toBe("binding-2");
+    expect(parsed[1]?.session).toBeNull();
     expect(parsed[0]?.session?.id).toBe("session-1");
     expect(parsed[0]?.deliverable).toBe(true);
 

@@ -84,13 +84,20 @@ export function IssueExternalCollaboration({
   const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const participants = useMemo(() => issue.external_participants ?? [], [issue.external_participants]);
   const bindings = useMemo(() => issue.external_session_bindings ?? [], [issue.external_session_bindings]);
+  const bindingsKnown = issue.external_session_bindings !== undefined;
   const deliveries = issue.mailbox_deliveries ?? [];
   const coordinator = issue.coordinator ?? null;
+  const coordinatorAgentID = coordinator?.type === "agent" ? coordinator.id : null;
 
   const bindingsByAgent = useMemo(
     () => new Map(bindings.map((binding) => [binding.agent_id, binding])),
     [bindings],
   );
+
+  // `undefined` means the projection failed or is absent; `[]` means the issue
+  // authoritatively has no bindings. Do not present a read failure as "none".
+  const bindingFor = (agentId: string): IssueSessionBinding | null | undefined =>
+    bindingsKnown ? (bindingsByAgent.get(agentId) ?? null) : undefined;
 
   // A binding is itself evidence of participation, so an agent with a target
   // is shown even when it has not commented on the issue yet.
@@ -98,19 +105,19 @@ export function IssueExternalCollaboration({
     const seen = new Set<string>();
     const out: Agent[] = [];
     for (const agent of participants) {
-      if (seen.has(agent.id)) continue;
+      if (agent.id === coordinatorAgentID || seen.has(agent.id)) continue;
       seen.add(agent.id);
       out.push(agent);
     }
     for (const binding of bindings) {
-      if (seen.has(binding.agent_id)) continue;
+      if (binding.agent_id === coordinatorAgentID || seen.has(binding.agent_id)) continue;
       const agent = agentsById.get(binding.agent_id);
       if (!agent) continue;
       seen.add(binding.agent_id);
       out.push(agent);
     }
     return out;
-  }, [participants, bindings, agentsById]);
+  }, [participants, bindings, agentsById, coordinatorAgentID]);
 
   const coordinatorAgent =
     coordinator?.type === "agent"
@@ -133,10 +140,20 @@ export function IssueExternalCollaboration({
           </div>
           {coordinator.type === "agent" && coordinatorAgent ? (
             agentExecutionKind(coordinatorAgent) === "external" ? (
-              <ExternalAgentCard
-                agent={coordinatorAgent}
-                ownerName={coordinatorAgent.owner_id ? getMemberName(coordinatorAgent.owner_id) : null}
-              />
+              <div className="space-y-1">
+                <ExternalAgentCard
+                  agent={coordinatorAgent}
+                  ownerName={coordinatorAgent.owner_id ? getMemberName(coordinatorAgent.owner_id) : null}
+                  showSession={false}
+                />
+                <div className="pl-8">
+                  <AgentIssueSessionBinding
+                    agent={coordinatorAgent}
+                    issueId={issue.id}
+                    binding={bindingFor(coordinatorAgent.id)}
+                  />
+                </div>
+              </div>
             ) : (
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
@@ -163,7 +180,7 @@ export function IssueExternalCollaboration({
             {t(($) => $.detail.external_participants)}
           </div>
           {externalAgents.map((agent) => {
-            const binding: IssueSessionBinding | null = bindingsByAgent.get(agent.id) ?? null;
+            const binding = bindingFor(agent.id);
             return (
               <div key={agent.id} className="space-y-1">
                 <ExternalAgentCard
