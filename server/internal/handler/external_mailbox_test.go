@@ -360,8 +360,6 @@ func TestPlainCommentAndReplyDoNotLaunch(t *testing.T) {
 }
 
 // TestMailboxDaemonClaimAndFencing covers dedup, daemon/owner binding and
-// lease fencing: a stale or foreign ack cannot overwrite a later lease.
-// TestMailboxDaemonClaimAndFencing covers dedup, daemon/owner binding and
 // lease fencing for a comment delivery on the one unified claim path: a stale or
 // foreign outcome cannot overwrite a later lease.
 func TestMailboxDaemonClaimAndFencing(t *testing.T) {
@@ -454,6 +452,9 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 	if claimed[0].IssueID != issueID || claimed[0].CommentID != commentID || claimed[0].Payload == nil {
 		t.Fatalf("claim missing stable references: %+v", claimed[0])
 	}
+	if claimed[0].WorkspaceID != testWorkspaceID {
+		t.Fatalf("claim workspace = %q, want the stored row's workspace %q", claimed[0].WorkspaceID, testWorkspaceID)
+	}
 	if changes() != 1 {
 		t.Fatal("claim must notify the issue detail")
 	}
@@ -521,6 +522,7 @@ func TestMailboxDaemonClaimAndFencing(t *testing.T) {
 		t.Fatalf("delivery status = %s, want delivered", deliveryStatus)
 	}
 }
+
 func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -571,6 +573,9 @@ func TestMailboxUserCredentialRequiresOwnedDaemonSelector(t *testing.T) {
 		}
 	}
 }
+
+// TestMailboxProcessingAckIsMonotonic pins unread -> read -> handled and the
+// rule that read can never undo handled.
 func TestMailboxProcessingAckIsMonotonic(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
@@ -898,7 +903,7 @@ func TestExternalAgentTokenCannotUseDaemonEndpoints(t *testing.T) {
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("daemon route must not run for an external agent token")
 	})
-	req := httptest.NewRequest(http.MethodPost, "/api/daemon/mailbox/claim", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/daemon/deliveries/claim", nil)
 	req.Header.Set("Authorization", "Bearer "+raw)
 	w := httptest.NewRecorder()
 	middleware.DaemonAuth(testHandler.Queries, nil, nil, nil)(next).ServeHTTP(w, req)

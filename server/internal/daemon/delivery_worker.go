@@ -29,7 +29,7 @@ func newPaseoDeliveryHost() *paseoDeliveryHost {
 func (h *paseoDeliveryHost) DeliverIfIdle(ctx context.Context, target delivery.HostTarget, d delivery.Delivery) (string, error) {
 	receipt, err := h.transport.Deliver(ctx, externalSessionFor(target), d.ID, renderDeliveryNotification(d))
 	if err != nil {
-		return "", hostErrorFromMailbox(err)
+		return "", err
 	}
 	return receipt, nil
 }

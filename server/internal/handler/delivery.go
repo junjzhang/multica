@@ -13,9 +13,12 @@ import (
 // daemonDeliveryClaim is the one claim projection for every source type. The
 // worker renders the notification from kind+payload and the stable references
 // below: a comment delivery carries its issue/comment ids, a generic event may
-// carry only an issue id or none at all.
+// carry only an issue id or none at all. workspace_id comes from the stored
+// delivery row, not the claiming request: the frozen envelope must describe the
+// row the lease actually covers.
 type daemonDeliveryClaim struct {
 	ID               string                `json:"id"`
+	WorkspaceID      string                `json:"workspace_id"`
 	Kind             string                `json:"kind"`
 	Payload          json.RawMessage       `json:"payload"`
 	SourceType       string                `json:"source_type"`
@@ -75,6 +78,7 @@ func (h *Handler) ClaimDaemonDeliveries(w http.ResponseWriter, r *http.Request) 
 	for _, claim := range claims {
 		items = append(items, daemonDeliveryClaim{
 			ID:               claim.ID,
+			WorkspaceID:      claim.Scope.WorkspaceID,
 			Kind:             claim.Kind,
 			Payload:          claim.Payload,
 			SourceType:       claim.Source.Type,

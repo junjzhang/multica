@@ -56,20 +56,20 @@ type paseoErrorEnvelope struct {
 //	paseo send <session-id> --if-idle --message-id <mailbox-id>
 //	  --prompt-file <private-file> --no-wait --json
 //
-// The typed error result is what keeps a busy host (known no effect) distinct
-// from an ambiguous accepted outcome. There is deliberately no fallback to an
-// ordinary send.
+// The delivery.HostError result is what keeps a busy host (known no effect)
+// distinct from an ambiguous accepted outcome. There is deliberately no
+// fallback to an ordinary send.
 func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession, messageID, content string) (string, error) {
 	if t == nil || t.bin == "" {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnsupported,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
 			Code:    mailboxErrorUnsupported,
 			Message: "paseo CLI is not configured; install Paseo before enabling external-session delivery",
 		}
 	}
 	if strings.TrimSpace(session.SessionID) == "" {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryFailed,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostRejected,
 			Code:    "missing_session_id",
 			Message: "mailbox claim has no external session id",
 		}
@@ -86,8 +86,8 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 
 	promptFile, err := os.CreateTemp("", "multica-mailbox-*.md")
 	if err != nil {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnavailable,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
 			Code:    "prompt_file_unavailable",
 			Message: "could not create a private prompt file for mailbox delivery",
 			Err:     err,
@@ -97,16 +97,16 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 	defer os.Remove(promptPath)
 	if _, err := promptFile.WriteString(content); err != nil {
 		promptFile.Close()
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnavailable,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
 			Code:    "prompt_file_unavailable",
 			Message: "could not write the private prompt file for mailbox delivery",
 			Err:     err,
 		}
 	}
 	if err := promptFile.Close(); err != nil {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnavailable,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostUnavailable,
 			Code:    "prompt_file_unavailable",
 			Message: "could not close the private prompt file for mailbox delivery",
 			Err:     err,
@@ -127,23 +127,23 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 
 	var result paseoSendResult
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &result); err != nil {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryOutcomeUnknown,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
 			Code:    mailboxErrorOutcomeUnknown,
 			Message: "paseo exited successfully but returned an unrecognized result; delivery is not retried automatically",
 			Err:     err,
 		}
 	}
 	if result.Status != "sent" {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryOutcomeUnknown,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
 			Code:    mailboxErrorOutcomeUnknown,
 			Message: fmt.Sprintf("paseo returned status %q for an if-idle send; delivery is not retried automatically", result.Status),
 		}
 	}
 	if result.AgentID != session.SessionID {
-		return "", &MailboxDeliveryError{
-			Kind:    MailboxDeliveryOutcomeUnknown,
+		return "", &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
 			Code:    mailboxErrorOutcomeUnknown,
 			Message: "paseo acknowledged a different agent id than the registered session; delivery is not retried automatically",
 		}
@@ -153,28 +153,28 @@ func (t *paseoCliTransport) Deliver(ctx context.Context, session ExternalSession
 
 func (t *paseoCliTransport) verifyHost(ctx context.Context, hostID string) error {
 	if hostID == "" {
-		return &MailboxDeliveryError{Kind: MailboxDeliveryFailed, Code: "missing_host_id", Message: "external session has no Paseo host identity"}
+		return &delivery.HostError{Kind: delivery.HostRejected, Code: "missing_host_id", Message: "external session has no Paseo host identity"}
 	}
 	stdout, _, err := t.run(ctx, t.bin, "status", "--json")
 	if err != nil {
-		return &MailboxDeliveryError{Kind: MailboxDeliveryUnavailable, Code: "paseo_host_probe_failed", Message: "Paseo host could not be verified before delivery", Err: err}
+		return &delivery.HostError{Kind: delivery.HostUnavailable, Code: "paseo_host_probe_failed", Message: "Paseo host could not be verified before delivery", Err: err}
 	}
 	var status struct {
 		ServerID string `json:"serverId"`
 	}
 	if err := json.Unmarshal(stdout, &status); err != nil || status.ServerID == "" {
-		return &MailboxDeliveryError{Kind: MailboxDeliveryUnsupported, Code: "paseo_host_identity_unavailable", Message: "Paseo status did not provide a server identity; no request was sent"}
+		return &delivery.HostError{Kind: delivery.HostUnsupported, Code: "paseo_host_identity_unavailable", Message: "Paseo status did not provide a server identity; no request was sent"}
 	}
 	if status.ServerID != hostID {
-		return &MailboxDeliveryError{Kind: MailboxDeliveryFailed, Code: "paseo_host_mismatch", Message: "registered Paseo host differs from the local daemon; no request was sent"}
+		return &delivery.HostError{Kind: delivery.HostRejected, Code: "paseo_host_mismatch", Message: "registered Paseo host differs from the local daemon; no request was sent"}
 	}
 	return nil
 }
 
 func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return &MailboxDeliveryError{
-			Kind:    MailboxDeliveryOutcomeUnknown,
+		return &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
 			Code:    "delivery_timeout",
 			Message: "paseo delivery timed out; the outcome is not retried automatically",
 			Err:     ctx.Err(),
@@ -184,8 +184,8 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 		// The host may have accepted the request before the process was
 		// stopped. Treat shutdown as an ambiguous accepted outcome rather than
 		// a known no-effect failure so it is not retried automatically.
-		return &MailboxDeliveryError{
-			Kind:    MailboxDeliveryOutcomeUnknown,
+		return &delivery.HostError{
+			Kind:    delivery.HostOutcomeUnknown,
 			Code:    "delivery_interrupted",
 			Message: "daemon stopped while host delivery was in flight; the outcome is not retried automatically",
 			Err:     ctx.Err(),
@@ -195,38 +195,38 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 	if code, ok := parsePaseoErrorCode(stderr); ok {
 		switch code {
 		case mailboxErrorAgentBusy:
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryBusy,
+			return &delivery.HostError{
+				Kind:    delivery.HostBusy,
 				Code:    code,
 				Message: "paseo session is busy; the request was not sent and will be retried",
 			}
 		case mailboxErrorOutcomeUnknown:
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryOutcomeUnknown,
+			return &delivery.HostError{
+				Kind:    delivery.HostOutcomeUnknown,
 				Code:    code,
 				Message: "paseo could not confirm whether the request was accepted; delivery is not retried automatically",
 			}
 		case "DAEMON_UNREACHABLE", "DAEMON_NOT_RUNNING", "DAEMON_REPLACED":
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryUnavailable,
+			return &delivery.HostError{
+				Kind:    delivery.HostUnavailable,
 				Code:    code,
 				Message: "paseo host is unreachable; the request stays queued and will be retried",
 			}
 		case "DAEMON_UPDATE_REQUIRED":
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryUnsupported,
+			return &delivery.HostError{
+				Kind:    delivery.HostUnsupported,
 				Code:    code,
 				Message: "paseo host requires an upgrade before it can accept atomic if-idle delivery",
 			}
 		case "AGENT_NOT_FOUND":
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryFailed,
+			return &delivery.HostError{
+				Kind:    delivery.HostRejected,
 				Code:    code,
 				Message: "the registered paseo session no longer exists; fix the session binding instead of creating a replacement session",
 			}
 		default:
-			return &MailboxDeliveryError{
-				Kind:    MailboxDeliveryFailed,
+			return &delivery.HostError{
+				Kind:    delivery.HostRejected,
 				Code:    code,
 				Message: fmt.Sprintf("paseo rejected mailbox delivery with code %s", code),
 			}
@@ -235,8 +235,8 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 
 	var exitErr *exec.ExitError
 	if !errors.As(runErr, &exitErr) {
-		return &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnsupported,
+		return &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
 			Code:    "paseo_cli_unavailable",
 			Message: "the paseo CLI could not be started; install Paseo and confirm `paseo` is on PATH",
 			Err:     runErr,
@@ -244,15 +244,15 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 	}
 
 	if unsupportedIfIdleCLI(stderr) {
-		return &MailboxDeliveryError{
-			Kind:    MailboxDeliveryUnsupported,
+		return &delivery.HostError{
+			Kind:    delivery.HostUnsupported,
 			Code:    mailboxErrorUnsupported,
 			Message: "the installed paseo CLI does not support --if-idle; upgrade Paseo (no fallback to ordinary send was attempted)",
 		}
 	}
 
-	return &MailboxDeliveryError{
-		Kind:    MailboxDeliveryOutcomeUnknown,
+	return &delivery.HostError{
+		Kind:    delivery.HostOutcomeUnknown,
 		Code:    mailboxErrorOutcomeUnknown,
 		Message: "paseo returned an unrecognized failure; delivery is not retried automatically",
 		Err:     runErr,
@@ -315,7 +315,7 @@ func (t *paseoCliTransport) LookupReceipt(ctx context.Context, session ExternalS
 	// The host probe is the same read-only identity check the send path uses:
 	// a receipt from another machine must never be read as this session's.
 	if err := t.verifyHost(lookupCtx, session.HostID); err != nil {
-		return delivery.Receipt{}, hostErrorFromMailbox(err)
+		return delivery.Receipt{}, err
 	}
 	stdout, stderr, runErr := t.run(lookupCtx, t.bin, "agent", "receipt", session.SessionID, messageID, "--json")
 	if runErr != nil {
@@ -440,36 +440,4 @@ func receiptLookupUnsupportedCLI(stderr []byte) bool {
 		strings.Contains(text, "unknown option") ||
 		strings.Contains(text, "unrecognized command") ||
 		strings.Contains(text, "unrecognized option")
-}
-
-// hostErrorFromMailbox translates the frozen mailbox transport taxonomy into
-// the delivery worker's host contract. Both describe the same host outcomes;
-// keeping one CLI classifier avoids a second parser.
-func hostErrorFromMailbox(err error) error {
-	var mailboxErr *MailboxDeliveryError
-	if !errors.As(err, &mailboxErr) {
-		return &delivery.HostError{
-			Kind:    delivery.HostOutcomeUnknown,
-			Code:    "host_result_unrecognized",
-			Message: "the host returned an unrecognized delivery result",
-			Err:     err,
-		}
-	}
-	kind := delivery.HostOutcomeUnknown
-	switch mailboxErr.Kind {
-	case MailboxDeliveryBusy:
-		kind = delivery.HostBusy
-	case MailboxDeliveryUnavailable:
-		kind = delivery.HostUnavailable
-	case MailboxDeliveryUnsupported:
-		kind = delivery.HostUnsupported
-	case MailboxDeliveryFailed:
-		kind = delivery.HostRejected
-	}
-	return &delivery.HostError{
-		Kind:    kind,
-		Code:    mailboxErr.Code,
-		Message: mailboxErr.Message,
-		Err:     mailboxErr.Err,
-	}
 }

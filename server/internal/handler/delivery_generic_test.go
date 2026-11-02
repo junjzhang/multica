@@ -101,12 +101,18 @@ func TestDeliveryClaimCoversCommentAndGeneric(t *testing.T) {
 	if commentItem.IssueID != issueID || commentItem.CommentID != commentID || commentItem.SourceType != "comment" {
 		t.Fatalf("comment claim refs = %+v, want the issue/comment ids", commentItem)
 	}
+	if commentItem.Kind != "comment_mention" || commentItem.WorkspaceID != testWorkspaceID {
+		t.Fatalf("comment claim kind/workspace = %q/%q, want comment_mention/%q", commentItem.Kind, commentItem.WorkspaceID, testWorkspaceID)
+	}
 	genericItem, ok := byID[generic.ID]
 	if !ok {
 		t.Fatalf("unified claim did not lease the generic delivery: %+v", deliveries)
 	}
 	if genericItem.IssueID != "" || genericItem.CommentID != "" || genericItem.SourceType != "ci_run" {
 		t.Fatalf("generic claim refs = %+v, want no fabricated issue/comment", genericItem)
+	}
+	if genericItem.WorkspaceID != testWorkspaceID {
+		t.Fatalf("generic claim workspace = %q, want %q", genericItem.WorkspaceID, testWorkspaceID)
 	}
 	if commentItem.VerifyOnly || genericItem.VerifyOnly {
 		t.Fatalf("first claim marked a fresh delivery verification-only: %+v", deliveries)
