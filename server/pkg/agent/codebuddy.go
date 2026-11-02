@@ -94,6 +94,9 @@ func buildCodebuddyArgs(opts ExecOptions, logger *slog.Logger) []string {
 }
 
 func (b *codebuddyBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("codebuddy", opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "codebuddy"

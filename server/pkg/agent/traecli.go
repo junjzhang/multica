@@ -87,6 +87,9 @@ func (s *traecliMessageStream) close() {
 }
 
 func (b *traecliBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "traecli"
@@ -283,6 +286,15 @@ func (b *traecliBackend) Execute(ctx context.Context, prompt string, opts ExecOp
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+				b.cfg.Logger.Warn("traecli strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 			if changed {
 				b.cfg.Logger.Warn("agent returned a different session id on resume — original was likely lost; continuing with the new id",
 					"backend", "traecli",

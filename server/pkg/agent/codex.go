@@ -951,6 +951,9 @@ func isCodexBareTomlKey(s string) bool {
 }
 
 func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	firstSession, err := b.executeOnce(ctx, prompt, opts, 1)
 	if err != nil {
 		return nil, err
@@ -998,12 +1001,14 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				sessionMu.Unlock()
 			}
 			// Hold back the leading session-pin status messages until this
-			// attempt proves it made real progress. A retry never continues the
-			// discarded attempt's thread (initialize retries fail before any
-			// thread exists; catalog retries clear ResumeSessionID below), so
-			// forwarding its pin would leave the resume pointer aimed at a
-			// thread that never produced a turn (MUL-5110). The first non-pin
-			// message means the attempt is live: flush and stream from then on.
+			// attempt proves it made real progress. An ordinary retry never
+			// continues the discarded attempt's thread (initialize retries fail
+			// before any thread exists; catalog retries clear ResumeSessionID
+			// below), so forwarding its pin would leave the resume pointer aimed
+			// at a thread that never produced a turn (MUL-5110). A strict retry
+			// keeps the original thread and may forward its pin only after the
+			// retry resumes that same identity. The first non-pin message means
+			// the attempt is live: flush and stream from then on.
 			var heldPins []Message
 			holdingPins := true
 			flushHeldPins := func() {
@@ -1055,11 +1060,20 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				// prepends the caller's continuity notice about the lost
 				// context.
 				if attemptOpts.ResumeSessionID != "" {
-					b.cfg.Logger.Warn("codex retry dropping resume pointer after model catalog refresh failure",
-						"prior_thread_id", attemptOpts.ResumeSessionID,
-					)
-					attemptOpts.ResumeSessionID = ""
-					attemptOpts.ResumeExpected = true
+					if attemptOpts.RequireResume {
+						// Strict mode may retry the same thread after a catalog
+						// repair, but it must never turn the retry into a fresh
+						// session or drop the requested identity.
+						b.cfg.Logger.Warn("codex strict retry keeps resume pointer after model catalog refresh failure",
+							"prior_thread_id", attemptOpts.ResumeSessionID,
+						)
+					} else {
+						b.cfg.Logger.Warn("codex retry dropping resume pointer after model catalog refresh failure",
+							"prior_thread_id", attemptOpts.ResumeSessionID,
+						)
+						attemptOpts.ResumeSessionID = ""
+						attemptOpts.ResumeExpected = true
+					}
 				}
 			}
 			b.cfg.Logger.Warn("codex retry scheduled", "reason", retryReason, "attempt", attempt, "next_attempt", attempt+1, "backoff", backoff.String())
@@ -1546,8 +1560,9 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		c.notify("initialized")
 
 		// 2. Start a new thread, or resume the prior one for this issue. When
-		// resume fails (thread GCed on the server, schema drift, etc.) we fall
-		// back to a fresh thread so the task still makes progress.
+		// resume fails (thread GCed on the server, schema drift, etc.) ordinary
+		// runs fall back to a fresh thread so the task still makes progress;
+		// RequireResume makes the same failure terminal before any turn.
 		threadID, resumed, err := c.startOrResumeThread(runCtx, opts, b.cfg.Logger)
 		if err != nil {
 			var handshakeErr *codexHandshakeTimeoutError
@@ -1592,7 +1607,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				Status:         finalStatus,
 				Error:          finalError,
 				DurationMs:     time.Since(startTime).Milliseconds(),
-				ResumeRejected: isCodexResumeOverflow(opts, err),
+				ResumeRejected: isCodexResumeOverflow(opts, err) || (opts.RequireResume && errors.Is(err, ErrResumeRequired)),
 			}
 			return
 		}
@@ -2001,7 +2016,13 @@ func codexTurnInput(prompt string, resumeExpected, resumed bool, notice string) 
 // answer a fresh start request. The returned threadID is what subsequent
 // turn/start calls must reference, and resumed indicates whether the prior
 // thread was picked up (only useful for logging).
+//
+// In strict mode (opts.RequireResume) every failure to land on exactly the
+// requested thread returns ErrResumeRequired and never reaches thread/start.
 func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return "", false, err
+	}
 	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" {
 		// thread/resume reuses the thread's persisted model and reasoning
 		// effort; only override fields the daemon actually cares about.
@@ -2037,6 +2058,14 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 		resumeResult, err := c.request(ctx, "thread/resume", resumeParams)
 		if err == nil {
 			if threadID := extractThreadID(resumeResult); threadID != "" {
+				if strictErr := requireExactResumedSessionID(opts, threadID, "codex thread/resume"); strictErr != nil {
+					logger.Warn("codex strict resume rejected a different thread",
+						"requested_thread_id", priorThreadID,
+						"confirmed_thread_id", threadID,
+						"error", strictErr,
+					)
+					return "", false, strictErr
+				}
 				logger.Info("codex lifecycle",
 					"phase", "thread_resume_response",
 					"task_id", c.cfg.TaskID,
@@ -2050,11 +2079,18 @@ func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions,
 				)
 				return threadID, true, nil
 			}
+			if opts.RequireResume {
+				return "", false, fmt.Errorf("%w: codex thread/resume returned no thread ID", ErrResumeRequired)
+			}
 			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
 		} else {
 			if isCodexTransportError(err) {
 				logger.Warn("codex thread/resume failed due to transport error; not falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
 				return "", false, fmt.Errorf("codex thread/resume failed: %w", err)
+			}
+			if opts.RequireResume {
+				logger.Warn("codex strict thread/resume failed; refusing thread/start", "prior_thread_id", priorThreadID, "error", err)
+				return "", false, fmt.Errorf("%w: codex thread/resume failed: %v", ErrResumeRequired, err)
 			}
 			logger.Warn("codex thread/resume failed; falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
 		}

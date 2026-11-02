@@ -76,6 +76,9 @@ func (s *mcodeMessageStream) close() {
 }
 
 func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "mcode"
@@ -237,6 +240,9 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			if !mcodeLoadSessionSupported(initResult) {
 				finalStatus = "failed"
 				finalError = "mcode ACP does not support session loading; retry with a fresh session"
+				if opts.RequireResume {
+					finalError = fmt.Sprintf("%v: mcode ACP cannot load the requested session", ErrResumeRequired)
+				}
 				resumeRejected = true
 				resCh <- Result{
 					Status:         finalStatus,
@@ -275,6 +281,15 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				return
 			}
 			sessionID, _ = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+				b.cfg.Logger.Warn("mcode strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 		} else {
 			if err := mcodeWaitForSessionStartup(runCtx); err != nil {
 				finalStatus, finalError = mcodeRequestFailure(runCtx, opts.Timeout, "session/new", err)

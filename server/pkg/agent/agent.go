@@ -81,6 +81,18 @@ type ExecOptions struct {
 	// the backend surfaces a continuity notice instead of silently
 	// restarting. Currently honoured by the codex backend (MUL-4424).
 	ResumeExpected bool
+	// RequireResume makes ResumeSessionID a hard requirement rather than a
+	// best-effort hint. When true, ResumeSessionID must be non-empty and the
+	// backend MUST prove, before it sends the task prompt or starts a turn,
+	// that it is continuing exactly that session. A backend that cannot prove
+	// this must fail with ErrResumeRequired instead of falling back to a fresh
+	// session, clearing the requested id, or accepting a different id.
+	//
+	// The default false preserves existing behaviour: providers may fall back
+	// to a fresh session when a resume is rejected so ordinary tasks still make
+	// progress. Strict callers (for example a result that must return to its
+	// originating managed conversation) own the no-fallback decision.
+	RequireResume bool
 	// ResumeContinuityNotice is the text to prepend to the first turn when
 	// ResumeExpected holds but the backend lands on a fresh thread anyway. The
 	// caller owns the wording because only it knows what the surface lost — an
