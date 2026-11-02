@@ -208,6 +208,15 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return h.canInvokeAgent(r.Context(), agent, actorType, actorID, originatorUserID, workspaceID)
 	}
 
+	// A rerun is a fresh dispatch, not a reason to change who receives the
+	// result. An accepted return is reused; an issue that never had one records
+	// the actual rerun actor's address before the task is created.
+	accepted, _, derr := h.ensureDelegationReturnForDispatch(r, issue, actorType, actorID)
+	if derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
+
 	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke)
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
@@ -226,6 +235,7 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := taskToResponse(*task, uuidToString(issue.WorkspaceID))
+	h.linkTaskDelegationReturn(r.Context(), task.ID, accepted.ID)
 	h.hydrateTaskAttributions(r.Context(), []*TaskAttribution{resp.Attribution})
 	writeJSON(w, http.StatusAccepted, resp)
 }

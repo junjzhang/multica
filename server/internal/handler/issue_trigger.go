@@ -76,15 +76,21 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 // clients and travels only with a run that actually starts. The squad path
 // still flows through enqueueSquadLeaderTask so the leader access gate and
 // pending dedup stay in one place.
-func (h *Handler) dispatchIssueRun(ctx context.Context, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string) {
+func (h *Handler) dispatchIssueRun(ctx context.Context, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnID pgtype.UUID) {
 	switch trigger.AssigneeType {
 	case "agent":
 		// The member who performed this assign/promote is the accountable human
 		// for the run (MUL-4302 §4). An agent actor is not a human, so only a
 		// member actor is threaded; otherwise attribution falls back to the chain.
-		_, _ = h.TaskService.EnqueueTaskForIssueWithHandoff(ctx, issue, handoffNote, memberActorUserID(actorType, actorID))
+		task, err := h.TaskService.EnqueueTaskForIssueWithHandoff(ctx, issue, handoffNote, memberActorUserID(actorType, actorID))
+		if err != nil {
+			slog.Warn("enqueue assigned agent task failed",
+				"issue_id", uuidToString(issue.ID), "error", err)
+			return
+		}
+		h.linkTaskDelegationReturn(ctx, task.ID, delegationReturnID)
 	case "squad":
-		h.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, actorType, actorID, handoffNote)
+		h.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, actorType, actorID, handoffNote, delegationReturnID)
 	}
 }
 

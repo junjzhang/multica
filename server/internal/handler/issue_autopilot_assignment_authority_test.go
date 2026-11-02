@@ -72,6 +72,8 @@ func newRunOnlyAutopilotFixture(t *testing.T, targetAgentID, triggerOwnerUserID 
 		"originator_user_id":  triggerOwnerUserID,
 		"accountable_user_id": triggerOwnerUserID,
 		"originator_source":   "trigger_owner",
+		"session_id":          "autopilot-run-session",
+		"work_dir":            "/work/autopilot-run",
 	}
 	for _, o := range over {
 		for k, v := range o {

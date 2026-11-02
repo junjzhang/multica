@@ -98,3 +98,14 @@ WHERE id = @id
   AND workspace_id = @workspace_id
   AND revoked_at IS NULL
 RETURNING *;
+
+-- name: ListExternalAgentSessionsByHostSession :many
+-- An external process names its host session (for Paseo, PASEO_AGENT_ID). The
+-- caller must still scope the match to the authenticated agent and workspace;
+-- more than one row means the reference is ambiguous and must be rejected
+-- rather than resolved to an arbitrary host.
+SELECT * FROM external_agent_session
+WHERE workspace_id = @workspace_id
+  AND agent_id = @agent_id
+  AND session_id = @host_session_id
+ORDER BY created_at ASC, id ASC;

@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/channelmedia"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/dispatch"
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -3515,6 +3516,22 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		return out
 	}
 
+	// An agent handing work to an agent or squad must name a return address
+	// before the issue exists. The service records this address and inserts an
+	// immediate run in the same transaction; a missing or invalid address is
+	// refused here, so no half-created delegation can commit.
+	var delegationReturn *delegation.Address
+	delegationCreatedBy := ""
+	if delegationReturnRequired(creatorType, assigneeType) {
+		address, derr := h.resolveDelegationAddress(r, workspaceID, creatorType, actualCreatorID)
+		if derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
+		}
+		delegationReturn = &address
+		delegationCreatedBy = requestUserID(r)
+	}
+
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
 		WorkspaceID:     wsUUID,
 		Title:           req.Title,
@@ -3538,6 +3555,9 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		AllowDuplicate:  req.AllowDuplicate,
 		CoordinatorType: coordinatorType,
 		CoordinatorID:   coordinatorID,
+
+		DelegationReturn:    delegationReturn,
+		DelegationCreatedBy: delegationCreatedBy,
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
@@ -4121,6 +4141,24 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate the dispatcher's return address before the assignment commits.
+	// The run decision is made after the write, so the gate keys on the same
+	// shape it will see: this update names an executable assignee (explicitly or
+	// through a workflow handoff) and does not suppress the run. An issue that
+	// already has an accepted recipient keeps it; no new address is required.
+	prospectiveAssignment := (touchedType || touchedID || handoff != nil) &&
+		(handoff != nil ||
+			params.AssigneeType.String != prevIssue.AssigneeType.String ||
+			uuidToString(params.AssigneeID) != uuidToString(prevIssue.AssigneeID))
+	if prospectiveAssignment && !req.SuppressRun && delegationReturnRequired(actorType, params.AssigneeType) {
+		if _, accepted := h.acceptedDelegationReturn(r.Context(), prevIssue); !accepted {
+			if _, derr := h.resolveDelegationAddress(r, workspaceID, actorType, actorID); derr != nil {
+				writeDelegationReturnError(w, derr)
+				return
+			}
+		}
+	}
+
 	attachmentIDs, ok := parseUUIDSliceOrBadRequest(w, req.AttachmentIDs, "attachment_ids")
 	if !ok {
 		return
@@ -4277,7 +4315,12 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, actorType, actorID)
 	}
 	if willRun {
-		h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, handoffNote)
+		accepted, _, derr := h.ensureDelegationReturnForDispatch(r, issue, actorType, actorID)
+		if derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
+		}
+		h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, handoffNote, accepted.ID)
 	}
 
 	// Sub-issue rules on the parent (the child_done system rule and sub-issue
@@ -4970,7 +5013,16 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, actorType, actorID)
 		}
 		if willRun {
-			h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, batchHandoffNote)
+			// Batch writes share one actor, so a refused return address skips
+			// this issue's run instead of blocking the other updates. No child
+			// task is queued without an accepted return.
+			accepted, required, derr := h.ensureDelegationReturnForDispatch(r, issue, actorType, actorID)
+			if derr != nil && required {
+				slog.Warn("batch dispatch refused: delegation return unavailable",
+					append(logger.RequestAttrs(r), "issue_id", uuidToString(issue.ID), "error", derr)...)
+				continue
+			}
+			h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, batchHandoffNote, accepted.ID)
 		}
 
 		// No status change — not even → cancelled — cancels active tasks here,

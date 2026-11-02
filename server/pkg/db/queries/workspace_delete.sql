@@ -414,6 +414,9 @@ deleted_external_agent_sessions AS (
 deleted_external_agent_session_bindings AS (
     DELETE FROM external_agent_session_binding WHERE workspace_id = $1
 ),
+deleted_issue_delegation_returns AS (
+    DELETE FROM issue_delegation_return WHERE workspace_id = $1
+),
 deleted_agent_invocation_targets AS (
     DELETE FROM agent_invocation_target
     WHERE agent_id IN (SELECT id FROM ws_agents)

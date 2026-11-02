@@ -381,8 +381,8 @@ func TestChildDone_SquadPrivateLeader_AgentActorWakesLeader(t *testing.T) {
 	// depends on the completer being able to invoke the leader.
 	var workerTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id, session_id, work_dir)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3, 'squad-leader-actor-session', '/work/squad-leader-actor')
 		RETURNING id
 	`, workerAgentID, child.ID, memberID).Scan(&workerTaskID); err != nil {
 		t.Fatalf("create worker task: %v", err)
@@ -461,8 +461,8 @@ func TestComment_SquadPrivateLeader_AgentActorAllowed(t *testing.T) {
 	// the private leader.
 	var taskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id, session_id, work_dir)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3, 'squad-private-leader-session', '/work/squad-private-leader')
 		RETURNING id
 	`, otherAgentID, issueID, ownerID).Scan(&taskID); err != nil {
 		t.Fatalf("create agent task: %v", err)

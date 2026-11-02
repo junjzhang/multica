@@ -1283,26 +1283,87 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 }
 
 func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin) (db.AgentTaskQueue, error) {
+	task, attr, err := s.insertIssueTask(ctx, issue, triggerCommentID, coalescedCommentIDs, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, fireAt, origin, pgtype.UUID{})
+	if err != nil {
+		return db.AgentTaskQueue{}, err
+	}
+	s.publishQueuedIssueTask(ctx, task, attr)
+	return task, nil
+}
+
+// EnqueueAssignedTaskInTx inserts the issue's assigned-agent task through the
+// caller's transaction, so a delegated issue, its accepted return address, and
+// its durable launch obligation commit together. Publication happens only after
+// the caller commits; a rollback therefore leaves neither a child issue nor a
+// queued run behind.
+func (s *TaskService) EnqueueAssignedTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, delegationReturnID pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+	txService := &TaskService{Queries: q}
+	return txService.insertIssueTask(ctx, issue, pgtype.UUID{}, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnID)
+}
+
+// PublishQueuedIssueTask broadcasts and wakes the runtime for a task inserted
+// by EnqueueAssignedTaskInTx. Call it only after the transaction committed.
+func (s *TaskService) PublishQueuedIssueTask(ctx context.Context, task db.AgentTaskQueue, attr attribution.Result) {
+	s.publishQueuedIssueTask(ctx, task, attr)
+}
+
+// HydrateQueuedIssueTaskOverlay fills the optional Composio overlay after the
+// issue transaction committed. The overlay is built outside the transaction for
+// the same reason the media-gated path does it there: it can perform external
+// I/O and must never hold the issue's locks. A failure is logged; the task is
+// already durable and runs without the optional integration.
+func (s *TaskService) HydrateQueuedIssueTaskOverlay(ctx context.Context, task db.AgentTaskQueue) {
+	if s == nil || s.Queries == nil || s.Composio == nil {
+		return
+	}
+	agent, err := s.Queries.GetAgent(ctx, task.AgentID)
+	if err != nil {
+		slog.Warn("hydrate queued issue task overlay: load agent failed",
+			"task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	overlay := s.buildRuntimeMCPOverlay(ctx, task.OriginatorUserID, agent)
+	if len(overlay.Overlay) == 0 && len(overlay.ConnectedApps) == 0 {
+		return
+	}
+	updated, err := s.Queries.SetQueuedAgentTaskRuntimeOverlay(ctx, db.SetQueuedAgentTaskRuntimeOverlayParams{
+		ID:                       task.ID,
+		RuntimeMcpOverlay:        overlay.Overlay,
+		RuntimeConnectedApps:     overlay.ConnectedApps,
+		ExpectedOriginatorUserID: task.OriginatorUserID,
+	})
+	if err != nil {
+		slog.Warn("hydrate queued issue task overlay failed",
+			"task_id", util.UUIDToString(task.ID), "error", err)
+		return
+	}
+	if updated == 0 {
+		slog.Debug("queued issue task overlay skipped: task plan changed",
+			"task_id", util.UUIDToString(task.ID))
+	}
+}
+
+func (s *TaskService) insertIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturnID pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
-		return db.AgentTaskQueue{}, fmt.Errorf("issue has no assignee")
+		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("issue has no assignee")
 	}
 	if err := guardIssueNotInTriage(ctx, s.Queries, issue.ID, origin); err != nil {
-		return db.AgentTaskQueue{}, err
+		return db.AgentTaskQueue{}, attribution.Result{}, err
 	}
 
 	agent, err := s.Queries.GetAgent(ctx, issue.AssigneeID)
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
-		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("load agent: %w", err)
 	}
 	if agent.ArchivedAt.Valid {
 		slog.Debug("task enqueue skipped: agent is archived", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agent.ID))
-		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("agent is archived")
 	}
 	if !agent.RuntimeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "agent has no runtime")
-		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("agent has no runtime")
 	}
 
 	// The issue assignee reacting to an agent-authored comment is a
@@ -1316,7 +1377,7 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	attr, err = s.applyAttributionFallback(ctx, attr, agent)
 	if err != nil {
 		slog.Warn("task enqueue refused: attribution fail-closed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(issue.AssigneeID))
-		return db.AgentTaskQueue{}, err
+		return db.AgentTaskQueue{}, attribution.Result{}, err
 	}
 	originatorUserID := attr.UserID
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
@@ -1386,10 +1447,10 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 		// path in enqueueMentionTaskWithCommentPlan.
 		if isDuplicatePendingTaskErr(err) {
 			slog.Debug("task enqueue coalesced: pending task already exists", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(issue.AssigneeID))
-			return db.AgentTaskQueue{}, ErrDuplicatePendingTask
+			return db.AgentTaskQueue{}, attribution.Result{}, ErrDuplicatePendingTask
 		}
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
-		return db.AgentTaskQueue{}, fmt.Errorf("create task: %w", err)
+		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("create task: %w", err)
 	}
 
 	slog.Info("task enqueued",
@@ -1398,9 +1459,29 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 		"agent_id", util.UUIDToString(issue.AssigneeID),
 		"force_fresh_session", forceFreshSession,
 	)
+	if delegationReturnID.Valid {
+		linked, err := s.Queries.SetAgentTaskDelegationReturn(ctx, db.SetAgentTaskDelegationReturnParams{
+			ID:                 task.ID,
+			DelegationReturnID: delegationReturnID,
+		})
+		if err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("link task to accepted return: %w", err)
+		}
+		if linked != 1 {
+			return db.AgentTaskQueue{}, attribution.Result{}, errors.New("link task to accepted return: task row disappeared")
+		}
+		task.DelegationReturnID = delegationReturnID
+	}
+	return task, attr, nil
+}
+
+// publishQueuedIssueTask records the human delegation and wakes the runtime
+// after the task committed. Deferred (media-gated) tasks stay unpublishable
+// until their promotion path runs.
+func (s *TaskService) publishQueuedIssueTask(ctx context.Context, task db.AgentTaskQueue, attr attribution.Result) {
 	s.RecordHumanDelegation(ctx, attr)
-	if fireAt.Valid {
-		return task, nil
+	if task.FireAt.Valid {
+		return
 	}
 	// Order matters: broadcast first, notify daemon second. notifyTaskAvailable
 	// kicks an in-process channel that the daemon picks up over HTTP and
@@ -1410,7 +1491,6 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	// in the desired observe-order makes correctness independent of timing.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.NotifyTaskEnqueued(ctx, task)
-	return task, nil
 }
 
 // EnqueueTaskForMention creates a queued task for a mentioned agent on an issue.

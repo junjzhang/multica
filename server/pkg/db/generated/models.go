@@ -211,6 +211,8 @@ type AgentTaskQueue struct {
 	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
 	IssueSnapshot             []byte      `json:"issue_snapshot"`
 	WorkflowStep              pgtype.Text `json:"workflow_step"`
+	// The accepted issue_delegation_return this run was dispatched under. Set only when a fresh task is inserted for a delegated issue; comment coalescing and reruns inherit the existing task's value and never overwrite it.
+	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
 }
 
 type AgentToLabel struct {
@@ -951,6 +953,17 @@ type IssueChildEvent struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	ClaimedAt    pgtype.Timestamptz `json:"claimed_at"`
 	ProcessedAt  pgtype.Timestamptz `json:"processed_at"`
+}
+
+type IssueDelegationReturn struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	IssueID           pgtype.UUID        `json:"issue_id"`
+	DispatcherAgentID pgtype.UUID        `json:"dispatcher_agent_id"`
+	ReturnKind        string             `json:"return_kind"`
+	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
+	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
 type IssueDependency struct {

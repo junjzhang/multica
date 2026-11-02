@@ -287,11 +287,16 @@ func createHandlerTestTaskForAgentOnIssue(t *testing.T, agentID, issueID string)
 		issueArg = issueID
 	}
 
+	// A task that is allowed to delegate must have recorded its provider
+	// session and work directory; the asynchronous pin is the run's return
+	// address, and a handler acting as this task is held to that gate.
 	taskID := dbfx.Task(t, agentID, testutil.Cols{
 		"runtime_id": handlerTestRuntimeID(t),
 		"status":     "running",
 		"issue_id":   issueArg,
 		"started_at": testutil.Raw("now()"),
+		"session_id": "handler-test-provider-session",
+		"work_dir":   "/work/handler-test",
 	})
 	return taskID
 }

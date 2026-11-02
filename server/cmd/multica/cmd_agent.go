@@ -287,6 +287,22 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 	if taskID := os.Getenv("MULTICA_TASK_ID"); taskID != "" {
 		client.TaskID = taskID
 	}
+	// A managed run is addressed by its own task token; an inherited
+	// PASEO_AGENT_ID must not rebind it. Outside one, an external session names
+	// the exact host session its delegation results return to. The server
+	// still validates that the session belongs to the authenticated agent.
+	if !taskContext {
+		returnSession := cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")
+		if strings.TrimSpace(returnSession) == "" {
+			returnSession = os.Getenv("PASEO_AGENT_ID")
+		}
+		client.ReturnSession = strings.TrimSpace(returnSession)
+	} else if strings.TrimSpace(cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")) != "" {
+		// A managed run's own task token is its return address. Accepting an
+		// explicit session here would let the host environment rebind a run
+		// Multica already manages.
+		return nil, fmt.Errorf("--return-session and MULTICA_RETURN_SESSION cannot be used inside a managed task; this run's own session is the return address")
+	}
 	return client, nil
 }
 

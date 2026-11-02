@@ -1858,6 +1858,11 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		threadRootID = rootComment.ID
 	}
 	triggerPlan := h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, authorType, authorID, commentID, threadRootID, sourceTaskID, originatorUserID, suppressAgentIDs, rootComment == nil)
+	commentReturn, derr := h.prepareCommentDelegationReturn(r, issue, authorType, authorID, triggerPlan)
+	if derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
 	var mailboxDelivered mailboxDeliveryResults
 
 	createParams := db.CreateCommentParams{
@@ -1979,6 +1984,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// native runs now; a blocked mention must not fail the saved comment and is
 	// surfaced per target instead (MUL-4525 §2).
 	resp.TriggerOutcomes = h.applyCommentTriggers(r.Context(), issue, comment, authorType, steerTaskIDs, triggerPlan, mailboxDelivered)
+	h.linkCommentTriggeredTasks(r.Context(), issue.ID, comment.ID, commentReturn.ID)
 	if len(steerTaskIDs) > 0 {
 		applyCommentSupplements(&resp, h.listCommentSupplements(r.Context(), issue.WorkspaceID, []pgtype.UUID{comment.ID})[uuidToString(comment.ID)])
 	}
@@ -3248,6 +3254,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// external mention persists its delivery in the same transaction as the new
 	// content. mailboxDelivered is what that transaction actually committed.
 	var triggerPlan commentTriggerPlan
+	var commentReturn db.IssueDelegationReturn
 	var mailboxDelivered mailboxDeliveryResults
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
@@ -3296,6 +3303,12 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			triggerPlan = h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, actorType, actorID, existing.ID, pgtype.UUID{}, sourceTaskID, h.invokeOriginatorFromRequest(r, actorType, actorID), suppressAgentIDs, false)
+			var prepErr error
+			commentReturn, prepErr = h.prepareCommentDelegationReturn(r, issue, actorType, actorID, triggerPlan)
+			if prepErr != nil {
+				writeDelegationReturnError(w, prepErr)
+				return
+			}
 		}
 	}
 
@@ -3426,7 +3439,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		// Native runs resolve after commit: a blocked mention must not fail the
 		// saved edit. Mailbox outcomes only report what the transaction
 		// committed, so the caller never sees "queued" for a rolled-back row.
-		return h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered)
+		outcomes := h.applyCommentTriggers(r.Context(), issue, comment, actorType, nil, triggerPlan, mailboxDelivered)
+		h.linkCommentTriggeredTasks(r.Context(), issue.ID, comment.ID, commentReturn.ID)
+		return outcomes
 	}
 
 	// Fetch reactions and attachments for the updated comment.
