@@ -42,28 +42,34 @@ function unavailableLabel(reason: string | undefined, t: IssuesT): string | null
 function SessionChoice({
   session,
   selected,
+  name,
   onSelect,
   t,
 }: {
   session: AgentSessionSummary;
   selected: boolean;
+  name: string;
   onSelect: () => void;
   t: IssuesT;
 }) {
   const reason = unavailableLabel(session.unavailable_reason, t);
   return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      disabled={!session.deliverable}
-      onClick={onSelect}
+    <label
       className={cn(
-        "flex w-full min-w-0 flex-col gap-0.5 rounded-md border p-2 text-left text-caption transition-colors",
+        "flex w-full min-w-0 cursor-pointer flex-col gap-0.5 rounded-md border p-2 text-left text-caption transition-colors focus-within:ring-2 focus-within:ring-ring/50",
         selected ? "border-primary bg-primary/5" : "border-border/70 hover:bg-muted/50",
         !session.deliverable && "cursor-not-allowed opacity-60 hover:bg-transparent",
       )}
     >
+      <input
+        type="radio"
+        name={name}
+        value={session.id}
+        checked={selected}
+        disabled={!session.deliverable}
+        onChange={onSelect}
+        className="sr-only"
+      />
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="min-w-0 truncate font-medium">
           {session.display_name || session.session_id}
@@ -84,7 +90,7 @@ function SessionChoice({
         {t(($) => $.detail.external_session_id, { id: session.session_id })}
       </span>
       {reason && <span className="text-micro text-destructive">{reason}</span>}
-    </button>
+    </label>
   );
 }
 
@@ -142,6 +148,7 @@ function SessionPicker({
               <SessionChoice
                 key={session.id}
                 session={session}
+                name={`agent-session-${agent.id}`}
                 selected={session.id === selected}
                 onSelect={() => setSelected(session.id)}
                 t={t}

@@ -335,6 +335,39 @@ describe("IssueExternalCollaboration", () => {
     expect(screen.queryByRole("button", { name: /resend|retry/i })).not.toBeInTheDocument();
   });
 
+  it("shows a legacy delivery with no frozen target instead of guessing one", () => {
+    permissions.canManage = false;
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          external_participants: [externalAgent],
+          mailbox_deliveries: [
+            {
+              id: "msg-legacy",
+              issue_id: "issue-1",
+              comment_id: "",
+              recipient_agent_id: "agent-1",
+              source_session: null,
+              target_session: null,
+              source_type: "issue_wakeup",
+              kind: "issue_wakeup",
+              delivery_status: "failed",
+              processing_status: "unread",
+              created_at: "2026-01-02T00:00:00Z",
+              delivered_at: null,
+              last_error: "legacy delivery has no registered external session",
+            },
+          ],
+        })}
+        agents={[externalAgent]}
+      />,
+    );
+
+    expect(screen.getByText("No frozen target (legacy)")).toBeInTheDocument();
+    expect(screen.getByText("legacy delivery has no registered external session")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /resend|retry/i })).not.toBeInTheDocument();
+  });
+
   it("renders delivery and processing as separate states, never as completion", () => {
     permissions.canManage = false;
     renderCollaboration(
