@@ -66,3 +66,80 @@ func TestEnqueueRequestValidation(t *testing.T) {
 		})
 	}
 }
+
+// A notification key is unique per workspace, so a stored row may only answer
+// the request that created it. Only the frozen target may differ: a producer
+// retry that re-resolves after a rebind still replays the original delivery.
+func TestSameContentRequiresOneLogicalNotification(t *testing.T) {
+	stored := Delivery{
+		ID:              "0190f0f0-0000-7000-8000-000000000009",
+		Scope:           Scope{WorkspaceID: "0190f0f0-0000-7000-8000-000000000001"},
+		Source:          Source{Type: "comment", Key: "0190f0f0-0000-7000-8000-000000000003", ActorType: "member", ActorID: "0190f0f0-0000-7000-8000-000000000008"},
+		Target:          Target{SessionID: "0190f0f0-0000-7000-8000-000000000004"},
+		Recipient:       Recipient{Type: "agent", ID: "0190f0f0-0000-7000-8000-000000000002"},
+		NotificationKey: "comment:0190f0f0-0000-7000-8000-000000000003:agent:0190f0f0-0000-7000-8000-000000000002",
+		Kind:            "comment_mention",
+		Payload:         json.RawMessage(`{"schema":"comment_mention.v1"}`),
+		Refs:            Refs{IssueID: "0190f0f0-0000-7000-8000-000000000005", CommentID: "0190f0f0-0000-7000-8000-000000000003"},
+	}
+	request := func(mutate func(*EnqueueRequest)) EnqueueRequest {
+		req := EnqueueRequest{
+			Scope:           stored.Scope,
+			Source:          stored.Source,
+			Target:          stored.Target,
+			Recipient:       stored.Recipient,
+			NotificationKey: stored.NotificationKey,
+			Kind:            stored.Kind,
+			Payload:         stored.Payload,
+			Refs:            stored.Refs,
+		}
+		if mutate != nil {
+			mutate(&req)
+		}
+		return req
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*EnqueueRequest)
+		want   bool
+	}{
+		{name: "identical replay", want: true},
+		{name: "retry after rebind keeps the frozen route", mutate: func(r *EnqueueRequest) {
+			r.Target.SessionID = "0190f0f0-0000-7000-8000-000000000006"
+		}, want: true},
+		{name: "another recipient under one key", mutate: func(r *EnqueueRequest) {
+			r.Recipient.ID = "0190f0f0-0000-7000-8000-000000000007"
+		}},
+		{name: "another recipient kind under one key", mutate: func(r *EnqueueRequest) {
+			r.Recipient.Type = "squad"
+		}},
+		{name: "another source event under one key", mutate: func(r *EnqueueRequest) {
+			r.Source.Key = "0190f0f0-0000-7000-8000-000000000010"
+		}},
+		{name: "another source type under one key", mutate: func(r *EnqueueRequest) {
+			r.Source.Type = "issue_wakeup"
+		}},
+		{name: "another kind under one key", mutate: func(r *EnqueueRequest) {
+			r.Kind = "issue_wakeup"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := request(tt.mutate).sameContent(stored); got != tt.want {
+				t.Fatalf("sameContent() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+
+	// Legacy comment rows predate source keys and payload snapshots. The legacy
+	// (recipient, comment) lookup is what finds them, so their empty source key
+	// must not turn a replay into a conflict.
+	legacy := stored
+	legacy.Source = Source{Type: "comment", ActorType: "member", ActorID: stored.Source.ActorID}
+	legacy.Payload = nil
+	legacy.NotificationKey = ""
+	if !request(nil).sameContent(legacy) {
+		t.Fatal("sameContent() = false for a legacy comment row found by recipient and comment")
+	}
+}

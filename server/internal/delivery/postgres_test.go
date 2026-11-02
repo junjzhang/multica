@@ -173,6 +173,88 @@ func TestPostgresRetryKeepsFrozenTargetAndID(t *testing.T) {
 	}
 }
 
+// TestPostgresEnqueueRejectsNotificationKeyCollision covers the physical
+// uniqueness boundary: one (workspace, notification_key) may only answer the
+// notification that created it. A producer that reuses a key for another
+// recipient or another source event must fail instead of receiving that stored
+// row, and the failed attempt must neither rewrite nor duplicate it.
+func TestPostgresEnqueueRejectsNotificationKeyCollision(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	store := NewPostgres(db.New(pool))
+	workspaceID := uuid.NewString()
+	recipientID := uuid.NewString()
+
+	first := genericRequest(workspaceID, recipientID)
+	first.Target.SessionID = uuid.NewString()
+	stored, err := store.Enqueue(context.Background(), first)
+	if err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	cleanupDelivery(t, pool, stored.ID)
+
+	tests := []struct {
+		name   string
+		mutate func(*EnqueueRequest)
+	}{
+		{name: "different recipient", mutate: func(r *EnqueueRequest) {
+			r.Recipient.ID = uuid.NewString()
+		}},
+		{name: "different recipient type", mutate: func(r *EnqueueRequest) {
+			r.Recipient.Type = "squad"
+		}},
+		{name: "different source type", mutate: func(r *EnqueueRequest) {
+			r.Source.Type = "issue_wakeup"
+		}},
+		{name: "different source key", mutate: func(r *EnqueueRequest) {
+			r.Source.Key = "run-42-attempt-2"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := first
+			tt.mutate(&req)
+			_, err := store.Enqueue(context.Background(), req)
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("enqueue with a colliding key = %v, want ErrConflict", err)
+			}
+
+			var rows int
+			if err := pool.QueryRow(context.Background(),
+				`SELECT count(*) FROM agent_mailbox_message WHERE workspace_id = $1 AND notification_key = $2`,
+				util.MustParseUUID(workspaceID), stored.NotificationKey).Scan(&rows); err != nil {
+				t.Fatalf("count rows for the key: %v", err)
+			}
+			if rows != 1 {
+				t.Fatalf("rows under the notification key = %d, want 1", rows)
+			}
+
+			got, err := store.Get(context.Background(), Scope{WorkspaceID: workspaceID}, stored.ID)
+			if err != nil {
+				t.Fatalf("read original delivery: %v", err)
+			}
+			if got.Recipient != first.Recipient {
+				t.Fatalf("original recipient = %+v, want %+v", got.Recipient, first.Recipient)
+			}
+			if got.Source != first.Source {
+				t.Fatalf("original source = %+v, want %+v", got.Source, first.Source)
+			}
+		})
+	}
+
+	// The control keeps route-only retry semantics: the same notification that
+	// now resolves another session still replays the frozen original.
+	rebound := first
+	rebound.Target.SessionID = uuid.NewString()
+	replayed, err := store.Enqueue(context.Background(), rebound)
+	if err != nil {
+		t.Fatalf("retry after rebind: %v", err)
+	}
+	if replayed.ID != stored.ID || replayed.Target.SessionID != first.Target.SessionID {
+		t.Fatalf("replayed = %s/%s, want frozen %s/%s",
+			replayed.ID, replayed.Target.SessionID, stored.ID, first.Target.SessionID)
+	}
+}
+
 // TestPostgresEnqueueRecoversLegacyCommentID proves rows written before the
 // core keep their original mailbox UUID: a replay resolves through the legacy
 // (recipient, comment) key instead of inserting a second request.

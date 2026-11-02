@@ -36,9 +36,9 @@ type Scope struct {
 	WorkspaceID string
 }
 
-// Source identifies what produced the request. Type+Key is the idempotency
-// key inside one scope and recipient; ActorType/ActorID/SessionID describe the
-// sender when the source is a session and are part of the immutable content.
+// Source identifies what produced the request. Type+Key name the originating
+// event and belong to the immutable content; ActorType/ActorID/SessionID
+// describe the sender when the source is a session and are part of it too.
 type Source struct {
 	Type      string
 	Key       string
@@ -176,8 +176,13 @@ type Store interface {
 }
 
 // sameContent reports whether an existing delivery holds exactly what req asks
-// to enqueue. A legacy comment row may predate immutable payload snapshots; for
-// those, matching kind and references are the available identity.
+// to enqueue. The notification key is unique per workspace, so a key that names
+// a different recipient or a different source event is a collision between two
+// logical notifications, not a replay: returning that row would hand the caller
+// someone else's message. A legacy comment row may predate immutable payload
+// snapshots and source keys; for those, matching kind, references and recipient
+// are the available identity, and only the legacy (recipient, comment) lookup
+// can find them.
 //
 // Target is deliberately not compared. The stored target is the frozen address
 // of an already-created notification: a producer retry that re-resolves after
@@ -188,6 +193,15 @@ func (r EnqueueRequest) sameContent(existing Delivery) bool {
 		return false
 	}
 	if existing.Refs != r.Refs {
+		return false
+	}
+	if existing.Recipient != r.Recipient {
+		return false
+	}
+	if existing.Source.Type != r.Source.Type {
+		return false
+	}
+	if existing.Source.Key != "" && existing.Source.Key != r.Source.Key {
 		return false
 	}
 	if existing.Source.ActorType != r.Source.ActorType ||
