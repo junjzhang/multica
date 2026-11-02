@@ -54,6 +54,7 @@ type Agent struct {
 	DisabledRuntimeSkills []byte      `json:"disabled_runtime_skills"`
 	ServiceTier           pgtype.Text `json:"service_tier"`
 	ConversationStarters  []byte      `json:"conversation_starters"`
+	ExecutionKind         string      `json:"execution_kind"`
 }
 
 type AgentBuilderDraft struct {
@@ -71,6 +72,36 @@ type AgentInvocationTarget struct {
 	TargetID   pgtype.UUID        `json:"target_id"`
 	CreatedBy  pgtype.UUID        `json:"created_by"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+type AgentMailboxMessage struct {
+	ID               pgtype.UUID        `json:"id"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	IssueID          pgtype.UUID        `json:"issue_id"`
+	CommentID        pgtype.UUID        `json:"comment_id"`
+	RecipientAgentID pgtype.UUID        `json:"recipient_agent_id"`
+	SourceSessionID  pgtype.UUID        `json:"source_session_id"`
+	SenderType       pgtype.Text        `json:"sender_type"`
+	SenderID         pgtype.UUID        `json:"sender_id"`
+	DeliveryStatus   string             `json:"delivery_status"`
+	ProcessingStatus string             `json:"processing_status"`
+	LeaseTokenHash   pgtype.Text        `json:"lease_token_hash"`
+	LeaseOwner       pgtype.Text        `json:"lease_owner"`
+	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
+	Attempts         int32              `json:"attempts"`
+	NextAttemptAt    pgtype.Timestamptz `json:"next_attempt_at"`
+	DeliveredAt      pgtype.Timestamptz `json:"delivered_at"`
+	HostReceipt      pgtype.Text        `json:"host_receipt"`
+	LastError        pgtype.Text        `json:"last_error"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SourceType       string             `json:"source_type"`
+	SourceKey        pgtype.Text        `json:"source_key"`
+	Kind             string             `json:"kind"`
+	RecipientType    string             `json:"recipient_type"`
+	Payload          []byte             `json:"payload"`
+	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
+	NotificationKey  pgtype.Text        `json:"notification_key"`
 }
 
 type AgentMcpServer struct {
@@ -707,6 +738,43 @@ type DingtalkGroupRoute struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ExternalAgentSession struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID pgtype.UUID        `json:"owner_user_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	Provider    string             `json:"provider"`
+	HostID      string             `json:"host_id"`
+	SessionID   string             `json:"session_id"`
+	DisplayName string             `json:"display_name"`
+	Url         pgtype.Text        `json:"url"`
+	DaemonID    string             `json:"daemon_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ExternalAgentSessionBinding struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	SessionID   pgtype.UUID        `json:"session_id"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+}
+
+type ExternalAgentToken struct {
+	ID          pgtype.UUID        `json:"id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID pgtype.UUID        `json:"owner_user_id"`
+	TokenHash   string             `json:"token_hash"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Feedback struct {
 	ID          pgtype.UUID        `json:"id"`
 	UserID      pgtype.UUID        `json:"user_id"`
@@ -864,6 +932,13 @@ type Issue struct {
 	LastActivityAt     pgtype.Timestamptz `json:"last_activity_at"`
 	TriageState        pgtype.Text        `json:"triage_state"`
 	DuplicateOfIssueID pgtype.UUID        `json:"duplicate_of_issue_id"`
+	CoordinatorType    pgtype.Text        `json:"coordinator_type"`
+	CoordinatorID      pgtype.UUID        `json:"coordinator_id"`
+	MergeAllowed       bool               `json:"merge_allowed"`
+	MergeRepositoryUrl pgtype.Text        `json:"merge_repository_url"`
+	MergeTargetBranch  pgtype.Text        `json:"merge_target_branch"`
+	MergeGrantedBy     pgtype.UUID        `json:"merge_granted_by"`
+	MergeGrantedAt     pgtype.Timestamptz `json:"merge_granted_at"`
 }
 
 type IssueChildEvent struct {
@@ -1691,29 +1766,33 @@ type VcsConnection struct {
 }
 
 type VcsPullRequest struct {
-	ID              pgtype.UUID        `json:"id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	ConnectionID    pgtype.UUID        `json:"connection_id"`
-	Provider        string             `json:"provider"`
-	RepoOwner       string             `json:"repo_owner"`
-	RepoName        string             `json:"repo_name"`
-	PrNumber        int32              `json:"pr_number"`
-	Title           string             `json:"title"`
-	State           string             `json:"state"`
-	HtmlUrl         string             `json:"html_url"`
-	Branch          pgtype.Text        `json:"branch"`
-	HeadSha         string             `json:"head_sha"`
-	AuthorLogin     pgtype.Text        `json:"author_login"`
-	AuthorAvatarUrl pgtype.Text        `json:"author_avatar_url"`
-	MergedAt        pgtype.Timestamptz `json:"merged_at"`
-	ClosedAt        pgtype.Timestamptz `json:"closed_at"`
-	PrCreatedAt     pgtype.Timestamptz `json:"pr_created_at"`
-	PrUpdatedAt     pgtype.Timestamptz `json:"pr_updated_at"`
-	Additions       int32              `json:"additions"`
-	Deletions       int32              `json:"deletions"`
-	ChangedFiles    int32              `json:"changed_files"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	ConnectionID         pgtype.UUID        `json:"connection_id"`
+	Provider             string             `json:"provider"`
+	RepoOwner            string             `json:"repo_owner"`
+	RepoName             string             `json:"repo_name"`
+	PrNumber             int32              `json:"pr_number"`
+	Title                string             `json:"title"`
+	State                string             `json:"state"`
+	HtmlUrl              string             `json:"html_url"`
+	Branch               pgtype.Text        `json:"branch"`
+	HeadSha              string             `json:"head_sha"`
+	AuthorLogin          pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt          pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions            int32              `json:"additions"`
+	Deletions            int32              `json:"deletions"`
+	ChangedFiles         int32              `json:"changed_files"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	ApiSnapshot          []byte             `json:"api_snapshot"`
+	SnapshotFetchedAt    pgtype.Timestamptz `json:"snapshot_fetched_at"`
+	SnapshotRefreshAfter pgtype.Timestamptz `json:"snapshot_refresh_after"`
+	SnapshotError        bool               `json:"snapshot_error"`
 }
 
 type VerificationCode struct {

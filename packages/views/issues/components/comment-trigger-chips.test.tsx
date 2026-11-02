@@ -48,7 +48,7 @@ const idle: AgentRunState = { kind: "idle" };
 
 function entry(agent: CommentTriggerPreviewAgent, state: AgentRunState, chosen?: RecipientAction): RecipientEntry {
   const opts = { canSteer: true, canRestart: true, steerByDefault: true };
-  return { agent, state, action: resolveRecipientAction(state, chosen, opts), actions: recipientActions(state, opts) };
+  return { agent, state, action: resolveRecipientAction(state, chosen, opts), actions: recipientActions(state, opts), mailbox: false, unsupported: false };
 }
 
 describe("CommentTriggerChips", () => {
@@ -172,6 +172,75 @@ describe("CommentTriggerChips", () => {
 
     expect(screen.getByText("Not found or no permission")).toBeInTheDocument();
     expect(screen.queryByText("Go")).not.toBeInTheDocument();
+  });
+
+  it("previews an external mention as mailbox delivery, not a native run", () => {
+    const mailboxAgent: CommentTriggerPreviewAgent = {
+      ...bob,
+      dispatch_kind: "mailbox",
+    };
+    renderWithI18n(
+      <CommentTriggerChips
+        recipients={[{
+          agent: mailboxAgent,
+          state: { kind: "idle" },
+          action: "start",
+          actions: [],
+          mailbox: true,
+          unsupported: false,
+        }]}
+        onActionChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Queues to Bob’s mailbox")).toBeInTheDocument();
+    expect(screen.queryByText("Will start when sent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Bob trigger/ })).not.toBeInTheDocument();
+  });
+
+  it("never presents an unknown dispatch kind as a native run", () => {
+    const futureAgent: CommentTriggerPreviewAgent = { ...bob, dispatch_kind: "future_kind" };
+    renderWithI18n(
+      <CommentTriggerChips
+        recipients={[{
+          agent: futureAgent,
+          state: { kind: "idle" },
+          action: "start",
+          actions: [],
+          mailbox: false,
+          unsupported: true,
+        }]}
+        onActionChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Bob’s target is unsupported")).toBeInTheDocument();
+    expect(screen.queryByText("Will start when sent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Queues to Bob’s mailbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Bob trigger/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps native and mailbox recipients on separate previews", () => {
+    const mailboxAgent: CommentTriggerPreviewAgent = { ...bob, dispatch_kind: "mailbox" };
+    renderWithI18n(
+      <CommentTriggerChips
+        recipients={[
+          entry(walt, idle),
+          {
+            agent: mailboxAgent,
+            state: { kind: "idle" },
+            action: "start",
+            actions: [],
+            mailbox: true,
+            unsupported: false,
+          },
+        ]}
+        onActionChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Will start when sent")).toBeInTheDocument();
+    expect(screen.getByText("Queues to Bob’s mailbox")).toBeInTheDocument();
   });
 
   it("renders one named chip per blocked mention", () => {

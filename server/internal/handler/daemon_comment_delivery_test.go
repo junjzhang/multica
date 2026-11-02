@@ -157,7 +157,10 @@ func createCommentDeliveryFixture(t *testing.T, label string) commentDeliveryFix
 	runtimeID := createClaimReclaimRuntime(t, ctx, label+" runtime")
 	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, label+" agent")
 
-	contents := []string{"first cross-thread instruction", "second instruction", "latest instruction"}
+	// Explicit mentions keep these comments trigger-bearing under
+	// explicit-mention-only routing; this fixture is about delivery, not routing.
+	mention := "[@Agent](mention://agent/" + agentID + ") "
+	contents := []string{mention + "first cross-thread instruction", mention + "second instruction", mention + "latest instruction"}
 	ids := make([]string, 3)
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at)
@@ -395,7 +398,7 @@ func TestUpdateComment_RequeuesSurvivingCoalescedBatch(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodPut, "/api/comments/"+fixture.commentID[2], map[string]any{
-		"content": "edited latest instruction",
+		"content": "[@Agent](mention://agent/" + fixture.agentID + ") edited latest instruction",
 	})
 	req = withURLParam(req, "commentId", fixture.commentID[2])
 	testHandler.UpdateComment(w, req)
@@ -446,7 +449,7 @@ func TestUpdateComment_CancelsAndRequeuesWhenEditedInputIsCoalesced(t *testing.T
 
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodPut, "/api/comments/"+fixture.commentID[0], map[string]any{
-		"content": "edited earlier instruction",
+		"content": "[@Agent](mention://agent/" + fixture.agentID + ") edited earlier instruction",
 	})
 	req = withURLParam(req, "commentId", fixture.commentID[0])
 	testHandler.UpdateComment(w, req)
@@ -603,7 +606,7 @@ func TestClaimTaskByRuntime_PayloadOverflowReceiptsOnlyEmbeddedPrefix(t *testing
 	}
 	fixture := createCommentDeliveryFixture(t, "Comment payload overflow")
 	makeCommentDeliverySingleThread(t, fixture)
-	oversized := strings.Repeat("x", maxClaimCommentPayloadBytes+1024)
+	oversized := "[@Agent](mention://agent/" + fixture.agentID + ") " + strings.Repeat("x", maxClaimCommentPayloadBytes+1024)
 	if _, err := testPool.Exec(context.Background(), `UPDATE comment SET content = $2 WHERE id = $1`, fixture.commentID[0], oversized); err != nil {
 		t.Fatalf("make first coalesced comment oversized: %v", err)
 	}

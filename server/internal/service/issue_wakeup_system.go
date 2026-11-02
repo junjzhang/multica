@@ -48,7 +48,8 @@ var childDoneCondition = json.RawMessage(`{"type":"children_done","each_stage":t
 // neither the issue nor the workspace sets an instruction. The trigger facts
 // say which stage closed, which one is next and how many were cancelled.
 const ChildDoneDefaultInstruction = "Sub-issues of this issue have closed; the trigger facts list each stage and which one is next. " +
-	"If a later stage is waiting, check that its dependencies are met, then move its sub-issues out of backlog so they start. " +
+	"If a later stage is waiting, check that its dependencies are met, then explicitly @mention each next-stage sub-issue's assignee (or rerun it) so that work starts. " +
+	"Moving a sub-issue out of backlog or changing its status does not start a run on its own. " +
 	"If a sub-issue in the closed stages was cancelled rather than finished, decide whether its work is still needed before advancing. " +
 	"When every sub-issue is closed, bring their results together on this issue and move it forward, or mark it ready for review when nothing remains."
 

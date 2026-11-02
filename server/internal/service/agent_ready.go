@@ -137,6 +137,17 @@ func AgentReadiness(ctx context.Context, lookup RuntimeLookup, agent db.Agent) (
 			Detail:       "agent is archived",
 		}, nil
 	}
+	if agent.ExecutionKind == "external" {
+		// External execution belongs to the host session. There is nothing for
+		// Multica to claim, so no managed run may ever be admitted — a missing
+		// runtime here is not a repair the user can make. Mailbox delivery is
+		// the only path for these agents.
+		return AgentVerdict{
+			Availability: AgentBlocked,
+			Reason:       dispatch.ReasonAgentRuntimeRequired,
+			Detail:       "external agent execution is managed by its host session",
+		}, nil
+	}
 	if !agent.RuntimeID.Valid {
 		return AgentVerdict{
 			Availability: AgentBlocked,
