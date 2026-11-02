@@ -443,7 +443,7 @@ func (b *dimBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 						"requested_session", opts.ResumeSessionID,
 					)
 					resumeRejected = true
-					resCh <- Result{Status: "failed", Error: fmt.Sprintf("dim session/load: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+					resCh <- markStrictResumeResult(Result{Status: "failed", Error: fmt.Sprintf("dim session/load: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 					return
 				}
 				if runCtx.Err() == context.DeadlineExceeded {
@@ -456,13 +456,13 @@ func (b *dimBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 					finalStatus = "failed"
 					finalError = fmt.Sprintf("dim session/load failed: %v", err)
 				}
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
 			sessionResult = result
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/load"); strictErr != nil {
 				b.cfg.Logger.Warn("dim strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

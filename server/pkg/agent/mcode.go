@@ -245,21 +245,22 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				}
 				resumeRejected = true
 				resCh <- Result{
-					Status:         finalStatus,
-					Error:          finalError,
-					DurationMs:     time.Since(startTime).Milliseconds(),
-					ResumeRejected: true,
+					Status:            finalStatus,
+					Error:             finalError,
+					DurationMs:        time.Since(startTime).Milliseconds(),
+					ResumeRejected:    true,
+					StrictResumeUnmet: opts.RequireResume,
 				}
 				return
 			}
 			if err := mcodeWaitForSessionStartup(runCtx); err != nil {
 				finalStatus, finalError = mcodeRequestFailure(runCtx, opts.Timeout, "session/load", err)
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         finalStatus,
 					Error:          finalError,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: resumeRejected,
-				}
+				}, opts)
 				return
 			}
 			result, loadErr := c.request(runCtx, "session/load", map[string]any{
@@ -272,16 +273,16 @@ func (b *mcodeBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				if finalStatus == "failed" && isACPSessionNotFound(loadErr) {
 					resumeRejected = true
 				}
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         finalStatus,
 					Error:          finalError,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: resumeRejected,
-				}
+				}, opts)
 				return
 			}
 			sessionID, _ = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/load"); strictErr != nil {
 				b.cfg.Logger.Warn("mcode strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

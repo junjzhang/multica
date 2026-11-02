@@ -439,17 +439,17 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 						"requested_session", opts.ResumeSessionID,
 					)
 					resumeRejected = true
-					resCh <- Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/resume failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+					resCh <- markStrictResumeResult(Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/resume failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 					return
 				}
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("zeroclaw session/resume failed: %v", err)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/resume"); strictErr != nil {
 				b.cfg.Logger.Warn("zeroclaw strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

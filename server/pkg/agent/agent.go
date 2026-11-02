@@ -315,6 +315,19 @@ type Result struct {
 	// requested session from future lookups. Backends must not set this together
 	// with ResumeRejected; the latter means the session is permanently unusable.
 	ResumeRejectedTransient bool
+	// StrictResumeUnmet is positive evidence that a run which asked for
+	// ExecOptions.RequireResume could not prove it continued exactly the
+	// requested session, or never confirmed that session before the prompt.
+	// It is deliberately separate from ResumeRejected: ResumeRejected is the
+	// daemon's licence to retry from a fresh session, which is precisely what
+	// the strict contract forbids. A cancelled or timed-out strict run keeps
+	// its real status and may not have rejected the session, but it still
+	// must not hand back an unconfirmed session pointer.
+	//
+	// shouldRetryWithFreshSession vetoes on this before every legacy signal,
+	// so a strict failure cannot be turned back into a fresh retry by a
+	// caller that forgets its own guard. Ordinary runs leave it false.
+	StrictResumeUnmet bool
 	// codexInitializeRetrySafe is provider-internal evidence that an
 	// initialize timeout happened before semantic activity and after the
 	// process tree was reaped. It is intentionally not part of the public

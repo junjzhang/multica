@@ -234,12 +234,12 @@ func (b *qwenpawBackend) Execute(ctx context.Context, prompt string, opts ExecOp
 					sessionID = ""
 					resumeRejected = true
 				}
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/load"); strictErr != nil {
 				b.cfg.Logger.Warn("qwenpaw strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

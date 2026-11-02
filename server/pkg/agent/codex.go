@@ -1604,10 +1604,11 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				)
 			}
 			resCh <- Result{
-				Status:         finalStatus,
-				Error:          finalError,
-				DurationMs:     time.Since(startTime).Milliseconds(),
-				ResumeRejected: isCodexResumeOverflow(opts, err) || (opts.RequireResume && errors.Is(err, ErrResumeRequired)),
+				Status:            finalStatus,
+				Error:             finalError,
+				DurationMs:        time.Since(startTime).Milliseconds(),
+				ResumeRejected:    isCodexResumeOverflow(opts, err) || (opts.RequireResume && errors.Is(err, ErrResumeRequired)),
+				StrictResumeUnmet: opts.RequireResume && errors.Is(err, ErrResumeRequired),
 			}
 			return
 		}

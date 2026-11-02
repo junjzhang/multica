@@ -9279,6 +9279,15 @@ func shouldRetryWithFreshSession(result agent.Result, priorSessionID string, too
 	if result.Status != "failed" || priorSessionID == "" || tools > 0 {
 		return false
 	}
+	// A strict run forbids starting over, so its failure must not be
+	// reinterpreted as a fresh-retry opportunity by any legacy signal below.
+	// This check sits before ResumeRejected, the history/auth classifiers and
+	// the undetectable-backend compatibility path on purpose: the strict
+	// failure result still carries ResumeRejected for its own meaning, and a
+	// caller that forgets its guard must not be able to re-enable the retry.
+	if result.StrictResumeUnmet {
+		return false
+	}
 	// Positive evidence: the backend proved the resume was refused.
 	if result.ResumeRejected || result.ResumeRejectedTransient {
 		return true

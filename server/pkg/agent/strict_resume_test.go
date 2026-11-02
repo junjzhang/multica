@@ -171,92 +171,317 @@ done
 `
 }
 
-func TestStrictACPResumeIdentity(t *testing.T) {
+// TestStrictACPResumeAcceptsRealEmptyResult runs strict resume against each
+// ACP fake whose session/load or session/resume success shape was captured
+// from a real runtime. ACP's load/resume result is allowed to be empty: the
+// client supplies the id, a missing one is an RPC error, and no response field
+// names the served session. Empty must therefore confirm the requested id, not
+// fail it. The fakes here are the same ones the ordinary resume tests use.
+func TestStrictACPResumeAcceptsRealEmptyResult(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fixture is POSIX-only")
 	}
-	providers := []struct {
-		name       string
-		provenance bool
+	cases := []struct {
+		name     string
+		resumeID string
+		build    func(t *testing.T) (Backend, string)
 	}{
-		{name: "hermes", provenance: true},
-		{name: "kimi"},
-		{name: "reasonix"},
-		{name: "dim"},
-		{name: "kiro"},
-		{name: "qoder"},
-		{name: "qoderclicn"},
-		{name: "traecli"},
-		{name: "grok"},
-		{name: "qwenpaw"},
-		{name: "zeroclaw"},
-		{name: "mcode"},
-	}
-	for _, tc := range providers {
-		t.Run(tc.name, func(t *testing.T) {
-			exact := `{"sessionId":"ses_requested"}`
-			changed := `{"sessionId":"ses_other"}`
-			if tc.provenance {
-				exact = `{"_meta":{"hermes":{"sessionProvenance":{"acpSessionId":"ses_requested"}}}}`
-				changed = `{"_meta":{"hermes":{"sessionProvenance":{"acpSessionId":"ses_other"}}}}`
-			}
-			cases := []struct {
-				name       string
-				response   string
-				wantStatus string
-				wantPrompt bool
-			}{
-				{name: "exact", response: exact, wantStatus: "completed", wantPrompt: true},
-				{name: "changed", response: changed, wantStatus: "failed", wantPrompt: false},
-				{name: "missing confirmation", response: `{}`, wantStatus: "failed", wantPrompt: false},
-			}
-			for _, runCase := range cases {
-				t.Run(runCase.name, func(t *testing.T) {
-					record := filepath.Join(t.TempDir(), "requests.jsonl")
-					exe := filepath.Join(t.TempDir(), tc.name)
-					writeTestExecutable(t, exe, []byte(strictACPScript()))
-					backend, err := New(tc.name, Config{
-						ExecutablePath: exe,
-						Logger:         slog.Default(),
-						Env: map[string]string{
-							"STRICT_ACP_RECORD":   record,
-							"STRICT_ACP_INIT":     strictACPInitResult,
-							"STRICT_ACP_RESPONSE": runCase.response,
-						},
-					})
-					if err != nil {
-						t.Fatalf("New(%s): %v", tc.name, err)
-					}
-					result, err := runStrictBackend(t, backend, ExecOptions{
-						RequireResume:   true,
-						ResumeSessionID: "ses_requested",
-						Timeout:         5 * time.Second,
-						Cwd:             t.TempDir(),
-					})
-					if err != nil {
-						t.Fatalf("Execute: %v", err)
-					}
-					if result.Status != runCase.wantStatus {
-						t.Fatalf("status = %q, want %q (error %q)", result.Status, runCase.wantStatus, result.Error)
-					}
-					methods := readRecordedMethods(t, record)
-					if recordHasMethod(methods, "session/new") {
-						t.Fatalf("strict resume created a new session: %v", methods)
-					}
-					if gotPrompt := recordHasMethod(methods, "session/prompt"); gotPrompt != runCase.wantPrompt {
-						t.Fatalf("session/prompt present = %v, want %v; methods: %v", gotPrompt, runCase.wantPrompt, methods)
-					}
-					if !recordHasMethod(methods, "session/resume") && !recordHasMethod(methods, "session/load") {
-						t.Fatalf("no resume RPC recorded: %v", methods)
-					}
-					if runCase.wantPrompt {
-						if result.ResumeRejected {
-							t.Fatal("a successful exact resume must not be marked ResumeRejected")
-						}
-					} else if !result.ResumeRejected {
-						t.Fatalf("strict failure = %+v, want ResumeRejected", result)
-					}
+		{
+			name:     "dim",
+			resumeID: "ses_prior",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				return newDimTestBackend(t, record), record
+			},
+		},
+		{
+			name:     "kiro",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				exe := filepath.Join(t.TempDir(), "kiro-cli")
+				writeTestExecutable(t, exe, []byte(fakeKiroACPScript()))
+				backend, err := New("kiro", Config{
+					ExecutablePath: exe,
+					Logger:         slog.Default(),
+					Env:            map[string]string{"KIRO_REQUESTS_FILE": record},
 				})
+				if err != nil {
+					t.Fatalf("New(kiro): %v", err)
+				}
+				return backend, record
+			},
+		},
+		{
+			name:     "grok",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				exe := filepath.Join(t.TempDir(), "grok")
+				writeTestExecutable(t, exe, []byte(fakeGrokACPScript()))
+				backend, err := New("grok", Config{
+					ExecutablePath: exe,
+					Logger:         slog.Default(),
+					Env:            map[string]string{"GROK_REQUESTS_FILE": record},
+				})
+				if err != nil {
+					t.Fatalf("New(grok): %v", err)
+				}
+				return backend, record
+			},
+		},
+		{
+			name:     "qwenpaw",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				exe := writeFakeQwenpawScript(t, fakeQwenpawACPScript())
+				backend, err := New("qwenpaw", Config{
+					ExecutablePath: exe,
+					Logger:         slog.Default(),
+					Env:            map[string]string{"QWENPAW_REQUESTS_FILE": record},
+				})
+				if err != nil {
+					t.Fatalf("New(qwenpaw): %v", err)
+				}
+				return backend, record
+			},
+		},
+		{
+			name:     "traecli",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				exe := filepath.Join(t.TempDir(), "traecli")
+				writeTestExecutable(t, exe, []byte(fakeTraecliACPScript()))
+				backend, err := New("traecli", Config{
+					ExecutablePath: exe,
+					Logger:         slog.Default(),
+					Env:            map[string]string{"TRAECLI_REQUESTS_FILE": record},
+				})
+				if err != nil {
+					t.Fatalf("New(traecli): %v", err)
+				}
+				return backend, record
+			},
+		},
+		{
+			name:     "mcode",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				exe, record, _ := writeFakeMcodeACP(t, true)
+				backend, err := New("mcode", Config{ExecutablePath: exe, Logger: slog.Default()})
+				if err != nil {
+					t.Fatalf("New(mcode): %v", err)
+				}
+				return backend, record
+			},
+		},
+		{
+			name:     "zeroclaw",
+			resumeID: "ses_existing",
+			build: func(t *testing.T) (Backend, string) {
+				record := filepath.Join(t.TempDir(), "requests.jsonl")
+				exe := writeFakeZeroclawScript(t, fakeZeroclawACPScript())
+				backend, err := New("zeroclaw", Config{
+					ExecutablePath: exe,
+					Logger:         slog.Default(),
+					Env:            map[string]string{"ZEROCLAW_REQUESTS_FILE": record},
+				})
+				if err != nil {
+					t.Fatalf("New(zeroclaw): %v", err)
+				}
+				return backend, record
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, record := tc.build(t)
+			result, err := runStrictBackend(t, backend, ExecOptions{
+				RequireResume:   true,
+				ResumeSessionID: tc.resumeID,
+				Timeout:         10 * time.Second,
+				Cwd:             t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if result.Status != "completed" {
+				t.Fatalf("a genuine resume of the real empty-result shape was rejected: %+v", result)
+			}
+			if result.SessionID != tc.resumeID {
+				t.Fatalf("SessionID = %q, want %q", result.SessionID, tc.resumeID)
+			}
+			if result.StrictResumeUnmet {
+				t.Fatalf("confirmed strict resume marked unmet: %+v", result)
+			}
+			methods := readRecordedMethods(t, record)
+			if recordHasMethod(methods, "session/new") {
+				t.Fatalf("strict resume created a new session: %v", methods)
+			}
+			if !recordHasMethod(methods, "session/load") && !recordHasMethod(methods, "session/resume") {
+				t.Fatalf("no resume RPC recorded: %v", methods)
+			}
+			if !recordHasMethod(methods, "session/prompt") {
+				t.Fatalf("resumed session never received the task prompt: %v", methods)
+			}
+		})
+	}
+}
+
+// TestStrictACPResumeEchoContract keeps both non-empty response shapes honest:
+// an exact echo confirms, and a different id is a silent rebind that strict
+// mode must refuse before the prompt. The load and resume RPCs share this
+// check, so one provider of each kind is enough here; the empty-result matrix
+// above covers the real per-provider shapes.
+func TestStrictACPResumeEchoContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	cases := []struct {
+		name       string
+		provider   string
+		response   string
+		wantStatus string
+		wantPrompt bool
+	}{
+		{name: "load exact echo", provider: "dim", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
+		{name: "load different id", provider: "dim", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
+		{name: "resume exact echo kimi", provider: "kimi", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
+		{name: "resume different id kimi", provider: "kimi", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
+		{name: "resume exact echo qoder", provider: "qoder", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
+		{name: "resume different id qoder", provider: "qoder", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
+		{name: "resume exact echo reasonix", provider: "reasonix", response: `{"sessionId":"ses_requested"}`, wantStatus: "completed", wantPrompt: true},
+		{name: "resume different id reasonix", provider: "reasonix", response: `{"sessionId":"ses_other"}`, wantStatus: "failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := filepath.Join(t.TempDir(), "requests.jsonl")
+			exe := filepath.Join(t.TempDir(), tc.provider)
+			writeTestExecutable(t, exe, []byte(strictACPScript()))
+			backend, err := New(tc.provider, Config{
+				ExecutablePath: exe,
+				Logger:         slog.Default(),
+				Env: map[string]string{
+					"STRICT_ACP_RECORD":   record,
+					"STRICT_ACP_INIT":     strictACPInitResult,
+					"STRICT_ACP_RESPONSE": tc.response,
+				},
+			})
+			if err != nil {
+				t.Fatalf("New(%s): %v", tc.provider, err)
+			}
+			result, err := runStrictBackend(t, backend, ExecOptions{
+				RequireResume:   true,
+				ResumeSessionID: "ses_requested",
+				Timeout:         10 * time.Second,
+				Cwd:             t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (error %q)", result.Status, tc.wantStatus, result.Error)
+			}
+			methods := readRecordedMethods(t, record)
+			if recordHasMethod(methods, "session/new") {
+				t.Fatalf("strict resume created a new session: %v", methods)
+			}
+			if gotPrompt := recordHasMethod(methods, "session/prompt"); gotPrompt != tc.wantPrompt {
+				t.Fatalf("session/prompt present = %v, want %v; methods: %v", gotPrompt, tc.wantPrompt, methods)
+			}
+			if tc.wantPrompt {
+				if result.SessionID != "ses_requested" || result.StrictResumeUnmet {
+					t.Fatalf("exact resume result = %+v", result)
+				}
+			} else if !result.ResumeRejected || !result.StrictResumeUnmet || result.SessionID != "" {
+				t.Fatalf("strict failure = %+v, want ResumeRejected, StrictResumeUnmet, no session", result)
+			}
+		})
+	}
+}
+
+// TestStrictHermesResumeRequiresProvenance pins the one ACP backend whose
+// successful resume response is untrustworthy on its own: Hermes silently
+// creates a new session when the requested one is missing. The served ACP id
+// is only visible on _meta.hermes.sessionProvenance.acpSessionId, so strict
+// mode requires it to match exactly; no provenance stays fail-closed even if a
+// top-level sessionId happens to echo the request.
+func TestStrictHermesResumeRequiresProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	cases := []struct {
+		name       string
+		response   string
+		wantStatus string
+		wantPrompt bool
+	}{
+		{
+			name:       "provenance exact",
+			response:   `{"_meta":{"hermes":{"sessionProvenance":{"acpSessionId":"ses_requested"}}}}`,
+			wantStatus: "completed",
+			wantPrompt: true,
+		},
+		{
+			name:       "provenance different",
+			response:   `{"_meta":{"hermes":{"sessionProvenance":{"acpSessionId":"ses_other"}}}}`,
+			wantStatus: "failed",
+		},
+		{
+			name:       "no provenance",
+			response:   `{}`,
+			wantStatus: "failed",
+		},
+		{
+			name:       "top-level echo without provenance",
+			response:   `{"sessionId":"ses_requested"}`,
+			wantStatus: "failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := filepath.Join(t.TempDir(), "requests.jsonl")
+			exe := filepath.Join(t.TempDir(), "hermes")
+			writeTestExecutable(t, exe, []byte(strictACPScript()))
+			backend, err := New("hermes", Config{
+				ExecutablePath: exe,
+				Logger:         slog.Default(),
+				Env: map[string]string{
+					"STRICT_ACP_RECORD":   record,
+					"STRICT_ACP_INIT":     strictACPInitResult,
+					"STRICT_ACP_RESPONSE": tc.response,
+				},
+			})
+			if err != nil {
+				t.Fatalf("New(hermes): %v", err)
+			}
+			result, err := runStrictBackend(t, backend, ExecOptions{
+				RequireResume:   true,
+				ResumeSessionID: "ses_requested",
+				Timeout:         10 * time.Second,
+				Cwd:             t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (error %q)", result.Status, tc.wantStatus, result.Error)
+			}
+			methods := readRecordedMethods(t, record)
+			if recordHasMethod(methods, "session/new") {
+				t.Fatalf("strict resume created a new session: %v", methods)
+			}
+			if gotPrompt := recordHasMethod(methods, "session/prompt"); gotPrompt != tc.wantPrompt {
+				t.Fatalf("session/prompt present = %v, want %v; methods: %v", gotPrompt, tc.wantPrompt, methods)
+			}
+			if tc.wantPrompt {
+				if result.SessionID != "ses_requested" || result.StrictResumeUnmet {
+					t.Fatalf("confirmed hermes resume result = %+v", result)
+				}
+			} else if !result.ResumeRejected || !result.StrictResumeUnmet || result.SessionID != "" {
+				t.Fatalf("strict hermes failure = %+v, want ResumeRejected, StrictResumeUnmet, no session", result)
 			}
 		})
 	}
@@ -290,8 +515,8 @@ func TestStrictMcodeWithoutLoadSessionFailsBeforePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if result.Status != "failed" || !result.ResumeRejected {
-		t.Fatalf("result = %+v, want failed ResumeRejected", result)
+	if result.Status != "failed" || !result.ResumeRejected || !result.StrictResumeUnmet {
+		t.Fatalf("result = %+v, want failed ResumeRejected StrictResumeUnmet", result)
 	}
 	if !strings.Contains(result.Error, ErrResumeRequired.Error()) {
 		t.Fatalf("error = %q, want strict-resume diagnostic", result.Error)
@@ -335,6 +560,9 @@ func TestStrictACPResumeRPCErrorDoesNotPrompt(t *testing.T) {
 	}
 	if result.Status != "failed" {
 		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if !result.StrictResumeUnmet {
+		t.Fatalf("strict resume RPC error is not marked StrictResumeUnmet: %+v", result)
 	}
 	methods := readRecordedMethods(t, record)
 	if recordHasMethod(methods, "session/new") || recordHasMethod(methods, "session/prompt") {
@@ -441,11 +669,11 @@ func TestStrictCodexResumeIdentity(t *testing.T) {
 				t.Fatalf("turn/start present = %v, want %v; methods: %v", gotPrompt, tc.wantPrompt, methods)
 			}
 			if tc.wantPrompt {
-				if result.SessionID != "thr_requested" {
-					t.Fatalf("SessionID = %q, want thr_requested", result.SessionID)
+				if result.SessionID != "thr_requested" || result.StrictResumeUnmet {
+					t.Fatalf("strict success result = %+v, want thr_requested and no unmet marker", result)
 				}
-			} else if !result.ResumeRejected {
-				t.Fatalf("strict failure = %+v, want ResumeRejected", result)
+			} else if !result.ResumeRejected || !result.StrictResumeUnmet {
+				t.Fatalf("strict failure = %+v, want ResumeRejected and StrictResumeUnmet", result)
 			}
 		})
 	}
@@ -760,6 +988,35 @@ func TestStrictMuseResumeIdentity(t *testing.T) {
 	}
 }
 
+// TestStrictMuseResumeErrorVetoesFreshRetry covers the MSP resume-error path:
+// Muse reports a host-side session-not-found as ResumeRejected, which is the
+// ordinary fresh-retry signal. A strict run must still mark the result so the
+// daemon cannot turn that same signal into the fresh session the caller
+// forbade.
+func TestStrictMuseResumeErrorVetoesFreshRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	bin, requestsPath, _ := writeFakeMuseServe(t, true)
+	backend := newFakeMuseBackend(t, bin)
+	result, err := runStrictBackend(t, backend, ExecOptions{
+		RequireResume:   true,
+		ResumeSessionID: fakeMuseSessionID,
+		Timeout:         5 * time.Second,
+		Cwd:             t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if result.Status != "failed" || !result.ResumeRejected || !result.StrictResumeUnmet {
+		t.Fatalf("strict muse resume error result = %+v, want failed ResumeRejected StrictResumeUnmet", result)
+	}
+	requests := readMuseRequests(t, requestsPath)
+	if museRequestByMethod(requests, "turn/start") != nil {
+		t.Fatalf("strict muse resume error still started a turn: %v", requests)
+	}
+}
+
 // TestStrictDshResumeIdentity pins the DSH protocol contract: the execute
 // frame carries the prompt and resume_session_id together, and strict mode
 // accepts the run only after the runtime reports session{resumed:true} for the
@@ -780,6 +1037,7 @@ func TestStrictDshResumeIdentity(t *testing.T) {
 		{name: "fresh session", mode: "fresh", wantStatus: "failed", wantRejected: true},
 		{name: "missing session", mode: "missing", wantStatus: "failed", wantRejected: true},
 		{name: "result id only", mode: "result-only", wantStatus: "failed", wantRejected: true},
+		{name: "confirmed then different result id", mode: "confirmed-changed", wantStatus: "failed", wantRejected: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -810,12 +1068,17 @@ case "$DSH_STRICT_MODE" in
   result-only)
     printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_requested","output":"no session frame","resume_rejected":false}'
     ;;
+  confirmed-changed)
+    printf '%s\n' '{"v":1,"type":"session","request_id":"task-1","session_id":"ses_requested","resumed":true}'
+    printf '%s\n' '{"v":1,"type":"result","request_id":"task-1","status":"completed","session_id":"ses_other","output":"wrong","resume_rejected":false}'
+    ;;
 esac
 `)
 			backend, err := New("dsh", Config{
 				ExecutablePath: bin,
 				TaskID:         "task-1",
 				Logger:         slog.Default(),
+				BuiltinRuntime: true,
 				Env: map[string]string{
 					"DSH_STRICT_MODE":   tc.mode,
 					"DSH_STRICT_RECORD": record,
@@ -851,8 +1114,8 @@ esac
 				t.Fatalf("status = %q, want %q (error %q)", result.Status, tc.wantStatus, result.Error)
 			}
 			if tc.wantRejected {
-				if !result.ResumeRejected || result.SessionID != "" {
-					t.Fatalf("strict failure = %+v, want ResumeRejected with no adopted session", result)
+				if !result.ResumeRejected || !result.StrictResumeUnmet || result.SessionID != "" {
+					t.Fatalf("strict failure = %+v, want ResumeRejected, StrictResumeUnmet, and no adopted session", result)
 				}
 				if !strings.Contains(result.Error, "ses_requested") {
 					t.Fatalf("strict failure error %q does not name the requested session", result.Error)
@@ -863,6 +1126,116 @@ esac
 				t.Fatalf("strict success result = %+v, want exact requested session", result)
 			}
 		})
+	}
+}
+
+// TestStrictDshUnconfirmedTerminalStatesDoNotLeakSession pins the reviewer's
+// cancellation probe and its timeout sibling. A strict run that never saw
+// session{resumed:true, session_id==requested} must hand back no session
+// pointer, even when the host reports a fresh id in its cancelled/timeout
+// terminal frame. The real status is preserved: cancel and timeout are
+// outcomes, not resume verdicts, so they do not become a definite rejection.
+// No status message may carry the unconfirmed id either, because the daemon
+// pins a resume pointer as soon as it sees one.
+func TestStrictDshUnconfirmedTerminalStatesDoNotLeakSession(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fixture is POSIX-only")
+	}
+	for _, tc := range []struct {
+		name       string
+		status     string
+		wantStatus string
+	}{
+		{name: "cancelled", status: "cancelled", wantStatus: "cancelled"},
+		{name: "timeout", status: "timeout", wantStatus: "timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := writeDshFixture(t, `
+if [ "$1" != "--profile" ] || [ "$2" != "multica" ] || [ "$3" != "--stdio" ]; then exit 9; fi
+printf '%s\n' '{"v":1,"type":"ready","runtime":"dsh","plugin_version":"test","capabilities":{}}'
+IFS= read -r execute
+printf '%s\n' '{"v":1,"type":"session","request_id":"task-cancel","session_id":"session-brand-new","resumed":false}'
+IFS= read -r cancel
+printf '%s\n' '{"v":1,"type":"result","request_id":"task-cancel","status":"'"$DSH_STRICT_TERMINAL"'","session_id":"session-brand-new","output":"","resume_rejected":false}'
+`)
+			backend, err := New("dsh", Config{
+				ExecutablePath: bin,
+				TaskID:         "task-cancel",
+				Logger:         slog.Default(),
+				BuiltinRuntime: true,
+				Env:            map[string]string{"DSH_STRICT_TERMINAL": tc.status},
+			})
+			if err != nil {
+				t.Fatalf("New(dsh): %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			session, err := backend.Execute(ctx, "wait", ExecOptions{
+				Cwd:             t.TempDir(),
+				Timeout:         5 * time.Second,
+				RequireResume:   true,
+				ResumeSessionID: "session-requested-original",
+			})
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			var messages []Message
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for msg := range session.Messages {
+					messages = append(messages, msg)
+				}
+			}()
+			// The fixture answers the protocol cancel frame, so any cancel is
+			// enough; the terminal frame itself decides the status under test.
+			time.Sleep(200 * time.Millisecond)
+			cancel()
+			result := <-session.Result
+			<-done
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (error %q)", result.Status, tc.wantStatus, result.Error)
+			}
+			if result.SessionID != "" {
+				t.Fatalf("strict run never confirmed the requested session yet Result.SessionID=%q", result.SessionID)
+			}
+			if !result.StrictResumeUnmet {
+				t.Fatalf("strict run without confirmation is not marked StrictResumeUnmet: %+v", result)
+			}
+			if result.ResumeRejected {
+				t.Fatalf("cancel/timeout must not be reported as a definite resume rejection: %+v", result)
+			}
+			for _, msg := range messages {
+				if msg.SessionID == "session-brand-new" {
+					t.Fatalf("unconfirmed session id was broadcast to the daemon: %+v", msg)
+				}
+			}
+		})
+	}
+}
+
+// TestStrictDshCustomRuntimeProfileFailsBeforeLaunch keeps the strict
+// guarantee scoped to the built-in Multica DSH runtime whose protocol-v1
+// execute path was verified. An arbitrary custom runtime profile that merely
+// declares the dsh protocol family has no such evidence, so strict mode must
+// fail closed before starting it.
+func TestStrictDshCustomRuntimeProfileFailsBeforeLaunch(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "launched")
+	backend, err := New("dsh", Config{
+		ExecutablePath: writeMarkerExecutable(t, marker),
+		Logger:         slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("New(dsh): %v", err)
+	}
+	_, err = backend.Execute(context.Background(), "prompt", ExecOptions{
+		RequireResume:   true,
+		ResumeSessionID: "ses_requested",
+	})
+	if !errors.Is(err, ErrResumeRequired) {
+		t.Fatalf("Execute error = %v, want ErrResumeRequired", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("strict custom-profile dsh was launched (stat error: %v)", statErr)
 	}
 }
 

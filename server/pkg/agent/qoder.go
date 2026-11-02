@@ -268,12 +268,12 @@ func (b *qoderBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 				// same dead session on every later turn (GH #8116).
 				finalStatus, finalError, resumeRejected = classifyACPResumeFailure(
 					runCtx, "qoder", "session/resume", err, timeout, b.cfg.Logger)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/resume"); strictErr != nil {
 				b.cfg.Logger.Warn("qoder strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

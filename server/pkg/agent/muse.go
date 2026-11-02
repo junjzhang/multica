@@ -651,12 +651,12 @@ func (b *museBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 				// may still be healthy and the platform retry should resume it.
 				status, message := museRequestFailure(runCtx, opts.Timeout, "session/resume", resumeErr)
 				cleanup()
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         status,
 					Error:          message,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: museSessionGone(resumeErr),
-				}
+				}, opts)
 				return
 			}
 			sessionID = museSessionID(result)

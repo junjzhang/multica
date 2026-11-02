@@ -301,18 +301,18 @@ func (b *reasonixBackend) Execute(ctx context.Context, prompt string, opts ExecO
 				} else if finalStatus == "failed" && isReasonixSessionLeaseConflict(err) {
 					finalError = fmt.Sprintf("reasonix session is already in use; close the other Reasonix window or process first: %v", err)
 				}
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         finalStatus,
 					Error:          finalError,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: resumeRejected,
-				}
+				}, opts)
 				return
 			}
 			sessionResult = result
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/resume"); strictErr != nil {
 				b.cfg.Logger.Warn("reasonix strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,

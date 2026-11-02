@@ -36,13 +36,29 @@ func requireStrictResume(opts ExecOptions) error {
 // presence of a separate preflight call:
 //
 //   - ACP (Hermes, TraeCLI, Kimi, Dim, Qoder CN, Reasonix, Kiro, MCode, QwenPaw,
-//     ZeroClaw, Grok, Muse): session/load or session/resume completes before
-//     session/prompt and reports the served id. checkStrictACPResumedSessionID
-//     rejects an empty or changed id. MCode additionally needs loadSession.
+//     ZeroClaw, Grok): session/load or session/resume is addressed by the
+//     client-supplied session id and completes before session/prompt. The
+//     response is allowed to be empty — ACP's LoadSession/ResumeSession result
+//     has no session-id field — so an empty result is confirmation that the
+//     requested id was accepted, provided the adapter reports a missing
+//     session as an RPC error (the isACPSessionNotFound /
+//     classifyACPResumeFailure path these backends already use). A response
+//     that names a different id is a silent rebind and is rejected.
+//     Hermes is the exception: it answers a missing session by silently
+//     creating a new one, so it must report the served ACP id under
+//     _meta.hermes.sessionProvenance.acpSessionId and strict mode requires an
+//     exact match; missing provenance stays fail-closed.
+//   - Muse: its MSP session/resume response names the served session, so
+//     strict mode requires that id to equal the requested one.
 //   - Codex: thread/resume returns the thread id before turn/start.
-//   - DSH: the runtime resumes exactly the non-empty resume_session_id before
-//     followup and reports session{resumed:true, session_id} first; see
-//     dsh.go.
+//   - DSH: the protocol-v1 execute frame carries the prompt and the non-empty
+//     resume_session_id together, and the verified Multica DSH runtime resumes
+//     exactly that session before followup, then reports
+//     session{resumed:true, session_id} first; see dsh.go. That guarantee is
+//     scoped to the built-in runtime (Config.BuiltinRuntime with no launch
+//     prefix); a custom runtime profile declaring the same protocol family is
+//     rejected before launch because there is no evidence it honours the same
+//     atomic resume contract.
 //   - Claude: --resume loads the named transcript before the turn. The adapter
 //     pre-checks the same transcript file so a missing session fails before
 //     launch. File existence only moves that failure earlier; the guarantee
@@ -91,19 +107,43 @@ func requireExactResumedSessionID(opts ExecOptions, confirmed, source string) er
 	return nil
 }
 
-// checkStrictACPResumedSessionID is the shared ACP resume validation. Hermes
-// reports the served ACP session under
-// _meta.hermes.sessionProvenance.acpSessionId rather than a top-level sessionId,
-// so callers for that backend pass provenance=true.
-func checkStrictACPResumedSessionID(opts ExecOptions, response json.RawMessage, provenance bool) error {
+// checkStrictACPResume validates a client-addressed ACP resume whose success
+// result is allowed to be empty. The request itself names the session, and the
+// adapters reject an unknown one through classifyACPResumeFailure before this
+// point, so a successful empty result confirms the requested id rather than
+// leaving it unproven. A non-empty response names the session the runtime
+// actually served; anything but the requested id is a silent rebind and must
+// not reach the prompt. rpc is only used in the failure diagnostic.
+func checkStrictACPResume(opts ExecOptions, response json.RawMessage, rpc string) error {
 	if !opts.RequireResume {
 		return nil
 	}
-	confirmed := extractACPSessionID(response)
-	if confirmed == "" && provenance {
-		confirmed = extractACPProvenanceSessionID(response)
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(response, &object); err != nil || object == nil {
+		return fmt.Errorf("%w: %s returned no usable resume result", ErrResumeRequired, rpc)
 	}
-	return requireExactResumedSessionID(opts, confirmed, "ACP resume")
+	confirmed := strings.TrimSpace(extractACPSessionID(response))
+	if confirmed == "" {
+		return nil
+	}
+	return requireExactResumedSessionID(opts, confirmed, rpc)
+}
+
+// checkStrictHermesResume is the Hermes-specific strict check. Hermes answers
+// session/resume for a session it no longer holds by silently creating a new
+// one, so neither an empty result nor a top-level sessionId is evidence. Only
+// the ACP id on _meta.hermes.sessionProvenance.acpSessionId identifies the
+// session the runtime actually served; without it strict mode cannot prove the
+// requested conversation was restored and fails closed.
+func checkStrictHermesResume(opts ExecOptions, response json.RawMessage) error {
+	if !opts.RequireResume {
+		return nil
+	}
+	confirmed := strings.TrimSpace(extractACPProvenanceSessionID(response))
+	if confirmed == "" {
+		return fmt.Errorf("%w: hermes session/resume reported no session provenance for %q", ErrResumeRequired, opts.ResumeSessionID)
+	}
+	return requireExactResumedSessionID(opts, confirmed, "hermes session/resume")
 }
 
 // strictResumeFailureResult is the terminal result for a run whose resume could
@@ -113,9 +153,22 @@ func checkStrictACPResumedSessionID(opts ExecOptions, response json.RawMessage, 
 // Execute error.
 func strictResumeFailureResult(err error, start time.Time) Result {
 	return Result{
-		Status:         "failed",
-		Error:          err.Error(),
-		DurationMs:     time.Since(start).Milliseconds(),
-		ResumeRejected: true,
+		Status:            "failed",
+		Error:             err.Error(),
+		DurationMs:        time.Since(start).Milliseconds(),
+		ResumeRejected:    true,
+		StrictResumeUnmet: true,
 	}
+}
+
+// markStrictResumeResult marks a strict run's terminal result without changing
+// its status. Resume errors that surface as a normal Result (for example a
+// session-not-found RPC failure) follow this path so the daemon can veto a
+// fresh retry even though ResumeRejected may be set. Ordinary runs are left
+// untouched.
+func markStrictResumeResult(result Result, opts ExecOptions) Result {
+	if opts.RequireResume {
+		result.StrictResumeUnmet = true
+	}
+	return result
 }

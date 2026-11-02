@@ -419,12 +419,12 @@ func (b *grokBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 				// same dead session on every later turn (GH #8116).
 				finalStatus, finalError, resumeRejected = classifyACPResumeFailure(
 					runCtx, "grok", "session/load", err, timeout, b.cfg.Logger)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
-			if strictErr := checkStrictACPResumedSessionID(opts, result, false); strictErr != nil {
+			if strictErr := checkStrictACPResume(opts, result, "session/load"); strictErr != nil {
 				b.cfg.Logger.Warn("grok strict resume refused to continue",
 					"requested", opts.ResumeSessionID,
 					"resolved", sessionID,
