@@ -12,7 +12,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -261,6 +263,15 @@ func StopClosedIssueWakeups(ctx context.Context, q *db.Queries, issue db.Issue) 
 	if err = q.DisableIssueWakeups(ctx, issue.ID); err != nil {
 		return nil, err
 	}
+	// An external target has no queued run to cancel. Withdraw notifications
+	// no host has accepted yet so closing an issue cannot still wake it.
+	if _, err = q.WithdrawIssueWakeupDeliveries(ctx, db.WithdrawIssueWakeupDeliveriesParams{
+		Reason:      pgtype.Text{String: "Issue closed before the wakeup notification was accepted", Valid: true},
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+	}); err != nil {
+		return nil, err
+	}
 	return q.CancelUnstartedIssueWakeupTasks(ctx, issue.ID)
 }
 
@@ -470,6 +481,18 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 	if err = s.authorize(ctx, q, issue.WorkspaceID, member, agent); err != nil {
 		return out, err
 	}
+	// The explicit (agent, issue) session binding is the delivery address;
+	// without one the rule could never be delivered, so refuse it at
+	// registration instead of queueing notifications that no host can claim.
+	// There is no fallback to another session of the same agent.
+	if agent.ExecutionKind == "external" {
+		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(agent.ID), util.UUIDToString(issue.ID)); err != nil {
+			if errors.Is(err, sessionroute.ErrNotBound) {
+				return out, fmt.Errorf("%w: agent has no session bound to this issue", ErrWakeupInput)
+			}
+			return out, err
+		}
+	}
 	filterAgent, err := wakeupUUID(in.FilterAgentID)
 	if err != nil {
 		return out, err
@@ -545,6 +568,11 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 			return out, err
 		}
 		if _, err = q.CancelUnstartedWakeupTasks(ctx, util.UUIDToString(old.ID)); err != nil {
+			return out, err
+		}
+		// A replacement is an explicit withdrawal of the old configuration.
+		// Its unaccepted notifications go with the old unstarted runs.
+		if err = withdrawWakeupDeliveries(ctx, q, old, "Wakeup replaced before the notification was accepted"); err != nil {
 			return out, err
 		}
 	}
@@ -628,7 +656,11 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 }
 
 func (s *IssueWakeupService) authorize(ctx context.Context, q *db.Queries, ws, member pgtype.UUID, a db.Agent) error {
-	if !member.Valid || a.ArchivedAt.Valid || !a.RuntimeID.Valid {
+	// An external agent has no Multica runtime: its registered host session is
+	// the executor, and dispatch reaches it through the delivery queue. Every
+	// other condition is the same workspace membership and invocation rule.
+	runnable := a.RuntimeID.Valid || a.ExecutionKind == "external"
+	if !member.Valid || a.ArchivedAt.Valid || !runnable {
 		return ErrWakeupForbidden
 	}
 	if _, err := q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{UserID: member, WorkspaceID: ws}); err != nil {
@@ -969,7 +1001,9 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		return readErr
 	}
 	var overlay runtimeMCPOverlayData
-	if candidate.ID.Valid && s.authorize(ctx, s.Tasks.Queries, prev.WorkspaceID, prev.CreatedBy, candidate) == nil {
+	// Only a managed run receives an MCP overlay; an external target is
+	// delivered to its host session and must not inherit runtime credentials.
+	if candidate.ID.Valid && candidate.ExecutionKind != "external" && s.authorize(ctx, s.Tasks.Queries, prev.WorkspaceID, prev.CreatedBy, candidate) == nil {
 		overlay = s.Tasks.buildRuntimeMCPOverlay(ctx, prev.CreatedBy, candidate)
 	}
 	tx, err := s.Tasks.TxStarter.Begin(ctx)
@@ -1020,11 +1054,25 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		return tx.Commit(ctx)
 	}
 	authErr := s.authorize(ctx, q, w.WorkspaceID, w.CreatedBy, agent)
+	disableReason := "Wakeup disabled: issue closed or permission unavailable"
+	// The issue's explicit session binding is the external target's delivery
+	// address, and it can be revoked after registration. Queueing then would
+	// leave a notification no host can claim, so the rule ends like one whose
+	// target is no longer allowed to run.
+	if authErr == nil && agent.ID.Valid && agent.ExecutionKind == "external" {
+		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID)); err != nil {
+			if !errors.Is(err, sessionroute.ErrNotBound) {
+				return err
+			}
+			authErr = ErrWakeupForbidden
+			disableReason = "Wakeup disabled: external host session binding is no longer active"
+		}
+	}
 	if w.DisabledAt.Valid || !active || authErr != nil {
 		if authErr != nil && !errors.Is(authErr, ErrWakeupForbidden) {
 			return authErr
 		}
-		_, err = tx.Exec(ctx, "UPDATE issue_wakeup SET enabled=false,disabled_at=COALESCE(disabled_at,now()),last_error=$2 WHERE id=$1", w.ID, "Wakeup disabled: issue closed or permission unavailable")
+		_, err = tx.Exec(ctx, "UPDATE issue_wakeup SET enabled=false,disabled_at=COALESCE(disabled_at,now()),last_error=$2 WHERE id=$1", w.ID, disableReason)
 		if err != nil {
 			return err
 		}
@@ -1032,6 +1080,9 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 			return err
 		}
 		if _, err = q.CancelUnstartedWakeupTasks(ctx, util.UUIDToString(w.ID)); err != nil {
+			return err
+		}
+		if err = withdrawWakeupDeliveries(ctx, q, w, disableReason); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1156,6 +1207,33 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		return err
 	}
 	taskExists := err == nil
+	// A managed rule merges a later firing into its waiting run. An external
+	// target has no task, so the merge happens one level up: while a
+	// notification for this rule is still undecided, timers advance and the
+	// inputs stay pending, exactly like a claimed run holding its inputs. The
+	// first pass after the notification settles merges them into one delivery.
+	if !taskExists && agent.ExecutionKind == "external" {
+		undecided, findErr := q.FindUndecidedWakeupDelivery(ctx, db.FindUndecidedWakeupDeliveryParams{
+			WorkspaceID:      w.WorkspaceID,
+			RecipientAgentID: w.AgentID,
+			SourcePattern:    wakeupDeliverySourcePattern(w.ID),
+		})
+		if findErr != nil && !errors.Is(findErr, pgx.ErrNoRows) {
+			return findErr
+		}
+		if findErr == nil {
+			if err = q.AdvanceIssueWakeup(ctx, db.AdvanceIssueWakeupParams{ID: w.ID, Enabled: w.Enabled, NextFireAt: next,
+				LastError: pgtype.Text{String: undecidedWakeupReason(undecided), Valid: true}}); err != nil {
+				return err
+			}
+			if timedOut {
+				if err = markTimedOut(); err != nil {
+					return err
+				}
+			}
+			return commit()
+		}
+	}
 	receipts, err := q.ListPendingWakeupReceipts(ctx, db.ListPendingWakeupReceiptsParams{WakeupID: w.ID, Revision: w.Revision})
 	if err != nil {
 		return err
@@ -1294,9 +1372,19 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 			if loop {
 				reason = wakeupPausedLoop
 			} else {
-				recent, e := q.CountRecentWakeupTasks(ctx, db.CountRecentWakeupTasksParams{WakeupID: util.UUIDToString(w.ID), IssueID: w.IssueID, Since: pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true}})
-				if e != nil {
-					return e
+				var recent int64
+				if agent.ExecutionKind == "external" {
+					recent, err = q.CountRecentWakeupDeliveries(ctx, db.CountRecentWakeupDeliveriesParams{
+						WorkspaceID:      w.WorkspaceID,
+						RecipientAgentID: w.AgentID,
+						SourcePattern:    wakeupDeliverySourcePattern(w.ID),
+						Since:            pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true},
+					})
+				} else {
+					recent, err = q.CountRecentWakeupTasks(ctx, db.CountRecentWakeupTasksParams{WakeupID: util.UUIDToString(w.ID), IssueID: w.IssueID, Since: pgtype.Timestamptz{Time: now.Add(-time.Hour), Valid: true}})
+				}
+				if err != nil {
+					return err
 				}
 				if recent >= wakeupHourlyRunLimit {
 					reason = wakeupPausedRate
@@ -1317,9 +1405,18 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		}
 	}
 	noteText, evidence := mergeWakeupEvidence(w, task, receipts)
-	if taskExists {
+	// An external target has no Multica runtime to run a task. The firing is
+	// stored as a generic delivery instead, in this same transaction, so the
+	// consumed inputs, the notification and the rule's next state cannot
+	// diverge. A managed target keeps the ordinary task path below.
+	external := !taskExists && agent.ExecutionKind == "external"
+	var deliveryID string
+	switch {
+	case external:
+		deliveryID, err = enqueueWakeupDelivery(ctx, q, w, receipts, noteText)
+	case taskExists:
 		task, err = q.ReplaceWakeupEvidence(ctx, db.ReplaceWakeupEvidenceParams{ID: task.ID, HandoffNote: pgtype.Text{String: noteText, Valid: true}, WakeupEvidence: evidence})
-	} else {
+	default:
 		if err = guardIssueNotInTriage(ctx, q, issue.ID, OriginNamed); err != nil {
 			return err
 		}
@@ -1359,9 +1456,17 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 			return err
 		}
 		// Schedules speak for themselves in the run list; triggers from events,
-		// conditions, a single time or a person get a timeline entry.
-		if w.Kind != "every" && w.Kind != "cron" {
-			if err = note(wakeupActivityTriggered, wakeupTriggerDetails(task, receipts)); err != nil {
+		// conditions, a single time or a person get a timeline entry. An
+		// external rule has no run list, so its delivery is always linked.
+		if external || (w.Kind != "every" && w.Kind != "cron") {
+			details := wakeupTriggerDetails(task, receipts)
+			if external {
+				// The delivery id is the read-only link from the timeline to
+				// the durable notification that this firing produced.
+				delete(details, "task_id")
+				details["delivery_id"] = deliveryID
+			}
+			if err = note(wakeupActivityTriggered, details); err != nil {
 				return err
 			}
 		}
@@ -1378,9 +1483,139 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	if err = commit(); err != nil {
 		return err
 	}
+	if !task.ID.Valid {
+		// The generic worker polls its own queue; there is no run to broadcast.
+		return nil
+	}
 	s.Tasks.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.Tasks.NotifyTaskEnqueued(ctx, task)
 	return nil
+}
+
+// A wakeup fired at an external agent is one generic delivery: the rule keeps
+// its timers, conditions, dedupe and pause semantics, while the host session
+// owns execution. The source key namespaces these rows apart from comment
+// handoffs; the value identifies one firing, never the rule.
+const (
+	wakeupDeliverySourceType = "issue_wakeup"
+	wakeupDeliveryKind       = "issue_wakeup"
+	// A payload beyond this bound cannot be stored as an immutable delivery.
+	// The rendered note is already bounded; the fallback only replaces a value
+	// whose JSON escaping alone would exceed the limit.
+	wakeupDeliveryPayloadLimit = delivery.MaxPayloadBytes
+)
+
+// withdrawWakeupDeliveries stops a rule's notifications that no host has
+// accepted yet. It runs in the transaction that disables or replaces the rule,
+// so a cancel racing a firing either stops the delivery or leaves it to the
+// firing's already-committed result.
+func withdrawWakeupDeliveries(ctx context.Context, q *db.Queries, w db.IssueWakeup, reason string) error {
+	_, err := q.WithdrawUnclaimedWakeupDeliveries(ctx, db.WithdrawUnclaimedWakeupDeliveriesParams{
+		Reason:           pgtype.Text{String: reason, Valid: true},
+		WorkspaceID:      w.WorkspaceID,
+		RecipientAgentID: w.AgentID,
+		SourcePattern:    wakeupDeliverySourcePattern(w.ID),
+	})
+	if err != nil {
+		return fmt.Errorf("withdraw wakeup deliveries: %w", err)
+	}
+	return nil
+}
+
+// undecidedWakeupReason names the notification that holds a rule's inputs.
+// An unknown outcome is fail-closed: the host may have accepted the request, so
+// the rule waits for an operator rather than replaying the same input under a
+// new delivery id.
+func undecidedWakeupReason(row db.FindUndecidedWakeupDeliveryRow) string {
+	id := util.UUIDToString(row.ID)
+	if row.DeliveryStatus == "unknown" {
+		return fmt.Sprintf("Wakeup delivery %s has an unknown outcome: the host may have accepted it, so the rule is paused and will not send again until that delivery is resolved; new trigger inputs are retained.", id)
+	}
+	return fmt.Sprintf("Waiting for wakeup delivery %s (%s) to be accepted; new trigger inputs are retained.", id, row.DeliveryStatus)
+}
+
+// wakeupDeliverySourcePattern scopes generic rows to one rule. The UUID and
+// the separators are literal for LIKE, and the trailing ':' keeps one rule's
+// key from matching a longer id.
+func wakeupDeliverySourcePattern(wakeupID pgtype.UUID) string {
+	return "wakeup:" + util.UUIDToString(wakeupID) + ":%"
+}
+
+// enqueueWakeupDelivery persists one firing for an external recipient. It runs
+// inside the rule's transaction: the source receipts, the delivery and the
+// rule's next state either all commit or all roll back, and a replay of the
+// same firing resolves the delivery that already exists instead of minting a
+// second id.
+func enqueueWakeupDelivery(ctx context.Context, q *db.Queries, w db.IssueWakeup, receipts []db.IssueWakeupReceipt, note string) (string, error) {
+	payload, err := wakeupDeliveryPayload(w, note)
+	if err != nil {
+		return "", err
+	}
+	key := wakeupDeliveryKey(w, receipts)
+	binding, err := sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID))
+	if errors.Is(err, sessionroute.ErrNotBound) {
+		return "", fmt.Errorf("%w: agent has no session bound to this issue", ErrWakeupForbidden)
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve wakeup session binding: %w", err)
+	}
+	enqueued, err := delivery.NewPostgres(q).Enqueue(ctx, delivery.EnqueueRequest{
+		Scope: delivery.Scope{WorkspaceID: util.UUIDToString(w.WorkspaceID)},
+		Source: delivery.Source{
+			Type: wakeupDeliverySourceType,
+			Key:  key,
+		},
+		Target:          delivery.Target{SessionID: binding.SessionID},
+		Recipient:       delivery.Recipient{Type: "agent", ID: util.UUIDToString(w.AgentID)},
+		NotificationKey: key,
+		Kind:            wakeupDeliveryKind,
+		Payload:         payload,
+		// A generic producer may reference the issue it concerns but never
+		// fabricates a comment: the comment projection stays comment-only.
+		Refs: delivery.Refs{IssueID: util.UUIDToString(w.IssueID)},
+	})
+	if err != nil {
+		return "", fmt.Errorf("enqueue wakeup delivery: %w", err)
+	}
+	return enqueued.ID, nil
+}
+
+// wakeupDeliveryKey identifies this firing by the newest consumed input. The
+// receipts are consumed in the same transaction, so the same key can only
+// reappear if that transaction rolled back and was retried.
+func wakeupDeliveryKey(w db.IssueWakeup, receipts []db.IssueWakeupReceipt) string {
+	last := ""
+	if len(receipts) > 0 {
+		last = util.UUIDToString(receipts[len(receipts)-1].ID)
+	}
+	return fmt.Sprintf("wakeup:%s:%d:%s", util.UUIDToString(w.ID), w.Revision, last)
+}
+
+// wakeupDeliveryPayload renders the same prompt a managed task would carry, so
+// an external session sees one wakeup language regardless of execution kind,
+// plus stable references it can read back.
+func wakeupDeliveryPayload(w db.IssueWakeup, note string) (json.RawMessage, error) {
+	body := map[string]any{
+		"schema":    "issue_wakeup.v1",
+		"issue_id":  util.UUIDToString(w.IssueID),
+		"wakeup_id": util.UUIDToString(w.ID),
+		"revision":  w.Revision,
+		"note":      note,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal wakeup delivery payload: %w", err)
+	}
+	if len(raw) > wakeupDeliveryPayloadLimit {
+		body["note"] = "Wakeup triggered. Read the issue, its comments and current state before deciding what to do."
+		if raw, err = json.Marshal(body); err != nil {
+			return nil, fmt.Errorf("marshal wakeup delivery payload: %w", err)
+		}
+	}
+	if len(raw) > wakeupDeliveryPayloadLimit {
+		return nil, fmt.Errorf("wakeup delivery payload exceeds %d bytes", wakeupDeliveryPayloadLimit)
+	}
+	return raw, nil
 }
 
 func qCleanupMissingWakeup(ctx context.Context, tx pgx.Tx, id pgtype.UUID) error {
@@ -1434,6 +1669,12 @@ func (s *IssueWakeupService) Disable(ctx context.Context, issueID, id, member pg
 	}
 	tasks, err := q.CancelUnstartedWakeupTasks(ctx, util.UUIDToString(id))
 	if err != nil {
+		return out, err
+	}
+	// Disabling withdraws notifications the external host has not accepted.
+	// A leased delivery keeps its outcome: the host may already have accepted
+	// it, and cancellation does not claim to retract accepted input.
+	if err = withdrawWakeupDeliveries(ctx, q, out, "Wakeup disabled before the notification was accepted"); err != nil {
 		return out, err
 	}
 	out, err = q.LockIssueWakeup(ctx, id)

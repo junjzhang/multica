@@ -170,3 +170,19 @@ describe("useRealtimeSync — comment activity cache coherence", () => {
     expect(qc.getQueryState(updatedBoardKey)?.isInvalidated).toBe(false);
   });
 });
+
+
+it("refreshes only the affected issue detail when mailbox delivery or processing changes", () => {
+  const qc = new QueryClient();
+  const current = issueKeys.detail("ws-1", "issue-1");
+  const unrelated = issueKeys.detail("ws-1", "issue-2");
+  const foreign = issueKeys.detail("ws-2", "issue-1");
+  for (const key of [current, unrelated, foreign, positionBoardKey]) qc.setQueryData(key, {});
+  const { ws, handlers } = createRecordingWs();
+  const view = renderHook(() => useRealtimeSync(ws, createStores()), { wrapper: createWrapper(qc) });
+  handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" });
+  expect(qc.getQueryState(current)?.isInvalidated).toBe(true);
+  for (const key of [unrelated, foreign, positionBoardKey]) expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
+  view.unmount();
+  qc.clear();
+});

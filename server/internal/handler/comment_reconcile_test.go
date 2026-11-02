@@ -91,8 +91,8 @@ func TestCompleteTask_ReconcilesMemberCommentPostedDuringRun(t *testing.T) {
 	// A deliberate member comment that arrived DURING the run (after started_at).
 	dbfx.Exec(t, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at)
-		VALUES ($1, $2, 'member', $3, 'wait, also handle this', 'comment', now() - interval '1 minute')
-	`, issueID, testWorkspaceID, testUserID)
+		VALUES ($1, $2, 'member', $3, '[@Agent](mention://agent/' || $4 || ') wait, also handle this', 'comment', now() - interval '1 minute')
+	`, issueID, testWorkspaceID, testUserID, agentID)
 
 	dbfx.Exec(t, `UPDATE comment SET parent_id=$2 WHERE issue_id=$1 AND id<>$2`, issueID, triggerCommentID)
 
@@ -139,8 +139,8 @@ func TestCompleteTask_ReplayDoesNotCreateSecondFollowUp(t *testing.T) {
 	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID) })
 	dbfx.Exec(t, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id, created_at)
-		VALUES ($1, $2, 'member', $3, 'also handle this once', 'comment', $4, now() - interval '1 minute')
-	`, issueID, testWorkspaceID, testUserID, triggerCommentID)
+		VALUES ($1, $2, 'member', $3, '[@Agent](mention://agent/' || $5 || ') also handle this once', 'comment', $4, now() - interval '1 minute')
+	`, issueID, testWorkspaceID, testUserID, triggerCommentID, agentID)
 
 	if w := completeTaskViaHandler(t, taskID, "done"); w.Code != http.StatusOK {
 		t.Fatalf("first CompleteTask: expected 200, got %d: %s", w.Code, w.Body.String())
@@ -552,14 +552,14 @@ func TestConsecutiveCommentsDifferentOriginatorsFullEnqueuePath(t *testing.T) {
 	}
 
 	// A's comment → creates the queued task (originator A).
-	cA := insertMemberComment(testUserID, "first, from A")
+	cA := insertMemberComment(testUserID, "[@Agent](mention://agent/"+agentID+") first, from A")
 	testHandler.triggerTasksForComment(ctx, issue, cA, nil, "member", testUserID, testUserID, nil, nil)
 	if n := pendingTaskCountForAgentIssue(t, issueID, agentID); n != 1 {
 		t.Fatalf("after A's comment expected exactly 1 queued task, got %d", n)
 	}
 
 	// B's comment (different originator) before start → must fold in, NOT drop.
-	cB := insertMemberComment(userB, "second, from B — different user")
+	cB := insertMemberComment(userB, "[@Agent](mention://agent/"+agentID+") second, from B — different user")
 	dbfx.Exec(t, `UPDATE comment SET parent_id=$2 WHERE id=$1`, cB.ID, cA.ID)
 	cB.ParentID = cA.ID
 	testHandler.triggerTasksForComment(ctx, issue, cB, nil, "member", userB, userB, nil, nil)
@@ -623,8 +623,8 @@ func TestCompleteTask_ReconcilesDispatchedWindowComment(t *testing.T) {
 	// (5m ago), before started_at (2m ago). A started_at anchor would miss it.
 	dbfx.Exec(t, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at)
-		VALUES ($1, $2, 'member', $3, 'squeezed in before start', 'comment', now() - interval '3 minutes')
-	`, issueID, testWorkspaceID, testUserID)
+		VALUES ($1, $2, 'member', $3, '[@Agent](mention://agent/' || $4 || ') squeezed in before start', 'comment', now() - interval '3 minutes')
+	`, issueID, testWorkspaceID, testUserID, agentID)
 
 	dbfx.Exec(t, `UPDATE comment SET parent_id=$2 WHERE issue_id=$1 AND id<>$2`, issueID, triggerCommentID)
 
@@ -702,9 +702,9 @@ func TestCompleteTask_ReconcilesPreDispatchMergeRaceComment(t *testing.T) {
 		`, issueID, testWorkspaceID, testUserID, content, age).Scan(&id)
 		return id
 	}
-	triggerCommentID := insertComment("initial request", "10 minutes")
-	deliveredCoalescedID := insertComment("folded in while queued (delivered)", "8 minutes")
-	raceCommentID := insertComment("posted before dispatch, merge lost the race", "7 minutes")
+	triggerCommentID := insertComment("[@Agent](mention://agent/"+agentID+") initial request", "10 minutes")
+	deliveredCoalescedID := insertComment("[@Agent](mention://agent/"+agentID+") folded in while queued (delivered)", "8 minutes")
+	raceCommentID := insertComment("[@Agent](mention://agent/"+agentID+") posted before dispatch, merge lost the race", "7 minutes")
 
 	// The running task: created before every comment window, with the delivered
 	// comment recorded in coalesced_comment_ids, dispatched after the race
@@ -778,9 +778,9 @@ func TestCompleteTask_ReconcilesPlannedButUndeliveredComments(t *testing.T) {
 				`, issueID, testWorkspaceID, testUserID, content, age).Scan(&id)
 				return id
 			}
-			old1 := insertComment("planned old one", "10 minutes")
+			old1 := insertComment("[@Agent](mention://agent/"+agentID+") planned old one", "10 minutes")
 			old2 := insertComment("[@Agent](mention://agent/"+agentID+") planned old two", "9 minutes")
-			trigger := insertComment("planned trigger", "8 minutes")
+			trigger := insertComment("[@Agent](mention://agent/"+agentID+") planned trigger", "8 minutes")
 			dbfx.Exec(t, `UPDATE comment SET parent_id=$2 WHERE issue_id=$1 AND id<>$2`, issueID, old1)
 			delivered := []string{trigger}
 			if tc.deliveredOldCount > 0 {

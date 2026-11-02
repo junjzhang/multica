@@ -129,28 +129,31 @@ func fullyPopulatedIssue(t *testing.T) db.Issue {
 		return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 	}
 	return db.Issue{
-		ID:             parseUUID("11111111-1111-1111-1111-111111111111"),
-		WorkspaceID:    parseUUID("22222222-2222-2222-2222-222222222222"),
-		Number:         42,
-		Title:          "Fix login",
-		Description:    pgtype.Text{String: "details", Valid: true},
-		Status:         "todo",
-		Priority:       "high",
-		AssigneeType:   pgtype.Text{String: "agent", Valid: true},
-		AssigneeID:     parseUUID("33333333-3333-3333-3333-333333333333"),
-		CreatorType:    "member",
-		CreatorID:      parseUUID("44444444-4444-4444-4444-444444444444"),
-		ParentIssueID:  parseUUID("55555555-5555-5555-5555-555555555555"),
-		ProjectID:      parseUUID("66666666-6666-6666-6666-666666666666"),
-		Position:       1024.5,
-		Stage:          pgtype.Int4{Int32: 2, Valid: true},
-		StartDate:      pgtype.Date{Time: utcDate(2026, time.January, 1), Valid: true},
-		DueDate:        pgtype.Date{Time: utcDate(2026, time.February, 1), Valid: true},
-		CreatedAt:      pgtype.Timestamptz{Time: utcDate(2026, time.January, 1), Valid: true},
-		UpdatedAt:      pgtype.Timestamptz{Time: utcDate(2026, time.January, 2), Valid: true},
-		LastActivityAt: pgtype.Timestamptz{Time: utcDate(2026, time.January, 3), Valid: true},
-		Metadata:       []byte(`{"pr_url":"https://example.test/pr/1"}`),
-		Properties:     []byte(`{"77777777-7777-7777-7777-777777777777":"done"}`),
+		ID:              parseUUID("11111111-1111-1111-1111-111111111111"),
+		WorkspaceID:     parseUUID("22222222-2222-2222-2222-222222222222"),
+		Number:          42,
+		Title:           "Fix login",
+		Description:     pgtype.Text{String: "details", Valid: true},
+		Status:          "todo",
+		Priority:        "high",
+		CoordinatorType: pgtype.Text{String: "agent", Valid: true},
+		CoordinatorID:   parseUUID("33333333-3333-3333-3333-333333333333"),
+		MergeAllowed:    true,
+		AssigneeType:    pgtype.Text{String: "agent", Valid: true},
+		AssigneeID:      parseUUID("33333333-3333-3333-3333-333333333333"),
+		CreatorType:     "member",
+		CreatorID:       parseUUID("44444444-4444-4444-4444-444444444444"),
+		ParentIssueID:   parseUUID("55555555-5555-5555-5555-555555555555"),
+		ProjectID:       parseUUID("66666666-6666-6666-6666-666666666666"),
+		Position:        1024.5,
+		Stage:           pgtype.Int4{Int32: 2, Valid: true},
+		StartDate:       pgtype.Date{Time: utcDate(2026, time.January, 1), Valid: true},
+		DueDate:         pgtype.Date{Time: utcDate(2026, time.February, 1), Valid: true},
+		CreatedAt:       pgtype.Timestamptz{Time: utcDate(2026, time.January, 1), Valid: true},
+		UpdatedAt:       pgtype.Timestamptz{Time: utcDate(2026, time.January, 2), Valid: true},
+		LastActivityAt:  pgtype.Timestamptz{Time: utcDate(2026, time.January, 3), Valid: true},
+		Metadata:        []byte(`{"pr_url":"https://example.test/pr/1"}`),
+		Properties:      []byte(`{"77777777-7777-7777-7777-777777777777":"done"}`),
 	}
 }
 
@@ -221,5 +224,66 @@ func TestResolvedBroadcastDuplicateOfMatchesResponse(t *testing.T) {
 	fromBroadcast := decode(service.IssueToMapResolved(ctx, testHandler.Queries, row, prefix)["duplicate_of"])
 	if !reflect.DeepEqual(fromBroadcast, fromResponse) {
 		t.Fatalf("broadcast duplicate_of = %v, HTTP duplicate_of = %v", fromBroadcast, fromResponse)
+	}
+}
+
+func TestIssuePartialProjectionsPreserveCollaborationState(t *testing.T) {
+	for name, value := range map[string]any{
+		"list": issueListRowToResponse(db.ListIssuesRow{}, "MUL"),
+		"open": openIssueRowToResponse(db.ListOpenIssuesRow{}, "MUL"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			keys := jsonKeys(t, value)
+			for _, field := range []string{"coordinator", "merge_authorization", "external_participants", "mailbox_deliveries"} {
+				if hasKey(keys, field) {
+					t.Errorf("unloaded field %s would overwrite detail state", field)
+				}
+			}
+		})
+	}
+	for name, value := range map[string]any{
+		"http":  issueToResponse(db.Issue{}, "MUL"),
+		"event": service.IssueToMap(db.Issue{}, "MUL"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields["coordinator"]) != "null" {
+				t.Fatal("full row must clear an absent coordinator")
+			}
+			for _, field := range []string{"external_participants", "mailbox_deliveries"} {
+				if _, exists := fields[field]; exists {
+					t.Errorf("unloaded %s would erase detail state", field)
+				}
+			}
+		})
+	}
+}
+
+func TestIssueExternalProjectionFailureDoesNotClearCache(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	id := dbfx.Issue(t, "Projection failure")
+	row, err := testHandler.Queries.GetIssue(context.Background(), parseUUID(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	resp := issueToResponse(row, "MUL")
+	testHandler.projectIssueExternalState(ctx, row, &resp)
+	if resp.ExternalParticipants != nil || resp.MailboxDeliveries != nil {
+		t.Fatal("failed queries must omit projections")
+	}
+	testHandler.projectIssueExternalState(context.Background(), row, &resp)
+	if resp.ExternalParticipants == nil || len(*resp.ExternalParticipants) != 0 || resp.MailboxDeliveries == nil || len(*resp.MailboxDeliveries) != 0 {
+		t.Fatal("successful empty queries must authoritatively clear projections")
 	}
 }

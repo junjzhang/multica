@@ -193,3 +193,30 @@ describe("AgentProfileCard — Model row", () => {
     expect(screen.queryByText("medium")).toBeNull();
   });
 });
+
+describe("AgentProfileCard — external identity", () => {
+  it("shows the host session instead of managed runtime and model rows", () => {
+    mockAgents.current = [
+      makeAgent({
+        runtime_id: "",
+        runtime_mode: "local",
+        execution_kind: "external",
+        external_session: {
+          provider: "paseo",
+          host_id: "server-1",
+          session_id: "paseo-agent-1",
+          display_name: "Review session",
+          url: "paseo://h/server-1/agent/paseo-agent-1",
+          daemon_id: "daemon-1",
+        },
+      }),
+    ];
+    renderCard();
+
+    expect(screen.getByText("Review session")).toBeInTheDocument();
+    expect(screen.getAllByText(enAgents.profile_card.session_label).length).toBeGreaterThan(0);
+    expect(screen.queryByText(enAgents.profile_card.runtime_label)).toBeNull();
+    expect(screen.queryByText("claude-opus-4-8")).toBeNull();
+    expect(screen.queryByText(enAgents.profile_card.unknown_runtime)).toBeNull();
+  });
+});

@@ -224,6 +224,12 @@ func (h *Handler) invokeOriginatorFromRequest(r *http.Request, actorType, actorI
 		return actorID
 	}
 	if actorType == "agent" {
+		// An external agent token has no task. Its authority is the token
+		// owner's verified workspace membership, re-checked by the auth
+		// middleware on every request, so the owner is the originator.
+		if r.Header.Get("X-Actor-Source") == "external_agent" {
+			return requestUserID(r)
+		}
 		if taskIDHeader := r.Header.Get("X-Task-ID"); taskIDHeader != "" {
 			if taskUUID, err := util.ParseUUID(taskIDHeader); err == nil {
 				if task, err := h.Queries.GetAgentTask(r.Context(), taskUUID); err == nil {

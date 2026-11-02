@@ -126,9 +126,9 @@ func triageEntryPoints() []triageEntryPoint {
 		{"comment mentioning a squad", true, func(t *testing.T, f triageRunFixture, issueID string) *testutil.Response {
 			return comment(t, issueID, "[@Squad](mention://squad/"+f.squadID+") please take a look")
 		}},
-		// A member replying to what the agent said is still that member naming
-		// it — the thread is the address.
-		{"reply to an agent's comment", true, func(t *testing.T, f triageRunFixture, issueID string) *testutil.Response {
+		// A reply is discussion under explicit-mention-only routing: it is not
+		// a request even on an ordinary issue, so Triage has nothing to refuse.
+		{"reply to an agent's comment", false, func(t *testing.T, f triageRunFixture, issueID string) *testutil.Response {
 			parentID := dbfx.Comment(t, issueID, "here is what I found", testutil.Cols{
 				"author_type": "agent", "author_id": f.agentID,
 			})
@@ -170,6 +170,13 @@ func TestTriageNoRunEntryPointsRunOnAnOrdinaryIssue(t *testing.T) {
 	f := newTriageRunFixture(t)
 	for _, entry := range triageEntryPoints() {
 		t.Run(entry.name, func(t *testing.T) {
+			// Implicit routes (plain comment, reply to an agent's comment) are
+			// no longer run entry points on ANY issue under explicit-mention-
+			// only routing; they have dedicated suppression coverage. Every
+			// other entry below still needs a positive control.
+			if entry.name == "reply to an agent's comment" || entry.name == "plain comment routed to the assignee" {
+				t.Skip("implicit comment routing was removed; covered by TestPlainCommentAndReplyDoNotLaunch")
+			}
 			issueID := f.issueFor(t, "", "ordinary issue: "+entry.name)
 			entry.call(t, f, issueID).WantOneOf(http.StatusOK, http.StatusCreated, http.StatusAccepted)
 			if n := tasksOn(t, issueID); n == 0 {
