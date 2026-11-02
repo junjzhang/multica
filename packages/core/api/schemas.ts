@@ -1371,14 +1371,19 @@ export const AgentSessionSummarySchema = ExternalSessionSchema.extend({
 
 /** Drop one malformed session without hiding the agent's other sessions. */
 export const AgentSessionListResponseSchema = z
-  .object({ sessions: z.array(z.unknown()).default([]) })
+  .object({ sessions: z.array(z.unknown()) })
   .loose()
-  .transform((value) => ({
-    sessions: value.sessions.flatMap((item) => {
+  .transform((value, ctx) => {
+    const sessions = value.sessions.flatMap((item) => {
       const parsed = AgentSessionSummarySchema.safeParse(item);
       return parsed.success ? [parsed.data] : [];
-    }),
-  }));
+    });
+    if (value.sessions.length > 0 && sessions.length === 0) {
+      ctx.addIssue({ code: "custom", message: "No valid registered sessions in response", path: ["sessions"] });
+      return z.NEVER;
+    }
+    return { sessions };
+  });
 
 export const AgentSessionBindingSchema = z.object({
   id: z.string(),
@@ -1409,9 +1414,8 @@ export const IssueSessionBindingListSchema = z.array(z.unknown())
   );
 
 export const AgentSessionBindingResponseSchema = z
-  .object({ binding: IssueSessionBindingSchema.nullable().default(null) })
-  .loose()
-  .catch({ binding: null });
+  .object({ binding: IssueSessionBindingSchema.nullable() })
+  .loose();
 
 export const CommentSchema = z.object({
   id: z.string(),

@@ -1866,12 +1866,14 @@ export class ApiClient {
   /** All registered host sessions of one external agent, never a single guess. */
   async listAgentSessions(agentId: string): Promise<AgentSessionSummary[]> {
     const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions`);
-    return parseWithFallback(
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[] } | null>(
       raw,
       AgentSessionListResponseSchema,
-      { sessions: [] },
+      null,
       { endpoint: "GET /api/agents/{id}/sessions" },
-    ).sessions;
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return parsed.sessions;
   }
 
   /** The exact active (agent, issue) target. Null means no binding, not failure. */
@@ -1883,12 +1885,14 @@ export class ApiClient {
     const raw = await this.fetch<unknown>(
       `/api/agents/${agentId}/session-bindings?${search}`,
     );
-    return parseWithFallback(
+    const parsed = parseWithFallback<{ binding: IssueSessionBinding | null } | null>(
       raw,
       AgentSessionBindingResponseSchema,
-      { binding: null },
+      null,
       { endpoint: "GET /api/agents/{id}/session-bindings" },
-    ).binding;
+    );
+    if (!parsed) throw new Error("Invalid issue session binding response");
+    return parsed.binding;
   }
 
   /**

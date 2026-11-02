@@ -418,7 +418,7 @@ describe("task session read projections", () => {
 
     expect(AgentSessionBindingResponseSchema.parse({ binding: parsed[0] })?.binding?.agent_id).toBe("agent-1");
     expect(AgentSessionBindingResponseSchema.parse({ binding: null }).binding).toBeNull();
-    expect(AgentSessionBindingResponseSchema.parse("not an object").binding).toBeNull();
+    expect(AgentSessionBindingResponseSchema.safeParse("not an object").success).toBe(false);
   });
 
   it("carries bindings on the issue and treats a malformed field as absent", () => {
