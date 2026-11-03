@@ -384,9 +384,14 @@ type TaskCancellationActor struct {
 }
 
 type AgentTaskResponse struct {
-	StartClaimSupported      bool                   `json:"start_claim_supported,omitempty"`
-	CancelledByCommentChange bool                   `json:"cancelled_by_comment_change,omitempty"`
-	CancelledBy              *TaskCancellationActor `json:"cancelled_by,omitempty"`
+	SessionPinGeneration     string                         `json:"session_pin_generation,omitempty"`
+	ResultNotifications      *[]ResultNotificationResponse  `json:"result_notifications,omitempty"`
+	RequireResume            bool                           `json:"require_resume,omitempty"`
+	DelegationResult         *protocol.DelegationResultTurn `json:"delegation_result,omitempty"`
+	ResourceControlRequired  bool                           `json:"resource_control_required,omitempty"`
+	StartClaimSupported      bool                           `json:"start_claim_supported,omitempty"`
+	CancelledByCommentChange bool                           `json:"cancelled_by_comment_change,omitempty"`
+	CancelledBy              *TaskCancellationActor         `json:"cancelled_by,omitempty"`
 
 	ID                   string                 `json:"id"`
 	AgentID              string                 `json:"agent_id"`
@@ -859,6 +864,7 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		handoffNote = t.HandoffNote.String
 	}
 	return AgentTaskResponse{
+		ResourceControlRequired: t.ResourceControlRequired,
 		// Task-scoped provenance must not transfer through copied retry context.
 		CancelledByCommentChange: t.Status == "cancelled" && cancellation.TaskID != "" && cancellation.TaskID == uuidToString(t.ID),
 		CancelledBy:              taskCancellationActorToResponse(t),

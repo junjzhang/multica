@@ -2492,6 +2492,17 @@ func (h *Handler) finalizeClaimDelivery(
 		// The runtime row is locked for the duration of FinalizeTaskClaim. Use
 		// its current owner as the task-token identity rather than the stale
 		// claim-time snapshot captured by the caller.
+		if response != nil && response.ResourceControlRequired {
+			generation := dbid.NewV7()
+			changed, err := qtx.MarkTaskResourceControlRequired(ctx, db.MarkTaskResourceControlRequiredParams{TaskID: task.ID, RuntimeID: task.RuntimeID, DispatchedAt: task.DispatchedAt, Generation: generation})
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return fmt.Errorf("claim generation changed before resource-control agreement")
+			}
+			response.SessionPinGeneration = uuidToString(generation)
+		}
 		tokenParams.UserID = locked.OwnerID
 		return nil
 	}
@@ -2814,6 +2825,15 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		}
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Wakeup is disabled or its authorization is no longer available.", taskfailure.ReasonInvalidTaskIdentity, "wakeup_unavailable", http.StatusConflict, "wakeup unavailable")
 	}
+	resultTurn, resultErr := service.VerifiedDelegationResult(r.Context(), h.Queries, *task)
+	if resultErr != nil {
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Delegated result cannot be delivered to its original session: "+resultErr.Error(), protocol.DelegationResultUnavailable, "result_unavailable", http.StatusConflict, "result unavailable")
+	}
+	resp.ResourceControlRequired = requestHasClientCapability(r, protocol.DaemonCapabilityDelegationResultsV1)
+	if (resultTurn != nil || task.ResourceControlRequired) && !resp.ResourceControlRequired {
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Daemon does not support strict delegated result delivery.", protocol.DelegationResultUnavailable, "result_unsupported", http.StatusConflict, "result unsupported")
+	}
+	resp.RequireResume, resp.DelegationResult = resultTurn != nil, resultTurn
 	// Preserve PostgreSQL's microseconds: second-resolution display timestamps
 	// cannot distinguish stale claims reclaimed within the same second.
 	if task.DispatchedAt.Valid {
@@ -3067,7 +3087,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Include workspace ID and repos so the daemon can set up worktrees.
 	// Project context, repo precedence and the tenant/failure rules around both
 	// live in resolveClaimProjectContext, which every claim path shares.
-	if task.IssueID.Valid {
+	if resultTurn == nil && task.IssueID.Valid {
 		issue, issueErr := h.Queries.GetIssue(r.Context(), task.IssueID)
 		if issueErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3523,7 +3543,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	}
 
 	// Chat task: populate workspace/session info from the chat_session table.
-	if task.ChatSessionID.Valid {
+	if resultTurn == nil && task.ChatSessionID.Valid {
 		cs, chatErr := h.Queries.GetChatSession(r.Context(), task.ChatSessionID)
 		if chatErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3784,7 +3804,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Autopilot run_only task: resolve workspace from autopilot_run →
 	// autopilot, and include the autopilot instructions because there is no
 	// issue for the agent to fetch.
-	if task.AutopilotRunID.Valid {
+	if resultTurn == nil && task.AutopilotRunID.Valid {
 		run, runErr := h.Queries.GetAutopilotRun(r.Context(), task.AutopilotRunID)
 		if runErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3842,7 +3862,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// prompt come from the task's context JSONB. Resolve workspace from
 	// there so the isolation check below has something to compare.
 	hasQuickCreate := false
-	if task.Context != nil && !task.IssueID.Valid && !task.ChatSessionID.Valid && !task.AutopilotRunID.Valid {
+	if resultTurn == nil && task.Context != nil && !task.IssueID.Valid && !task.ChatSessionID.Valid && !task.AutopilotRunID.Valid {
 		var qc service.QuickCreateContext
 		if json.Unmarshal(task.Context, &qc) == nil && qc.Type == service.QuickCreateContextType {
 			hasQuickCreate = true
@@ -3987,6 +4007,18 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		}
 	}
 
+	if resultTurn != nil {
+		resp.PriorSessionID, resp.PriorWorkDir = resultTurn.SessionID, resultTurn.WorkDir
+		resp.ThreadName = "Delegated result"
+		if task.IssueID.Valid {
+			issue, err := h.Queries.GetIssue(r.Context(), task.IssueID)
+			if err != nil {
+				return resp, nil, nil, agentSkillCount, builtinSkillCount, h.rejectClaimSourceLoad(r.Context(), task, err, "issue", uuidToString(task.IssueID))
+			}
+			resp.WorkspaceID, resp.ThreadName, issueNumber = uuidToString(issue.WorkspaceID), issue.Title, issue.Number
+		}
+	}
+
 	// Catch-all workspace isolation check. Every context branch above already
 	// ran this the moment it resolved its owning workspace, which is what makes
 	// "prove ownership, then hydrate" structural rather than per-branch
@@ -4115,7 +4147,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Wakeup rules that waited for this run hand it their inputs now, after
 	// every gate passed, and only for a daemon that renders them; otherwise
 	// they keep their inputs and start their own run.
-	if requestHasClientCapability(r, protocol.DaemonCapabilityJoinedWakeupsV1) {
+	if resultTurn == nil && requestHasClientCapability(r, protocol.DaemonCapabilityJoinedWakeupsV1) {
 		joined, err := (&service.IssueWakeupService{Tasks: h.TaskService}).JoinWaitingWakeups(r.Context(), *task)
 		if err != nil {
 			slog.Warn("daemon claim: waiting wakeups keep their inputs", "task_id", uuidToString(task.ID), "error", err)
@@ -4805,7 +4837,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// transaction (force session_id NULL + flag the row), so an auto-retry the
 	// same commit creates and wakes can never observe the withheld pointer or a
 	// missing continuity-gap flag.
-	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized
@@ -5488,7 +5520,7 @@ func (h *Handler) failTask(w http.ResponseWriter, r *http.Request, taskID, works
 	// keep a stale mid-flight pin) and flagging the row in the same commit that
 	// creates and wakes the auto-retry, so the retry can never claim the withheld
 	// pointer or miss the continuity gap.
-	task, transitioned, err := h.TaskService.FailTaskWithTransition(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.FailTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
 	if err != nil {
 		// A FailTask error is an infrastructure failure (the terminal
 		// transaction that also clears the withheld session, writes the
@@ -5814,6 +5846,10 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 		// clients may already hold a refetched row without the branch/error
 		// and will not refetch again on their own.
 		h.TaskService.RebroadcastCancelledTask(r.Context(), task.ID)
+	}
+	if _, err := h.Queries.RecordTaskTerminalReport(r.Context(), task.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record terminal acknowledgement")
+		return
 	}
 	h.TaskService.FinalizeDeferredCancelledChat(r.Context(), task.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -6149,6 +6185,10 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	resp := make([]AgentTaskResponse, len(tasks))
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
+	}
+	if err := h.hydrateResultNotifications(r.Context(), issue.WorkspaceID, issue.ID, resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load result notification state")
+		return
 	}
 	h.hydrateTaskSupplementMetadata(r.Context(), r, issue.WorkspaceID, tasks, resp)
 	// Execution-log rows render the "on behalf of <member>" badge, so this

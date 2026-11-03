@@ -4819,6 +4819,9 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 		if err != nil {
 			return err
 		}
+		if err := recordTerminalReport(ctx, qtx, t.ID); err != nil {
+			return err
+		}
 		task = t
 		change, err = syncQoderIssue(ctx, qtx, t, true)
 		if err != nil {
@@ -4892,6 +4895,9 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 					"current_status", existing.Status,
 					"agent_id", util.UUIDToString(existing.AgentID),
 				)
+				if err := recordTerminalReport(ctx, s.Queries, existing.ID); err != nil {
+					return nil, false, err
+				}
 				return &existing, false, nil
 			}
 			slog.Warn("complete task failed",
@@ -5319,6 +5325,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 		if err != nil {
 			return err
 		}
+		if err := recordTerminalReport(ctx, qtx, t.ID); err != nil {
+			return err
+		}
 		task = t
 
 		// Atomic with the status flip, same as the completion path. A failed
@@ -5457,6 +5466,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 				} else if transferErr != nil {
 					return fmt.Errorf("transfer pending source context to retry: %w", transferErr)
 				} else {
+					if _, err := qtx.CopyRetryDelegationReturns(ctx, db.CopyRetryDelegationReturnsParams{ParentTaskID: taskID, ChildTaskID: child.ID}); err != nil {
+						return fmt.Errorf("copy retry accepted returns: %w", err)
+					}
 					if err := qtx.CopyChannelTaskDelivery(ctx, db.CopyChannelTaskDeliveryParams{
 						ChildTaskID: child.ID, ParentTaskID: taskID,
 					}); err != nil {
@@ -5479,6 +5491,12 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 			default:
 				return fmt.Errorf("create retry task: %w", cerr)
 			}
+		}
+
+		if err := qtx.SetTaskDelegationOutcomeFinal(ctx, db.SetTaskDelegationOutcomeFinalParams{
+			ID: t.ID, IsFinal: !retryEligible(failureReason, t),
+		}); err != nil {
+			return fmt.Errorf("record delegated outcome decision: %w", err)
 		}
 
 		// A terminal non-retried chat failure is a visible assistant outcome.
@@ -5524,6 +5542,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 					"current_status", existing.Status,
 					"agent_id", util.UUIDToString(existing.AgentID),
 				)
+				if err := recordTerminalReport(ctx, s.Queries, existing.ID); err != nil {
+					return nil, false, err
+				}
 				return &existing, false, nil
 			}
 			slog.Warn("fail task failed",
@@ -5783,7 +5804,7 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 // a human may have edited in the meantime, so replaying the failed attempt is
 // never what the workspace wants.
 func retryEligible(failureReason string, t db.AgentTaskQueue) bool {
-	return retryableReasons[failureReason] &&
+	return !delegation.IsResultTask(t) && retryableReasons[failureReason] &&
 		t.Attempt < retryAttemptCeiling(failureReason, t.MaxAttempts) &&
 		!t.AutopilotRunID.Valid &&
 		!IsTriageTask(t) &&
@@ -5837,152 +5858,106 @@ func hasRunnableSuccessor(ctx context.Context, q *db.Queries, task db.AgentTaskQ
 // Autopilot tasks are NOT auto-retried here; the autopilot scheduler owns
 // its own re-run cadence and we don't want to double-fire it.
 func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentTaskQueue) (*db.AgentTaskQueue, error) {
-	if parent.Status != "failed" {
-		return nil, nil
-	}
-	reason := ""
-	if parent.FailureReason.Valid {
-		reason = parent.FailureReason.String
-	}
-	if !retryableReasons[reason] {
-		return nil, nil
-	}
-	// Use the reason-aware ceiling, not the raw max_attempts column, so an
-	// orphaned provider_network task recovered on its 2nd attempt is still
-	// allowed its deferred 3rd attempt (retryAttemptCeiling raises the ceiling
-	// to 3). Kept in sync with retryEligible below, which applies the same
-	// ceiling to the primary FailTask path.
-	if parent.Attempt >= retryAttemptCeiling(reason, parent.MaxAttempts) {
-		slog.Info("task auto-retry skipped: budget exhausted",
-			"task_id", util.UUIDToString(parent.ID),
-			"attempt", parent.Attempt,
-			"max_attempts", parent.MaxAttempts,
-			"ceiling", retryAttemptCeiling(reason, parent.MaxAttempts),
-		)
-		return nil, nil
-	}
-	// Autopilot has its own retry semantics (don't double-trigger) and a task
-	// with no issue/chat link has nowhere to report its retry — retryEligible
-	// covers both, keeping this sweeper path in sync with FailTask's in-tx retry.
-	if !retryEligible(reason, parent) {
-		return nil, nil
-	}
+	child, _, err := s.retryFailedTaskDecision(ctx, parent)
+	return child, err
+}
 
-	var runtimeMCPOverlay runtimeMCPOverlayData
-	agent, agentErr := s.Queries.GetAgent(ctx, parent.AgentID)
-	if agentErr != nil {
-		// Best-effort: failing to resolve the agent for the overlay is not
-		// retry-fatal. Log and continue — the daemon will reject the claim
-		// later if the agent is genuinely gone.
-		slog.Warn("task auto-retry: load agent for overlay failed",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"agent_id", util.UUIDToString(parent.AgentID),
-			"error", agentErr,
-		)
-	} else {
-		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, agent)
-	}
-	// Mirror FailTask's in-tx backoff + effective-budget persistence: defer the
-	// final provider_network attempt ~5s via fire_at (zero delay leaves fire_at
-	// NULL for an immediate child), and write the reason-aware ceiling into the
-	// child's max_attempts so the retry chain stays self-consistent.
-	var retryFireAt pgtype.Timestamptz
-	if delay := retryDelayForAttempt(reason, parent.Attempt); delay > 0 {
-		retryFireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
-	}
-	// Same advisory slot check as FailTask's path, for the same reason: skip the
-	// work when a successor is already visible. Losing the race is handled by
-	// CreateRetryTask yielding the slot, which this caller reads as "no retry".
-	if successor, herr := hasRunnableSuccessor(ctx, s.Queries, parent); herr != nil {
-		slog.Warn("task auto-retry: successor check failed; attempting retry anyway",
-			"parent_task_id", util.UUIDToString(parent.ID), "error", herr)
-	} else if successor {
-		slog.Info("task auto-retry skipped: a successor is already pending",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"issue_id", util.UUIDToString(parent.IssueID),
-			"agent_id", util.UUIDToString(parent.AgentID),
-		)
-		return nil, nil
+// retryFailedTaskDecision is the retry policy's authoritative outcome decision.
+// final=false includes a live successor/slot conflict: absence of a new child
+// is not evidence that an accepted execution is finally over.
+func (s *TaskService) retryFailedTaskDecision(ctx context.Context, parent db.AgentTaskQueue) (*db.AgentTaskQueue, bool, error) {
+	if parent.Status != "failed" {
+		return nil, true, nil
 	}
 	if s.TxStarter == nil {
-		return nil, errors.New("task auto-retry: transaction starter is required")
+		return nil, false, errors.New("task auto-retry: transaction starter is required")
 	}
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("task auto-retry: begin transaction: %w", err)
+		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	qtx := s.Queries.WithTx(tx)
-	if err := guardIssueNotInTriage(ctx, qtx, parent.IssueID, OriginDerived); err != nil {
-		if errors.Is(err, ErrIssueInTriage) {
-			slog.Info("task auto-retry skipped: issue is in triage",
-				"parent_task_id", util.UUIDToString(parent.ID),
-				"issue_id", util.UUIDToString(parent.IssueID))
-			return nil, nil
-		}
-		return nil, err
-	}
-	child, err := qtx.CreateRetryTask(ctx, db.CreateRetryTaskParams{
-		NewTaskID:            dbid.NewV7(),
-		ID:                   parent.ID,
-		FireAt:               retryFireAt,
-		MaxAttempts:          pgtype.Int4{Int32: retryAttemptCeiling(reason, parent.MaxAttempts), Valid: true},
-		RuntimeMcpOverlay:    runtimeMCPOverlay.Overlay,
-		RuntimeConnectedApps: runtimeMCPOverlay.ConnectedApps,
-	})
+	q := s.Queries.WithTx(tx)
+	parent, err = q.LockTaskForRetryDecision(ctx, parent.ID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Workspace torn down, or the pending slot was taken between the check
-		// above and this insert. Same contract as FailTask's path: no retry, no
-		// error.
-		slog.Info("task auto-retry not created: no row written",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"reason", reason,
-		)
-		return nil, nil
+		return nil, true, nil
 	}
 	if err != nil {
-		slog.Warn("task auto-retry failed",
-			"parent_task_id", util.UUIDToString(parent.ID),
-			"reason", reason,
-			"error", err,
-		)
-		return nil, err
+		return nil, false, err
 	}
-	if err := transferPendingSourceContextToRetry(ctx, qtx, parent, child); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Info("task auto-retry skipped: source context already transferred or attached",
-				"parent_task_id", util.UUIDToString(parent.ID),
-				"source_context_retry_id", util.UUIDToString(child.ID),
-			)
-			return nil, nil
+	if parent.Status != "failed" {
+		return nil, false, nil
+	}
+	final := func() (*db.AgentTaskQueue, bool, error) {
+		if err := q.SetTaskDelegationOutcomeFinal(ctx, db.SetTaskDelegationOutcomeFinalParams{ID: parent.ID, IsFinal: true}); err != nil {
+			return nil, false, err
 		}
-		return nil, err
+		return nil, true, tx.Commit(ctx)
 	}
-	if err := qtx.CopyChannelTaskDelivery(ctx, db.CopyChannelTaskDeliveryParams{
-		ChildTaskID: child.ID, ParentTaskID: parent.ID,
-	}); err != nil {
-		return nil, fmt.Errorf("copy auto-retry channel delivery: %w", err)
+	if child, err := q.GetAutomaticRetryChild(ctx, parent.ID); err == nil {
+		if _, err := q.CopyRetryDelegationReturns(ctx, db.CopyRetryDelegationReturnsParams{ParentTaskID: parent.ID, ChildTaskID: child.ID}); err != nil {
+			return nil, false, err
+		}
+		return &child, false, tx.Commit(ctx)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+	if parent.DelegationOutcomeFinal || !retryEligible(parent.FailureReason.String, parent) {
+		return final()
+	}
+	if successor, err := hasRunnableSuccessor(ctx, q, parent); err != nil {
+		return nil, false, err
+	} else if successor {
+		return nil, false, nil
+	}
+	if err := guardIssueNotInTriage(ctx, q, parent.IssueID, OriginDerived); errors.Is(err, ErrIssueInTriage) {
+		return final()
+	} else if err != nil {
+		return nil, false, err
+	}
+	var overlay runtimeMCPOverlayData
+	if actor, err := q.GetAgent(ctx, parent.AgentID); err == nil {
+		overlay = s.buildRuntimeMCPOverlay(ctx, parent.OriginatorUserID, actor)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+	var fireAt pgtype.Timestamptz
+	if delay := retryDelayForAttempt(parent.FailureReason.String, parent.Attempt); delay > 0 {
+		fireAt = pgtype.Timestamptz{Time: time.Now().Add(delay), Valid: true}
+	}
+	child, err := q.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID: parent.ID, NewTaskID: dbid.NewV7(), FireAt: fireAt,
+		MaxAttempts:       pgtype.Int4{Int32: retryAttemptCeiling(parent.FailureReason.String, parent.MaxAttempts), Valid: true},
+		RuntimeMcpOverlay: overlay.Overlay, RuntimeConnectedApps: overlay.ConnectedApps,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if err := transferPendingSourceContextToRetry(ctx, q, parent, child); errors.Is(err, pgx.ErrNoRows) {
+		if _, err := q.DeleteUnstartedQuickCreateRetryTask(ctx, child.ID); err != nil {
+			return nil, false, err
+		}
+		return final()
+	} else if err != nil {
+		return nil, false, err
+	}
+	if _, err := q.CopyRetryDelegationReturns(ctx, db.CopyRetryDelegationReturnsParams{ParentTaskID: parent.ID, ChildTaskID: child.ID}); err != nil {
+		return nil, false, err
+	}
+	if err := q.CopyChannelTaskDelivery(ctx, db.CopyChannelTaskDeliveryParams{ChildTaskID: child.ID, ParentTaskID: parent.ID}); err != nil {
+		return nil, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("task auto-retry: commit: %w", err)
+		return nil, false, err
 	}
-	slog.Info("task auto-retry enqueued",
-		"parent_task_id", util.UUIDToString(parent.ID),
-		"child_task_id", util.UUIDToString(child.ID),
-		"reason", reason,
-		"attempt", child.Attempt,
-		"max_attempts", child.MaxAttempts,
-		"status", child.Status,
-	)
-	// A queued child transitions ∅ → queued (same as EnqueueTaskFor*): broadcast
-	// queued first, then notify the daemon — see EnqueueTaskForIssue for ordering
-	// rationale. A deferred child (backoff armed) stays inert until
-	// PromoteDueDeferredTasksForRuntime fires its queued event + wakeup.
 	if child.Status == "queued" {
 		s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
 		s.NotifyTaskEnqueued(ctx, child)
 	}
-	return &child, nil
+	return &child, false, nil
 }
 
 func transferPendingSourceContextToRetry(ctx context.Context, q *db.Queries, parent, child db.AgentTaskQueue) error {
@@ -6122,6 +6097,9 @@ func (s *TaskService) RerunIssueWithDelegation(ctx context.Context, issueID pgty
 		// named source, not GetLastTaskSession) and targets the triager rather
 		// than the issue's assignee. Redoing triage is re-triage, a different
 		// action on a different status.
+		if delegation.IsResultTask(sourceTask) {
+			return nil, errors.New("result handling turn requires its original receipt; ordinary rerun is not available")
+		}
 		if IsTriageTask(sourceTask) {
 			return nil, ErrRerunSourceIsTriage
 		}
@@ -6736,6 +6714,17 @@ func loadDelegatedFailureRecoveryTarget(ctx context.Context, q *db.Queries, fail
 		(failed.TriggerEvidenceKind.Valid && failed.TriggerEvidenceKind.String == string(attribution.EvidenceDelegatedFailure)) {
 		return nil, nil
 	}
+	if delegation.IsResultTask(failed) {
+		return nil, nil
+	}
+	accepted, err := q.HasTaskDelegationReturns(ctx, failed.ID)
+	if err != nil {
+		return nil, fmt.Errorf("check accepted result ownership: %w", err)
+	}
+	if accepted {
+		return nil, nil
+	}
+
 	hasRetry, err := q.HasRetryTaskForParent(ctx, failed.ID)
 	if err != nil {
 		return nil, fmt.Errorf("check retry child: %w", err)

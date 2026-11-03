@@ -103,6 +103,9 @@ func managedRun(t *testing.T, opts managedRunOptions) (agentID, taskID string) {
 	if opts.pinned {
 		cols["session_id"] = "provider-session-" + opts.name
 		cols["work_dir"] = "/work/" + opts.name
+		cols["resource_control_required"] = true
+		cols["session_pin_confirmed"] = true
+		cols["session_pin_generation"] = testutil.Raw("gen_random_uuid()")
 	}
 	taskID = dbfx.Task(t, agentID, cols)
 	return agentID, taskID
@@ -206,11 +209,14 @@ func TestResolveManagedChatScope(t *testing.T) {
 	agentID := dbfx.Agent(t, "Delegation Chat Agent", runtimeID, testutil.Cols{"execution_kind": "managed"})
 	chatID := dbfx.ChatSession(t, agentID)
 	taskID := dbfx.Task(t, agentID, testutil.Cols{
-		"chat_session_id": chatID,
-		"runtime_id":      runtimeID,
-		"status":          "running",
-		"session_id":      "chat-provider-session",
-		"work_dir":        "/work/chat",
+		"chat_session_id":           chatID,
+		"runtime_id":                runtimeID,
+		"status":                    "running",
+		"session_id":                "chat-provider-session",
+		"work_dir":                  "/work/chat",
+		"resource_control_required": true,
+		"session_pin_confirmed":     true,
+		"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 	})
 	if _, err := ResolveManaged(context.Background(), testQueries, testWorkspaceID, agentID, taskID); err != nil {
 		t.Fatalf("chat-scoped run: %v", err)

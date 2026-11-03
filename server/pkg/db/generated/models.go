@@ -141,9 +141,13 @@ type AgentSkill struct {
 }
 
 type AgentTaskDelegationReturn struct {
-	TaskID             pgtype.UUID        `json:"task_id"`
-	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	TaskID                 pgtype.UUID        `json:"task_id"`
+	DelegationReturnID     pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	NotificationDeliveryID pgtype.UUID        `json:"notification_delivery_id"`
+	NotificationTaskID     pgtype.UUID        `json:"notification_task_id"`
+	NotificationError      pgtype.Text        `json:"notification_error"`
+	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 }
 
 type AgentTaskQueue struct {
@@ -204,20 +208,25 @@ type AgentTaskQueue struct {
 	// The row id referenced by trigger_evidence_kind (a comment id, autopilot_run id, rule_version id, source task id, ...). No FK; resolvable per-kind in the app layer (MUL-4302 §2).
 	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
 	// The one human accountable for this run, for audit / visibility / cost only — NEVER consulted for authorization (that is originator_user_id). Invariant: when originator_user_id IS NOT NULL, this equals it; the two diverge only when originator_user_id IS NULL (autopilot rule_owner / degraded owner_fallback name an accountable human while authorization carries none). No FK, no cascade (MUL-4302 §1/§7). NULL means no accountable human was resolved: a pre-migration row, OR a NEW row whose audit source is not-yet-resolved / unattributed (e.g. run_only autopilot until rule_owner lands) — NOT pre-migration only.
-	AccountableUserID         pgtype.UUID `json:"accountable_user_id"`
-	SessionRolloutMissing     bool        `json:"session_rollout_missing"`
-	RetiredSessionID          pgtype.Text `json:"retired_session_id"`
-	QuickActionsDisabled      bool        `json:"quick_actions_disabled"`
-	RegenerateQuickActionsFor pgtype.UUID `json:"regenerate_quick_actions_for"`
-	BranchName                pgtype.Text `json:"branch_name"`
-	DurableWorkDir            pgtype.Text `json:"durable_work_dir"`
-	ChannelContextRevision    pgtype.Int8 `json:"channel_context_revision"`
-	CommentThreadID           pgtype.UUID `json:"comment_thread_id"`
-	CancelledByType           pgtype.Text `json:"cancelled_by_type"`
-	CancelledByID             pgtype.UUID `json:"cancelled_by_id"`
-	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
-	IssueSnapshot             []byte      `json:"issue_snapshot"`
-	WorkflowStep              pgtype.Text `json:"workflow_step"`
+	AccountableUserID         pgtype.UUID        `json:"accountable_user_id"`
+	SessionRolloutMissing     bool               `json:"session_rollout_missing"`
+	RetiredSessionID          pgtype.Text        `json:"retired_session_id"`
+	QuickActionsDisabled      bool               `json:"quick_actions_disabled"`
+	RegenerateQuickActionsFor pgtype.UUID        `json:"regenerate_quick_actions_for"`
+	BranchName                pgtype.Text        `json:"branch_name"`
+	DurableWorkDir            pgtype.Text        `json:"durable_work_dir"`
+	ChannelContextRevision    pgtype.Int8        `json:"channel_context_revision"`
+	CommentThreadID           pgtype.UUID        `json:"comment_thread_id"`
+	CancelledByType           pgtype.Text        `json:"cancelled_by_type"`
+	CancelledByID             pgtype.UUID        `json:"cancelled_by_id"`
+	CancelledByName           pgtype.Text        `json:"cancelled_by_name"`
+	IssueSnapshot             []byte             `json:"issue_snapshot"`
+	WorkflowStep              pgtype.Text        `json:"workflow_step"`
+	DelegationOutcomeFinal    bool               `json:"delegation_outcome_final"`
+	ResourceControlRequired   bool               `json:"resource_control_required"`
+	TerminalReportedAt        pgtype.Timestamptz `json:"terminal_reported_at"`
+	SessionPinConfirmed       bool               `json:"session_pin_confirmed"`
+	SessionPinGeneration      pgtype.UUID        `json:"session_pin_generation"`
 }
 
 type AgentToLabel struct {

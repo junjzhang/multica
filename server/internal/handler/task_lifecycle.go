@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // RecoverOrphanedTasks is called by the daemon at startup for each runtime
@@ -65,10 +66,7 @@ func (h *Handler) RecoverOrphanedTasks(w http.ResponseWriter, r *http.Request) {
 // work_dir as soon as they're known — typically right after the agent
 // emits its first system message — so a crash mid-run doesn't lose the
 // resume pointer needed to continue the conversation on the next attempt.
-type PinTaskSessionRequest struct {
-	SessionID string `json:"session_id,omitempty"`
-	WorkDir   string `json:"work_dir,omitempty"`
-}
+type PinTaskSessionRequest = protocol.SessionPinRequest
 
 func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
@@ -81,11 +79,30 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.SessionID == "" && req.WorkDir == "" {
+	if req.SessionID == "" && req.WorkDir == "" && req.NextGeneration == "" {
 		writeError(w, http.StatusBadRequest, "session_id or work_dir required")
 		return
 	}
 
+	var generation, nextGeneration pgtype.UUID
+	if req.Generation != "" {
+		var ok bool
+		generation, ok = parseUUIDOrBadRequest(w, req.Generation, "generation")
+		if !ok {
+			return
+		}
+	}
+	if req.NextGeneration != "" {
+		var ok bool
+		nextGeneration, ok = parseUUIDOrBadRequest(w, req.NextGeneration, "next_generation")
+		if !ok {
+			return
+		}
+		if !generation.Valid || generation == nextGeneration || req.SessionID != "" || req.WorkDir != "" {
+			writeError(w, 400, "invalid session generation transition")
+			return
+		}
+	}
 	params := db.UpdateAgentTaskSessionParams{ID: parseUUID(taskID)}
 	if req.SessionID != "" {
 		params.SessionID = pgtype.Text{String: req.SessionID, Valid: true}
@@ -122,10 +139,47 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "pin session failed")
 		return
 	}
+	task, err := qtx.LockTaskSessionPin(r.Context(), params.ID)
+	if err != nil {
+		writeError(w, 500, "load current session generation failed")
+		return
+	}
+	if nextGeneration.Valid {
+		updated, err := qtx.InvalidateTaskSessionPin(r.Context(), db.InvalidateTaskSessionPinParams{TaskID: task.ID, Generation: generation, NextGeneration: nextGeneration})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 409, "session generation changed or strict return cannot start fresh")
+			return
+		}
+		if err != nil {
+			writeError(w, 500, "invalidate session pin failed")
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, 500, "commit session generation failed")
+			return
+		}
+		writeJSON(w, 200, protocol.SessionPinAcknowledgement{Generation: uuidToString(updated.SessionPinGeneration)})
+		return
+	}
+	if task.ResourceControlRequired && (!generation.Valid || generation != task.SessionPinGeneration) {
+		writeError(w, http.StatusConflict, "stale or missing provider session generation")
+		return
+	}
+	turn, err := service.VerifiedDelegationResult(r.Context(), qtx, task)
+	if err != nil || (turn != nil && ((req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir))) {
+		writeError(w, http.StatusConflict, "result task must retain its frozen session and directory")
+		return
+	}
 	if err := qtx.UpdateAgentTaskSession(r.Context(), params); err != nil {
 		slog.Warn("pin-session failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusInternalServerError, "pin session failed")
 		return
+	}
+	if req.SessionID != "" && req.WorkDir != "" {
+		if _, err := qtx.ConfirmTaskSessionPin(r.Context(), db.ConfirmTaskSessionPinParams{TaskID: params.ID, SessionID: params.SessionID, WorkDir: params.WorkDir, Generation: generation}); err != nil {
+			writeError(w, http.StatusInternalServerError, "confirm current execution session failed")
+			return
+		}
 	}
 	// The statement re-reads the row, ignores anything that is not a cancelled
 	// chat task, and refuses to move the pointer when a newer turn already owns

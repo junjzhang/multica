@@ -207,6 +207,19 @@ func runCommentDispatchObligationSweeper(ctx context.Context, h *handler.Handler
 	})
 }
 
+func runDelegationResultSweeper(ctx context.Context, h *handler.Handler) {
+	runPeriodicSweep(ctx, time.Minute, func() {
+		stats, err := h.TaskService.ReconcileDelegationResults(ctx, 100)
+		if err != nil {
+			slog.Warn("delegated result reconciliation failed", "error", err)
+			return
+		}
+		if stats.Materialized > 0 || stats.Refused > 0 {
+			slog.Info("delegated results reconciled", "materialized", stats.Materialized, "refused", stats.Refused)
+		}
+	})
+}
+
 func runRuntimeGCSweeper(ctx context.Context, txStarter runtimeGCTxStarter, queries *db.Queries, metrics *obsmetrics.BusinessMetrics, publisher runtimeGCEventPublisher) {
 	runPeriodicSweep(ctx, runtimeGCSweepInterval, func() {
 		gcRuntimes(ctx, txStarter, queries, metrics, publisher)

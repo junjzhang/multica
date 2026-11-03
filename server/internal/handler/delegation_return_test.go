@@ -34,11 +34,14 @@ func managedDispatcherFixture(t *testing.T, name string) (agentID, taskID, token
 	})
 	scopeIssue := dbfx.Issue(t, "Delegation scope for "+name)
 	taskID = dbfx.Task(t, agentID, testutil.Cols{
-		"issue_id":   scopeIssue,
-		"runtime_id": runtimeID,
-		"status":     "running",
-		"session_id": "dispatcher-session-" + name,
-		"work_dir":   "/work/dispatcher-" + name,
+		"issue_id":                  scopeIssue,
+		"runtime_id":                runtimeID,
+		"status":                    "running",
+		"session_id":                "dispatcher-session-" + name,
+		"work_dir":                  "/work/dispatcher-" + name,
+		"resource_control_required": true,
+		"session_pin_confirmed":     true,
+		"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 	})
 	token = taskTokenFixture(t, agentID, taskID)
 	return agentID, taskID, token
