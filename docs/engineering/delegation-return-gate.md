@@ -295,6 +295,13 @@ original source through the durable reverse relation, but the receipt updates
 the turn whose directory was actually removed. Removing historical directory
 A never redirects a task that now points at B.
 
+`GET /api/daemon/tasks/{id}/gc-check` exposes that same persisted top-level
+`durable_work_dir` as a string or null, under the existing daemon task-access
+gate. It does not infer removal from terminal status, a missing directory, or
+paths in result JSON. Older servers may omit the field; absence/null is not
+cleanup permission. The daemon must still prove local ownership/provenance and
+obtain the existing authoritative resource-release decision.
+
 Issue run reads include only materialized/refused notifications or eligible final
 outcomes. A comment-change cancelled run and an automatic-retry intermediate
 attempt have no pending notification of their own; their replacement/final leaf

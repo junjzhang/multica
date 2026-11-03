@@ -242,5 +242,5 @@ func (h *Handler) taskResourceGCProjection(r *http.Request, task db.AgentTaskQue
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": task.Status, "completed_at": timestampToPtr(task.CompletedAt), "resource_control_required": task.ResourceControlRequired, "terminal_reported_at": timestampToPtr(task.TerminalReportedAt), "resource_identity": addr, "resources_retained": !decision.ReleaseAllowed, "retention_reason": decision.Reason, "protected_resources": decision.ProtectedResources}, nil
+	return map[string]any{"status": task.Status, "completed_at": timestampToPtr(task.CompletedAt), "durable_work_dir": textToPtr(task.DurableWorkDir), "resource_control_required": task.ResourceControlRequired, "terminal_reported_at": timestampToPtr(task.TerminalReportedAt), "resource_identity": addr, "resources_retained": !decision.ReleaseAllowed, "retention_reason": decision.Reason, "protected_resources": decision.ProtectedResources}, nil
 }
