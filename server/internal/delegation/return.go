@@ -430,12 +430,18 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted managed address snapshot is missing", ErrReturnConflict)
 		}
 		original, err := q.GetAgentTask(ctx, existing.SourceTaskID)
-		if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: original source scope unavailable", ErrReturnConflict)
+		}
+		if err != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("load accepted source scope: %w", err)
 		}
 		if !original.IssueID.Valid && !original.ChatSessionID.Valid && !original.AutopilotRunID.Valid {
 			if err := ValidateOriginalTaskScope(ctx, q, existing); err != nil {
-				return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnConflict, err)
+				if errors.Is(err, ErrReturnInvalid) {
+					return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnConflict, err)
+				}
+				return db.IssueDelegationReturn{}, err
 			}
 		}
 		if existing.RuntimeID == currentTask.RuntimeID &&

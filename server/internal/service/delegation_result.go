@@ -409,7 +409,10 @@ func resultScopeTaskID(ctx context.Context, q *db.Queries, source db.AgentTaskQu
 		return "", nil
 	}
 	if err := delegation.ValidateOriginalTaskScope(ctx, q, address); err != nil {
-		return "", resultRefusal("original_task_scope_unavailable")
+		if errors.Is(err, delegation.ErrReturnInvalid) {
+			return "", resultRefusal("original_task_scope_unavailable")
+		}
+		return "", err
 	}
 	return util.UUIDToString(address.ScopeTaskID), nil
 }
