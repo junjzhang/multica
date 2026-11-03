@@ -16,6 +16,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// A re-executed copy of this binary runs the real command tree with the
+	// caller's environment (see session_context_test.go). Its HOME, Paseo
+	// identity and credentials must reach the command unchanged, so the
+	// isolation below does not apply to it.
+	if os.Getenv(cliProcessChildEnv) == "1" {
+		os.Exit(m.Run())
+	}
+
 	for _, key := range []string{
 		"MULTICA_AGENT_ID",
 		"MULTICA_TASK_ID",
@@ -24,6 +32,9 @@ func TestMain(m *testing.M) {
 		"MULTICA_WORKSPACE_ID",
 		"MULTICA_SERVER_URL",
 		"MULTICA_TASK_CONFIG_ROOT",
+		"PASEO_AGENT_ID",
+		"MULTICA_EXTERNAL_SESSION_FILE",
+		"MULTICA_RETURN_SESSION",
 	} {
 		os.Unsetenv(key)
 	}

@@ -69,10 +69,47 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 		b.WriteString(sessionContinuityNoticeFor(task))
 	}
 	b.WriteString(execenv.BuildOnBehalfOfBlock(task.InitiatorName, task.InitiatorEmail))
+	b.WriteString(buildCoordinatorBlock(task))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
 	b.WriteString(buildJoinedWakeupsBlock(task.WakeupJoined))
 	b.WriteString(buildProjectWorkflowBlock(task))
 	return b.String()
+}
+
+// buildCoordinatorBlock reports issue metadata without changing the immutable
+// return addresses accepted by each delegation. It is refreshed on every turn.
+func buildCoordinatorBlock(task Task) string {
+	if !safeMentionID(task.CoordinatorID) || (task.CoordinatorType != "agent" && task.CoordinatorType != "member") {
+		return ""
+	}
+	if task.CoordinatorType == "agent" && task.CoordinatorID == task.AgentID {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[Issue coordinator]\n"+
+			"Recorded %s coordinator: %s. This is issue metadata, not this run's return address.\n"+
+			"When this run has accepted delegation return addresses, Multica routes its saved result to those frozen addresses automatically. Coordinator changes do not move accepted addresses.\n"+
+			"Do not infer a return target from the coordinator or assignee, or send an extra coordinator mention merely to return a result. Do not claim the coordinator was notified or that the result was accepted without evidence.\n\n",
+		task.CoordinatorType, task.CoordinatorID)
+}
+
+// safeMentionID accepts the UUID-shaped ids the server sends and rejects
+// anything that could break out of the markdown mention it is embedded in.
+func safeMentionID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // buildProjectWorkflowBlock carries the issue's project workflow and current

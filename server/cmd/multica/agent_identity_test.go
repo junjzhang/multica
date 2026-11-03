@@ -21,8 +21,8 @@ func newIdentityTestCmd() *cobra.Command {
 
 // Every business client fails closed when a Paseo session only has the human
 // profile: the server would classify it as a member and exempt the delegation
-// gate. The explicit owner entry, a session with an agent credential, and
-// ordinary human flows outside a Paseo session keep working.
+// gate. The explicit owner entry and manual external credentials outside
+// Paseo keep working.
 func TestAgentSessionBusinessClientRejectsHumanProfile(t *testing.T) {
 	// /tmp has no daemon task marker above it; the worktree does, because this
 	// suite runs inside a managed task of the authoring session.
@@ -41,7 +41,7 @@ func TestAgentSessionBusinessClientRejectsHumanProfile(t *testing.T) {
 	t.Setenv("MULTICA_TASK_ID", "")
 
 	business := newIdentityTestCmd()
-	if _, err := newAPIClient(business); err == nil || !strings.Contains(err.Error(), "Paseo agent session") {
+	if _, err := newAPIClient(business); err == nil || !strings.Contains(err.Error(), "Paseo session") {
 		t.Fatalf("business command with human profile: err = %v, want a Paseo identity refusal", err)
 	}
 	if requests.Load() != 0 {
@@ -53,6 +53,10 @@ func TestAgentSessionBusinessClientRejectsHumanProfile(t *testing.T) {
 		t.Fatalf("explicit owner/credential entry was blocked: %v", err)
 	}
 
+	// Manual external credentials outside a file-bound Paseo session remain
+	// available, with an explicit return address rather than a profile fallback.
+	t.Setenv("PASEO_AGENT_ID", "")
+	t.Setenv("MULTICA_RETURN_SESSION", "paseo-session-1")
 	t.Setenv("MULTICA_TOKEN", "mea_external_agent")
 	client, err := newAPIClient(business)
 	if err != nil {

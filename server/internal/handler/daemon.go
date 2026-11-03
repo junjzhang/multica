@@ -2812,6 +2812,17 @@ func claimResponseAgentIdentityMatches(resp AgentTaskResponse) bool {
 	return resp.AgentID != "" && resp.Agent != nil && resp.Agent.ID == resp.AgentID
 }
 
+// issueCoordinatorForClaim returns the issue's recorded coordinator as claim
+// fields. A NULL coordinator stays empty on the wire: the daemon must report
+// "not recorded" rather than invent a coordinator from the assignee, the
+// triggering commenter, or any earlier run.
+func issueCoordinatorForClaim(coordinatorType pgtype.Text, coordinatorID pgtype.UUID) (string, string) {
+	if !coordinatorType.Valid || !coordinatorID.Valid {
+		return "", ""
+	}
+	return strings.TrimSpace(coordinatorType.String), uuidToString(coordinatorID)
+}
+
 // buildClaimedTaskResponse assembles the full daemon claim payload for a
 // single already-claimed task and computes the exact comment ids embedded in
 // it (deliveredCommentIDs). Shared by the per-runtime handler
@@ -3123,6 +3134,9 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		if issue.AssigneeID.Valid {
 			resp.IssueAssigneeID = uuidToString(issue.AssigneeID)
 		}
+		// Refresh coordinator metadata on resumed turns too; accepted result
+		// addresses remain frozen independently of this issue metadata.
+		resp.CoordinatorType, resp.CoordinatorID = issueCoordinatorForClaim(issue.CoordinatorType, issue.CoordinatorID)
 		// This claim's own snapshot, recorded by FinalizeTaskClaim so a LATER
 		// run that resumes this one's session can compare against what THIS run
 		// was actually handed. Building it here, from the issue row already
