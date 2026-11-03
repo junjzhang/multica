@@ -41,9 +41,9 @@ func agentSessionBindingToResponse(binding sessionroute.Binding) AgentSessionBin
 }
 
 // BindAgentSession records which session of an agent serves one issue, and
-// revokes the previous active binding of the same exact key. It is the explicit
-// takeover entry: earlier delivery rows keep the target they froze, while
-// later notifications resolve the replacement.
+// revokes the previous active binding of the same exact key. Newly addressed
+// notifications use the replacement. Accepted delegation returns and earlier
+// delivery envelopes retain their original targets.
 func (h *Handler) BindAgentSession(w http.ResponseWriter, r *http.Request) {
 	if isMachineCredentialActor(r) {
 		writeError(w, http.StatusForbidden, "this endpoint is only available to human actors")
