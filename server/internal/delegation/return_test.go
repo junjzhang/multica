@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -378,4 +379,38 @@ func countRowsIn(t *testing.T, query string, args ...any) int {
 		t.Fatalf("count: %v", err)
 	}
 	return n
+}
+
+func TestManagedAcceptedReturnWithoutSnapshotFailsClosed(t *testing.T) {
+	taskID := util.MustParseUUID("00000000-0000-0000-0000-000000000001")
+	runtimeID := util.MustParseUUID("00000000-0000-0000-0000-000000000002")
+	original := db.IssueDelegationReturn{
+		ReturnKind: string(KindManagedTask), SourceTaskID: taskID, RuntimeID: runtimeID,
+		Provider:  pgtype.Text{String: "source-provider", Valid: true},
+		SessionID: pgtype.Text{String: "accepted-session", Valid: true},
+		WorkDir:   pgtype.Text{String: "/accepted/work", Valid: true},
+	}
+	current := db.AgentTaskQueue{ID: taskID, RuntimeID: runtimeID, SessionID: original.SessionID, WorkDir: original.WorkDir}
+	runtime := db.AgentRuntime{ID: runtimeID, Provider: original.Provider.String}
+	for _, missing := range []string{"runtime", "provider", "session", "work_dir"} {
+		t.Run(missing, func(t *testing.T) {
+			accepted := original
+			switch missing {
+			case "runtime":
+				accepted.RuntimeID = pgtype.UUID{}
+			case "provider":
+				accepted.Provider = pgtype.Text{}
+			case "session":
+				accepted.SessionID = pgtype.Text{}
+			case "work_dir":
+				accepted.WorkDir = pgtype.Text{}
+			}
+			// No query handle: a missing snapshot must never consult the mutable
+			// source task to reconstruct an address, even for the same task ID.
+			_, err := reuseAccepted(context.Background(), nil, accepted, current, runtime, true, sessionroute.Binding{}, false)
+			if !errors.Is(err, ErrReturnConflict) {
+				t.Fatalf("missing %s accepted: %v", missing, err)
+			}
+		})
+	}
 }

@@ -5,10 +5,12 @@
 -- replacing it; another dispatcher has its own key and row.
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id,
-    return_kind, external_session_id, source_task_id
+    return_kind, external_session_id, source_task_id,
+    runtime_id, provider, session_id, work_dir
 ) VALUES (
     @id, @workspace_id, @issue_id, @dispatcher_agent_id,
-    @return_kind, sqlc.narg('external_session_id'), sqlc.narg('source_task_id')
+    @return_kind, sqlc.narg('external_session_id'), sqlc.narg('source_task_id'),
+    sqlc.narg('runtime_id'), sqlc.narg('provider'), sqlc.narg('session_id'), sqlc.narg('work_dir')
 )
 ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
 RETURNING *;
@@ -162,6 +164,13 @@ ORDER BY r.created_at, r.id;
 INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
 VALUES (@task_id, @delegation_return_id)
 ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+
+-- name: LockRuntimeForDelegation :one
+-- Freeze the source runtime's provider while accepting its address. Admission
+-- takes runtime, agent, then task locks, matching the claim delivery gate.
+SELECT * FROM agent_runtime
+WHERE id = @id AND workspace_id = @workspace_id
+FOR SHARE;
 
 -- name: LockAgentTaskForDelegation :one
 -- Re-reads the dispatching managed run under a share lock inside the

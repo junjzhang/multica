@@ -38,8 +38,8 @@ const (
 	// agent. The exact session is frozen on that dispatcher's accepted return.
 	KindExternalSession Kind = "external_session"
 	// KindManagedTask addresses the managed run that first dispatched the work.
-	// The source task row owns the runtime, provider session and work directory;
-	// the next slice resumes that row instead of the agent+issue latest session.
+	// The source task identifies provenance. Its physical return address is
+	// frozen on acceptance independently of the task's mutable resume pointer.
 	KindManagedTask Kind = "managed_task"
 )
 
@@ -302,10 +302,11 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 	}
 
 	var (
-		currentTask  db.AgentTaskQueue
-		binding      sessionroute.Binding
-		hasBinding   bool
-		managedInput bool
+		currentTask    db.AgentTaskQueue
+		currentRuntime db.AgentRuntime
+		binding        sessionroute.Binding
+		hasBinding     bool
+		managedInput   bool
 	)
 	switch addr.Kind {
 	case KindManagedTask:
@@ -316,11 +317,12 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		if parseErr != nil {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: source task id", ErrReturnInvalid)
 		}
-		task, checkErr := recheckManagedSourceLocked(ctx, q, ws, dispatcher, sourceTaskID)
+		task, runtime, checkErr := recheckManagedSourceLocked(ctx, q, ws, dispatcher, sourceTaskID)
 		if checkErr != nil {
 			return db.IssueDelegationReturn{}, checkErr
 		}
 		currentTask = task
+		currentRuntime = runtime
 		managedInput = true
 	case KindExternalSession:
 		if strings.TrimSpace(addr.ExternalSessionID) == "" {
@@ -365,7 +367,7 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 	}
 	existing, err := q.LockIssueDelegationReturnForDispatcher(ctx, lookup)
 	if err == nil {
-		return reuseAccepted(ctx, q, existing, addr, currentTask, managedInput, binding, hasBinding)
+		return reuseAccepted(ctx, q, existing, currentTask, currentRuntime, managedInput, binding, hasBinding)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load accepted return: %w", err)
@@ -386,11 +388,11 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		}
 		params.ExternalSessionID = sessionID
 	case KindManagedTask:
-		sourceTaskID, parseErr := util.ParseUUID(strings.TrimSpace(addr.SourceTaskID))
-		if parseErr != nil {
-			return db.IssueDelegationReturn{}, fmt.Errorf("%w: source task id", ErrReturnInvalid)
-		}
-		params.SourceTaskID = sourceTaskID
+		params.SourceTaskID = currentTask.ID
+		params.RuntimeID = currentTask.RuntimeID
+		params.Provider = pgtype.Text{String: currentRuntime.Provider, Valid: true}
+		params.SessionID = currentTask.SessionID
+		params.WorkDir = currentTask.WorkDir
 	}
 
 	created, err := q.CreateIssueDelegationReturn(ctx, params)
@@ -402,7 +404,7 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 			if lockErr != nil {
 				return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load winning accepted return: %w", lockErr)
 			}
-			return reuseAccepted(ctx, q, winner, addr, currentTask, managedInput, binding, hasBinding)
+			return reuseAccepted(ctx, q, winner, currentTask, currentRuntime, managedInput, binding, hasBinding)
 		}
 		return db.IssueDelegationReturn{}, fmt.Errorf("delegation: record accepted return: %w", err)
 	}
@@ -412,27 +414,20 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 // reuseAccepted applies the fixed-address rule to an existing row. The same
 // physical session is reusable even when a continuation turn carries a new task
 // id; a different session is a conflict.
-func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegationReturn, addr Address, currentTask db.AgentTaskQueue, managedInput bool, binding sessionroute.Binding, hasBinding bool) (db.IssueDelegationReturn, error) {
+func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegationReturn, currentTask db.AgentTaskQueue, currentRuntime db.AgentRuntime, managedInput bool, binding sessionroute.Binding, hasBinding bool) (db.IssueDelegationReturn, error) {
 	switch {
 	case existing.ReturnKind == string(KindManagedTask) && managedInput:
-		if uuidEqual(existing.SourceTaskID, currentTask.ID) {
+		if !existing.RuntimeID.Valid || !nonemptyText(existing.Provider) ||
+			!nonemptyText(existing.SessionID) || !nonemptyText(existing.WorkDir) {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted managed address snapshot is missing", ErrReturnConflict)
+		}
+		if existing.RuntimeID == currentTask.RuntimeID &&
+			existing.Provider.String == currentRuntime.Provider &&
+			existing.SessionID.String == currentTask.SessionID.String &&
+			existing.WorkDir.String == currentTask.WorkDir.String {
 			return existing, nil
 		}
-		previous, err := q.GetAgentTask(ctx, existing.SourceTaskID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return db.IssueDelegationReturn{}, fmt.Errorf("%w: previously accepted source run is missing", ErrReturnConflict)
-			}
-			return db.IssueDelegationReturn{}, fmt.Errorf("delegation: load accepted source: %w", err)
-		}
-		if previous.SessionID.Valid && currentTask.SessionID.Valid &&
-			previous.SessionID.String == currentTask.SessionID.String {
-			// A later turn in the original provider session. The stored task id
-			// stays the durable reference to that exact address; the new turn is
-			// not another address.
-			return existing, nil
-		}
-		return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted source session and current source session differ", ErrReturnConflict)
+		return db.IssueDelegationReturn{}, fmt.Errorf("%w: current managed address differs from the accepted snapshot", ErrReturnConflict)
 	case existing.ReturnKind == string(KindExternalSession) && hasBinding:
 		if uuidEqual(existing.ExternalSessionID, parseUUIDOrZero(binding.SessionID)) {
 			return existing, nil
@@ -458,33 +453,55 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 	}
 }
 
-// recheckManagedSourceLocked is the authoritative admission check for a new
-// delegation: the source run and its agent are locked, then status,
-// authorization, runtime, scope and pin are read from those locked rows. A
-// request that passed authentication before the run completed therefore cannot
-// keep dispatching after it.
-func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatcher pgtype.UUID, sourceTaskID pgtype.UUID) (db.AgentTaskQueue, error) {
-	task, err := q.LockAgentTaskForDelegation(ctx, sourceTaskID)
+func nonemptyText(value pgtype.Text) bool {
+	return value.Valid && strings.TrimSpace(value.String) != ""
+}
+
+// Admission locks runtime, agent, then source task, matching claim delivery.
+// The initial task read only locates the runtime; every authority and address
+// value is checked again under those locks before the snapshot can be accepted.
+func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatcher pgtype.UUID, sourceTaskID pgtype.UUID) (db.AgentTaskQueue, db.AgentRuntime, error) {
+	candidate, err := q.GetAgentTask(ctx, sourceTaskID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return db.AgentTaskQueue{}, fmt.Errorf("%w: source run does not exist", ErrReturnInvalid)
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source run does not exist", ErrReturnInvalid)
 		}
-		return db.AgentTaskQueue{}, fmt.Errorf("delegation: lock source run: %w", err)
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("delegation: locate source runtime: %w", err)
 	}
-	if task.AgentID != dispatcher {
-		return db.AgentTaskQueue{}, fmt.Errorf("%w: source run belongs to another agent", ErrReturnInvalid)
+	if candidate.AgentID != dispatcher || !candidate.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source run identity", ErrReturnInvalid)
+	}
+	runtime, err := q.LockRuntimeForDelegation(ctx, db.LockRuntimeForDelegationParams{ID: candidate.RuntimeID, WorkspaceID: ws})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source runtime does not exist in this workspace", ErrReturnInvalid)
+		}
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("delegation: lock source runtime: %w", err)
+	}
+	if strings.TrimSpace(runtime.Provider) == "" {
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source runtime provider is missing", ErrReturnInvalid)
 	}
 	actor, err := q.LockAgentForDelegation(ctx, db.LockAgentForDelegationParams{ID: dispatcher, WorkspaceID: ws})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return db.AgentTaskQueue{}, fmt.Errorf("%w: agent is not in this workspace", ErrReturnInvalid)
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: agent is not in this workspace", ErrReturnInvalid)
 		}
-		return db.AgentTaskQueue{}, fmt.Errorf("delegation: lock agent: %w", err)
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("delegation: lock agent: %w", err)
+	}
+	task, err := q.LockAgentTaskForDelegation(ctx, sourceTaskID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source run does not exist", ErrReturnInvalid)
+		}
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("delegation: lock source run: %w", err)
+	}
+	if task.RuntimeID != runtime.ID {
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, fmt.Errorf("%w: source runtime changed before acceptance", ErrReturnInvalid)
 	}
 	if err := validateManagedSource(ctx, q, ws, dispatcher, task, actor); err != nil {
-		return db.AgentTaskQueue{}, err
+		return db.AgentTaskQueue{}, db.AgentRuntime{}, err
 	}
-	return task, nil
+	return task, runtime, nil
 }
 
 // RunReturnIDs returns every accepted relationship one run carries.
