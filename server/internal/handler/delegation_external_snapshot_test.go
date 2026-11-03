@@ -11,6 +11,13 @@ import (
 )
 
 func TestExternalRebindingDoesNotRetargetAcceptedResult(t *testing.T) {
+	for _, action := range []string{"comment", "rerun"} {
+		t.Run(action, func(t *testing.T) { externalRebindingPreservesResult(t, action) })
+	}
+}
+
+func externalRebindingPreservesResult(t *testing.T, action string) {
+	t.Helper()
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
 	}
@@ -45,8 +52,12 @@ func TestExternalRebindingDoesNotRetargetAcceptedResult(t *testing.T) {
 	testutil.Call(t, testHandler.BindAgentSession, request).Want(http.StatusCreated)
 
 	content := fmt.Sprintf("[@Executor](mention://agent/%s) inspect the next revision", target)
-	w = serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateComment), http.MethodPost,
-		"/api/issues/"+issueID+"/comments", map[string]any{"content": content}, map[string]string{"id": issueID}, func(r *http.Request) {
+	handler, endpoint, body := testHandler.CreateComment, "comments", map[string]any{"content": content}
+	if action == "rerun" {
+		handler, endpoint, body = testHandler.RerunIssue, "rerun", map[string]any{}
+	}
+	w = serveAuthenticated(t, token, http.HandlerFunc(handler), http.MethodPost,
+		"/api/issues/"+issueID+"/"+endpoint, body, map[string]string{"id": issueID}, func(r *http.Request) {
 			r.Header.Set(ReturnSessionHeader, replacement)
 		})
 	if w.Code != http.StatusConflict {
@@ -63,6 +74,10 @@ func TestExternalRebindingDoesNotRetargetAcceptedResult(t *testing.T) {
 	}
 	if after.ExternalSessionID != accepted.ExternalSessionID {
 		t.Errorf("accepted return changed from %s to %s", originalSession, uuidToString(after.ExternalSessionID))
+	}
+	pending, err := testHandler.Queries.GetAgentTask(ctx, result.ID)
+	if err != nil || pending.Status != result.Status {
+		t.Fatalf("rejected %s changed original task: %s -> %s, err=%v", action, result.Status, pending.Status, err)
 	}
 	finishResultFixture(t, result)
 	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {

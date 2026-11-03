@@ -799,22 +799,8 @@ func isDuplicatePendingTaskErr(err error) bool {
 	}
 }
 
-// pendingSlotTakenErr reports whether err means "the (issue, agent) pending slot
-// was already occupied when we tried to enqueue".
-//
-// Both paths behind RerunIssue now normalize the unique violation into the bare
-// ErrDuplicatePendingTask sentinel: enqueueMentionTaskWithCommentPlan since
-// #5958, and enqueueIssueTaskWithCommentPlan as of #5914 above. The sentinel
-// half is therefore what matches in practice, and it has to be here — the
-// mention path is the one taken by EVERY rerun whose target is not the issue's
-// current agent assignee (a squad leader, a displaced agent re-fired by
-// task_id, a mentioned agent), and matching only the raw pgconn error meant the
-// reclaim never ran for those, so a system retry winning the slot surfaced as a
-// hard error instead.
-//
-// The raw-violation half is kept deliberately, as a cheap defensive net: one
-// errors.As, and it keeps this predicate honest for any caller that reaches it
-// without passing through one of those two normalizing paths.
+// pendingSlotTakenErr recognizes both raw insert conflicts and the normalized
+// error returned by enqueue helpers.
 func pendingSlotTakenErr(err error) bool {
 	return isDuplicatePendingTaskErr(err) || errors.Is(err, ErrDuplicatePendingTask)
 }
@@ -6183,61 +6169,21 @@ func (s *TaskService) RerunIssueWithDelegation(ctx context.Context, issueID pgty
 	// asking an agent for another pass silently killed the pass it was still
 	// working on; interrupting an in-flight run is what CancelTask /
 	// `multica issue cancel-task` is for.
-	clearPendingSlot := func() int {
-		var cancelled []db.AgentTaskQueue
-		// Atomic with the cancel: a pending coordinator task can already hold a
-		// recovery receipt, and nothing downstream could repair a settlement
-		// that failed after this committed.
-		cerr := s.runInTx(ctx, func(qtx *db.Queries) error {
-			var err error
-			cancelled, err = qtx.CancelPendingTasksByIssueAndAgentInThread(ctx, db.CancelPendingTasksByIssueAndAgentInThreadParams{
-				ThreadCommentID: triggerCommentID,
-				IssueID:         issueID,
-				AgentID:         agentID,
-			})
-			if err != nil {
-				return err
-			}
-			return SettleTerminalTaskState(ctx, qtx, cancelled...)
-		})
-		if cerr != nil {
-			slog.Warn("rerun: cancel pending tasks failed",
-				"issue_id", util.UUIDToString(issueID),
-				"agent_id", util.UUIDToString(agentID),
-				"error", cerr,
-			)
-		}
-		for _, t := range cancelled {
-			s.captureTaskCancelled(ctx, t)
-			s.ReconcileAgentStatus(ctx, t.AgentID)
-			s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
-		}
-		return len(cancelled)
-	}
-	cancelledCount := clearPendingSlot()
-
 	// A manual rerun is a NEW direct_human trigger attributed to the rerunning
 	// member, not the original run's human (MUL-4302 §5); actorUserID carries them.
 	// sourceTaskID is the rerun lineage: it rides the CreateAgentTask insert
 	// (rerun_of_task_id) so the queued event / daemon claim never sees a NULL
 	// lineage, and it stays distinct from system-retry's retry_of_task_id (§5).
-	task, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
+	task, cancelledCount, err := s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
 	if pendingSlotTakenErr(err) {
-		// The clear above and this enqueue are separate commits, so a system
-		// retry created by a concurrent FailTask can take the pending slot in
-		// between. CreateRetryTask yields the slot when it is already occupied,
-		// but it cannot yield to a row that does not exist yet, so a retry
-		// committing inside this window gets there first. Clear once more and
-		// retry: the deliberate human action is the one that should hold the
-		// slot. Bounded to a single extra attempt — a second collision would mean
-		// something is enqueueing in a loop, which is worth surfacing rather than
-		// spinning on.
+		// A concurrent queue writer can occupy a previously empty slot. The
+		// failed transaction left every prior task intact; retry the entire
+		// replacement once against the committed occupant.
 		slog.Info("issue rerun: pending slot taken concurrently, reclaiming",
 			"issue_id", util.UUIDToString(issueID),
 			"agent_id", util.UUIDToString(agentID),
 		)
-		cancelledCount += clearPendingSlot()
-		task, err = s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
+		task, cancelledCount, err = s.enqueueRerunTask(ctx, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, actorUserID, sourceTaskID, rerunOrigin, dispatch)
 	}
 	if err != nil {
 		return nil, err
@@ -6321,12 +6267,27 @@ func (s *TaskService) promoteNewestSurvivingComment(ctx context.Context, ids []p
 // handler ignores this flag for reruns and instead reads the exact source task
 // (rerun_of_task_id) to reuse its workdir and, when the failure did not poison
 // the conversation, resume its session (MUL-4869).
-func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dispatch RerunDelegation) (db.AgentTaskQueue, error) {
+func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, dispatch RerunDelegation) (db.AgentTaskQueue, int, error) {
 	var task db.AgentTaskQueue
 	var attr attribution.Result
+	var cancelled []db.AgentTaskQueue
 	write := func(q *db.Queries) error {
+		if _, err := q.LockIssueForTaskRerun(ctx, db.LockIssueForTaskRerunParams{
+			IssueID: issue.ID, WorkspaceID: issue.WorkspaceID, AgentID: agentID,
+		}); err != nil {
+			return err
+		}
 		returnIDs, err := s.rerunDelegationReturnIDs(ctx, q, issue, dispatch)
 		if err != nil {
+			return err
+		}
+		cancelled, err = q.CancelPendingTasksByIssueAndAgentInThread(ctx, db.CancelPendingTasksByIssueAndAgentInThreadParams{
+			ThreadCommentID: triggerCommentID, IssueID: issue.ID, AgentID: agentID,
+		})
+		if err != nil {
+			return err
+		}
+		if err := SettleTerminalTaskState(ctx, q, cancelled...); err != nil {
 			return err
 		}
 		if issue.AssigneeType.String == "agent" && issue.AssigneeID.Valid &&
@@ -6337,14 +6298,19 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 		task, attr, err = s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, true, "", actorUserID, rerunOfTaskID, origin, returnIDs)
 		return err
 	}
-	// The accepted return, the run, and every inherited relationship commit
-	// together. A refusal above this point leaves no accepted return behind.
+	// Replacement, terminal settlement and accepted returns have one commit.
+	// A refusal or enqueue failure must leave the previous queue untouched.
 	if err := s.runInTx(ctx, write); err != nil {
-		return db.AgentTaskQueue{}, err
+		return db.AgentTaskQueue{}, 0, err
+	}
+	for _, prior := range cancelled {
+		s.captureTaskCancelled(ctx, prior)
+		s.ReconcileAgentStatus(ctx, prior.AgentID)
+		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, prior)
 	}
 	s.applyQueuedIssueTaskOverlay(ctx, s.Queries, &task)
 	s.publishQueuedIssueTask(ctx, task, attr)
-	return task, nil
+	return task, len(cancelled), nil
 }
 
 // rerunDelegationReturnIDs builds the explicit set a rerun carries: the exact

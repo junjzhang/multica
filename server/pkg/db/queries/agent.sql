@@ -632,6 +632,15 @@ WHERE issue_id = $1 AND agent_id = $2
   AND status IN ('queued', 'dispatched', 'deferred')
 RETURNING *;
 
+-- name: LockIssueForTaskRerun :one
+-- Match task-owner acquisition before locking the issue for queue replacement.
+-- Cancellation and insertion then share the owner-before-task lock order.
+SELECT i.id FROM issue i
+JOIN agent a ON a.id = @agent_id AND a.workspace_id = i.workspace_id
+WHERE i.id = @issue_id AND i.workspace_id = @workspace_id
+  AND lock_task_owner_rows(a.id, i.id, a.runtime_id)
+FOR NO KEY UPDATE OF i;
+
 -- name: CancelPendingTasksByIssueAndAgentInThread :many
 -- Cancel only the not-yet-started plan in the selected thread. Other threads
 -- retain their queues; running tasks are stopped explicitly through CancelTask.

@@ -7137,6 +7137,29 @@ func (q *Queries) LockAgentTaskStartClaim(ctx context.Context, arg LockAgentTask
 	return i, err
 }
 
+const lockIssueForTaskRerun = `-- name: LockIssueForTaskRerun :one
+SELECT i.id FROM issue i
+JOIN agent a ON a.id = $1 AND a.workspace_id = i.workspace_id
+WHERE i.id = $2 AND i.workspace_id = $3
+  AND lock_task_owner_rows(a.id, i.id, a.runtime_id)
+FOR NO KEY UPDATE OF i
+`
+
+type LockIssueForTaskRerunParams struct {
+	AgentID     pgtype.UUID `json:"agent_id"`
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Match task-owner acquisition before locking the issue for queue replacement.
+// Cancellation and insertion then share the owner-before-task lock order.
+func (q *Queries) LockIssueForTaskRerun(ctx context.Context, arg LockIssueForTaskRerunParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockIssueForTaskRerun, arg.AgentID, arg.IssueID, arg.WorkspaceID)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const markAgentTaskWaitingLocalDirectory = `-- name: MarkAgentTaskWaitingLocalDirectory :one
 UPDATE agent_task_queue
 SET status = 'waiting_local_directory',
