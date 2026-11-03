@@ -396,6 +396,11 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		params.Provider = pgtype.Text{String: currentRuntime.Provider, Valid: true}
 		params.SessionID = currentTask.SessionID
 		params.WorkDir = currentTask.WorkDir
+		scopeTaskID, err := ManagedSourceTaskScope(ctx, q, currentTask, ws)
+		if err != nil {
+			return db.IssueDelegationReturn{}, err
+		}
+		params.ScopeTaskID = scopeTaskID
 	}
 
 	created, err := q.CreateIssueDelegationReturn(ctx, params)
@@ -423,6 +428,15 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 		if !existing.RuntimeID.Valid || !nonemptyText(existing.Provider) ||
 			!nonemptyText(existing.SessionID) || !nonemptyText(existing.WorkDir) {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted managed address snapshot is missing", ErrReturnConflict)
+		}
+		original, err := q.GetAgentTask(ctx, existing.SourceTaskID)
+		if err != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: original source scope unavailable", ErrReturnConflict)
+		}
+		if !original.IssueID.Valid && !original.ChatSessionID.Valid && !original.AutopilotRunID.Valid {
+			if err := ValidateOriginalTaskScope(ctx, q, existing); err != nil {
+				return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnConflict, err)
+			}
 		}
 		if existing.RuntimeID == currentTask.RuntimeID &&
 			existing.Provider.String == currentRuntime.Provider &&

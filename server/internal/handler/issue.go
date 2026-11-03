@@ -4594,6 +4594,10 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 
 	deleteResult, err := h.deleteIssueAndCollectAttachmentURLs(r.Context(), issue, nil)
 	if err != nil {
+		if errors.Is(err, service.ErrDelegationResourcesRetained) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to delete issue")
 		return
 	}
@@ -4653,6 +4657,12 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 			ID: issue.ID, WorkspaceID: issue.WorkspaceID,
 		}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("lock issue for delete: %w", err)
+		}
+		if err := qtx.LockTasksForScopeRemoval(ctx, db.LockTasksForScopeRemovalParams{IssueID: issue.ID}); err != nil {
+			return issueDeleteResult{}, err
+		}
+		if err := h.TaskService.RequireDelegationScopeReleased(ctx, qtx, issue.WorkspaceID, issue.ID, pgtype.UUID{}); err != nil {
+			return issueDeleteResult{}, err
 		}
 		detached, err := qtx.DetachDirectChildIssues(ctx, db.DetachDirectChildIssuesParams{
 			WorkspaceID: issue.WorkspaceID, ParentIssueID: issue.ID, ExcludedIssueIds: excludedIssueIDs,

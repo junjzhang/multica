@@ -372,7 +372,7 @@ func (q *Queries) GetDelegationResultObligationForTask(ctx context.Context, task
 }
 
 const getDelegationReturnByID = `-- name: GetDelegationReturnByID :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at FROM issue_delegation_return WHERE id = $1
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE id = $1
 `
 
 func (q *Queries) GetDelegationReturnByID(ctx context.Context, id pgtype.UUID) (IssueDelegationReturn, error) {
@@ -391,8 +391,56 @@ func (q *Queries) GetDelegationReturnByID(ctx context.Context, id pgtype.UUID) (
 		&i.SessionID,
 		&i.WorkDir,
 		&i.CreatedAt,
+		&i.ScopeTaskID,
 	)
 	return i, err
+}
+
+const getResourceTaskState = `-- name: GetResourceTaskState :one
+SELECT t.id,t.agent_id,t.status,t.resource_control_required,t.terminal_reported_at
+FROM agent_task_queue t JOIN agent a ON a.id=t.agent_id
+WHERE t.id = $1 AND a.workspace_id = $2
+`
+
+type GetResourceTaskStateParams struct {
+	TaskID      pgtype.UUID `json:"task_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+type GetResourceTaskStateRow struct {
+	ID                      pgtype.UUID        `json:"id"`
+	AgentID                 pgtype.UUID        `json:"agent_id"`
+	Status                  string             `json:"status"`
+	ResourceControlRequired bool               `json:"resource_control_required"`
+	TerminalReportedAt      pgtype.Timestamptz `json:"terminal_reported_at"`
+}
+
+func (q *Queries) GetResourceTaskState(ctx context.Context, arg GetResourceTaskStateParams) (GetResourceTaskStateRow, error) {
+	row := q.db.QueryRow(ctx, getResourceTaskState, arg.TaskID, arg.WorkspaceID)
+	var i GetResourceTaskStateRow
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.Status,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+	)
+	return i, err
+}
+
+const hasPendingReturnInputs = `-- name: HasPendingReturnInputs :one
+SELECT EXISTS (
+ SELECT 1 FROM comment_dispatch_obligation o
+ LEFT JOIN comment_delegation_return c ON c.comment_id = o.comment_id
+ WHERE o.status = 'pending' AND (o.delegation_return_id = $1 OR c.delegation_return_id = $1)
+) AS pending
+`
+
+func (q *Queries) HasPendingReturnInputs(ctx context.Context, returnID pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPendingReturnInputs, returnID)
+	var pending bool
+	err := row.Scan(&pending)
+	return pending, err
 }
 
 const hasTaskDelegationReturns = `-- name: HasTaskDelegationReturns :one
@@ -512,9 +560,13 @@ SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_
     handling.error AS handling_error
 FROM agent_task_delegation_return l
 JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN agent_task_queue outcome ON outcome.id = l.task_id
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE r.issue_id = $1 AND r.workspace_id = $2
+  AND (l.notification_task_id IS NOT NULL OR l.notification_delivery_id IS NOT NULL OR l.notification_error IS NOT NULL
+    OR ((outcome.status = 'completed' OR (outcome.status = 'failed' AND outcome.delegation_outcome_final))
+      AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = outcome.id)))
 ORDER BY r.created_at, r.id
 `
 
@@ -595,6 +647,153 @@ func (q *Queries) ListIssueResultNotifications(ctx context.Context, arg ListIssu
 	return items, nil
 }
 
+const listManagedReturnsForRuntime = `-- name: ListManagedReturnsForRuntime :many
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE runtime_id = $1 AND return_kind = 'managed_task'
+ AND ($2::uuid IS NULL OR id > $2)
+ORDER BY id LIMIT 500
+`
+
+type ListManagedReturnsForRuntimeParams struct {
+	RuntimeID     pgtype.UUID `json:"runtime_id"`
+	AfterReturnID pgtype.UUID `json:"after_return_id"`
+}
+
+func (q *Queries) ListManagedReturnsForRuntime(ctx context.Context, arg ListManagedReturnsForRuntimeParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listManagedReturnsForRuntime, arg.RuntimeID, arg.AfterReturnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.RuntimeID,
+			&i.Provider,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.CreatedAt,
+			&i.ScopeTaskID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listManagedReturnsForScope = `-- name: ListManagedReturnsForScope :many
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id FROM issue_delegation_return r
+JOIN agent_task_queue source ON source.id = r.source_task_id
+LEFT JOIN agent_task_queue root ON root.id = r.scope_task_id
+WHERE r.workspace_id = $1 AND r.return_kind = 'managed_task'
+  AND (($2::uuid IS NOT NULL AND (source.issue_id = $2 OR root.issue_id = $2 OR r.issue_id = $2))
+    OR ($3::uuid IS NOT NULL AND (source.chat_session_id = $3 OR root.chat_session_id = $3)))
+ AND ($4::uuid IS NULL OR r.id > $4)
+ORDER BY r.id LIMIT 500
+`
+
+type ListManagedReturnsForScopeParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	IssueID       pgtype.UUID `json:"issue_id"`
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	AfterReturnID pgtype.UUID `json:"after_return_id"`
+}
+
+func (q *Queries) ListManagedReturnsForScope(ctx context.Context, arg ListManagedReturnsForScopeParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listManagedReturnsForScope,
+		arg.WorkspaceID,
+		arg.IssueID,
+		arg.ChatSessionID,
+		arg.AfterReturnID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.RuntimeID,
+			&i.Provider,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.CreatedAt,
+			&i.ScopeTaskID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listManagedReturnsForWorkspace = `-- name: ListManagedReturnsForWorkspace :many
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE workspace_id = $1 AND return_kind = 'managed_task'
+ AND ($2::uuid IS NULL OR id > $2)
+ORDER BY id LIMIT 500
+`
+
+type ListManagedReturnsForWorkspaceParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	AfterReturnID pgtype.UUID `json:"after_return_id"`
+}
+
+func (q *Queries) ListManagedReturnsForWorkspace(ctx context.Context, arg ListManagedReturnsForWorkspaceParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listManagedReturnsForWorkspace, arg.WorkspaceID, arg.AfterReturnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.RuntimeID,
+			&i.Provider,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.CreatedAt,
+			&i.ScopeTaskID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReadyDelegationResults = `-- name: ListReadyDelegationResults :many
 SELECT l.task_id, l.delegation_return_id
 FROM agent_task_delegation_return l
@@ -622,6 +821,69 @@ func (q *Queries) ListReadyDelegationResults(ctx context.Context, batchSize int3
 	for rows.Next() {
 		var i ListReadyDelegationResultsRow
 		if err := rows.Scan(&i.TaskID, &i.DelegationReturnID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReturnResultDependencies = `-- name: ListReturnResultDependencies :many
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, t.status AS execution_status, t.delegation_outcome_final,
+       t.resource_control_required, t.terminal_reported_at,
+       handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
+       handling.terminal_reported_at AS handling_terminal_reported_at,
+       handling.resource_control_required AS handling_resource_control_required
+FROM agent_task_delegation_return l
+LEFT JOIN agent_task_queue t ON t.id = l.task_id
+LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
+WHERE l.delegation_return_id = $1
+`
+
+type ListReturnResultDependenciesRow struct {
+	AgentTaskDelegationReturn       AgentTaskDelegationReturn `json:"agent_task_delegation_return"`
+	ExecutionStatus                 pgtype.Text               `json:"execution_status"`
+	DelegationOutcomeFinal          pgtype.Bool               `json:"delegation_outcome_final"`
+	ResourceControlRequired         pgtype.Bool               `json:"resource_control_required"`
+	TerminalReportedAt              pgtype.Timestamptz        `json:"terminal_reported_at"`
+	HandlingStatus                  pgtype.Text               `json:"handling_status"`
+	HandlingStartedAt               pgtype.Timestamptz        `json:"handling_started_at"`
+	HandlingFailureReason           pgtype.Text               `json:"handling_failure_reason"`
+	HandlingTerminalReportedAt      pgtype.Timestamptz        `json:"handling_terminal_reported_at"`
+	HandlingResourceControlRequired pgtype.Bool               `json:"handling_resource_control_required"`
+}
+
+func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgtype.UUID) ([]ListReturnResultDependenciesRow, error) {
+	rows, err := q.db.Query(ctx, listReturnResultDependencies, returnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReturnResultDependenciesRow{}
+	for rows.Next() {
+		var i ListReturnResultDependenciesRow
+		if err := rows.Scan(
+			&i.AgentTaskDelegationReturn.TaskID,
+			&i.AgentTaskDelegationReturn.DelegationReturnID,
+			&i.AgentTaskDelegationReturn.CreatedAt,
+			&i.AgentTaskDelegationReturn.NotificationDeliveryID,
+			&i.AgentTaskDelegationReturn.NotificationTaskID,
+			&i.AgentTaskDelegationReturn.NotificationError,
+			&i.AgentTaskDelegationReturn.MaterializedAt,
+			&i.AgentTaskDelegationReturn.LastAttemptAt,
+			&i.ExecutionStatus,
+			&i.DelegationOutcomeFinal,
+			&i.ResourceControlRequired,
+			&i.TerminalReportedAt,
+			&i.HandlingStatus,
+			&i.HandlingStartedAt,
+			&i.HandlingFailureReason,
+			&i.HandlingTerminalReportedAt,
+			&i.HandlingResourceControlRequired,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1070,6 +1332,26 @@ func (q *Queries) LockTaskSessionPin(ctx context.Context, taskID pgtype.UUID) (A
 		&i.SessionPinGeneration,
 	)
 	return i, err
+}
+
+const lockTasksForScopeRemoval = `-- name: LockTasksForScopeRemoval :exec
+WITH locked AS (
+ SELECT id FROM agent_task_queue
+ WHERE ($1::uuid IS NOT NULL AND issue_id = $1)
+    OR ($2::uuid IS NOT NULL AND chat_session_id = $2)
+ ORDER BY id FOR UPDATE
+)
+SELECT count(*) FROM locked
+`
+
+type LockTasksForScopeRemovalParams struct {
+	IssueID       pgtype.UUID `json:"issue_id"`
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+}
+
+func (q *Queries) LockTasksForScopeRemoval(ctx context.Context, arg LockTasksForScopeRemovalParams) error {
+	_, err := q.db.Exec(ctx, lockTasksForScopeRemoval, arg.IssueID, arg.ChatSessionID)
+	return err
 }
 
 const markTaskResourceControlRequired = `-- name: MarkTaskResourceControlRequired :execrows

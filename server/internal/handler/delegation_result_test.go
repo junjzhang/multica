@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -602,11 +603,14 @@ func TestDelegationResultPreservesOriginalUnscopedTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbfx.Exec(t, `UPDATE agent_runtime SET runtime_mode='local',provider='codex',daemon_id='unscoped-result-daemon' WHERE id=$1`, source.RuntimeID)
-	dbfx.Exec(t, `UPDATE agent_task_queue SET issue_id=NULL WHERE id=$1`, source.ID)
+	quickContext, _ := json.Marshal(service.QuickCreateContext{Type: service.QuickCreateContextType, WorkspaceID: testWorkspaceID, RequesterID: testUserID, Prompt: "Create delegated work"})
+	dbfx.Exec(t, `UPDATE agent_task_queue SET issue_id=NULL,context=$2::jsonb WHERE id=$1`, source.ID, quickContext)
 	target, _ := executableTarget(t, "unscoped-target")
 	title := fmt.Sprintf("unscoped result %d", time.Now().UnixNano())
 	bumpIssueCounter(t)
-	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), "POST", "/api/issues", createIssueBody(title, target), nil, nil)
+	body := createIssueBody(title, target)
+	body["origin_type"], body["origin_id"] = "quick_create", sourceID
+	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), "POST", "/api/issues", body, nil, nil)
 	if w.Code != 201 {
 		t.Fatalf("unscoped admission: %d %s", w.Code, w.Body.String())
 	}
@@ -617,7 +621,11 @@ func TestDelegationResultPreservesOriginalUnscopedTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishResultFixture(t, result)
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, source.ID)
+	testutil.Call(t, testHandler.CompleteTask, withURLParam(newOwnerDaemonRequest("POST", "/complete", map[string]string{"output": "Created delegated issue", "session_id": source.SessionID.String, "work_dir": source.WorkDir.String}), "taskId", sourceID)).Want(200)
+	linkedSource, _ := testHandler.Queries.GetAgentTask(ctx, source.ID)
+	if linkedSource.IssueID != result.IssueID {
+		t.Fatal("quick-create completion did not exercise LinkTaskToIssue")
+	}
 	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +639,145 @@ func TestDelegationResultPreservesOriginalUnscopedTask(t *testing.T) {
 		t.Fatal("unscoped source was redirected into a replacement scope")
 	}
 	proof, err := service.VerifiedDelegationResult(ctx, testHandler.Queries, turn)
-	if err != nil || proof == nil || proof.SourceTaskID != sourceID {
+	if err != nil || proof == nil || proof.SourceTaskID != sourceID || proof.ScopeTaskID != sourceID {
 		t.Fatalf("original task scope verification: %v", err)
+	}
+	// The result handler may itself accept real child work. Its provenance is R,
+	// while its physical namespace remains the original task S.
+	req := withURLParam(newOwnerDaemonRequest("POST", "/claim", nil), "runtimeId", uuidToString(source.RuntimeID))
+	req.Header.Set("X-Client-Capabilities", protocol.DaemonCapabilityDelegationResultsV1)
+	var claim struct {
+		Task *AgentTaskResponse `json:"task"`
+	}
+	testutil.Call(t, testHandler.ClaimTaskByRuntime, req).Want(200).JSON(&claim)
+	if claim.Task == nil || claim.Task.ID != turnID {
+		t.Fatal("first typed turn was not claimed")
+	}
+	turn, _ = testHandler.Queries.GetAgentTask(ctx, turn.ID)
+	testutil.Call(t, testHandler.StartTask, startClaimRequest(turnID, uuidToString(turn.RuntimeID), turn.DispatchedAt.Time)).Want(200)
+	testutil.Call(t, testHandler.PinTaskSession, withURLParam(newOwnerDaemonRequest("POST", "/session", protocol.SessionPinRequest{SessionID: proof.SessionID, WorkDir: proof.WorkDir, Generation: claim.Task.SessionPinGeneration}), "taskId", turnID)).Want(204)
+	nextTitle := title + " next"
+	bumpIssueCounter(t)
+	w = serveAuthenticated(t, claim.Task.AuthToken, http.HandlerFunc(testHandler.CreateIssue), "POST", "/api/issues", createIssueBody(nextTitle, target), nil, nil)
+	if w.Code != 201 {
+		t.Fatalf("typed handler new delegation: %d %s", w.Code, w.Body.String())
+	}
+	nextIssue, _ := issueIDByTitle(t, nextTitle)
+	cleanupDelegatedIssue(t, nextIssue)
+	nextAddress, ok := acceptedReturn(t, nextIssue)
+	if !ok || uuidToString(nextAddress.ScopeTaskID) != sourceID {
+		t.Fatal("new delegation did not freeze its original task scope")
+	}
+
+	nextResult, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, nextIssue, target)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishResultFixture(t, nextResult)
+	if _, err := testHandler.TaskService.CompleteTask(service.WithTerminalReport(ctx), turn.ID, []byte(`{"output":"handled prior result"}`), proof.SessionID, proof.WorkDir, "", false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The newly accepted child owns its scope fact, independently of the old
+	// notification relation that led to R.
+	dbfx.Exec(t, `DELETE FROM agent_task_delegation_return WHERE notification_task_id=$1`, turn.ID)
+	dbfx.Exec(t, `DELETE FROM issue_delegation_return WHERE id=$1`, parseUUID(proof.DelegationReturnID))
+	dbfx.Exec(t, `UPDATE issue SET status='done' WHERE id=$1`, result.IssueID)
+	// The old notification is gone. Only the new child's frozen scope keeps S.
+	testutil.Call(t, testHandler.DeleteIssue, withURLParam(newRequest("DELETE", "/api/issues/"+issueID, nil), "id", issueID)).Want(http.StatusConflict)
+	if _, err := testHandler.Queries.GetAgentTask(ctx, source.ID); err != nil {
+		t.Fatal("new dependency lost its original scope task")
+	}
+
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	var secondTurnID string
+	dbfx.QueryRow(t, `SELECT notification_task_id FROM agent_task_delegation_return WHERE task_id=$1`, nextResult.ID).Scan(&secondTurnID)
+	secondTurn, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(secondTurnID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextProof, err := service.VerifiedDelegationResult(ctx, testHandler.Queries, secondTurn)
+	if err != nil || nextProof == nil || nextProof.ScopeTaskID != sourceID || nextProof.SourceTaskID != turnID {
+		t.Fatalf("typed delegation changed original physical task scope: proof=%+v err=%v", nextProof, err)
+	}
+
+	// Actual loss of S is a visible refusal, never a replacement issue/root.
+	dbfx.Exec(t, `DELETE FROM agent_task_queue WHERE id=$1`, source.ID)
+	var refused struct {
+		Task *AgentTaskResponse `json:"task"`
+	}
+	testutil.Call(t, testHandler.ClaimTaskByRuntime, req.Clone(req.Context())).Want(200).JSON(&refused)
+	if refused.Task != nil {
+		t.Fatal("deleted original scope still produced an executable claim")
+	}
+	lost, _ := testHandler.Queries.GetAgentTask(ctx, secondTurn.ID)
+	if lost.Status != "failed" || lost.FailureReason.String != protocol.DelegationResultUnavailable {
+		t.Fatalf("missing scope not visible: %s/%s", lost.Status, lost.FailureReason.String)
+	}
+
+}
+
+func TestDelegationResultNotifiesOnlyActualCarriedRecipients(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	ctx := context.Background()
+	source, result, first := resultFixture(t, "multi-recipient")
+	if _, err := testHandler.TaskService.CancelTask(ctx, result.ID); err != nil {
+		t.Fatal(err)
+	}
+	firstRun, firstToken := extraManagedRun(t, uuidToString(source.AgentID), first.SessionID.String, first.WorkDir.String)
+	rootComment := dbfx.Comment(t, uuidToString(result.IssueID), "One shared dispatch thread")
+	code, _, body := intentComment(t, firstToken, uuidToString(result.IssueID), fmt.Sprintf("[@Executor](mention://agent/%s) first accepted input", uuidToString(result.AgentID)), rootComment)
+	if code != 201 {
+		t.Fatalf("first actual recipient: %d %s", code, body)
+	}
+	result, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, uuidToString(result.IssueID), uuidToString(result.AgentID))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, firstRun)
+
+	secondAgent, secondID, secondToken := managedDispatcherFixture(t, "multi-recipient-second")
+	second, _ := testHandler.Queries.GetAgentTask(ctx, parseUUID(secondID))
+	dbfx.Exec(t, `UPDATE agent_runtime SET runtime_mode='local',provider='codex',daemon_id='multi-second-daemon' WHERE id=$1`, second.RuntimeID)
+	code, _, body = intentComment(t, secondToken, uuidToString(result.IssueID), fmt.Sprintf("[@Executor](mention://agent/%s) additional accepted input", uuidToString(result.AgentID)), rootComment)
+	if code != 201 {
+		t.Fatalf("second actual recipient: %d %s", code, body)
+	}
+	carried := taskReturnIDs(t, uuidToString(result.ID))
+	if len(carried) != 2 {
+		t.Fatalf("actual batch has %d accepted recipients", len(carried))
+	}
+	thirdAgent, thirdID, _ := managedDispatcherFixture(t, "multi-recipient-unrelated")
+	address, err := delegation.ResolveManaged(ctx, testHandler.Queries, testWorkspaceID, thirdAgent, thirdID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := delegation.Ensure(ctx, testHandler.Queries, testWorkspaceID, uuidToString(result.IssueID), address, testUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, second.ID)
+	finishResultFixture(t, result)
+	for range 2 {
+		if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := testHandler.Queries.ListTaskResultNotifications(ctx, db.ListTaskResultNotificationsParams{TaskID: result.ID, WorkspaceID: parseUUID(testWorkspaceID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, row := range rows {
+		if !row.NotificationTaskID.Valid || row.DelegationReturnID == unrelated.ID {
+			t.Fatal("missing actual notification or notified an uncarried binding")
+		}
+		got[uuidToString(row.DispatcherAgentID)] = true
+	}
+	if len(rows) != 2 || !got[uuidToString(source.AgentID)] || !got[secondAgent] {
+		t.Fatalf("actual recipient set: %v, first=%s", got, uuidToString(first.ID))
 	}
 }

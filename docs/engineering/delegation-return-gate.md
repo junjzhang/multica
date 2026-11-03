@@ -212,6 +212,21 @@ handling turn does not inherit the executor's outgoing returns, and ordinary
 comments cannot merge into it. Real new delegations it accepts still create
 their own obligations.
 
+For an original task-only scope, the accepted return stores `scope_task_id`.
+A typed handler that delegates more work proves that scope through its current
+durable notification before the new return copies it. The new dependency then
+owns that scope fact; removing the older notification does not change its
+namespace. Quick-create completion may link the original task to a newly
+created issue for navigation, but that later link cannot replace the frozen
+task scope. Source and scope task records remain protected while accepted
+business work or execution/notification dependencies are unresolved.
+
+A typed terminal success must report the verified session and work directory.
+Missing or contradictory addresses produce an input-unknown failure, retain
+the original tuple and notification id, and never resend the input. Failure and
+cancellation reports cannot retire or overwrite the frozen tuple. Resource
+control callbacks report location refinement separately from outcome reporting.
+
 Ordinary pending assignment/comment inputs keep their own unique issue/agent/
 thread slot. Typed result turns are excluded from that index; their locked
 run/return obligation and unique notification pointer provide idempotency.
@@ -231,6 +246,12 @@ current-generation pin confirms both. Before ordinary fresh fallback, the
 confirmation. A repeated transition to the same new generation acknowledges it
 without clearing a newer pin. Late old-generation pins cannot alter the task
 or previously accepted snapshots.
+
+Issue run reads include only materialized/refused notifications or eligible final
+outcomes. A comment-change cancelled run and an automatic-retry intermediate
+attempt have no pending notification of their own; their replacement/final leaf
+owns its actual result notification. This projection does not change resource
+dependency accounting.
 
 Issue run reads expose `result_notifications`. An explicit empty array means
 that the server read the obligations and found none; an omitted field means
