@@ -282,6 +282,9 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 }
 
 func buildPromptBody(task Task, provider string) string {
+	if result := task.DelegationResult; result != nil {
+		return fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+	}
 	if task.WakeupID != "" {
 		var b strings.Builder
 		fmt.Fprintf(&b, "You are running as a local coding agent for a Multica workspace.\n\nYour assigned issue ID is: %s\n\n[WAKEUP]\n%s\n\n", task.IssueID, task.HandoffNote)

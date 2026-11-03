@@ -59,6 +59,22 @@ func lockFileExclusiveNonBlocking(f *os.File) (ok bool, err error) {
 	return false, err
 }
 
+func lockFileSharedNonBlocking(f *os.File) (ok bool, err error) {
+	overlapped := new(windows.Overlapped)
+	err = windows.LockFileEx(
+		windows.Handle(f.Fd()),
+		windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, overlapped,
+	)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) || errors.Is(err, windows.ERROR_IO_PENDING) {
+		return false, nil
+	}
+	return false, err
+}
+
 // unlockFile drops the lock.
 func unlockFile(f *os.File) error {
 	overlapped := new(windows.Overlapped)

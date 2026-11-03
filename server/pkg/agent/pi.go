@@ -426,7 +426,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		}
 		if !locked {
 			if opts.ResumeSessionID != "" {
-				return piSessionBusyResult(label, sessionPath), nil
+				return piSessionBusyResult(label, sessionPath, opts.RequireResume), nil
 			}
 			return nil, fmt.Errorf("%s session file %q is already in use", label, sessionPath)
 		}
@@ -853,7 +853,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}, nil
 }
 
-func piSessionBusyResult(label, sessionPath string) *Session {
+func piSessionBusyResult(label, sessionPath string, strict bool) *Session {
 	msgCh := make(chan Message)
 	close(msgCh)
 	resCh := make(chan Result, 1)
@@ -861,6 +861,7 @@ func piSessionBusyResult(label, sessionPath string) *Session {
 		Status:                  "failed",
 		Error:                   fmt.Sprintf("%s session file %q is already in use by another execution", label, sessionPath),
 		ResumeRejectedTransient: true,
+		StrictResumeUnmet:       strict,
 	}
 	close(resCh)
 	return &Session{Messages: msgCh, Result: resCh}
