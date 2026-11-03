@@ -6695,8 +6695,10 @@ func (h *Handler) GetTaskGCCheck(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":       task.Status,
-		"completed_at": task.CompletedAt.Time,
-	})
+	projection, err := h.taskResourceGCProjection(r, task)
+	if err != nil {
+		writeError(w, 500, "resource dependencies unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, projection)
 }
