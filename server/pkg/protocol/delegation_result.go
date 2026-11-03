@@ -71,3 +71,18 @@ type ResourceReleaseDecision struct {
 	Reason             string                   `json:"reason"`
 	ProtectedResources []ManagedResourceAddress `json:"protected_resources"`
 }
+
+// SessionPinRequest confirms the current provider attempt. A non-empty
+// NextGeneration invalidates the old attempt before an ordinary fresh retry.
+// Retrying the same transition acknowledges the new generation without
+// invalidating a pin already confirmed for it.
+type SessionPinRequest struct {
+	SessionID      string `json:"session_id,omitempty"`
+	WorkDir        string `json:"work_dir,omitempty"`
+	Generation     string `json:"generation,omitempty"`
+	NextGeneration string `json:"next_generation,omitempty"`
+}
+
+type SessionPinAcknowledgement struct {
+	Generation string `json:"generation"`
+}
