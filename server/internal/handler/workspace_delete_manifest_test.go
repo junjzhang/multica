@@ -28,6 +28,7 @@ var workspaceDeletionManifest = map[string]workspaceDeleteAction{
 	"external_agent_session":             workspaceDelete,
 	"external_agent_session_binding":     workspaceDelete,
 	"issue_delegation_return":            workspaceDelete,
+	"delegation_result_takeover":         workspaceDelete,
 	"comment_delegation_return":          workspaceDelete,
 	"comment_dispatch_obligation":        workspaceDelete,
 	"issue_assignment_delegation":        workspaceDelete,

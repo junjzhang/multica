@@ -352,7 +352,7 @@ func (q *Queries) GetAutomaticRetryChild(ctx context.Context, parentTaskID pgtyp
 }
 
 const getDelegationResultObligationForTask = `-- name: GetDelegationResultObligationForTask :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at FROM agent_task_delegation_return WHERE notification_task_id = $1
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id FROM agent_task_delegation_return WHERE notification_task_id = $1
 `
 
 func (q *Queries) GetDelegationResultObligationForTask(ctx context.Context, taskID pgtype.UUID) (AgentTaskDelegationReturn, error) {
@@ -367,12 +367,13 @@ func (q *Queries) GetDelegationResultObligationForTask(ctx context.Context, task
 		&i.NotificationError,
 		&i.MaterializedAt,
 		&i.LastAttemptAt,
+		&i.TakeoverID,
 	)
 	return i, err
 }
 
 const getDelegationReturnByID = `-- name: GetDelegationReturnByID :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE id = $1
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return WHERE id = $1
 `
 
 func (q *Queries) GetDelegationReturnByID(ctx context.Context, id pgtype.UUID) (IssueDelegationReturn, error) {
@@ -392,6 +393,7 @@ func (q *Queries) GetDelegationReturnByID(ctx context.Context, id pgtype.UUID) (
 		&i.WorkDir,
 		&i.CreatedAt,
 		&i.ScopeTaskID,
+		&i.IsCurrent,
 	)
 	return i, err
 }
@@ -479,7 +481,7 @@ WITH RECURSIVE execution AS (
     JOIN execution child ON child.retry_of_task_id = parent.id
 )
 SELECT EXISTS (
-    SELECT 1 FROM agent_task_delegation_return l JOIN execution e ON e.id = l.task_id
+    SELECT 1 FROM agent_task_delegation_return l JOIN execution e ON e.id = l.task_id WHERE l.takeover_id IS NULL
 ) AS present
 `
 
@@ -580,7 +582,7 @@ func (q *Queries) InvalidateTaskSessionPin(ctx context.Context, arg InvalidateTa
 }
 
 const listDaemonResourceReturns = `-- name: ListDaemonResourceReturns :many
-SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id FROM issue_delegation_return r
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current FROM issue_delegation_return r
 LEFT JOIN agent_runtime rt ON rt.id = r.runtime_id
 WHERE r.workspace_id = $1 AND r.return_kind = 'managed_task'
   AND (rt.daemon_id = $2 OR rt.id IS NULL)
@@ -614,6 +616,7 @@ func (q *Queries) ListDaemonResourceReturns(ctx context.Context, arg ListDaemonR
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -695,7 +698,7 @@ func (q *Queries) ListDaemonResourceTasks(ctx context.Context, arg ListDaemonRes
 }
 
 const listIssueResultNotifications = `-- name: ListIssueResultNotifications :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, (SELECT current.id FROM issue_delegation_return current WHERE current.workspace_id = r.workspace_id AND current.issue_id = r.issue_id AND current.dispatcher_agent_id = r.dispatcher_agent_id AND current.is_current) AS current_return_id, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,
@@ -727,6 +730,8 @@ type ListIssueResultNotificationsRow struct {
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	TakeoverID             pgtype.UUID        `json:"takeover_id"`
+	CurrentReturnID        pgtype.UUID        `json:"current_return_id"`
 	DispatcherAgentID      pgtype.UUID        `json:"dispatcher_agent_id"`
 	ReturnKind             string             `json:"return_kind"`
 	SourceTaskID           pgtype.UUID        `json:"source_task_id"`
@@ -763,6 +768,8 @@ func (q *Queries) ListIssueResultNotifications(ctx context.Context, arg ListIssu
 			&i.NotificationError,
 			&i.MaterializedAt,
 			&i.LastAttemptAt,
+			&i.TakeoverID,
+			&i.CurrentReturnID,
 			&i.DispatcherAgentID,
 			&i.ReturnKind,
 			&i.SourceTaskID,
@@ -791,7 +798,7 @@ func (q *Queries) ListIssueResultNotifications(ctx context.Context, arg ListIssu
 }
 
 const listManagedReturnsForRuntime = `-- name: ListManagedReturnsForRuntime :many
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE runtime_id = $1 AND return_kind = 'managed_task'
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return WHERE runtime_id = $1 AND return_kind = 'managed_task'
  AND ($2::uuid IS NULL OR id > $2)
 ORDER BY id LIMIT 500
 `
@@ -824,6 +831,7 @@ func (q *Queries) ListManagedReturnsForRuntime(ctx context.Context, arg ListMana
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -836,7 +844,7 @@ func (q *Queries) ListManagedReturnsForRuntime(ctx context.Context, arg ListMana
 }
 
 const listManagedReturnsForScope = `-- name: ListManagedReturnsForScope :many
-SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id FROM issue_delegation_return r
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current FROM issue_delegation_return r
 JOIN agent_task_queue source ON source.id = r.source_task_id
 LEFT JOIN agent_task_queue root ON root.id = r.scope_task_id
 WHERE r.workspace_id = $1 AND r.return_kind = 'managed_task'
@@ -881,6 +889,7 @@ func (q *Queries) ListManagedReturnsForScope(ctx context.Context, arg ListManage
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -893,7 +902,7 @@ func (q *Queries) ListManagedReturnsForScope(ctx context.Context, arg ListManage
 }
 
 const listManagedReturnsForWorkspace = `-- name: ListManagedReturnsForWorkspace :many
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return WHERE workspace_id = $1 AND return_kind = 'managed_task'
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return WHERE workspace_id = $1 AND return_kind = 'managed_task'
  AND ($2::uuid IS NULL OR id > $2)
 ORDER BY id LIMIT 500
 `
@@ -926,6 +935,7 @@ func (q *Queries) ListManagedReturnsForWorkspace(ctx context.Context, arg ListMa
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -975,7 +985,7 @@ func (q *Queries) ListReadyDelegationResults(ctx context.Context, batchSize int3
 }
 
 const listReturnResultDependencies = `-- name: ListReturnResultDependencies :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, t.status AS execution_status, t.delegation_outcome_final,
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
        handling.terminal_reported_at AS handling_terminal_reported_at,
@@ -1017,6 +1027,7 @@ func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgt
 			&i.AgentTaskDelegationReturn.NotificationError,
 			&i.AgentTaskDelegationReturn.MaterializedAt,
 			&i.AgentTaskDelegationReturn.LastAttemptAt,
+			&i.AgentTaskDelegationReturn.TakeoverID,
 			&i.ExecutionStatus,
 			&i.DelegationOutcomeFinal,
 			&i.ResourceControlRequired,
@@ -1038,7 +1049,7 @@ func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgt
 }
 
 const listTaskResultNotifications = `-- name: ListTaskResultNotifications :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, (SELECT current.id FROM issue_delegation_return current WHERE current.workspace_id = r.workspace_id AND current.issue_id = r.issue_id AND current.dispatcher_agent_id = r.dispatcher_agent_id AND current.is_current) AS current_return_id, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,
@@ -1066,6 +1077,8 @@ type ListTaskResultNotificationsRow struct {
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	TakeoverID             pgtype.UUID        `json:"takeover_id"`
+	CurrentReturnID        pgtype.UUID        `json:"current_return_id"`
 	DispatcherAgentID      pgtype.UUID        `json:"dispatcher_agent_id"`
 	ReturnKind             string             `json:"return_kind"`
 	SourceTaskID           pgtype.UUID        `json:"source_task_id"`
@@ -1102,6 +1115,8 @@ func (q *Queries) ListTaskResultNotifications(ctx context.Context, arg ListTaskR
 			&i.NotificationError,
 			&i.MaterializedAt,
 			&i.LastAttemptAt,
+			&i.TakeoverID,
+			&i.CurrentReturnID,
 			&i.DispatcherAgentID,
 			&i.ReturnKind,
 			&i.SourceTaskID,
@@ -1132,7 +1147,7 @@ func (q *Queries) ListTaskResultNotifications(ctx context.Context, arg ListTaskR
 const listUnresolvedDelegationFailures = `-- name: ListUnresolvedDelegationFailures :many
 SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation FROM agent_task_queue t
 WHERE t.status = 'failed' AND NOT t.delegation_outcome_final
-  AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id)
+  AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id AND l.takeover_id IS NULL)
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
 ORDER BY (SELECT min(COALESCE(l.last_attempt_at, '-infinity'::timestamptz)) FROM agent_task_delegation_return l WHERE l.task_id=t.id), t.completed_at, t.id LIMIT $1
 `
@@ -1294,7 +1309,7 @@ func (q *Queries) LockDelegationResultIssues(ctx context.Context, arg LockDelega
 }
 
 const lockDelegationResultObligation = `-- name: LockDelegationResultObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at FROM agent_task_delegation_return
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id FROM agent_task_delegation_return
 WHERE task_id = $1 AND delegation_return_id = $2
 FOR UPDATE SKIP LOCKED
 `
@@ -1316,6 +1331,7 @@ func (q *Queries) LockDelegationResultObligation(ctx context.Context, arg LockDe
 		&i.NotificationError,
 		&i.MaterializedAt,
 		&i.LastAttemptAt,
+		&i.TakeoverID,
 	)
 	return i, err
 }

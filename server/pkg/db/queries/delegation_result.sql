@@ -9,7 +9,7 @@ WITH RECURSIVE execution AS (
     JOIN execution child ON child.retry_of_task_id = parent.id
 )
 SELECT EXISTS (
-    SELECT 1 FROM agent_task_delegation_return l JOIN execution e ON e.id = l.task_id
+    SELECT 1 FROM agent_task_delegation_return l JOIN execution e ON e.id = l.task_id WHERE l.takeover_id IS NULL
 ) AS present;
 
 -- name: SetTaskDelegationOutcomeFinal :exec
@@ -29,7 +29,7 @@ ORDER BY created_at, id LIMIT 1;
 -- name: ListUnresolvedDelegationFailures :many
 SELECT t.* FROM agent_task_queue t
 WHERE t.status = 'failed' AND NOT t.delegation_outcome_final
-  AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id)
+  AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id AND l.takeover_id IS NULL)
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
 ORDER BY (SELECT min(COALESCE(l.last_attempt_at, '-infinity'::timestamptz)) FROM agent_task_delegation_return l WHERE l.task_id=t.id), t.completed_at, t.id LIMIT @batch_size;
 
@@ -105,7 +105,7 @@ ON CONFLICT DO NOTHING
 RETURNING *;
 
 -- name: ListTaskResultNotifications :many
-SELECT l.*, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE current.workspace_id = r.workspace_id AND current.issue_id = r.issue_id AND current.dispatcher_agent_id = r.dispatcher_agent_id AND current.is_current) AS current_return_id, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,
@@ -160,7 +160,7 @@ SELECT EXISTS (
 ) AS pending;
 
 -- name: ListIssueResultNotifications :many
-SELECT l.*, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE current.workspace_id = r.workspace_id AND current.issue_id = r.issue_id AND current.dispatcher_agent_id = r.dispatcher_agent_id AND current.is_current) AS current_return_id, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,

@@ -278,9 +278,10 @@ func ResolveExternal(ctx context.Context, q *db.Queries, workspaceID, agentID, s
 }
 
 // Ensure records addr as the accepted return for one (issue, dispatcher agent)
-// pair and returns the row that was accepted. The first accepted address for
-// that key wins: an existing row is returned unchanged when the current
-// trusted source is the same physical session. A different physical session for
+// pair and returns its current immutable address version. An existing current
+// version is returned unchanged when the current
+// trusted source is the same physical session. Only explicit takeover changes
+// which version is current. A different physical session for
 // the same actor on the same issue is a conflict, not a silent reuse of the old
 // run and not a silent overwrite with the new one.
 //

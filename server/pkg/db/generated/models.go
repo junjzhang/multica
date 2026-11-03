@@ -149,6 +149,7 @@ type AgentTaskDelegationReturn struct {
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	TakeoverID             pgtype.UUID        `json:"takeover_id"`
 }
 
 type AgentTaskQueue struct {
@@ -744,6 +745,21 @@ type DaemonToken struct {
 	OwnerID     pgtype.UUID        `json:"owner_id"`
 }
 
+type DelegationResultTakeover struct {
+	ID                      pgtype.UUID        `json:"id"`
+	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	ClientRequestID         pgtype.UUID        `json:"client_request_id"`
+	ResultTaskID            pgtype.UUID        `json:"result_task_id"`
+	FromReturnID            pgtype.UUID        `json:"from_return_id"`
+	ExpectedCurrentReturnID pgtype.UUID        `json:"expected_current_return_id"`
+	TargetReturnID          pgtype.UUID        `json:"target_return_id"`
+	TargetKind              string             `json:"target_kind"`
+	TargetSelectorID        pgtype.UUID        `json:"target_selector_id"`
+	CreatedBy               pgtype.UUID        `json:"created_by"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	TargetSelectionVersion  pgtype.Text        `json:"target_selection_version"`
+}
+
 type DingtalkBotIdentity struct {
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
 	InstallationID   pgtype.UUID        `json:"installation_id"`
@@ -1025,6 +1041,7 @@ type IssueDelegationReturn struct {
 	WorkDir           pgtype.Text        `json:"work_dir"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	ScopeTaskID       pgtype.UUID        `json:"scope_task_id"`
+	IsCurrent         bool               `json:"is_current"`
 }
 
 type IssueDependency struct {

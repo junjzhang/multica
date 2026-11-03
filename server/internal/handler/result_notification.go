@@ -9,6 +9,8 @@ import (
 
 type ResultNotificationResponse struct {
 	ReturnID         string `json:"return_id"`
+	CurrentReturnID  string `json:"current_return_id,omitempty"`
+	TakeoverID       string `json:"takeover_id,omitempty"`
 	RecipientAgentID string `json:"recipient_agent_id"`
 	Kind             string `json:"kind"`
 	DeliveryID       string `json:"delivery_id,omitempty"`
@@ -33,7 +35,7 @@ func (h *Handler) hydrateResultNotifications(ctx context.Context, workspace, iss
 		if task == nil {
 			continue
 		}
-		note := ResultNotificationResponse{ReturnID: uuidToString(row.DelegationReturnID), RecipientAgentID: uuidToString(row.DispatcherAgentID), Kind: row.ReturnKind, DeliveryID: uuidToString(row.NotificationDeliveryID), HandlingTaskID: uuidToString(row.NotificationTaskID), Status: "pending"}
+		note := ResultNotificationResponse{CurrentReturnID: uuidToString(row.CurrentReturnID), TakeoverID: uuidToString(row.TakeoverID), ReturnID: uuidToString(row.DelegationReturnID), RecipientAgentID: uuidToString(row.DispatcherAgentID), Kind: row.ReturnKind, DeliveryID: uuidToString(row.NotificationDeliveryID), HandlingTaskID: uuidToString(row.NotificationTaskID), Status: "pending"}
 		switch {
 		case row.NotificationError.Valid:
 			note.Status, note.Error = "refused", row.NotificationError.String

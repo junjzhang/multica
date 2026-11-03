@@ -241,7 +241,7 @@ func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.Ag
 	return q.SetDelegationResultDelivery(ctx, db.SetDelegationResultDeliveryParams{TaskID: outcome.ID, DelegationReturnID: address.ID, DeliveryID: deliveryID})
 }
 
-func strictResultProviderSupported(provider string) bool {
+func StrictResultProviderSupported(provider string) bool {
 	switch provider {
 	case "codex", "claude", "pi", "opencode", "dsh", "grok", "dim", "kiro", "qwenpaw", "traecli", "mcode", "kimi", "qoder", "zeroclaw", "reasonix", "hermes", "muse":
 		return true
@@ -265,7 +265,7 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if runtime.Provider != address.Provider.String {
 		return empty, resultRefusal("frozen_provider_changed")
 	}
-	if runtime.RuntimeMode != "local" || !strictResultProviderSupported(runtime.Provider) {
+	if runtime.RuntimeMode != "local" || !StrictResultProviderSupported(runtime.Provider) {
 		return empty, resultRefusal("unsupported_strict_result_runtime")
 	}
 	if runtime.Visibility == "private" && !RuntimeAllowsUser(runtime, agent.OwnerID) {
@@ -404,7 +404,7 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 		return nil, err
 	}
 	if runtime.WorkspaceID != address.WorkspaceID || runtime.Provider != expected.Provider || runtime.RuntimeMode != "local" ||
-		!strictResultProviderSupported(runtime.Provider) || (runtime.Visibility == "private" && !RuntimeAllowsUser(runtime, agent.OwnerID)) {
+		!StrictResultProviderSupported(runtime.Provider) || (runtime.Visibility == "private" && !RuntimeAllowsUser(runtime, agent.OwnerID)) {
 		return nil, resultRefusal("frozen_runtime_unavailable")
 	}
 	if address.ScopeTaskID.Valid {

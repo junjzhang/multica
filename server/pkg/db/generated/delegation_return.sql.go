@@ -14,7 +14,7 @@ import (
 const copyRetryDelegationReturns = `-- name: CopyRetryDelegationReturns :execrows
 INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
 SELECT $1, parent.delegation_return_id
-FROM agent_task_delegation_return parent WHERE parent.task_id = $2
+FROM agent_task_delegation_return parent WHERE parent.task_id = $2 AND parent.takeover_id IS NULL
 ON CONFLICT (task_id, delegation_return_id) DO NOTHING
 `
 
@@ -41,8 +41,8 @@ INSERT INTO issue_delegation_return (
     $5, $6, $7,
     $8, $9, $10, $11, $12
 )
-ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
-RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id
+ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) WHERE is_current DO NOTHING
+RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current
 `
 
 type CreateIssueDelegationReturnParams struct {
@@ -62,7 +62,7 @@ type CreateIssueDelegationReturnParams struct {
 
 // The accepted return is written with the dispatching business write in one
 // transaction. A concurrent dispatch for the same (issue, dispatcher) loses on
-// uq_issue_delegation_return_dispatch and re-reads the winner instead of
+// uq_current_issue_delegation_return and re-reads the winner instead of
 // replacing it; another dispatcher has its own key and row.
 func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIssueDelegationReturnParams) (IssueDelegationReturn, error) {
 	row := q.db.QueryRow(ctx, createIssueDelegationReturn,
@@ -94,6 +94,7 @@ func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIss
 		&i.WorkDir,
 		&i.CreatedAt,
 		&i.ScopeTaskID,
+		&i.IsCurrent,
 	)
 	return i, err
 }
@@ -258,10 +259,10 @@ func (q *Queries) GetIssueAssignmentDelegation(ctx context.Context, arg GetIssue
 }
 
 const getIssueDelegationReturnForDispatcher = `-- name: GetIssueDelegationReturnForDispatcher :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return
 WHERE workspace_id = $1
   AND issue_id = $2
-  AND dispatcher_agent_id = $3
+  AND dispatcher_agent_id = $3 AND is_current
 `
 
 type GetIssueDelegationReturnForDispatcherParams struct {
@@ -270,7 +271,7 @@ type GetIssueDelegationReturnForDispatcherParams struct {
 	DispatcherAgentID pgtype.UUID `json:"dispatcher_agent_id"`
 }
 
-// One actor's accepted address on one issue, independent of the assignment
+// One actor's current accepted version on one issue, independent of the assignment
 // slot it dispatched to.
 func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg GetIssueDelegationReturnForDispatcherParams) (IssueDelegationReturn, error) {
 	row := q.db.QueryRow(ctx, getIssueDelegationReturnForDispatcher, arg.WorkspaceID, arg.IssueID, arg.DispatcherAgentID)
@@ -289,6 +290,7 @@ func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg
 		&i.WorkDir,
 		&i.CreatedAt,
 		&i.ScopeTaskID,
+		&i.IsCurrent,
 	)
 	return i, err
 }
@@ -661,10 +663,10 @@ func (q *Queries) LinkIssueAssignmentDelegationReturn(ctx context.Context, arg L
 }
 
 const listAgentTaskDelegationReturns = `-- name: ListAgentTaskDelegationReturns :many
-SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current
 FROM issue_delegation_return r
 JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
-WHERE l.task_id = $1
+WHERE l.task_id = $1 AND l.takeover_id IS NULL
 ORDER BY r.created_at, r.id
 `
 
@@ -693,6 +695,7 @@ func (q *Queries) ListAgentTaskDelegationReturns(ctx context.Context, taskID pgt
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -767,7 +770,7 @@ func (q *Queries) ListIssueAssignmentDelegationReturnIDs(ctx context.Context, ar
 }
 
 const listIssueDelegationReturns = `-- name: ListIssueDelegationReturns :many
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return
 WHERE workspace_id = $1 AND issue_id = $2
 ORDER BY created_at, id
 `
@@ -801,6 +804,7 @@ func (q *Queries) ListIssueDelegationReturns(ctx context.Context, arg ListIssueD
 			&i.WorkDir,
 			&i.CreatedAt,
 			&i.ScopeTaskID,
+			&i.IsCurrent,
 		); err != nil {
 			return nil, err
 		}
@@ -1018,10 +1022,10 @@ func (q *Queries) LockCommentDispatchObligation(ctx context.Context, id pgtype.U
 }
 
 const lockIssueDelegationReturnForDispatcher = `-- name: LockIssueDelegationReturnForDispatcher :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current FROM issue_delegation_return
 WHERE workspace_id = $1
   AND issue_id = $2
-  AND dispatcher_agent_id = $3
+  AND dispatcher_agent_id = $3 AND is_current
 FOR UPDATE
 `
 
@@ -1051,6 +1055,7 @@ func (q *Queries) LockIssueDelegationReturnForDispatcher(ctx context.Context, ar
 		&i.WorkDir,
 		&i.CreatedAt,
 		&i.ScopeTaskID,
+		&i.IsCurrent,
 	)
 	return i, err
 }
@@ -1099,7 +1104,7 @@ WITH RECURSIVE missing AS (
     SELECT child.id AS task_id, parent.delegation_return_id
     FROM agent_task_delegation_return parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
-    WHERE NOT EXISTS (
+    WHERE parent.takeover_id IS NULL AND NOT EXISTS (
         SELECT 1 FROM agent_task_delegation_return present
         WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
     )
