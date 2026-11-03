@@ -78,6 +78,12 @@ A session that no longer exists leaves a visible notification failure and a pres
 
 Before candidate business writes, the rehearsed rollback may restore the compatible previous application against the retained schema, or restore a backup only while all writers remain fenced and no newer results would be lost. The release manifest must state which option was actually tested.
 
+The qualified 639–643 down bundle stops at638 and refuses accepted takeover
+history. It is not a downgrade to the deployed `5f617320` application or schema610.
+Recovery to that deployment requires its matching artifacts and a consistent
+schema610 backup, with all writers stopped and no candidate business writes to
+lose. Do not assume that the old application can safely use retained schema643.
+
 After candidate writes, first fence new dispatch and preserve new tasks, results, bindings, deliveries, and receipts. Prefer correcting the candidate or a specifically verified compatible recovery build. Do not blindly downgrade to a binary that assumes one session per Agent. Do not restore the pre-upgrade database over new work.
 
 Retry only an operation whose outcome is known. For an uncertain send or acknowledgement, look up the original host receipt. An explicit takeover creates a separately identified notification of the preserved result; it does not rewrite or erase the uncertain original.

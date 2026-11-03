@@ -45,7 +45,7 @@ Known busy means no host-side acceptance: retain the message for retry with its 
 
 ## Results, cancellation, and unavailable sessions
 
-Persist results in the existing issue/comment records. Persist the obligation to notify atomically with result submission, so a crash between saving a result and notifying cannot lose the notification. Reuse the existing PostgreSQL transaction and delivery infrastructure; do not introduce another message broker or parallel result store.
+The existing `agent_task_queue.result` and `error` fields are authoritative for the execution result; issue/comment records present and discuss it. Persist the result and the facts that make its accepted notification obligations due in the same transaction, so a crash between saving a result and notifying cannot lose the notification. Reuse the existing PostgreSQL transaction and delivery infrastructure; do not introduce another message broker or parallel result store.
 
 A submitted result awaiting acceptance and an undeliverable notification can coexist. Show both on the issue. When the original session has been deleted, preserve the result and a visible delivery failure; do not silently redirect or rerun the managed Agent. An explicitly selected takeover session may receive a new notification of the existing result. Original uncertain deliveries remain intact and receipt-only.
 

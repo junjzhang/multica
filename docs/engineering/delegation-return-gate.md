@@ -360,11 +360,14 @@ executable mention are unchanged.
 
 ## CLI context
 
-`--return-session` / `MULTICA_RETURN_SESSION` names the external session and is
-sent as `X-Return-Session`. Outside a managed task the current Paseo session id
-(`PASEO_AGENT_ID`) is the default. Inside a managed task the task token is
-authoritative, an explicit session is refused, and an inherited provider session
-is ignored.
+In a connected Paseo session, the private session file supplies the credential,
+workspace and `X-Return-Session` together. The CLI confirms the credential's own
+Agent before issuing business requests. Explicit return-session flags or
+environment values must agree with that file; a human or named profile cannot
+replace it. Outside a file-bound session, `--return-session` /
+`MULTICA_RETURN_SESSION` supplies the external address. Inside a managed task,
+the task token is authoritative, an explicit external session is refused, and an
+inherited provider session is ignored.
 
 Fail-closed identity is the default rule of the business client, not a list of
 annotated commands: when `PASEO_AGENT_ID` is set and the credential is not an
@@ -375,15 +378,18 @@ separate owner client; ordinary human commands outside a Paseo session are
 unchanged. A newly added business command therefore inherits the refusal without
 being added to a list.
 
-## Remaining work
+## Runtime qualification
 
-Result submission that consumes `agent_task_delegation_return` and persists the
-notification obligation atomically, delivery through the existing managed
-queue/resume path or mailbox, visible failure after session deletion, explicit
-managed takeover UI, and the isolated qualification described in the cutover
-runbook are not part of this slice. The local worktree Finalize/report ordering
-and directory-retention race remain with the result-submission slice; the
-source-row lock here does not claim to fix the whole resource lifecycle.
+The admission gate, durable result obligations, managed/mailbox delivery,
+failure projections and explicit takeover form one workflow. Source-row locking
+protects admission; the [daemon resource protocol](delegation-result-daemon.md)
+also protects finalization, receipt uncertainty and retained directories.
+
+The [cutover runbook](task-session-delivery-cutover.md) defines the required
+isolated browser, host, resource and migration evidence. A release manifest must
+bind that evidence to its actual artifacts and source revisions; component
+acceptance does not substitute for final CI, delivery records or deployment
+approval.
 
 
 ## Explicit result takeover

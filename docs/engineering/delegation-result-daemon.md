@@ -15,12 +15,12 @@ session address also remains unknown; prior hints are never filled in as receipt
 evidence. Neither outcome permits a fresh
 prompt retry. A post-prompt resume rejection cannot override this rule.
 Busy directories and provider stores keep the same task waiting with its
-preparation lease; cancellation ends that wait. A provider's explicit transient
-refusal with `StrictResumeUnmet` also proves no input occurred. `StrictResumeUnmet`
-alone is only an identity failure and can describe an error after input; it must
-remain unknown rather than authorize resource release. That combination
-waits in the same task and retries the same strict session; an ambiguous or
-post-input failure never takes this path. Starting a task or observing
+preparation lease; cancellation ends that wait. Only the combination
+`ResumeRejectedTransient && StrictResumeUnmet` proves a pre-input busy refusal
+and permits waiting in the same task before retrying the same strict session.
+`StrictResumeUnmet` alone does not prove that no input occurred: it can describe
+an error after input and must remain unknown, without retry or resource release.
+An ambiguous or post-input failure never takes the busy-retry path. Starting a task or observing
 a session status event is not evidence that the result input was accepted.
 
 The prompt references the saved result and asks the original conversation to
