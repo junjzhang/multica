@@ -8566,6 +8566,39 @@ func (q *Queries) SetDeferredChannelIssueTaskRuntimeOverlay(ctx context.Context,
 	return result.RowsAffected(), nil
 }
 
+const setQueuedAgentTaskRuntimeOverlay = `-- name: SetQueuedAgentTaskRuntimeOverlay :execrows
+UPDATE agent_task_queue
+SET runtime_mcp_overlay = $1,
+    runtime_connected_apps = $2
+WHERE id = $3
+  AND status = 'queued'
+  AND trigger_comment_id IS NULL
+  AND originator_user_id IS NOT DISTINCT FROM $4::uuid
+`
+
+type SetQueuedAgentTaskRuntimeOverlayParams struct {
+	RuntimeMcpOverlay        []byte      `json:"runtime_mcp_overlay"`
+	RuntimeConnectedApps     []byte      `json:"runtime_connected_apps"`
+	ID                       pgtype.UUID `json:"id"`
+	ExpectedOriginatorUserID pgtype.UUID `json:"expected_originator_user_id"`
+}
+
+// The delegated issue, accepted return, and task commit atomically before the
+// optional external overlay is built. Hydrate only the untouched original plan;
+// a comment merge may already have replaced the trigger and attribution.
+func (q *Queries) SetQueuedAgentTaskRuntimeOverlay(ctx context.Context, arg SetQueuedAgentTaskRuntimeOverlayParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setQueuedAgentTaskRuntimeOverlay,
+		arg.RuntimeMcpOverlay,
+		arg.RuntimeConnectedApps,
+		arg.ID,
+		arg.ExpectedOriginatorUserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setTaskDeliveredCommentIDs = `-- name: SetTaskDeliveredCommentIDs :one
 UPDATE agent_task_queue
 SET delivered_comment_ids = $1::uuid[]

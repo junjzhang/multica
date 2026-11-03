@@ -77,8 +77,8 @@ func TestAgentCreateOriginator_E2E_CreateAssignSquad_PrivateWorkerTriggered(t *t
 	creatorAID := createHandlerTestAgent(t, "mul4305-e2e-creator-agent", nil)
 	var creatorTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $2)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, originator_user_id, accountable_user_id, session_id, work_dir)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $2, 'agent-create-e2e-session', '/work/agent-create-e2e')
 		RETURNING id
 	`, creatorAID, ownerH).Scan(&creatorTaskID); err != nil {
 		t.Fatalf("create A's acting task: %v", err)
@@ -97,6 +97,7 @@ func TestAgentCreateOriginator_E2E_CreateAssignSquad_PrivateWorkerTriggered(t *t
 	})
 	r.Header.Set("X-Agent-ID", creatorAID)
 	r.Header.Set("X-Task-ID", creatorTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	testHandler.CreateIssue(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
@@ -135,6 +136,12 @@ func TestAgentCreateOriginator_E2E_CreateAssignSquad_PrivateWorkerTriggered(t *t
 	if leaderOriginator != ownerH {
 		t.Fatalf("squad-leader task originator = %q, want the original human H %q", leaderOriginator, ownerH)
 	}
+	// The leader's run pins its provider session asynchronously at claim time;
+	// until then it has no delegation return address. Simulate the pin so the
+	// leader can hand work to the worker in this end-to-end flow.
+	if _, err := testPool.Exec(ctx, `UPDATE agent_task_queue SET session_id = 'leader-e2e-session', work_dir = '/work/leader-e2e' WHERE id = $1`, leaderTaskID); err != nil {
+		t.Fatalf("pin leader task session: %v", err)
+	}
 
 	// Step 2: the leader L, running its assignment task, posts a comment that
 	// @-mentions the private worker J. The comment stamps source_task_id = the
@@ -145,6 +152,7 @@ func TestAgentCreateOriginator_E2E_CreateAssignSquad_PrivateWorkerTriggered(t *t
 	})
 	r.Header.Set("X-Agent-ID", leaderID)
 	r.Header.Set("X-Task-ID", leaderTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", created.ID)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
@@ -199,8 +207,8 @@ func TestAgentCreateOriginator_E2E_UpdateAssignSquad_HandlerGateAdmitsPrivateLea
 	creatorAID := createHandlerTestAgent(t, "mul4305-e2e-update-creator", nil)
 	var creatorTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $2)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, originator_user_id, accountable_user_id, session_id, work_dir)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $2, 'agent-create-e2e-session', '/work/agent-create-e2e')
 		RETURNING id
 	`, creatorAID, ownerH).Scan(&creatorTaskID); err != nil {
 		t.Fatalf("create A's acting task: %v", err)
@@ -216,6 +224,7 @@ func TestAgentCreateOriginator_E2E_UpdateAssignSquad_HandlerGateAdmitsPrivateLea
 	})
 	r.Header.Set("X-Agent-ID", creatorAID)
 	r.Header.Set("X-Task-ID", creatorTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	testHandler.CreateIssue(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
@@ -238,6 +247,7 @@ func TestAgentCreateOriginator_E2E_UpdateAssignSquad_HandlerGateAdmitsPrivateLea
 	})
 	r.Header.Set("X-Agent-ID", creatorAID)
 	r.Header.Set("X-Task-ID", creatorTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", created.ID)
 	testHandler.UpdateIssue(w, r)
 	if w.Code != http.StatusOK {

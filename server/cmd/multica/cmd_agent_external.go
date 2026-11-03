@@ -202,7 +202,7 @@ func runAgentExternalRegister(cmd *cobra.Command, _ []string) error {
 		body["permission_mode"] = permissionMode
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -236,7 +236,7 @@ func runAgentSessionBind(cmd *cobra.Command, args []string) error {
 	if issueID == "" || sessionID == "" {
 		return fmt.Errorf("--issue and --session are required")
 	}
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--save-to, --save-profile and --print-token are mutually exclusive")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -383,7 +383,7 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentTokenRevoke(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}

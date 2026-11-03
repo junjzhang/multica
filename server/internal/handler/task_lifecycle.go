@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -208,13 +211,52 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return h.canInvokeAgent(r.Context(), agent, actorType, actorID, originatorUserID, workspaceID)
 	}
 
-	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke)
+	// A rerun is a fresh dispatch, not a reason to change who receives the
+	// result: the source run's complete accepted set is preserved, and the
+	// rerunning agent's own accepted address is added. The address is validated
+	// before anything is cancelled or created, but it is recorded only inside
+	// the enqueue transaction below, after eligibility has passed — a rerun
+	// refused by triage or the invoke gate must leave no accepted return.
+	dispatchReturn, derr := h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})
+	if derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
+	// The source run is the named task, or the run the current assignment
+	// intent points to when the request names none. It is never "the target
+	// worker's latest run": that can be a different dispatcher's independent
+	// comment thread. Ordinary human reruns with no delegated assignment keep
+	// the legacy latest-run fallback, but a run that carries accepted returns
+	// is never treated as an assignment.
+	inheritTaskID := sourceTaskID
+	if !inheritTaskID.Valid {
+		resolved, srcErr := h.defaultRerunSourceTask(r.Context(), issue)
+		if srcErr != nil {
+			if errors.Is(srcErr, errRerunSourceRequired) {
+				writeError(w, http.StatusBadRequest, "rerun requires task_id: the current assignment has no determinable delegated source run")
+				return
+			}
+			slog.Warn("resolve default rerun source failed", "issue_id", id, "error", srcErr)
+			writeError(w, http.StatusInternalServerError, "failed to resolve rerun source")
+			return
+		}
+		inheritTaskID = resolved
+	}
+	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, service.RerunDelegation{
+		Address:       dispatchReturn,
+		CreatedBy:     requestUserID(r),
+		InheritTaskID: inheritTaskID,
+	})
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
 		return
 	}
 	if errors.Is(err, service.ErrIssueInTriage) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonIssueInTriage)
+		return
+	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
 		return
 	}
 	// Not a dispatch refusal: the issue may well be runnable, and only the named
@@ -228,6 +270,65 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 	resp := taskToResponse(*task, uuidToString(issue.WorkspaceID))
 	h.hydrateTaskAttributions(r.Context(), []*TaskAttribution{resp.Attribution})
 	writeJSON(w, http.StatusAccepted, resp)
+}
+
+var errRerunSourceRequired = errors.New("rerun has no delegated assignment source")
+
+// defaultRerunSourceTask resolves "rerun the current assignment" to the exact
+// run that assignment intent points at. When no intent exists, the legacy
+// latest-run fallback is allowed only for an issue that has never accepted a
+// delegation return and whose latest run carries none; otherwise a caller must
+// name the source run explicitly.
+func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (pgtype.UUID, error) {
+	if (issue.AssigneeType.String != "agent" && issue.AssigneeType.String != "squad") || !issue.AssigneeID.Valid {
+		return pgtype.UUID{}, nil
+	}
+	assignee := delegation.Assignee{Type: issue.AssigneeType.String, ID: util.UUIDToString(issue.AssigneeID)}
+	intent, err := delegation.LoadAssignmentIntent(ctx, h.Queries, issue.ID, assignee)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if intent != nil {
+		if !intent.TaskID.Valid {
+			return pgtype.UUID{}, errRerunSourceRequired
+		}
+		return intent.TaskID, nil
+	}
+	returns, err := h.Queries.ListIssueDelegationReturns(ctx, db.ListIssueDelegationReturnsParams{
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+	})
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if len(returns) > 0 {
+		return pgtype.UUID{}, errRerunSourceRequired
+	}
+	targetAgentID := issue.AssigneeID
+	if issue.AssigneeType.String == "squad" {
+		if squad, squadErr := h.Queries.GetSquad(ctx, issue.AssigneeID); squadErr == nil {
+			targetAgentID = squad.LeaderID
+		}
+	}
+	latest, err := h.Queries.GetLatestTaskIDForIssueAndAgent(ctx, db.GetLatestTaskIDForIssueAndAgentParams{
+		IssueID:       issue.ID,
+		AgentID:       targetAgentID,
+		ExcludeTaskID: pgtype.UUID{},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pgtype.UUID{}, nil
+		}
+		return pgtype.UUID{}, err
+	}
+	inherited, err := delegation.RunReturnIDs(ctx, h.Queries, latest)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if len(inherited) > 0 {
+		return pgtype.UUID{}, errRerunSourceRequired
+	}
+	return latest, nil
 }
 
 // RetrySourceContextQuickCreate manually re-enqueues a failed issue-less
