@@ -258,6 +258,26 @@ func resolveProfile(cmd *cobra.Command) string {
 }
 
 func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
+	// A Paseo session's binding owns credential, server and workspace for the
+	// commands that act on its behalf. It is resolved before any human-profile
+	// lookup so a missing or broken file fails closed instead of quietly
+	// falling through to the person who owns the machine.
+	if session, err := externalSessionForCommand(); err != nil {
+		return nil, err
+	} else if session != nil {
+		if err := sessionContextConflicts(cmd, session); err != nil {
+			return nil, err
+		}
+		client := cli.NewAPIClient(session.ServerURL, session.WorkspaceID, session.Token)
+		// A file that names agent B does not prove the token belongs to B.
+		// Confirm the credential's own identity before any command can write
+		// under it; a mismatch or an unverifiable server fails closed.
+		if err := verifyExternalSessionActor(context.Background(), client, session.AgentID); err != nil {
+			return nil, fmt.Errorf("refusing the Paseo session binding: %w; %s", err, externalSessionConnectHint)
+		}
+		return client, nil
+	}
+
 	taskContext := inDaemonManagedExecutionContext()
 	token := resolveToken(cmd)
 	if taskContext && !strings.HasPrefix(token, "mat_") {
@@ -511,6 +531,17 @@ func requireWorkspaceID(cmd *cobra.Command) (string, error) {
 		return "", fmt.Errorf("workspace_id is required: use --workspace-id flag, set MULTICA_WORKSPACE_ID env, or run 'multica config set workspace_id <id>'")
 	}
 	return id, nil
+}
+
+// commandWorkspaceID returns the workspace the already-built client acts in.
+// A Paseo binding selects its own workspace, so callers must not resolve the
+// human profile afterwards: that would pair the session's credential with a
+// different workspace. Without a binding this is the ordinary resolver.
+func commandWorkspaceID(cmd *cobra.Command, client *cli.APIClient) (string, error) {
+	if client.WorkspaceID != "" {
+		return client.WorkspaceID, nil
+	}
+	return requireWorkspaceID(cmd)
 }
 
 // Agent commands

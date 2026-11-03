@@ -69,10 +69,70 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 		b.WriteString(sessionContinuityNoticeFor(task))
 	}
 	b.WriteString(execenv.BuildOnBehalfOfBlock(task.InitiatorName, task.InitiatorEmail))
+	b.WriteString(buildReturnAddressBlock(task))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
 	b.WriteString(buildJoinedWakeupsBlock(task.WakeupJoined))
 	b.WriteString(buildProjectWorkflowBlock(task))
 	return b.String()
+}
+
+// buildReturnAddressBlock names the issue's recorded result recipient. It is a
+// return address, not a delegator: the run may hand work back only by an
+// explicit mention, and a recipient the server did not report is left unsaid
+// rather than inferred from the assignee, the trigger author, or the latest
+// commenter.
+//
+// It renders per turn rather than in the cached brief because the coordinator
+// can change between runs on the same issue, including a run that resumes a
+// prior session (MUL-5377).
+func buildReturnAddressBlock(task Task) string {
+	if !safeMentionID(task.CoordinatorID) {
+		return ""
+	}
+	switch task.CoordinatorType {
+	case "agent":
+		// An agent can be its own coordinator: the server records the creator
+		// as coordinator, and an agent-created issue assigned back to that same
+		// agent is the ordinary case. There is no one to hand back to, and a
+		// mention of this run's own agent would queue another run while this
+		// one is still executing — the pending-task check only covers queued
+		// and dispatched tasks, so the run could wake itself indefinitely.
+		if task.CoordinatorID == task.AgentID {
+			return ""
+		}
+		return fmt.Sprintf(
+			"[Result return address]\n"+
+				"This issue records an agent coordinator: %s. To hand a result back for review or acceptance, post a comment that explicitly mentions [@coordinator](mention://agent/%s). Only that explicit mention reaches the coordinator — nothing returns results automatically.\n"+
+				"The coordinator is this issue's recorded recipient, not evidence of who delegated this or any other task: do not infer recipients for other issues or runs, and do not report a handoff you did not make.\n\n",
+			task.CoordinatorID, task.CoordinatorID)
+	case "member":
+		return fmt.Sprintf(
+			"[Result return address]\n"+
+				"This issue records a member coordinator: %s. A member has no mailbox this run can wake, so report the result in this issue's thread and do not state that the member was notified or woken.\n\n",
+			task.CoordinatorID)
+	}
+	// An unknown actor kind is not a route. Saying nothing keeps the run from
+	// guessing, and old servers that never send the fields reach the same path.
+	return ""
+}
+
+// safeMentionID accepts the UUID-shaped ids the server sends and rejects
+// anything that could break out of the markdown mention it is embedded in.
+func safeMentionID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // buildProjectWorkflowBlock carries the issue's project workflow and current
