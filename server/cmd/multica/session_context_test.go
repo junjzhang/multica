@@ -82,7 +82,9 @@ type fakeAPI struct {
 	// visibility of an agent is not a credential-identity check.
 	mailboxAgentID string
 	// mailboxStatus forces the identity check itself to fail.
-	mailboxStatus int
+	mailboxStatus  int
+	sessionsBody   string
+	sessionsStatus int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -118,6 +120,24 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 				response = `{"error":"mailbox credentials may only read their own mailbox"}`
 			default:
 				response = `{"messages":[],"next_cursor":null}`
+			}
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/sessions") {
+			if api.sessionsStatus != 0 {
+				status = api.sessionsStatus
+			}
+			if api.sessionsBody != "" {
+				response = api.sessionsBody
+			} else {
+				var fixture struct {
+					ExternalSession *sessionRegisteredAddress `json:"external_session"`
+				}
+				_ = json.Unmarshal([]byte(api.agentBody), &fixture)
+				sessions := []sessionRegisteredAddress{}
+				if fixture.ExternalSession != nil {
+					sessions = append(sessions, *fixture.ExternalSession)
+				}
+				encoded, _ := json.Marshal(map[string]any{"sessions": sessions})
+				response = string(encoded)
 			}
 		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/") {
 			if api.agentStatus != 0 {
@@ -787,7 +807,7 @@ func TestSessionStatusRejectsRemoteBindingDrift(t *testing.T) {
 		{"session", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-other","daemon_id":"daemon-1"}}`, "session"},
 		{"daemon", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-other"}}`, "daemon"},
 		{"execution kind", `{"id":"agent-1","name":"A","execution_kind":"managed","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "execution_kind"},
-		{"session removed", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":null}`, "no longer returns an external session"},
+		{"session removed", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":null}`, "not registered"},
 		{"agent id", `{"id":"agent-other","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "not the recorded"},
 	}
 	for _, tc := range cases {
@@ -977,6 +997,29 @@ func TestCLIProcessNonPaseoSessionUsesExplicitCredentials(t *testing.T) {
 			requests := api.recorded()
 			if len(requests) != 1 || requests[0].Authorization != wantToken || requests[0].WorkspaceID != wantWorkspace || requests[0].ReturnSession != wantReturn {
 				t.Fatalf("non-Paseo identity/return contract changed: %#v", requests)
+			}
+		})
+	}
+}
+
+func TestSessionStatusCannotVerifyWithoutSessionRegistry(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError, http.StatusOK} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.agentBody = `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`
+			api.sessionsStatus = status
+			if status == http.StatusOK {
+				api.sessionsBody = "invalid JSON"
+			}
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+			stdout, stderr, code := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode: %v %s", err, stderr)
+			}
+			if code == 0 || report.Valid || !strings.Contains(report.Error, "cannot verify registered session") {
+				t.Fatalf("failed list fell back to presentation DTO: %+v", report)
 			}
 		})
 	}

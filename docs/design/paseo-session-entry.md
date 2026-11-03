@@ -122,11 +122,15 @@ managed task, and no synthetic task id may enter attribution.
   provider, host, session, daemon) or why it could not confirm it.
 
 `valid` is only true after the server confirms the credential's own agent with
-the own-mailbox read **and** `GET /api/agents/<agent_id>` returns the same
-external agent and provider/host/session/daemon. A file on disk is never
+the own-mailbox read, `GET /api/agents/<agent_id>` confirms agent metadata, and
+`GET /api/agents/<agent_id>/sessions` contains the exact provider/host/session
+with the recorded daemon. The agent DTO's single presentation session is not
+routing authority. An unavailable session-list endpoint is unverifiable; no
+old-DTO or latest-session fallback is used. A file on disk is never
 presented as authorization; a 401/403 reports the credential as rejected or as
-belonging to another agent, a 404 as a missing agent, and an unreachable server
-as unverified. `session status` also applies the same `--profile`,
+belonging to another agent. Missing agent metadata is reported as missing;
+an unreadable session registry or unreachable server remains unverified.
+`session status` also applies the same `--profile`,
 `MULTICA_TOKEN`, endpoint and workspace conflict rules as ordinary commands, so
 it cannot report a binding those commands would refuse.
 
