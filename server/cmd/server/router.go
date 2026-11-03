@@ -2078,6 +2078,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/quick-actions/{quickActionId}/run", h.RunQuickAction)
 					r.Post("/quick-actions/{quickActionId}/render", h.RenderQuickAction)
 					r.Get("/task-runs", h.ListTasksByIssue)
+					r.With(handler.RequireHumanActor).Post("/result-takeovers", h.TakeoverDelegationResult)
 					r.Get("/usage", h.GetIssueUsage)
 					r.Post("/reactions", h.AddIssueReaction)
 					r.Delete("/reactions", h.RemoveIssueReaction)

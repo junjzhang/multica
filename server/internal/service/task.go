@@ -6314,27 +6314,37 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 }
 
 // rerunDelegationReturnIDs builds the explicit set a rerun carries: the exact
-// source run's complete set plus the rerunning actor's accepted relationship.
+// source run's carried set, replacing only an explicitly rerunning actor's
+// prior versions with that actor's current accepted relationship.
 // It never substitutes the target assignment's history or a worker's latest
 // run. It runs in the enqueue transaction, so a managed source that completed
 // since authentication is refused by delegation.Ensure and leaves no return.
 func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, dispatch RerunDelegation) ([]pgtype.UUID, error) {
-	var sets [][]pgtype.UUID
+	var ids []pgtype.UUID
+	var explicit db.IssueDelegationReturn
 	if dispatch.Address != nil {
 		accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *dispatch.Address, dispatch.CreatedBy)
 		if err != nil {
 			return nil, err
 		}
-		sets = append(sets, []pgtype.UUID{accepted.ID})
+		explicit = accepted
+		ids = append(ids, accepted.ID)
 	}
 	if dispatch.InheritTaskID.Valid {
-		inherited, err := delegation.RunReturnIDs(ctx, q, dispatch.InheritTaskID)
+		inherited, err := q.ListAgentTaskDelegationReturns(ctx, dispatch.InheritTaskID)
 		if err != nil {
 			return nil, err
 		}
-		sets = append(sets, inherited)
+		for _, prior := range inherited {
+			// An explicit dispatch replaces only this actor's responsibility in the
+			// new rerun. Other accepted inputs and the original run remain intact.
+			if explicit.ID.Valid && prior.DispatcherAgentID == explicit.DispatcherAgentID {
+				continue
+			}
+			ids = append(ids, prior.ID)
+		}
 	}
-	return delegation.UnionReturnIDs(sets...), nil
+	return delegation.UnionReturnIDs(ids), nil
 }
 
 // The bulk terminal writes below are the sweeper, archive and daemon-recovery

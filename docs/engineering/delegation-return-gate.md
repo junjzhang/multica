@@ -4,13 +4,14 @@ This slice implements the transactional delegation half of
 [task-session-delivery.md](../design/task-session-delivery.md): an Agent that
 hands work to another executable Agent or squad must name the address its result
 returns to, and that address is accepted before any child work exists. Result
-submission, notification delivery, takeover UI, and the maintenance-window
-cutover remain later slices.
+submission and explicit result takeover reuse the durable notification paths.
+Takeover UI and the maintenance-window cutover are separately qualified.
 
 ## Canonical binding, intents, and runs
 
-The accepted address is one row per `(workspace, issue, dispatcher agent)` in
-`issue_delegation_return` (`uq_issue_delegation_return_dispatch`). It does not
+Accepted addresses are immutable versions in `issue_delegation_return`. One
+version is current per `(workspace, issue, dispatcher agent)`, enforced by
+`uq_current_issue_delegation_return`. The key does not
 include the assignee: the address belongs to the dispatcher, and the worker a
 dispatcher chooses does not change where that dispatcher's results go. Each row
 names either:
@@ -329,3 +330,56 @@ managed takeover UI, and the isolated qualification described in the cutover
 runbook are not part of this slice. The local worktree Finalize/report ordering
 and directory-retention race remain with the result-submission slice; the
 source-row lock here does not claim to fix the whole resource lifecycle.
+
+
+## Explicit result takeover
+
+`POST /api/issues/{id}/result-takeovers` accepts a human who can manage the
+original dispatcher Agent and access the selected target scope. The request
+names `client_request_id`, the final `result_task_id`, its `from_return_id`,
+`expected_current_return_id`, and an exact target selector: either
+`{kind: external_session, external_session_id}` or
+`{kind: managed_task, source_task_id}`. Managed selection requires a current
+nonterminal execution with a confirmed v1 session pin; a closed historical run
+is not new admission proof. Private chat and autopilot access remain required.
+
+The transaction records an immutable action, chooses a proved address version,
+changes current routing, and creates the saved result's notification obligation
+only if that result has none for this address. Physical address reuse preserves
+the original source-task provenance even when the request selected a newer
+active turn at the same runtime/provider/session/directory and scope. An invalid
+historical snapshot cannot be repaired by guessing or silently cloning it.
+
+The action separately stores the selected source task or registered session ID.
+An identical request-key replay returns that action before re-admitting the
+source, which may since have ended. Different content conflicts. Replay never
+moves a newer current route backwards. A fresh request that changes the current
+address requires the expected-current CAS; requests already selecting the
+current address need not compete merely because they name different results.
+
+Selecting an address with an existing notification records the action and may
+make that address current, but preserves the original notification ID, provenance
+and receipt. In particular, a fresh request key cannot resend an unknown input.
+Responses distinguish the action's stable `target_return_id` from the actual
+`current_return_id`. Clients reload state rather than optimistically replacing
+it. Notification projections include `current_return_id` and an optional
+`takeover_id`; pending/queued/running do not prove host acceptance.
+
+`agent_task_delegation_return.takeover_id` distinguishes a post-result action
+from an input actually carried by the executor. Retry copying, late retry-chain
+propagation, delegated-failure classification and exact-source rerun inheritance
+use only carried inputs. Materialization, typed-task reverse verification,
+read projections and resource retention see both kinds. No action changes the
+executor result/error or starts a new executor attempt.
+
+An explicit Agent rerun from the new session replaces only that dispatcher's
+old address versions in the NEW run's inherited set. Other dispatchers, the old
+run, and existing accepted comment/assignment inputs retain their addresses.
+A human rerun with no explicit dispatcher source preserves the exact source
+run's carried set; it never guesses recipients from the current route.
+
+Migrations 639–642 add action provenance and the current-address partial unique
+index. Deploy the current-address writer with the index retirement: older
+writers infer conflicts from the retired all-versions index. The replacement
+index is built concurrently before the old index is dropped. Do not mix an old
+writer with the completed migration or introduce address-rewriting dual writes.

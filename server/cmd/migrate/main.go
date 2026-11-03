@@ -141,6 +141,8 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
 	"636_ordinary_task_pending_thread_index":                    "idx_one_pending_ordinary_task_per_issue_agent_thread",
+	"640_current_delegation_return_index":                       "uq_current_issue_delegation_return",
+	"642_result_takeover_request_index":                         "uq_delegation_result_takeover_request",
 	"632_delegation_result_task_index":                          "uq_delegation_result_task",
 	"610_tgit_snapshot_refresh_index":                           "idx_tgit_snapshot_refresh",
 	"616_agent_mailbox_target_session_index":                    "idx_agent_mailbox_target_session",
