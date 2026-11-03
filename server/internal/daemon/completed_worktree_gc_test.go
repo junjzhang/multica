@@ -179,7 +179,7 @@ func TestCompletedRemovedWorktreeGC(t *testing.T) {
 				}
 				t.Cleanup(func() { os.Rename(moved, repo) })
 			}
-			if mode == "finalization_missing" || mode == "linked_owner_mismatch" {
+			if mode == "finalization_missing" || mode == "linked_owner_mismatch" || mode == "linked_provenance_missing" {
 				file := filepath.Join(root, ".local_worktree.json")
 				raw, err := os.ReadFile(file)
 				if err != nil {
@@ -191,6 +191,9 @@ func TestCompletedRemovedWorktreeGC(t *testing.T) {
 				}
 				if mode == "finalization_missing" {
 					delete(data, "finalized_tip")
+				} else if mode == "linked_provenance_missing" {
+					// Legacy task branches had no saved conversation owner.
+					data["owner"] = map[string]string{}
 				} else {
 					data["owner"] = map[string]string{"AgentID": "different-owner"}
 				}

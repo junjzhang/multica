@@ -42,7 +42,11 @@ unchanged.
 For a source with no issue, chat, or autopilot, `scope_task_id` identifies the
 original task namespace. A handling task R uses fresh R credentials while its
 provider state stays in source S's environment. Further result turns preserve
-S rather than creating a store keyed by R. A deleted business scope cannot be
+S rather than creating a store keyed by R. Task-specific worktree branches persist
+the known workspace, agent and original-task owner while keeping their existing
+name and `tracks_state=false`. Preparation saves that identity before provider
+execution and the v1 session pin; strict reuse still rejects missing or conflicting
+owner metadata. A deleted business scope cannot be
 reinterpreted as this task-only scope. Its runtime brief describes result
 processing without an issue-comment or quick-create workflow. Source quick-create
 execution fields are cleared, while the new process receives its current task

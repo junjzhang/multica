@@ -1260,6 +1260,9 @@ func resolveTaskBranch(gitRoot string, params LocalWorktreeParams, headSHA strin
 	taskScoped := taskBranchPlan{name: fmt.Sprintf("agent/%s/%s", agentSegment, taskKey(params.TaskID)), base: headSHA}
 
 	owner := params.owner()
+	if owner.valid() {
+		taskScoped.owner = owner
+	}
 	if params.ConversationKey == "" || !owner.valid() {
 		return taskScoped
 	}
