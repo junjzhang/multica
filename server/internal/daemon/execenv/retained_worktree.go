@@ -110,8 +110,8 @@ func ValidateRemovedWorktree(envRoot, workDir, workspaceID, agentID, scopeType, 
 		return err
 	}
 	defer unlock()
-	if _, err := runGit(w.GitRoot, "rev-parse", "--git-dir"); err != nil {
-		return err
+	if _, err := runGit(w.GitRoot, "cat-file", "-e", w.finalizedTip+"^{commit}"); err != nil {
+		return fmt.Errorf("removed worktree final commit is unavailable in the durable repository: %w", err)
 	}
 	if w.dropOnRemove {
 		return nil

@@ -18,7 +18,7 @@ import (
 )
 
 func TestCompletedRemovedWorktreeGC(t *testing.T) {
-	for _, mode := range []string{"acknowledged", "no_edits", "response_lost", "unconfirmed", "storage_missing", "permission_unknown", "receipt_unavailable", "address_changed", "finalization_missing", "replacement_directory", "branch_missing", "linked_scope", "linked_owner_mismatch", "linked_provenance_missing"} {
+	for _, mode := range []string{"acknowledged", "no_edits", "no_edits_repo_replaced", "response_lost", "unconfirmed", "storage_missing", "permission_unknown", "receipt_unavailable", "address_changed", "finalization_missing", "replacement_directory", "branch_missing", "linked_scope", "linked_owner_mismatch", "linked_provenance_missing"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
@@ -35,7 +35,7 @@ func TestCompletedRemovedWorktreeGC(t *testing.T) {
 			}
 			gitOK(t, repo, "add", "-A")
 			gitOK(t, repo, "commit", "-qm", "initial")
-			if mode != "no_edits" {
+			if !strings.HasPrefix(mode, "no_edits") {
 				fake := d.cfg.Agents["claude"].Path
 				script, err := os.ReadFile(fake)
 				if err != nil {
@@ -153,6 +153,24 @@ func TestCompletedRemovedWorktreeGC(t *testing.T) {
 			root := result.EnvRoot
 			if _, err := os.Lstat(result.WorkDir); !os.IsNotExist(err) {
 				t.Fatalf("actual Finalize/Remove did not remove checkout: %v", err)
+			}
+			if mode == "no_edits_repo_replaced" {
+				moved := repo + "-original"
+				if err := os.Rename(repo, moved); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.RemoveAll(repo); os.Rename(moved, repo) })
+				if err := os.MkdirAll(repo, 0700); err != nil {
+					t.Fatal(err)
+				}
+				gitOK(t, repo, "init", "-q", "-b", "main")
+				gitOK(t, repo, "config", "user.name", "Replacement")
+				gitOK(t, repo, "config", "user.email", "replacement@example.test")
+				if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("unrelated"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitOK(t, repo, "add", "-A")
+				gitOK(t, repo, "commit", "-qm", "unrelated repository")
 			}
 			if mode == "storage_missing" {
 				moved := repo + "-offline"
