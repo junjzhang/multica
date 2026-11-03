@@ -80,6 +80,7 @@ import type {
   PluginPreview,
   PluginSurfaceLaunch,
   ResourceLabelsResponse,
+  ResultNotification,
   RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -2252,6 +2253,32 @@ const TaskUsageSchema = z.object({
   cost_usd_ticks: z.number().optional(),
 }).loose();
 
+const ExternalResultNotificationStatusSchema = z.enum([
+  "pending", "leased", "delivered", "failed", "refused", "unknown",
+]).catch("unknown");
+
+const ManagedResultNotificationStatusSchema = z.enum([
+  "pending", "queued", "deferred", "dispatched", "waiting_local_directory",
+  "running", "received", "cancelled", "refused", "unknown",
+]).catch("unknown");
+
+export const ResultNotificationSchema = z.object({
+  return_id: z.string().min(1),
+  recipient_agent_id: z.string().min(1),
+  kind: z.enum(["external_session", "managed_task", "unknown"]).catch("unknown"),
+  delivery_id: z.string().min(1).optional().catch(undefined),
+  handling_task_id: z.string().min(1).optional().catch(undefined),
+  status: z.unknown(),
+  error: z.string().min(1).optional().catch(undefined),
+}).loose().transform((note): ResultNotification => ({
+  ...note,
+  status: note.kind === "external_session"
+    ? ExternalResultNotificationStatusSchema.parse(note.status)
+    : note.kind === "managed_task"
+      ? ManagedResultNotificationStatusSchema.parse(note.status)
+      : "unknown",
+}));
+
 export const AgentTaskSchema = z.object({
   wakeup_id: z.string().optional().catch(undefined),
   cancelled_by_comment_change: z.boolean().optional().catch(undefined),
@@ -2267,6 +2294,8 @@ export const AgentTaskSchema = z.object({
   completed_at: z.string().nullable().default(null),
   result: z.unknown().default(null),
   error: z.string().nullable().default(null),
+  // Invalid metadata is unknown, never a known-empty list or a missing run.
+  result_notifications: z.array(ResultNotificationSchema).optional().catch(undefined),
   failure_reason: z.string().optional(),
   created_at: z.string().default(""),
   chat_session_id: z.string().optional(),

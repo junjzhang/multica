@@ -42,6 +42,7 @@ export type {
   AgentInvocationTarget,
   AgentInvocationTargetInput,
   AgentTask,
+  ResultNotification,
   TaskUsage,
   TaskAttribution,
   AttributionUser,

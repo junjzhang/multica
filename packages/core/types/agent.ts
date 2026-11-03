@@ -343,6 +343,29 @@ export interface TaskCancellationActor {
   name?: string;
 }
 
+export interface ResultNotification {
+  return_id: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task" | "unknown";
+  delivery_id?: string;
+  handling_task_id?: string;
+  status:
+    | "pending"
+    | "queued"
+    | "deferred"
+    | "dispatched"
+    | "waiting_local_directory"
+    | "running"
+    | "received"
+    | "cancelled"
+    | "leased"
+    | "delivered"
+    | "failed"
+    | "refused"
+    | "unknown";
+  error?: string;
+}
+
 export interface AgentTask {
   wakeup_id?: string;
   id: string;
@@ -372,6 +395,8 @@ export interface AgentTask {
   completed_at: string | null;
   result: unknown;
   error: string | null;
+  /** Undefined means unknown/unhydrated; [] means hydrated with no notifications. */
+  result_notifications?: ResultNotification[];
   // Empty string when the task is not in a failed state (the backend uses
   // `omitempty`, so the field may also be missing on non-failed tasks).
   // Open string on the wire, not a closed enum: the backend's classifier
