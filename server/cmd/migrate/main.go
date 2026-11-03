@@ -388,6 +388,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"641_retire_delegation_return_dispatch_index":           "uq_issue_delegation_return_dispatch",
 	"637_retire_shared_task_pending_thread_index":           "idx_one_pending_task_per_issue_agent_thread",
 	"617_drop_mailbox_source_key_unique":                    "uq_agent_mailbox_delivery_idempotency",
 	"613_drop_external_agent_session_agent_unique":          "uq_external_agent_session_agent",
@@ -438,6 +439,18 @@ var preRollbackHooks = func() map[string]preMigrationHook {
 	// partially applied version fails before dropping its first live index.
 	for _, version := range sourceContextMigrationVersions {
 		hooks[version] = ensureSourceContextRollbackSafe
+	}
+	for _, version := range resultTakeoverMigrationVersions {
+		cleanup := hooks[version]
+		hooks[version] = func(ctx context.Context, pool *pgxpool.Pool) error {
+			if err := ensureResultTakeoverRollbackSafe(ctx, pool); err != nil {
+				return err
+			}
+			if cleanup != nil {
+				return cleanup(ctx, pool)
+			}
+			return nil
+		}
 	}
 	hooks["430_channel_outbound_message_binding_index"] = refuseChannelChatRouteHistoryRollback
 	return hooks

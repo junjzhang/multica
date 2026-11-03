@@ -474,3 +474,50 @@ do not rewrite an accepted action or move the current route backwards.
 External selection retains its stable registered-session identity and does not
 require this managed proof. Clients must not replace an unknown request's proof
 with freshly fetched options; a new selection is a new explicit request.
+
+
+### Takeover schema rollback
+
+Rollback of 639–643 is supported only in a maintenance window with API,
+scheduler, daemon and other database writers stopped for the entire sequence.
+The migration advisory lock serializes migrators; it does not fence application
+writes across concurrent index statements. Use the takeover-capable migration
+runner, not manually selected middle-step DDL. Mixed-version writing is not
+supported.
+
+Before 643 can remove a saved selection proof, the runner refuses if any action,
+non-NULL takeover link, noncurrent address version or duplicate legacy
+`(workspace, issue, dispatcher)` key remains. The same guard runs at every
+639–643 rollback entry, including partial upgrades, and before invalid-index
+cleanup. Missing required schema also fails closed. Both destructive SQL files
+(643 and 639) carry their own history checks. Refusal leaves proof columns,
+constraints, IDs, unknown states, receipts and migration records unchanged.
+Do not delete accepted history to make rollback pass; retain the takeover-capable
+schema/application when it cannot represent that history in the older schema.
+
+An unused, quiescent database may roll back without deleting ordinary results
+or returns. The down sequence removes the empty action index, restores the old
+full dispatcher unique index concurrently, then retires the current-only index
+and feature columns/table. Interrupted restoration of the old index uses the
+existing invalid-index cleanup/retry mechanism after the history guard succeeds.
+A subsequent up migration restores the current schema while preserving ordinary
+result and notification facts.
+
+
+The existing CLI has no target-version flag: running `migrate down` from the
+full repository migration directory would continue below 638. For this bounded
+rollback, build the current guarded runner and place exactly these five files
+in a separate bundle's `migrations/` directory:
+
+- `639_result_takeover.down.sql`
+- `640_current_delegation_return_index.down.sql`
+- `641_retire_delegation_return_dispatch_index.down.sql`
+- `642_result_takeover_request_index.down.sql`
+- `643_result_takeover_selection_version.down.sql`
+
+Run that binary with `down` from the bundle root, using the intended database
+configuration. Existing `ResolveDir` selects this directory before the binary's
+source location. Verify the bundle file hashes against the delivered manifest
+and verify the migration ledger stops at 638 before starting the matching older
+application. Do not run bare `down` against the complete directory. Re-upgrade
+with the normal complete up-migration corpus while writers remain stopped.
