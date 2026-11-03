@@ -138,7 +138,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// Reclaim per-issue Codex session stores idle past their TTL. These live
 	// under the shared ~/.codex home (outside WorkspacesRoot) so resume survives
 	// the task GC, which means they need their own bounded lifecycle (MUL-4424).
-	if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+	if storesRemoved, storeBytes := execenv.PruneCodexSessionStores(d.cfg.Profile, d.cfg.GCCodexSessionTTL, time.Now(), d.reserveProviderStoreForDeletion(ctx, "codex", d.cfg.GCCodexSessionTTL), d.logger); storesRemoved > 0 {
 		stats.storesReclaimed += storesRemoved
 		stats.bytesReclaimed += storeBytes
 	}
@@ -147,7 +147,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// (that is what fixes #6638), so a deleted agent's memory needs its own
 	// bounded lifecycle. Retention is much longer than the Codex one — these are
 	// a few markdown files, and reclaiming them is user-visible amnesia.
-	if storesRemoved, storeBytes := execenv.PruneHermesMemoryStores(d.cfg.Profile, d.cfg.GCHermesMemoryTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+	if storesRemoved, storeBytes := execenv.PruneHermesMemoryStores(d.cfg.Profile, d.cfg.GCHermesMemoryTTL, time.Now(), d.reserveProviderStoreForDeletion(ctx, "hermes", d.cfg.GCHermesMemoryTTL), d.logger); storesRemoved > 0 {
 		stats.hermesMemoryStoresReclaimed += storesRemoved
 		stats.bytesReclaimed += storeBytes
 	}
@@ -155,7 +155,7 @@ func (d *Daemon) runGC(ctx context.Context) {
 	// And per-conversation Hermes session stores, which outlive the task for the
 	// same reason (that is what fixes #6806) but hold transcripts rather than
 	// notes — so they get the shorter, Codex-like retention.
-	if storesRemoved, storeBytes := execenv.PruneHermesSessionStores(d.cfg.Profile, d.cfg.GCHermesSessionTTL, time.Now(), d.reserveStoreForDeletion, d.logger); storesRemoved > 0 {
+	if storesRemoved, storeBytes := execenv.PruneHermesSessionStores(d.cfg.Profile, d.cfg.GCHermesSessionTTL, time.Now(), d.reserveProviderStoreForDeletion(ctx, "hermes", d.cfg.GCHermesSessionTTL), d.logger); storesRemoved > 0 {
 		stats.hermesSessionStoresReclaimed += storesRemoved
 		stats.bytesReclaimed += storeBytes
 	}
@@ -227,7 +227,7 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			}
 		}
 		action := d.shouldCleanTaskDir(ctx, taskDir)
-		cleanedHere += d.applyGCAction(ctx, taskDir, action, stats)
+		cleanedHere += d.applyGCActionForMeta(ctx, taskDir, action, stats, meta)
 	}
 	workspaceIDs := make([]string, 0, len(issueCandidatesByWorkspace))
 	for workspaceID := range issueCandidatesByWorkspace {
@@ -307,13 +307,13 @@ func (d *Daemon) gcWorkspaceIssues(ctx context.Context, workspaceID string, cand
 			// data stays. The regenerable Codex cache is still fair game —
 			// see applyManagedArtifactFallback.
 			action := d.applyManagedArtifactFallback(candidate.taskDir, candidate.meta, gcActionSkip)
-			cleaned += d.applyGCAction(ctx, candidate.taskDir, action, stats)
+			cleaned += d.applyGCActionForMeta(ctx, candidate.taskDir, action, stats, candidate.meta)
 			continue
 		}
 		action := d.gcDecisionIssueResult(candidate.taskDir, candidate.meta, result)
 		action = d.applyLocalDirectoryGCOverride(candidate.meta, action)
 		action = d.applyManagedArtifactFallback(candidate.taskDir, candidate.meta, action)
-		cleaned += d.applyGCAction(ctx, candidate.taskDir, action, stats)
+		cleaned += d.applyGCActionForMeta(ctx, candidate.taskDir, action, stats, candidate.meta)
 	}
 	return cleaned
 }
@@ -322,6 +322,10 @@ func (d *Daemon) gcWorkspaceIssues(ctx context.Context, workspaceID string, cand
 // atomically reserves the env root because a task can start while the server
 // reconciliation request is in flight.
 func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAction, stats *gcStats) int {
+	return d.applyGCActionForMeta(ctx, taskDir, action, stats, nil)
+}
+
+func (d *Daemon) applyGCActionForMeta(ctx context.Context, taskDir string, action gcAction, stats *gcStats, scanned *execenv.GCMeta) int {
 	if action != gcActionSkip {
 		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
 			d.logger.Warn("gc: refusing to mutate unowned task directory", "dir", taskDir, "error", err)
@@ -334,17 +338,66 @@ func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAct
 			return 0
 		}
 		defer release()
-		// Re-read provenance after taking the exclusion lock so a concurrent
-		// reset cannot change ownership between validation and mutation.
-		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
-			d.logger.Warn("gc: refusing to mutate task directory after ownership changed", "dir", taskDir, "error", err)
+		wsRoot, err := os.OpenRoot(d.cfg.WorkspacesRoot)
+		if err != nil {
 			stats.skipped++
 			return 0
 		}
+		defer wsRoot.Close()
+		rel, err := filepath.Rel(d.cfg.WorkspacesRoot, taskDir)
+		if err != nil {
+			stats.skipped++
+			return 0
+		}
+		claim, lockedInfo, err := execenv.LockEnvRootForReuse(wsRoot, rel, taskDir)
+		if err != nil || claim == nil {
+			stats.skipped++
+			return 0
+		}
+		defer claim.Release()
+		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
+			stats.skipped++
+			return 0
+		}
+		currentInfo, err := os.Stat(taskDir)
+		if err != nil || !os.SameFile(lockedInfo, currentInfo) {
+			stats.skipped++
+			return 0
+		}
+		// The scan may precede a new owner. Decide from current metadata while
+		// execution is excluded, including the remote dependency decision.
+		currentMeta, metaErr := execenv.ReadGCMeta(taskDir)
+		if metaErr != nil || !sameGCMetadata(currentMeta, scanned) {
+			action = d.shouldCleanTaskDir(ctx, taskDir)
+		}
+		if action != gcActionSkip && action != gcActionCleanManagedArtifacts {
+			resource, err := d.resourceForGC(taskDir)
+			if err != nil {
+				d.logger.Warn("gc: resource ownership cannot be proven", "dir", taskDir, "error", err)
+				stats.skipped++
+				return 0
+			}
+			decision, err := d.client.ReleaseResource(ctx, resource.Address)
+			if err != nil {
+				d.logger.Warn("gc: release permission unavailable", "dir", taskDir, "error", err)
+				stats.skipped++
+				return 0
+			}
+			if !d.permitResourceRelease(resource.Address, decision) {
+				stats.skipped++
+				return 0
+			}
+		}
+		currentInfo, err = os.Stat(taskDir)
+		if err != nil || !os.SameFile(lockedInfo, currentInfo) {
+			stats.skipped++
+			return 0
+		}
+
 	}
 	switch action {
 	case gcActionClean:
-		bytes, removed := d.cleanTaskDir(taskDir)
+		bytes, removed := d.cleanTaskDir(ctx, taskDir)
 		if !removed {
 			stats.skipped++
 			return 0
@@ -353,7 +406,7 @@ func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAct
 		stats.bytesReclaimed += bytes
 		return 1
 	case gcActionOrphan:
-		bytes, removed := d.cleanTaskDir(taskDir)
+		bytes, removed := d.cleanTaskDir(ctx, taskDir)
 		if !removed {
 			stats.skipped++
 			return 0
@@ -894,7 +947,7 @@ func (d *Daemon) gcTaskDirOwner(taskDir string) (*execenv.EnvRootOwner, error) {
 // cleanTaskDir removes a proven daemon-owned task directory, logs the
 // reclaimed bytes, and returns that count for the cycle summary. A failed or
 // refused removal reports removed=false.
-func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, removed bool) {
+func (d *Daemon) cleanTaskDir(ctx context.Context, taskDir string) (bytes int64, removed bool) {
 	// Measure first, prove ownership second. dirSize walks the entire tree,
 	// which on a large task directory takes long enough for the validated
 	// directory to be replaced underneath us — checking before that walk would
@@ -906,7 +959,36 @@ func (d *Daemon) cleanTaskDir(taskDir string) (bytes int64, removed bool) {
 		d.logger.Warn("gc: refusing to remove unowned task directory", "dir", taskDir, "error", ownerErr)
 		return 0, false
 	}
-	if err := os.RemoveAll(taskDir); err != nil {
+	if resource, err := readManagedResource(taskDir); err == nil {
+		rel, _ := filepath.Rel(taskDir, resource.Address.WorkDir)
+		if parts := strings.Split(rel, string(filepath.Separator)); len(parts) > 0 && parts[0] == "worktree" {
+			w, err := execenv.LoadRetainedWorktree(taskDir, resource.Address.WorkDir, owner.WorkspaceID, resource.Address.AgentID, resource.Address.ScopeID, d.logger)
+			if err != nil {
+				return 0, false
+			}
+			if err := w.RestoreRemovalProof(); err != nil {
+				d.logger.Warn("gc: retaining worktree without finalization proof", "dir", taskDir, "error", err)
+				return 0, false
+			}
+			if err := w.Remove(d.logger); err != nil {
+				return 0, false
+			}
+			request := resource.Address
+			request.ResourcePath = w.Path
+			d.acknowledgeResourceRemoval(ctx, resource.OwnerTaskID, request, durableWorktreePath(w))
+		}
+	}
+	quarantine, err := os.MkdirTemp(filepath.Dir(taskDir), ".gc-")
+	if err != nil {
+		return 0, false
+	}
+	if err := os.Remove(quarantine); err != nil {
+		return 0, false
+	}
+	if err := os.Rename(taskDir, quarantine); err != nil {
+		return 0, false
+	}
+	if err := os.RemoveAll(quarantine); err != nil {
 		d.logger.Warn("gc: remove task dir failed", "dir", taskDir, "error", err)
 		return 0, false
 	} else {
@@ -1790,4 +1872,13 @@ func isBareRepo(path string) bool {
 		return false
 	}
 	return true
+}
+
+func sameGCMetadata(a, b *execenv.GCMeta) bool {
+	if a == nil || b == nil || !a.CompletedAt.Equal(b.CompletedAt) {
+		return false
+	}
+	left, right := *a, *b
+	left.CompletedAt, right.CompletedAt = time.Time{}, time.Time{}
+	return left == right
 }
