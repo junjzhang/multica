@@ -758,6 +758,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 	cacheRoot := filepath.Join(cfg.WorkspacesRoot, ".repos")
 	skillCacheRoot := filepath.Join(cfg.WorkspacesRoot, ".skill-cache", "v1")
 	client := NewClient(cfg.ServerBaseURL)
+	client.mailboxDaemonID = cfg.DaemonID
 	// Tag every daemon HTTP request with the daemon's CLI version so the
 	// server can split logs/metrics by client version (parallel to the CLI).
 	client.SetVersion(cfg.CLIVersion)
@@ -2147,6 +2148,9 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
 	defer d.deregisterRuntimes()
 
+	// Configure shared client identity before any background loop reads it.
+	d.client.mailboxDaemonID = d.cfg.DaemonID
+
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
 	go d.terminalReportReplayLoop(ctx)
@@ -2162,10 +2166,6 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
-	// The delivery worker sends the verified daemon identity with every claim
-	// and outcome. Set it once before the loop starts, so it never writes the
-	// shared client configuration from the loop.
-	d.client.mailboxDaemonID = d.cfg.DaemonID
 	deliveryWorkerDone := make(chan struct{})
 	go func() {
 		defer close(deliveryWorkerDone)
