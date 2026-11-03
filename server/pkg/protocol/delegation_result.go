@@ -45,6 +45,21 @@ type ResourceReleaseRequest struct {
 
 const DaemonCapabilityDelegationResultsV1 = "delegation_results_v1"
 
+const (
+	DelegationResultInputUnknown = "delegation_result_input_unknown"
+	DelegationResultUnavailable  = "delegation_result_unavailable"
+)
+
+type ResourceReleaseReceipt struct {
+	ResourceReleaseRequest
+	DurableWorkDir string `json:"durable_work_dir"`
+}
+
+type ResourceReleaseAcknowledgement struct {
+	Recorded       bool   `json:"recorded"`
+	DurableWorkDir string `json:"durable_work_dir,omitempty"`
+}
+
 // ResourceReleaseDecision is permission to release daemon-owned resources,
 // never permission to remove a user-owned directory. Missing/unknown responses
 // do not grant release.
