@@ -442,6 +442,10 @@ describe("task session read projections", () => {
       ...baseIssue,
       external_session_bindings: [{ id: 3 }],
     });
-    expect(malformed.external_session_bindings).toEqual([]);
+    expect(malformed.external_session_bindings).toBeUndefined();
+    expect(IssueSessionBindingListSchema.safeParse([{ id: 3 }]).success).toBe(false);
+
+    const empty = IssueSchema.parse({ ...baseIssue, external_session_bindings: [] });
+    expect(empty.external_session_bindings).toEqual([]);
   });
 });

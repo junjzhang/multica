@@ -1403,15 +1403,19 @@ export const IssueSessionBindingSchema = z.object({
   created_at: z.string().default(""),
 }).loose();
 
-/** Drop malformed bindings instead of failing the whole issue response. */
+/** Keep valid bindings; an entirely malformed list cannot prove absence. */
 export const IssueSessionBindingListSchema = z.array(z.unknown())
-  .catch([])
-  .transform((items) =>
-    items.flatMap((item) => {
+  .transform((items, ctx) => {
+    const bindings = items.flatMap((item) => {
       const parsed = IssueSessionBindingSchema.safeParse(item);
       return parsed.success ? [parsed.data] : [];
-    }),
-  );
+    });
+    if (items.length > 0 && bindings.length === 0) {
+      ctx.addIssue({ code: "custom", message: "No valid issue session bindings in response" });
+      return z.NEVER;
+    }
+    return bindings;
+  });
 
 export const AgentSessionBindingResponseSchema = z
   .object({ binding: IssueSessionBindingSchema.nullable() })
