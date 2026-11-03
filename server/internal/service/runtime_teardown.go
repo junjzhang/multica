@@ -86,7 +86,10 @@ func TeardownRuntime(ctx context.Context, qtx *db.Queries, runtimeID pgtype.UUID
 	}
 
 	if err := RequireRuntimeDelegationResourcesReleased(ctx, qtx, runtimeID); err != nil {
-		return out, fmt.Errorf("%w: %v", ErrRuntimeNotDrained, err)
+		if errors.Is(err, ErrDelegationResourcesRetained) {
+			return out, fmt.Errorf("%w: %v", ErrRuntimeNotDrained, err)
+		}
+		return out, fmt.Errorf("check retained delegation records: %w", err)
 	}
 	lockedAgentIDs := make([]pgtype.UUID, len(lockedAgents))
 	for i, agent := range lockedAgents {

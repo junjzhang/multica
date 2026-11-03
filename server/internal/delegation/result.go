@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 
@@ -53,12 +54,18 @@ func ManagedSourceTaskScope(ctx context.Context, q *db.Queries, source db.AgentT
 		return source.ID, nil
 	}
 	link, err := q.GetDelegationResultObligationForTask(ctx, source.ID)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return pgtype.UUID{}, fmt.Errorf("%w: result source has no durable notification", ErrReturnInvalid)
 	}
-	accepted, err := q.GetDelegationReturnByID(ctx, link.DelegationReturnID)
 	if err != nil {
-		return pgtype.UUID{}, err
+		return pgtype.UUID{}, fmt.Errorf("load result source notification: %w", err)
+	}
+	accepted, err := q.GetDelegationReturnByID(ctx, link.DelegationReturnID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pgtype.UUID{}, fmt.Errorf("%w: result source return is missing", ErrReturnInvalid)
+	}
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("load result source return: %w", err)
 	}
 	projected, err := ResultTurn(source)
 	if err != nil || projected == nil || accepted.WorkspaceID != workspace || accepted.ReturnKind != string(KindManagedTask) ||
@@ -77,14 +84,23 @@ func ValidateOriginalTaskScope(ctx context.Context, q *db.Queries, accepted db.I
 		return fmt.Errorf("%w: original task scope is missing", ErrReturnInvalid)
 	}
 	root, err := q.LockAgentTaskForDelegation(ctx, accepted.ScopeTaskID)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: original task scope unavailable", ErrReturnInvalid)
+	}
+	if err != nil {
+		return fmt.Errorf("load original task scope: %w", err)
 	}
 	if root.AgentID != accepted.DispatcherAgentID || IsResultTask(root) {
 		return fmt.Errorf("%w: original task scope mismatch", ErrReturnInvalid)
 	}
 	actor, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: root.AgentID, WorkspaceID: accepted.WorkspaceID})
-	if err != nil || actor.ID != root.AgentID {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: original task scope workspace mismatch", ErrReturnInvalid)
+	}
+	if err != nil {
+		return fmt.Errorf("load original scope agent: %w", err)
+	}
+	if actor.ID != root.AgentID {
 		return fmt.Errorf("%w: original task scope workspace mismatch", ErrReturnInvalid)
 	}
 	return nil
