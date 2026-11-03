@@ -795,6 +795,9 @@ func writeInlineBlocksPolicy(b *strings.Builder) {
 func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 	b.WriteString("## Output\n\n")
 	switch kind {
+	case kindTaskResult:
+		b.WriteString("Your response is saved as this task's result in the original conversation. This turn has no assigned issue. Do not create an issue solely to receive or deliver this result.\n\n")
+		b.WriteString("**Delivering files here:** this task result is text-only. Describe saved artifacts and their owning business scope without presenting a local path as a delivered file.\n")
 	case kindAutopilotRunOnly:
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n\n")
 		b.WriteString("**Delivering files here:** this surface is text-only — the run result carries no attachments. Describe what you produced; do not link its path.\n")
@@ -848,26 +851,9 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 // Called from buildMetaSkillContent (runtime_config.go). The
 // `runtime_brief_slim` flag that once gated it was retired in MUL-4297.
 //
-// The Section × Kind matrix encoded below (skip = elide section, keep
-// = always emit, △ = data-driven inside the helper):
-//
-//	Section               | comment | assign | autopilot | quick_create | chat
-//	----------------------+---------+--------+-----------+--------------+------
-//	Available Commands    |   full  |  full  |   full    |   minimal    | full
-//	Issue Body Formatting |    ✓    |   ✓    |     ✓     |      ✓       |  ✓
-//	Comment Formatting    |    ✓    |   ✓    |     —     |      —       |  —
-//	Repositories          |    △    |   △    |     △     |      —       |  △
-//	Project Context       |    △    |   △    |     △     |      △       |  △
-//	Instruction Precedence|    —    |   ✓    |     —     |      —       |  —
-//	Sub-issue Creation    |    ✓    |   ✓    |     —     |      —       |  —
-//	Skills                |    ✓    |   ✓    |     ✓    |      ✓       |  ✓
-//	Mentions              |    ✓    |   ✓    |     —     |      —       |  —
-//	Attachments           |    ✓    |   ✓    |     —     |      —       |  —
-//
-// Always-on rows — Header, Background Task Safety, Agent Identity,
-// Requesting User, Workspace Context, Connected Apps,
-// Workflow, Always Use CLI, Output — are shared by every kind and emitted
-// unconditionally (or gated by their own data preconditions).
+// Identity and permission guidance is shared across kinds. Task-scoped result
+// turns keep their own workflow and output channel instead of inheriting the
+// source's quick-create action or an issue-comment obligation.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -907,6 +893,8 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 
 	writeWorkflowHeader(&b)
 	switch kind {
+	case kindTaskResult:
+		fmt.Fprintf(&b, "Process the saved result referenced by this turn in original task scope `%s`. Continue the original conversation as needed, using this turn's task identity. There is no automatic issue creation or issue status update for this turn.\n\n", ctx.ScopeTaskID)
 	case kindChat:
 		writeWorkflowChat(&b)
 	case kindQuickCreate:

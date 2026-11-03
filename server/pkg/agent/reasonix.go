@@ -302,10 +302,11 @@ func (b *reasonixBackend) Execute(ctx context.Context, prompt string, opts ExecO
 					finalError = fmt.Sprintf("reasonix session is already in use; close the other Reasonix window or process first: %v", err)
 				}
 				resCh <- markStrictResumeResult(Result{
-					Status:         finalStatus,
-					Error:          finalError,
-					DurationMs:     time.Since(startTime).Milliseconds(),
-					ResumeRejected: resumeRejected,
+					Status:                  finalStatus,
+					Error:                   finalError,
+					DurationMs:              time.Since(startTime).Milliseconds(),
+					ResumeRejected:          resumeRejected,
+					ResumeRejectedTransient: opts.RequireResume && !resumeRejected && finalStatus == "failed" && isReasonixSessionLeaseConflict(err),
 				}, opts)
 				return
 			}

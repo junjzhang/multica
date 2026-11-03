@@ -314,6 +314,8 @@ type Result struct {
 	// The daemon may use a fresh session for this turn, but must not retire the
 	// requested session from future lookups. Backends must not set this together
 	// with ResumeRejected; the latter means the session is permanently unusable.
+	// Together with StrictResumeUnmet this certifies refusal before input, so a
+	// strict caller may wait and retry the same session without a fresh prompt.
 	ResumeRejectedTransient bool
 	// StrictResumeUnmet is positive evidence that a run which asked for
 	// ExecOptions.RequireResume could not prove it continued exactly the

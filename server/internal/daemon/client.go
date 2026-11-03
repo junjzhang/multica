@@ -215,6 +215,7 @@ func daemonCommonCapabilities() []string {
 		protocol.DaemonCapabilityPlatformSkillV1,
 		protocol.DaemonCapabilityCheckoutKeepsWorkV1,
 		protocol.DaemonCapabilityJoinedWakeupsV1,
+		protocol.DaemonCapabilityDelegationResultsV1,
 	}
 }
 
@@ -697,18 +698,23 @@ func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, 
 
 // PinTaskSession persists the agent's session_id and work_dir on the task
 // row mid-flight so a daemon crash doesn't lose the resume pointer.
-func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir string) error {
+func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir, generation string) error {
 	if sessionID == "" && workDir == "" {
 		return nil
 	}
-	body := map[string]any{}
-	if sessionID != "" {
-		body["session_id"] = sessionID
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), protocol.SessionPinRequest{SessionID: sessionID, WorkDir: workDir, Generation: generation}, nil)
+}
+
+func (c *Client) InvalidateTaskSession(ctx context.Context, taskID, generation, nextGeneration string) error {
+	var acknowledgement protocol.SessionPinAcknowledgement
+	err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), protocol.SessionPinRequest{Generation: generation, NextGeneration: nextGeneration}, &acknowledgement)
+	if err != nil {
+		return err
 	}
-	if workDir != "" {
-		body["work_dir"] = workDir
+	if acknowledgement.Generation != nextGeneration {
+		return errors.New("session pin invalidation was not acknowledged")
 	}
-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), body, nil)
+	return nil
 }
 
 // RecoverOrphans tells the server to fail any dispatched/running tasks the
@@ -1020,8 +1026,14 @@ func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*Aut
 // Quick-create tasks have no separate parent record, so GC keys directly on
 // the task itself.
 type TaskGCStatus struct {
-	Status      string    `json:"status"`
-	CompletedAt time.Time `json:"completed_at"`
+	ResourceControlRequired bool                              `json:"resource_control_required"`
+	TerminalReportedAt      *time.Time                        `json:"terminal_reported_at"`
+	ResourceIdentity        *protocol.ManagedResourceAddress  `json:"resource_identity"`
+	ResourcesRetained       *bool                             `json:"resources_retained"`
+	RetentionReason         string                            `json:"retention_reason"`
+	ProtectedResources      []protocol.ManagedResourceAddress `json:"protected_resources"`
+	Status                  string                            `json:"status"`
+	CompletedAt             time.Time                         `json:"completed_at"`
 }
 
 // GetTaskGCCheck returns the status of an agent task for GC decisions.
