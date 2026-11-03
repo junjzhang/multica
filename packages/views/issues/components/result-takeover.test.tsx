@@ -189,3 +189,43 @@ describe("saved result return selection", () => {
     expect(screen.queryByRole("button", { name: /rerun|re-run/i })).not.toBeInTheDocument();
   });
 });
+
+it("an archived recipient keeps an accepted-but-unconfirmed request replayable", async () => {
+  calls.takeoverIssueResult.mockRejectedValueOnce(new TypeError("accepted response lost"));
+  const { client } = renderNotes();
+  const dialog = await openDialog();
+  fireEvent.click(within(dialog).getByRole("radio", { name: /Session B/ }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Send saved result and update return session" }));
+  await screen.findByText("The outcome is unknown. Retry uses the original request; it does not create a second notification.");
+  const original = calls.takeoverIssueResult.mock.calls[0]![1];
+  act(() => client.setQueryData(["workspaces", "workspace", "agents"], [{ id: "dispatcher", name: "Dispatcher", archived_at: "2026-11-03T00:00:00Z" }]));
+  const retry = await screen.findByRole("button", { name: "Retry the same request" });
+  expect(retry).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Choose a different session" })).not.toBeInTheDocument();
+  fireEvent.click(retry);
+  await waitFor(() => expect(calls.takeoverIssueResult).toHaveBeenCalledTimes(2));
+  expect(calls.takeoverIssueResult.mock.calls[1]![1]).toEqual(original);
+});
+
+it("actual management revocation prevents another write", async () => {
+  calls.takeoverIssueResult.mockRejectedValueOnce(new TypeError("response lost"));
+  const { client } = renderNotes();
+  const dialog = await openDialog();
+  fireEvent.click(within(dialog).getByRole("radio", { name: /Session B/ }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Send saved result and update return session" }));
+  await screen.findByText("The outcome is unknown. Retry uses the original request; it does not create a second notification.");
+  state.canManage = false;
+  act(() => client.setQueryData(["workspaces", "workspace", "agents"], [{ id: "dispatcher", name: "Permission changed", archived_at: null }]));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Retry the same request" })).not.toBeInTheDocument());
+  expect(calls.takeoverIssueResult).toHaveBeenCalledTimes(1);
+});
+
+it("an archived recipient cannot start a fresh selection", async () => {
+  calls.listAgents.mockResolvedValue([{ id: "dispatcher", name: "Dispatcher", archived_at: "2026-11-03T00:00:00Z" }]);
+  renderNotes();
+  await waitFor(() => expect(calls.listAgents).toHaveBeenCalled());
+  expect(calls.listAgents).toHaveBeenCalledWith({ workspace_id: "workspace", include_archived: true });
+  expect(calls.getResultTakeoverOptions).not.toHaveBeenCalled();
+  expect(calls.takeoverIssueResult).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Choose a return session" })).not.toBeInTheDocument();
+});

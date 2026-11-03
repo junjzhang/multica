@@ -34,10 +34,11 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
   const agents = useQuery(agentListOptions(wsId));
   const agent = agents.data?.find((candidate) => candidate.id === notification.recipient_agent_id) ?? null;
   const permission = useAgentPermissions(agent, wsId);
-  const canChoose = permission.canEdit.allowed && !permission.isLoading && !!agent && !agent.archived_at;
+  const canManage = permission.canEdit.allowed && !permission.isLoading && !!agent;
+  const canChooseNew = canManage && !agent.archived_at;
   const options = useQuery({
     ...resultTakeoverOptions(wsId, issueId, task.id, notification.return_id),
-    enabled: canChoose,
+    enabled: canChooseNew,
   });
   const mutation = useTakeoverIssueResult(wsId, issueId, notification.recipient_agent_id);
   const [open, setOpen] = useState(false);
@@ -45,7 +46,7 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
   const [attempt, setAttempt] = useState<Attempt | null>(null);
   const attemptRef = useRef<Attempt | null>(null);
   const [previousUnknown, setPreviousUnknown] = useState(false);
-  const data = canChoose && !options.isError ? options.data : undefined;
+  const data = canChooseNew && !options.isError ? options.data : undefined;
   const target = data?.returns.find((version) => version.return_id === notification.return_id)?.target;
   const selectedChoice = data?.targets.find((choice) => choiceKey(choice, data.current_return_id) === selected && choice.available);
   const conflict = mutation.error instanceof ApiError && mutation.error.status === 409;
@@ -56,7 +57,7 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
   const existing = response && attempt?.existingReturnIds.includes(response.target_return_id);
 
   const submit = async () => {
-    if (mutation.isPending || (!attempt && (!selectedChoice || !data))) return;
+    if (!canManage || mutation.isPending || (!attempt && (!canChooseNew || !selectedChoice || !data))) return;
     let next = attemptRef.current;
     if (!next) {
       if (!selectedChoice || !data) return;
@@ -82,6 +83,7 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
   };
 
   const chooseAgain = () => {
+    if (!canChooseNew) return;
     setPreviousUnknown(previousUnknown || unknown);
     attemptRef.current = null;
     setAttempt(null);
@@ -98,20 +100,20 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
       <p className="break-words">{t(($) => $.result_takeover.fixed_target)}: {target
         ? `${target.display_name || target.session_ref} · ${target.provider} · ${target.session_ref}`
         : t(($) => $.result_takeover.target_unavailable)}</p>
-      {canChoose && options.isError && !unsupported && (
+      {canChooseNew && options.isError && !unsupported && (
         <div>
           <p role="status">{t(($) => $.result_takeover.read_failed)}</p>
           <Button variant="ghost" size="xs" onClick={() => void options.refetch()}>{t(($) => $.result_takeover.reload)}</Button>
         </div>
       )}
-      {canChoose && (data || attempt) && (!unsupported || attempt) && (
+      {canManage && (data || attempt) && (!unsupported || attempt) && (
         <Dialog open={open} onOpenChange={(next) => {
           if (mutation.isPending) return;
-          if (next && mutation.isSuccess) { attemptRef.current = null; setAttempt(null); setSelected(""); mutation.reset(); }
+          if (next && mutation.isSuccess && canChooseNew) { attemptRef.current = null; setAttempt(null); setSelected(""); mutation.reset(); }
           setOpen(next);
         }}>
           <DialogTrigger render={<Button variant="outline" size="xs" />}>
-            {t(($) => $.result_takeover.action)}
+            {canChooseNew ? t(($) => $.result_takeover.action) : t(($) => $.result_takeover.retry)}
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
@@ -144,11 +146,11 @@ export function ResultTakeover({ issueId, task, notification, notifications }: {
             </div>}
             <DialogFooter>
               <Button variant="outline" disabled={mutation.isPending} onClick={() => setOpen(false)}>{attempt ? t(($) => $.result_takeover.close) : t(($) => $.result_takeover.cancel)}</Button>
-              {attempt && !mutation.isPending && !response && <Button variant="outline" onClick={chooseAgain}>
+              {canChooseNew && attempt && !mutation.isPending && !response && <Button variant="outline" onClick={chooseAgain}>
                 {conflict || rejected ? t(($) => $.result_takeover.reload) : t(($) => $.result_takeover.change_target)}
               </Button>}
               {!response && <Button onClick={() => void submit()} aria-busy={mutation.isPending}
-                disabled={!canChoose || mutation.isPending || (rejected && !conflict) || (!attempt && (!selectedChoice || options.isFetching || options.isError))}>
+                disabled={!canManage || (!attempt && !canChooseNew) || mutation.isPending || (rejected && !conflict) || (!attempt && (!selectedChoice || options.isFetching || options.isError))}>
                 {mutation.isPending && <Spinner aria-hidden className="size-3.5" />}
                 {attempt ? t(($) => $.result_takeover.retry) : t(($) => $.result_takeover.submit)}
               </Button>}
