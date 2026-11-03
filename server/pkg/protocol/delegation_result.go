@@ -7,6 +7,7 @@ type DelegationResultTurn struct {
 	ResultTaskID       string `json:"result_task_id"`
 	DelegationReturnID string `json:"delegation_return_id"`
 	SourceTaskID       string `json:"source_task_id"`
+	ScopeTaskID        string `json:"scope_task_id,omitempty"`
 	DelegatedIssueID   string `json:"delegated_issue_id"`
 	Outcome            string `json:"outcome"`
 	RuntimeID          string `json:"runtime_id"`
