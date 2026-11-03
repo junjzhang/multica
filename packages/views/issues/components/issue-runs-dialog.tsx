@@ -41,6 +41,7 @@ import { RunCumulativeChart } from "./issue-runs-cumulative-chart";
 import { canRetryRun, RetryRunButton } from "./retry-run-button";
 import { RunTriggerLabel } from "./run-trigger-label";
 import { useStatusLabel, useTriggerText } from "./task-run-labels";
+import { ResultNotifications } from "./result-notifications";
 
 // The issue's runs laid out in time — the surface the execution log's header
 // and cost bars open.
@@ -1045,6 +1046,7 @@ function RunDetails({ id, run, reason }: { id: string; run: TimelineRun; reason:
           </>
         )}
       </dl>
+      <ResultNotifications notifications={run.task.result_notifications} />
     </div>
   );
 }

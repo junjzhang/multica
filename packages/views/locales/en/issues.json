@@ -841,6 +841,21 @@
     "strip_no_usage": "No usage recorded",
     "sparkline_now": "Now"
   },
+  "result_notifications": {
+    "title": "Result notifications",
+    "unavailable": "Notification status unavailable",
+    "empty": "No result notifications",
+    "waiting": "Waiting",
+    "delivering": "Delivering",
+    "processing": "Processing",
+    "received": "Received by session",
+    "unknown": "Receipt unknown",
+    "refused": "Cannot deliver",
+    "failed": "Delivery failed",
+    "cancelled": "Cancelled",
+    "error_details": "Technical details",
+    "receipt_hint": "Receiving a notification does not mean the result is approved."
+  },
   "runs_timeline": {
     "title": "Runs",
     "stat_spent": "Spent",
