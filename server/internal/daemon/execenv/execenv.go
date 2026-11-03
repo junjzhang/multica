@@ -419,6 +419,16 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		return nil, fmt.Errorf("execenv: task ID is required")
 	}
 
+	localPath := params.LocalWorkDir
+	if params.LocalWorktree != nil {
+		localPath = params.LocalWorktree.LocalPath
+	}
+	if localPath != "" {
+		if err := ValidateUserWorkDir(params.WorkspacesRoot, localPath); err != nil {
+			return nil, err
+		}
+	}
+
 	envRoot, err := ResolveRootDir(RootDirParams{
 		WorkspacesRoot:  params.WorkspacesRoot,
 		WorkspaceID:     params.WorkspaceID,
@@ -815,6 +825,12 @@ type ReuseParams struct {
 // Returns nil if the workdir does not exist or required provider setup fails
 // (caller should fall back to Prepare).
 func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
+	if params.LocalDirectory {
+		if err := ValidateUserWorkDir(params.WorkspacesRoot, params.WorkDir); err != nil {
+			logger.Warn("execenv: user working directory is not user-owned", "error", err)
+			return nil
+		}
+	}
 	if _, err := os.Stat(params.WorkDir); err != nil {
 		return nil
 	}

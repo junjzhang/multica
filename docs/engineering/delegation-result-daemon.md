@@ -113,3 +113,27 @@ may run while an idle conversation is retained. It still requires the env-root
 OS lock. This exception does not cover user artifact patterns, workdirs,
 provider transcripts, or result evidence. Empty task-root index entries are
 metadata only; pruning them does not delete an execution directory.
+
+## User directory ownership and upgrades
+
+A project `local_directory` cannot point into daemon-owned workspaces or a
+proven task subtree owned by another profile. Prepare, local-directory Reuse,
+and execution admission check the canonical directory before writing task
+configuration or starting the provider. A normal user directory remains usable
+when it contains Multica context sidecars; those sidecars are not task-root
+ownership. A nonempty task owner also prevents user-directory adoption when
+its legacy marker lacks workspace or completion metadata; missing proof never
+converts a daemon-owned directory into a user-owned one. Managed strict result
+reuse continues through its own root lock and provenance checks.
+
+This boundary does not repair historical registrations. Before upgrading a
+daemon that may have used this configuration, stop its execution and GC, then
+inventory every attached workspace's local-directory resources and persisted
+task working directories. Resolve aliases on that host and move any borrowed
+managed subtree into a user-owned directory, updating its bindings before
+restarting. An incomplete inventory or remaining overlapping binding blocks
+that transition. The parent managed root can otherwise still be reclaimed even
+if the borrower will no longer execute: old GC metadata stores only a
+`local_directory` flag, and sidecar manifests do not enumerate all bindings.
+Workspace-scoped release authorization is deliberately not widened to obtain
+another workspace's private addresses.
