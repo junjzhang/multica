@@ -141,6 +141,7 @@ LIMIT 1;
 -- find the source run whose exact accepted relationships it continues.
 SELECT id FROM agent_task_queue
 WHERE issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
       sqlc.narg('exclude_task_id')::uuid IS NULL

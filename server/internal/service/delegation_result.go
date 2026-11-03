@@ -39,6 +39,9 @@ func (s *TaskService) ReconcileDelegationResults(ctx context.Context, limit int3
 	}
 	for _, failed := range failures {
 		_, _, err := s.retryFailedTaskDecision(ctx, failed)
+		if stampErr := s.Queries.RecordDelegationRetryDecisionAttempt(ctx, failed.ID); stampErr != nil {
+			return stats, stampErr
+		}
 		if err != nil {
 			slog.Warn("delegated failure decision pending", "task_id", util.UUIDToString(failed.ID), "error", err)
 			continue
@@ -50,6 +53,11 @@ func (s *TaskService) ReconcileDelegationResults(ctx context.Context, limit int3
 	}
 	for _, pair := range ready {
 		created, refused, err := s.materializeDelegationResult(ctx, pair.TaskID, pair.DelegationReturnID)
+		if err != nil || (!created && !refused) {
+			if stampErr := s.Queries.RecordDelegationResultAttempt(ctx, db.RecordDelegationResultAttemptParams{TaskID: pair.TaskID, ReturnID: pair.DelegationReturnID}); stampErr != nil {
+				return stats, stampErr
+			}
+		}
 		if err != nil {
 			slog.Warn("delegated result materialization pending", "task_id", util.UUIDToString(pair.TaskID), "return_id", util.UUIDToString(pair.DelegationReturnID), "error", err)
 			continue

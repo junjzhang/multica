@@ -784,15 +784,15 @@ var ErrAttributionFailClosed = errors.New("attribution: no precise accountable h
 var ErrDuplicatePendingTask = errors.New("a pending task for this issue and agent already exists")
 
 // isDuplicatePendingTaskErr reports whether err is the pending-task unique-index
-// violation (a concurrent enqueue won the race). Accept both names while v1 and
-// v2 can coexist during a rolling deploy.
+// violation (a concurrent ordinary enqueue won the race). Accept current and
+// prior index names across the migration boundary.
 func isDuplicatePendingTaskErr(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
 		return false
 	}
 	switch pgErr.ConstraintName {
-	case "idx_one_pending_task_per_issue_agent", "idx_one_pending_task_per_issue_agent_v2", "idx_one_pending_task_per_issue_agent_thread":
+	case "idx_one_pending_task_per_issue_agent", "idx_one_pending_task_per_issue_agent_v2", "idx_one_pending_task_per_issue_agent_thread", "idx_one_pending_ordinary_task_per_issue_agent_thread":
 		return true
 	default:
 		return false

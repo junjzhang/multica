@@ -539,8 +539,9 @@ SELECT
 FROM agent_task_queue p
 WHERE p.id = $1
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
-ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE status IN ('queued', 'dispatched')
-       OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE COALESCE(context->>'type', '') <> 'delegation_result'
+  AND (status IN ('queued', 'dispatched')
+       OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true'))
 DO NOTHING
 RETURNING *;
 
@@ -627,6 +628,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND status IN ('queued', 'dispatched', 'deferred')
 RETURNING *;
 
@@ -637,6 +639,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND status IN ('queued', 'dispatched', 'deferred')
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid)
 RETURNING *;
@@ -1710,6 +1713,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND status IN ('queued', '
 -- the pre-TEN-356 (issue_id, agent_id) key so non-PR issues keep coalescing.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -1724,6 +1728,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
 -- root comment and all descendants. NULL selects assignment-level work.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -1741,6 +1746,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
 -- Carries the same head_sha dedup key as HasPendingTaskForIssueAndAgent (TEN-356).
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
     status IN ('queued', 'dispatched')
@@ -1756,6 +1762,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
 -- Thread-scoped edit preview: ignore the comment whose old run save replaces.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
     status IN ('queued', 'dispatched')
@@ -2148,6 +2155,7 @@ LIMIT @max_per_tick;
 -- NO active task exists.
 SELECT count(*) > 0 AS has_active FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -2157,6 +2165,7 @@ WHERE issue_id = $1 AND agent_id = $2
 -- Active execution and pending work in this comment thread only.
 SELECT count(*) > 0 AS has_active FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -2170,6 +2179,7 @@ WHERE issue_id = $1 AND agent_id = $2
 -- thread-parent replies.
 SELECT is_leader_task, squad_id FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -2241,6 +2251,7 @@ WHERE r.runtime_id = ANY(@runtime_ids::uuid[])
     WHERE successor.issue_id = r.issue_id
       AND successor.agent_id = r.agent_id
       AND successor.comment_thread_id IS NOT DISTINCT FROM r.comment_thread_id
+      AND COALESCE(successor.context->>'type', '') <> 'delegation_result'
       AND successor.id <> r.id
       AND successor.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
   )
@@ -2286,6 +2297,7 @@ WITH due AS (
           AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
           AND (
             occupant.status IN ('queued', 'dispatched')
             OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')
@@ -2354,6 +2366,7 @@ WHERE t.runtime_id = ANY(@runtime_ids::uuid[])
         AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
         AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
         AND (
           occupant.status IN ('queued', 'dispatched')
           OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')
@@ -2389,6 +2402,7 @@ WITH due AS (
           AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
           AND (
             occupant.status IN ('queued', 'dispatched')
             OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')

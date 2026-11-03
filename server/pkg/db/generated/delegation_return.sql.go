@@ -292,6 +292,7 @@ func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg
 const getLatestTaskIDForIssueAndAgent = `-- name: GetLatestTaskIDForIssueAndAgent :one
 SELECT id FROM agent_task_queue
 WHERE issue_id = $1
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = $2
   AND (
       $3::uuid IS NULL

@@ -352,7 +352,7 @@ func (q *Queries) GetAutomaticRetryChild(ctx context.Context, parentTaskID pgtyp
 }
 
 const getDelegationResultObligationForTask = `-- name: GetDelegationResultObligationForTask :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at FROM agent_task_delegation_return WHERE notification_task_id = $1
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at FROM agent_task_delegation_return WHERE notification_task_id = $1
 `
 
 func (q *Queries) GetDelegationResultObligationForTask(ctx context.Context, taskID pgtype.UUID) (AgentTaskDelegationReturn, error) {
@@ -366,6 +366,7 @@ func (q *Queries) GetDelegationResultObligationForTask(ctx context.Context, task
 		&i.NotificationTaskID,
 		&i.NotificationError,
 		&i.MaterializedAt,
+		&i.LastAttemptAt,
 	)
 	return i, err
 }
@@ -503,7 +504,7 @@ func (q *Queries) InvalidateTaskSessionPin(ctx context.Context, arg InvalidateTa
 }
 
 const listIssueResultNotifications = `-- name: ListIssueResultNotifications :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,
@@ -530,6 +531,7 @@ type ListIssueResultNotificationsRow struct {
 	NotificationTaskID     pgtype.UUID        `json:"notification_task_id"`
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 	DispatcherAgentID      pgtype.UUID        `json:"dispatcher_agent_id"`
 	ReturnKind             string             `json:"return_kind"`
 	SourceTaskID           pgtype.UUID        `json:"source_task_id"`
@@ -565,6 +567,7 @@ func (q *Queries) ListIssueResultNotifications(ctx context.Context, arg ListIssu
 			&i.NotificationTaskID,
 			&i.NotificationError,
 			&i.MaterializedAt,
+			&i.LastAttemptAt,
 			&i.DispatcherAgentID,
 			&i.ReturnKind,
 			&i.SourceTaskID,
@@ -600,7 +603,7 @@ WHERE l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL
   AND l.notification_error IS NULL
   AND (t.status = 'completed' OR (t.status = 'failed' AND t.delegation_outcome_final))
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
-ORDER BY t.completed_at, l.task_id, l.delegation_return_id
+ORDER BY l.last_attempt_at NULLS FIRST, t.completed_at, l.task_id, l.delegation_return_id
 LIMIT $1
 `
 
@@ -630,7 +633,7 @@ func (q *Queries) ListReadyDelegationResults(ctx context.Context, batchSize int3
 }
 
 const listTaskResultNotifications = `-- name: ListTaskResultNotifications :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     r.external_session_id, r.runtime_id, r.provider, r.session_id, r.work_dir,
     delivery.delivery_status, delivery.processing_status, delivery.host_receipt,
     delivery.last_error AS delivery_error,
@@ -657,6 +660,7 @@ type ListTaskResultNotificationsRow struct {
 	NotificationTaskID     pgtype.UUID        `json:"notification_task_id"`
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 	DispatcherAgentID      pgtype.UUID        `json:"dispatcher_agent_id"`
 	ReturnKind             string             `json:"return_kind"`
 	SourceTaskID           pgtype.UUID        `json:"source_task_id"`
@@ -692,6 +696,7 @@ func (q *Queries) ListTaskResultNotifications(ctx context.Context, arg ListTaskR
 			&i.NotificationTaskID,
 			&i.NotificationError,
 			&i.MaterializedAt,
+			&i.LastAttemptAt,
 			&i.DispatcherAgentID,
 			&i.ReturnKind,
 			&i.SourceTaskID,
@@ -724,7 +729,7 @@ SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.st
 WHERE t.status = 'failed' AND NOT t.delegation_outcome_final
   AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
-ORDER BY t.completed_at, t.id LIMIT $1
+ORDER BY (SELECT min(COALESCE(l.last_attempt_at, '-infinity'::timestamptz)) FROM agent_task_delegation_return l WHERE l.task_id=t.id), t.completed_at, t.id LIMIT $1
 `
 
 func (q *Queries) ListUnresolvedDelegationFailures(ctx context.Context, batchSize int32) ([]AgentTaskQueue, error) {
@@ -884,7 +889,7 @@ func (q *Queries) LockDelegationResultIssues(ctx context.Context, arg LockDelega
 }
 
 const lockDelegationResultObligation = `-- name: LockDelegationResultObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at FROM agent_task_delegation_return
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at FROM agent_task_delegation_return
 WHERE task_id = $1 AND delegation_return_id = $2
 FOR UPDATE SKIP LOCKED
 `
@@ -905,6 +910,7 @@ func (q *Queries) LockDelegationResultObligation(ctx context.Context, arg LockDe
 		&i.NotificationTaskID,
 		&i.NotificationError,
 		&i.MaterializedAt,
+		&i.LastAttemptAt,
 	)
 	return i, err
 }
@@ -1090,6 +1096,33 @@ func (q *Queries) MarkTaskResourceControlRequired(ctx context.Context, arg MarkT
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const recordDelegationResultAttempt = `-- name: RecordDelegationResultAttempt :exec
+UPDATE agent_task_delegation_return SET last_attempt_at = now()
+WHERE task_id = $1 AND delegation_return_id = $2
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL
+`
+
+type RecordDelegationResultAttemptParams struct {
+	TaskID   pgtype.UUID `json:"task_id"`
+	ReturnID pgtype.UUID `json:"return_id"`
+}
+
+func (q *Queries) RecordDelegationResultAttempt(ctx context.Context, arg RecordDelegationResultAttemptParams) error {
+	_, err := q.db.Exec(ctx, recordDelegationResultAttempt, arg.TaskID, arg.ReturnID)
+	return err
+}
+
+const recordDelegationRetryDecisionAttempt = `-- name: RecordDelegationRetryDecisionAttempt :exec
+UPDATE agent_task_delegation_return SET last_attempt_at = now()
+WHERE task_id = $1
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL
+`
+
+func (q *Queries) RecordDelegationRetryDecisionAttempt(ctx context.Context, taskID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, recordDelegationRetryDecisionAttempt, taskID)
+	return err
 }
 
 const recordTaskTerminalReport = `-- name: RecordTaskTerminalReport :execrows

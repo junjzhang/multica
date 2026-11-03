@@ -31,7 +31,7 @@ SELECT t.* FROM agent_task_queue t
 WHERE t.status = 'failed' AND NOT t.delegation_outcome_final
   AND EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.task_id = t.id)
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
-ORDER BY t.completed_at, t.id LIMIT @batch_size;
+ORDER BY (SELECT min(COALESCE(l.last_attempt_at, '-infinity'::timestamptz)) FROM agent_task_delegation_return l WHERE l.task_id=t.id), t.completed_at, t.id LIMIT @batch_size;
 
 -- name: ListReadyDelegationResults :many
 SELECT l.task_id, l.delegation_return_id
@@ -41,7 +41,7 @@ WHERE l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL
   AND l.notification_error IS NULL
   AND (t.status = 'completed' OR (t.status = 'failed' AND t.delegation_outcome_final))
   AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
-ORDER BY t.completed_at, l.task_id, l.delegation_return_id
+ORDER BY l.last_attempt_at NULLS FIRST, t.completed_at, l.task_id, l.delegation_return_id
 LIMIT @batch_size;
 
 -- name: LockDelegationResultIssues :many
@@ -154,3 +154,13 @@ RETURNING *;
 
 -- name: LockTaskSessionPin :one
 SELECT * FROM agent_task_queue WHERE id = @task_id FOR UPDATE;
+
+-- name: RecordDelegationResultAttempt :exec
+UPDATE agent_task_delegation_return SET last_attempt_at = now()
+WHERE task_id = @task_id AND delegation_return_id = @return_id
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
+
+-- name: RecordDelegationRetryDecisionAttempt :exec
+UPDATE agent_task_delegation_return SET last_attempt_at = now()
+WHERE task_id = @task_id
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;

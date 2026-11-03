@@ -148,6 +148,7 @@ type AgentTaskDelegationReturn struct {
 	NotificationTaskID     pgtype.UUID        `json:"notification_task_id"`
 	NotificationError      pgtype.Text        `json:"notification_error"`
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 }
 
 type AgentTaskQueue struct {

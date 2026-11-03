@@ -205,6 +205,15 @@ handling turn does not inherit the executor's outgoing returns, and ordinary
 comments cannot merge into it. Real new delegations it accepts still create
 their own obligations.
 
+Ordinary pending assignment/comment inputs keep their own unique issue/agent/
+thread slot. Typed result turns are excluded from that index; their locked
+run/return obligation and unique notification pointer provide idempotency.
+Claim-time in-flight serialization still includes both kinds. Migrations build
+the replacement index concurrently before retiring the shared index. Rollback
+requires draining colliding pending turns; it never discards either input.
+Transient notification failures retain the same obligation and record its last
+attempt time, so a blocked prefix cannot starve later eligible recipients.
+
 The daemon advertises `delegation_results_v1`. Claim commits
 `resource_control_required`, a fresh `session_pin_generation`, and the task
 token in one transaction. Old queued work acquires that agreement when claimed
