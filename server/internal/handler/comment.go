@@ -3754,24 +3754,9 @@ func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cancel any active task whose planned batch contains this comment so the
-	// agent does not run with the now-deleted content already embedded. Must
-	// run before the delete: a removed row would nullify trigger_comment_id
-	// through ON DELETE SET NULL and orphan those tasks in queued.
-	cancelled, cancelErr := h.TaskService.CancelTasksByTriggerComment(r.Context(), comment.ID)
-	if cancelErr != nil {
-		slog.Warn("cancel tasks for deleted trigger comment failed", append(logger.RequestAttrs(r), "error", cancelErr, "comment_id", commentId)...)
-	}
-
 	deleted, err := h.deleteComment(r.Context(), comment.ID, comment.WorkspaceID)
 	if err != nil {
 		slog.Warn("delete comment failed", append(logger.RequestAttrs(r), "error", err, "comment_id", commentId)...)
-		// Cancellation already committed but deletion did not. If the parent
-		// issue still exists, rebuild the complete cancelled batch (including
-		// this trigger) before reporting the storage error or concurrent no-op.
-		if hasIssue {
-			h.retriggerCancelledTaskSurvivors(r.Context(), issue, cancelled, pgtype.UUID{})
-		}
 		if errors.Is(err, errTaskSupplementInFlight) {
 			writeError(w, http.StatusConflict, "additional message is still being delivered")
 		} else if errors.Is(err, pgx.ErrNoRows) {
@@ -3782,6 +3767,7 @@ func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.TaskService.BroadcastCancelledTasks(r.Context(), workspaceID, deleted.CancelledTasks)
 	h.deleteS3Objects(r.Context(), deleted.AttachmentURLs)
 	slog.Info("comment deleted", append(logger.RequestAttrs(r),
 		"comment_id", commentId,
@@ -3811,13 +3797,14 @@ func (h *Handler) DeleteComment(w http.ResponseWriter, r *http.Request) {
 		h.publish(protocol.EventCommentDeleted, workspaceID, actorType, actorID, eventPayload)
 	}
 	if hasIssue {
-		h.retriggerCancelledTaskSurvivors(r.Context(), issue, cancelled, comment.ID)
+		h.retriggerCancelledTaskSurvivors(r.Context(), issue, deleted.CancelledTasks, comment.ID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // commentDeletion is the committed outcome of deleteComment.
 type commentDeletion struct {
+	CancelledTasks []db.AgentTaskQueue
 	// Tombstone is the cleared row when the comment still had replies.
 	Tombstone *db.Comment
 	// RemovedIDs lists every row removed outright: the comment itself when it
@@ -3926,6 +3913,15 @@ func (h *Handler) deleteComment(ctx context.Context, commentID, workspaceID pgty
 		}); err != nil {
 			return out, err
 		}
+	}
+	// Cancellation and surviving obligations commit with deletion. A failed
+	// delete leaves the original batch intact instead of requiring compensation.
+	out.CancelledTasks, err = qtx.CancelAgentTasksByTriggerComment(ctx, target.ID)
+	if err != nil {
+		return out, err
+	}
+	if err := service.SettleTerminalTaskState(ctx, qtx, out.CancelledTasks...); err != nil {
+		return out, err
 	}
 	// Separate statement on purpose: its snapshot postdates the locks above,
 	// so it sees every committed reply, and none can be added while they are

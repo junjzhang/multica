@@ -658,13 +658,37 @@ RETURNING *;
 -- The body may already have been embedded as either the primary trigger or a
 -- coalesced input; cancellation prevents an agent from acting on a stale or
 -- deleted version. Must run before deletion clears trigger_comment_id.
+-- Serialize with recovery in issue -> task -> obligation order. Editing already
+-- holds the issue lock; deletion's cancellation also needs it before task locks.
+WITH locked_issue AS MATERIALIZED (
+    SELECT issue.id FROM issue
+    JOIN comment ON comment.issue_id = issue.id AND comment.workspace_id = issue.workspace_id
+    WHERE comment.id = $1
+    FOR UPDATE OF issue
+), issue_fence AS MATERIALIZED (
+    SELECT count(*) AS locked_count FROM locked_issue
+), targets AS MATERIALIZED (
+    SELECT agent_task_queue.id FROM agent_task_queue
+    WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
+      AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+      AND (SELECT locked_count FROM issue_fence) >= 0
+    FOR UPDATE OF agent_task_queue
+), reopened AS (
+    UPDATE comment_dispatch_obligation AS obligation
+    SET status = 'pending', next_attempt_at = now(), last_error = NULL, updated_at = now()
+    FROM targets
+    WHERE obligation.settled_task_id = targets.id
+      AND obligation.comment_id <> $1
+      AND obligation.status = 'settled'
+    RETURNING obligation.id
+)
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL,
     context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('comment_change_cancelled_task_id', id::text)
-WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
-RETURNING *;
+WHERE id IN (SELECT id FROM targets)
+  AND (SELECT count(*) FROM reopened) >= 0
+RETURNING agent_task_queue.*;
 
 -- name: CancelAgentTasksByChatSession :many
 -- Cancels active tasks belonging to a chat session. Called from

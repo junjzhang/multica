@@ -908,21 +908,45 @@ func (q *Queries) CancelAgentTasksByIssue(ctx context.Context, issueID pgtype.UU
 }
 
 const cancelAgentTasksByTriggerComment = `-- name: CancelAgentTasksByTriggerComment :many
+WITH locked_issue AS MATERIALIZED (
+    SELECT issue.id FROM issue
+    JOIN comment ON comment.issue_id = issue.id AND comment.workspace_id = issue.workspace_id
+    WHERE comment.id = $1
+    FOR UPDATE OF issue
+), issue_fence AS MATERIALIZED (
+    SELECT count(*) AS locked_count FROM locked_issue
+), targets AS MATERIALIZED (
+    SELECT agent_task_queue.id FROM agent_task_queue
+    WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
+      AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+      AND (SELECT locked_count FROM issue_fence) >= 0
+    FOR UPDATE OF agent_task_queue
+), reopened AS (
+    UPDATE comment_dispatch_obligation AS obligation
+    SET status = 'pending', next_attempt_at = now(), last_error = NULL, updated_at = now()
+    FROM targets
+    WHERE obligation.settled_task_id = targets.id
+      AND obligation.comment_id <> $1
+      AND obligation.status = 'settled'
+    RETURNING obligation.id
+)
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL,
     context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('comment_change_cancelled_task_id', id::text)
-WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step
+WHERE id IN (SELECT id FROM targets)
+  AND (SELECT count(*) FROM reopened) >= 0
+RETURNING agent_task_queue.id, agent_task_queue.agent_id, agent_task_queue.issue_id, agent_task_queue.status, agent_task_queue.priority, agent_task_queue.dispatched_at, agent_task_queue.started_at, agent_task_queue.completed_at, agent_task_queue.result, agent_task_queue.error, agent_task_queue.created_at, agent_task_queue.context, agent_task_queue.runtime_id, agent_task_queue.session_id, agent_task_queue.work_dir, agent_task_queue.trigger_comment_id, agent_task_queue.chat_session_id, agent_task_queue.autopilot_run_id, agent_task_queue.attempt, agent_task_queue.max_attempts, agent_task_queue.parent_task_id, agent_task_queue.failure_reason, agent_task_queue.trigger_summary, agent_task_queue.force_fresh_session, agent_task_queue.is_leader_task, agent_task_queue.wait_reason, agent_task_queue.initiator_user_id, agent_task_queue.handoff_note, agent_task_queue.prepare_lease_expires_at, agent_task_queue.squad_id, agent_task_queue.runtime_mcp_overlay, agent_task_queue.escalation_for_task_id, agent_task_queue.fire_at, agent_task_queue.originator_user_id, agent_task_queue.runtime_connected_apps, agent_task_queue.coalesced_comment_ids, agent_task_queue.delivered_comment_ids, agent_task_queue.chat_input_task_id, agent_task_queue.chat_finalize_deferred_at, agent_task_queue.originator_source, agent_task_queue.delegated_from_task_id, agent_task_queue.retry_of_task_id, agent_task_queue.rerun_of_task_id, agent_task_queue.rule_version_id, agent_task_queue.trigger_evidence_kind, agent_task_queue.trigger_evidence_ref_id, agent_task_queue.accountable_user_id, agent_task_queue.session_rollout_missing, agent_task_queue.retired_session_id, agent_task_queue.quick_actions_disabled, agent_task_queue.regenerate_quick_actions_for, agent_task_queue.branch_name, agent_task_queue.durable_work_dir, agent_task_queue.channel_context_revision, agent_task_queue.comment_thread_id, agent_task_queue.cancelled_by_type, agent_task_queue.cancelled_by_id, agent_task_queue.cancelled_by_name, agent_task_queue.issue_snapshot, agent_task_queue.workflow_step
 `
 
 // Cancels active tasks whose planned batch contains the edited/deleted comment.
 // The body may already have been embedded as either the primary trigger or a
 // coalesced input; cancellation prevents an agent from acting on a stale or
 // deleted version. Must run before deletion clears trigger_comment_id.
-func (q *Queries) CancelAgentTasksByTriggerComment(ctx context.Context, triggerCommentID pgtype.UUID) ([]AgentTaskQueue, error) {
-	rows, err := q.db.Query(ctx, cancelAgentTasksByTriggerComment, triggerCommentID)
+// Serialize with recovery in issue -> task -> obligation order. Editing already
+// holds the issue lock; deletion's cancellation also needs it before task locks.
+func (q *Queries) CancelAgentTasksByTriggerComment(ctx context.Context, id pgtype.UUID) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, cancelAgentTasksByTriggerComment, id)
 	if err != nil {
 		return nil, err
 	}
