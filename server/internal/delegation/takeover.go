@@ -2,6 +2,9 @@ package delegation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -96,4 +99,22 @@ func validateTakeoverScopeReuse(ctx context.Context, q *db.Queries, prior, candi
 		return fmt.Errorf("%w: original scope differs", ErrReturnConflict)
 	}
 	return requireTaskScope(ctx, q, prior.WorkspaceID, original)
+}
+
+// TakeoverSelectionVersion is a compare-and-swap value, not authorization.
+// It binds the selected live source to its complete physical address and scope
+// without exposing directory paths in the human-facing options response.
+func TakeoverSelectionVersion(address db.IssueDelegationReturn, source db.AgentTaskQueue) string {
+	issue, chat, autopilot := source.IssueID, source.ChatSessionID, source.AutopilotRunID
+	if address.ScopeTaskID.Valid {
+		issue, chat, autopilot = pgtype.UUID{}, pgtype.UUID{}, pgtype.UUID{}
+	}
+	data, _ := json.Marshal([]string{
+		util.UUIDToString(address.WorkspaceID), util.UUIDToString(address.DispatcherAgentID), util.UUIDToString(source.ID),
+		util.UUIDToString(address.RuntimeID), address.Provider.String, address.SessionID.String, address.WorkDir.String,
+		util.UUIDToString(address.ScopeTaskID), util.UUIDToString(issue), util.UUIDToString(chat), util.UUIDToString(autopilot),
+		util.UUIDToString(source.SessionPinGeneration),
+	})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }

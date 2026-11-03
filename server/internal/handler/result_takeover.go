@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -24,6 +25,7 @@ type resultTakeoverTarget struct {
 	Kind              delegation.Kind `json:"kind"`
 	ExternalSessionID string          `json:"external_session_id,omitempty"`
 	SourceTaskID      string          `json:"source_task_id,omitempty"`
+	SelectionVersion  string          `json:"selection_version,omitempty"`
 }
 
 type resultTakeoverRequest struct {
@@ -48,6 +50,7 @@ type takeoverInput struct {
 	workspace, issue, actor, dispatcher       pgtype.UUID
 	request, result, from, expected, selector pgtype.UUID
 	kind                                      delegation.Kind
+	selectionVersion                          string
 }
 
 type takeoverError struct {
@@ -75,7 +78,7 @@ func (h *Handler) TakeoverDelegationResult(w http.ResponseWriter, r *http.Reques
 		writeError(w, 400, "invalid result takeover request")
 		return
 	}
-	input := takeoverInput{workspace: issue.WorkspaceID, issue: issue.ID, actor: actor, kind: body.Target.Kind}
+	input := takeoverInput{workspace: issue.WorkspaceID, issue: issue.ID, actor: actor, kind: body.Target.Kind, selectionVersion: body.Target.SelectionVersion}
 	for _, field := range []struct {
 		value, name string
 		dest        *pgtype.UUID
@@ -92,8 +95,8 @@ func (h *Handler) TakeoverDelegationResult(w http.ResponseWriter, r *http.Reques
 	selector := ""
 	switch input.kind {
 	case delegation.KindExternalSession:
-		if body.Target.SourceTaskID != "" {
-			writeError(w, 400, "external target cannot name a managed task")
+		if body.Target.SourceTaskID != "" || body.Target.SelectionVersion != "" {
+			writeError(w, 400, "external target cannot include managed selection fields")
 			return
 		}
 		selector = body.Target.ExternalSessionID
@@ -166,6 +169,12 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return empty, pgtype.UUID{}, false, err
 	}
+	if in.kind == delegation.KindManagedTask {
+		decoded, err := hex.DecodeString(in.selectionVersion)
+		if err != nil || len(decoded) != 32 {
+			return empty, pgtype.UUID{}, false, takeoverError{400, "managed target requires selection_version from current options"}
+		}
+	}
 	owners := []pgtype.UUID{in.issue}
 	if in.kind == delegation.KindManagedTask {
 		source, err := h.Queries.GetAgentTask(ctx, in.selector)
@@ -209,6 +218,9 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 	if err = h.authorizeTakeoverTarget(ctx, q, in, target, source); err != nil {
 		return empty, pgtype.UUID{}, false, err
 	}
+	if in.kind == delegation.KindManagedTask && in.selectionVersion != delegation.TakeoverSelectionVersion(target, source) {
+		return empty, pgtype.UUID{}, false, takeoverError{409, "selected source session changed; reload before taking over"}
+	}
 	current, err := q.LockIssueDelegationReturnForDispatcher(ctx, db.LockIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: in.dispatcher})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return empty, pgtype.UUID{}, false, takeoverError{409, "current return is unavailable"}
@@ -239,7 +251,7 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 			return empty, pgtype.UUID{}, false, err
 		}
 	}
-	action, err := q.CreateResultTakeover(ctx, db.CreateResultTakeoverParams{ID: dbid.NewV7(), WorkspaceID: in.workspace, ClientRequestID: in.request, ResultTaskID: in.result, FromReturnID: in.from, ExpectedCurrentReturnID: in.expected, TargetReturnID: target.ID, TargetKind: string(in.kind), TargetSelectorID: in.selector, CreatedBy: in.actor})
+	action, err := q.CreateResultTakeover(ctx, db.CreateResultTakeoverParams{ID: dbid.NewV7(), WorkspaceID: in.workspace, ClientRequestID: in.request, ResultTaskID: in.result, FromReturnID: in.from, ExpectedCurrentReturnID: in.expected, TargetReturnID: target.ID, TargetKind: string(in.kind), TargetSelectorID: in.selector, CreatedBy: in.actor, TargetSelectionVersion: pgtype.Text{String: in.selectionVersion, Valid: in.selectionVersion != ""}})
 	if err != nil {
 		return empty, pgtype.UUID{}, false, err
 	}
@@ -260,7 +272,7 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 }
 
 func (h *Handler) takeoverReplay(ctx context.Context, q *db.Queries, in takeoverInput, action db.DelegationResultTakeover) (db.DelegationResultTakeover, pgtype.UUID, bool, error) {
-	if action.CreatedBy != in.actor || action.ResultTaskID != in.result || action.FromReturnID != in.from || action.ExpectedCurrentReturnID != in.expected || action.TargetKind != string(in.kind) || action.TargetSelectorID != in.selector {
+	if action.CreatedBy != in.actor || action.ResultTaskID != in.result || action.FromReturnID != in.from || action.ExpectedCurrentReturnID != in.expected || action.TargetKind != string(in.kind) || action.TargetSelectorID != in.selector || action.TargetSelectionVersion.String != in.selectionVersion {
 		return action, pgtype.UUID{}, false, takeoverError{409, "client_request_id already identifies a different takeover"}
 	}
 	current, err := q.GetIssueDelegationReturnForDispatcher(ctx, db.GetIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: in.dispatcher})
@@ -275,6 +287,10 @@ func validateTakeoverResult(ctx context.Context, q *db.Queries, in takeoverInput
 	if err != nil {
 		return err
 	}
+	return validateTakeoverSavedOutcome(ctx, q, in, outcome)
+}
+
+func validateTakeoverSavedOutcome(ctx context.Context, q *db.Queries, in takeoverInput, outcome db.AgentTaskQueue) error {
 	if outcome.IssueID != in.issue {
 		return takeoverError{404, "saved result not found"}
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -63,12 +64,26 @@ func takeoverExternalSession(t *testing.T, f takeoverFixture, name string) strin
 	return dbfx.Insert(t, "external_agent_session", testutil.Cols{"workspace_id": testWorkspaceID, "owner_user_id": f.owner, "agent_id": f.address.DispatcherAgentID, "provider": "paseo", "host_id": "host-" + name, "session_id": "session-" + name, "display_name": name, "daemon_id": "takeover-host"})
 }
 
-func takeoverBody(f takeoverFixture, kind delegation.Kind, selector string) resultTakeoverRequest {
+func takeoverBody(t *testing.T, f takeoverFixture, kind delegation.Kind, selector string) resultTakeoverRequest {
+	t.Helper()
 	body := resultTakeoverRequest{ClientRequestID: uuidToString(dbid.NewV7()), ResultTaskID: uuidToString(f.result.ID), FromReturnID: uuidToString(f.address.ID), ExpectedCurrentReturnID: uuidToString(f.address.ID), Target: resultTakeoverTarget{Kind: kind}}
 	if kind == delegation.KindExternalSession {
 		body.Target.ExternalSessionID = selector
 	} else {
 		body.Target.SourceTaskID = selector
+		source, err := testHandler.Queries.GetAgentTask(context.Background(), parseUUID(selector))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime, err := testHandler.Queries.GetAgentRuntime(context.Background(), source.RuntimeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope, err := delegation.ManagedSourceTaskScope(context.Background(), testHandler.Queries, source, f.address.WorkspaceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body.Target.SelectionVersion = delegation.TakeoverSelectionVersion(db.IssueDelegationReturn{WorkspaceID: f.address.WorkspaceID, DispatcherAgentID: source.AgentID, RuntimeID: source.RuntimeID, Provider: pgtype.Text{String: runtime.Provider, Valid: true}, SessionID: source.SessionID, WorkDir: source.WorkDir, ScopeTaskID: scope}, source)
 	}
 	return body
 }
@@ -98,7 +113,7 @@ func TestResultTakeoverExternalPreservesUnknownAndReusesTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	resultBefore, _ := testHandler.Queries.GetAgentTask(ctx, f.result.ID)
-	b := takeoverBody(f, delegation.KindExternalSession, takeoverExternalSession(t, f, "B"))
+	b := takeoverBody(t, f, delegation.KindExternalSession, takeoverExternalSession(t, f, "B"))
 	accepted := decodeTakeover(t, callTakeover(t, f, b), 201)
 	if accepted.TargetReturnID == uuidToString(f.address.ID) {
 		t.Fatal("takeover rewrote original address")
@@ -122,7 +137,7 @@ func TestResultTakeoverExternalPreservesUnknownAndReusesTarget(t *testing.T) {
 	if n := countValue(t, `SELECT count(*) FROM agent_task_delegation_return WHERE task_id=$1`, f.result.ID); n != 2 {
 		t.Fatalf("fresh request duplicated notification: %d", n)
 	}
-	c := takeoverBody(f, delegation.KindExternalSession, takeoverExternalSession(t, f, "C"))
+	c := takeoverBody(t, f, delegation.KindExternalSession, takeoverExternalSession(t, f, "C"))
 	c.ExpectedCurrentReturnID = accepted.TargetReturnID
 	next := decodeTakeover(t, callTakeover(t, f, c), 201)
 	replay = decodeTakeover(t, callTakeover(t, f, b), 200)
@@ -173,7 +188,7 @@ func TestResultTakeoverManagedRequiresCurrentPinAndReusesProvenance(t *testing.T
 	f := takeoverFixture{result, address, testUserID, token}
 	dbfx.Cleanup(t, `DELETE FROM delegation_result_takeover WHERE result_task_id=$1`, result.ID)
 	b := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"issue_id": source.IssueID, "runtime_id": source.RuntimeID, "status": "running", "session_id": "new-session-B", "work_dir": "/work/new-B", "resource_control_required": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
-	body := takeoverBody(f, delegation.KindManagedTask, b)
+	body := takeoverBody(t, f, delegation.KindManagedTask, b)
 	if got := callTakeover(t, f, body); got.Code != 409 {
 		t.Fatalf("unconfirmed source admitted: %d %s", got.Code, got.Body.String())
 	}
@@ -222,6 +237,7 @@ func TestResultTakeoverManagedRequiresCurrentPinAndReusesProvenance(t *testing.T
 	}
 	b2 := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"issue_id": source.IssueID, "runtime_id": source.RuntimeID, "status": "running", "session_id": "new-session-B", "work_dir": "/work/new-B", "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
 	fresh.Target.SourceTaskID = b2
+	fresh.Target.SelectionVersion = takeoverBody(t, f, delegation.KindManagedTask, b2).Target.SelectionVersion
 	reused := decodeTakeover(t, callTakeover(t, f, fresh), 201)
 	if reused.TargetReturnID != accepted.TargetReturnID {
 		t.Fatal("new source turn cloned same physical address")
@@ -259,7 +275,7 @@ func queryString(t *testing.T, sql string, args ...any) string {
 
 func TestResultTakeoverTransactionAndCompetingTargets(t *testing.T) {
 	f := externalTakeoverFixture(t)
-	b := takeoverBody(f, delegation.KindExternalSession, takeoverExternalSession(t, f, "atomic-B"))
+	b := takeoverBody(t, f, delegation.KindExternalSession, takeoverExternalSession(t, f, "atomic-B"))
 	fn := "takeover_fail_" + strings.ReplaceAll(uuidToString(f.result.ID), "-", "_")
 	dbfx.Exec(t, fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger AS $$ BEGIN IF NEW.task_id='%s' AND NEW.takeover_id IS NOT NULL THEN RAISE EXCEPTION 'takeover rollback probe'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql; CREATE TRIGGER %s BEFORE INSERT ON agent_task_delegation_return FOR EACH ROW EXECUTE FUNCTION %s();`, fn, uuidToString(f.result.ID), fn, fn))
 	drop := func() {
@@ -277,7 +293,7 @@ func TestResultTakeoverTransactionAndCompetingTargets(t *testing.T) {
 		t.Fatal("failed action changed future route")
 	}
 	drop()
-	c := takeoverBody(f, delegation.KindExternalSession, takeoverExternalSession(t, f, "atomic-C"))
+	c := takeoverBody(t, f, delegation.KindExternalSession, takeoverExternalSession(t, f, "atomic-C"))
 	var wg sync.WaitGroup
 	outputs := make(chan *httptest.ResponseRecorder, 2)
 	for _, body := range []resultTakeoverRequest{b, c} {
@@ -333,7 +349,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 		t.Fatal(err)
 	}
 	bSession := takeoverExternalSession(t, f, "rerun-B")
-	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(f, delegation.KindExternalSession, bSession)), 201)
+	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(t, f, delegation.KindExternalSession, bSession)), 201)
 	bReturn, err := testHandler.Queries.GetDelegationReturnByID(ctx, parseUUID(action.TargetReturnID))
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +408,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 
 func TestResultTakeoverAuthorizationAndTargetScope(t *testing.T) {
 	f := externalTakeoverFixture(t)
-	b := takeoverBody(f, delegation.KindExternalSession, takeoverExternalSession(t, f, "permission-B"))
+	b := takeoverBody(t, f, delegation.KindExternalSession, takeoverExternalSession(t, f, "permission-B"))
 	stranger := dbfx.User(t, "takeover stranger", fmt.Sprintf("takeover-%d@example.com", time.Now().UnixNano()))
 	dbfx.Member(t, testWorkspaceID, stranger, "member")
 	denied := withURLParam(newRequestAs(stranger, "POST", "/takeover", b), "id", uuidToString(f.result.IssueID))
@@ -417,16 +433,16 @@ func TestResultTakeoverAuthorizationAndTargetScope(t *testing.T) {
 	managed := takeoverFixture{result, address, testUserID, token}
 	chat := dbfx.ChatSession(t, uuidToString(source.AgentID), testutil.Cols{"creator_id": stranger})
 	target := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"chat_session_id": chat, "runtime_id": source.RuntimeID, "status": "running", "session_id": "private-chat-session", "work_dir": "/work/private-chat", "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
-	if got := callTakeover(t, managed, takeoverBody(managed, delegation.KindManagedTask, target)); got.Code != 403 {
+	if got := callTakeover(t, managed, takeoverBody(t, managed, delegation.KindManagedTask, target)); got.Code != 403 {
 		t.Fatalf("canManageAgent bypassed private chat: %d %s", got.Code, got.Body.String())
 	}
 	dbfx.Exec(t, `UPDATE agent_task_queue SET chat_session_id=NULL,issue_id=$2,resource_control_required=false WHERE id=$1`, target, source.IssueID)
-	if got := callTakeover(t, managed, takeoverBody(managed, delegation.KindManagedTask, target)); got.Code != 409 {
+	if got := callTakeover(t, managed, takeoverBody(t, managed, delegation.KindManagedTask, target)); got.Code != 409 {
 		t.Fatalf("legacy execution admitted: %d", got.Code)
 	}
 	dbfx.Exec(t, `UPDATE agent_task_queue SET resource_control_required=true WHERE id=$1`, target)
 	dbfx.Exec(t, `UPDATE agent_runtime SET provider='qoder_cloud' WHERE id=$1`, source.RuntimeID)
-	if got := callTakeover(t, managed, takeoverBody(managed, delegation.KindManagedTask, target)); got.Code != 409 {
+	if got := callTakeover(t, managed, takeoverBody(t, managed, delegation.KindManagedTask, target)); got.Code != 409 {
 		t.Fatalf("unsupported executor admitted: %d", got.Code)
 	}
 	if countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id=$1`, result.IssueID) != 1 {
@@ -445,7 +461,7 @@ func TestResultTakeoverPreservesOldUnknownResourceDependency(t *testing.T) {
 	f := takeoverFixture{result, address, testUserID, token}
 	dbfx.Cleanup(t, `DELETE FROM delegation_result_takeover WHERE result_task_id=$1`, result.ID)
 	b := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"issue_id": source.IssueID, "runtime_id": source.RuntimeID, "status": "running", "session_id": "retained-B", "work_dir": "/work/retained-B", "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
-	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(f, delegation.KindManagedTask, b)), 201)
+	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(t, f, delegation.KindManagedTask, b)), 201)
 	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +498,7 @@ func TestResultTakeoverExternalUsesExistingDeliveryWorker(t *testing.T) {
 	f := externalTakeoverFixture(t)
 	ctx := context.Background()
 	b := takeoverExternalSession(t, f, "worker-B")
-	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(f, delegation.KindExternalSession, b)), 201)
+	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(t, f, delegation.KindExternalSession, b)), 201)
 	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
 		t.Fatal(err)
 	}

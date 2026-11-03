@@ -5,10 +5,10 @@ WHERE workspace_id = @workspace_id AND client_request_id = @client_request_id;
 -- name: CreateResultTakeover :one
 INSERT INTO delegation_result_takeover (
  id, workspace_id, client_request_id, result_task_id, from_return_id,
- expected_current_return_id, target_return_id, target_kind, target_selector_id, created_by
+ expected_current_return_id, target_return_id, target_kind, target_selector_id, created_by, target_selection_version
 ) VALUES (
  @id, @workspace_id, @client_request_id, @result_task_id, @from_return_id,
- @expected_current_return_id, @target_return_id, @target_kind, @target_selector_id, @created_by
+ @expected_current_return_id, @target_return_id, @target_kind, @target_selector_id, @created_by, sqlc.narg(target_selection_version)
 ) RETURNING *;
 
 -- name: CreateDelegationReturnVersion :one
@@ -39,3 +39,15 @@ VALUES (@task_id, @delegation_return_id, @takeover_id);
 
 -- name: LockResultTakeoverMember :one
 SELECT * FROM member WHERE workspace_id = @workspace_id AND user_id = @user_id FOR SHARE;
+
+-- name: ListResultTakeoverManagedSources :many
+SELECT t.* FROM agent_task_queue t
+JOIN agent a ON a.id = t.agent_id
+WHERE a.workspace_id = @workspace_id AND a.id = @agent_id
+  AND t.runtime_id = a.runtime_id
+  AND t.status NOT IN ('completed', 'failed', 'cancelled')
+  AND t.resource_control_required AND t.session_pin_confirmed
+  AND t.session_pin_generation IS NOT NULL
+  AND t.session_id IS NOT NULL AND btrim(t.session_id) <> ''
+  AND t.work_dir IS NOT NULL AND btrim(t.work_dir) <> ''
+ORDER BY t.created_at, t.id;

@@ -757,6 +757,7 @@ type DelegationResultTakeover struct {
 	TargetSelectorID        pgtype.UUID        `json:"target_selector_id"`
 	CreatedBy               pgtype.UUID        `json:"created_by"`
 	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	TargetSelectionVersion  pgtype.Text        `json:"target_selection_version"`
 }
 
 type DingtalkBotIdentity struct {

@@ -339,7 +339,7 @@ original dispatcher Agent and access the selected target scope. The request
 names `client_request_id`, the final `result_task_id`, its `from_return_id`,
 `expected_current_return_id`, and an exact target selector: either
 `{kind: external_session, external_session_id}` or
-`{kind: managed_task, source_task_id}`. Managed selection requires a current
+`{kind: managed_task, source_task_id, selection_version}`. Managed selection requires a current
 nonterminal execution with a confirmed v1 session pin; a closed historical run
 is not new admission proof. Private chat and autopilot access remain required.
 
@@ -383,3 +383,47 @@ index. Deploy the current-address writer with the index retirement: older
 writers infer conflicts from the retired all-versions index. The replacement
 index is built concurrently before the old index is dropped. Do not mix an old
 writer with the completed migration or introduce address-rewriting dual writes.
+
+
+### Takeover target read model
+
+`GET /api/issues/{id}/result-takeover-options?result_task_id=C&from_return_id=A`
+returns one snapshot containing `current_return_id`, `returns`, and `targets`.
+It requires a human who can manage the original dispatcher and proves the
+selected result/return relationship. It neither changes routing nor records an
+action. The existing Agent task-history endpoint is not a candidate source.
+
+Each return view has `return_id`, `kind`, and `target`, whose safe fields are
+`provider`, `session_ref`, and `display_name`. Missing or inaccessible historical
+scope produces `target: null` while retaining the return identity; it is not an
+unbound route. `session_ref` is a stable short digest for display only; provider
+session IDs may themselves be file paths and are never returned by this read
+model. Display names use scope titles only after this human's access check.
+Task-only scopes use a generic run time label, never prompts or directory paths.
+
+Candidate targets carry an explicit registered `external_session_id` or current
+`source_task_id`, `kind`, the same safe display fields, and `available: true`.
+Managed targets also include `selection_version`.
+Only candidates passing the POST's source proof and scope permissions are
+listed. Managed candidates require a nonterminal confirmed v1 pin and supported
+local runtime; no latest or historical task inference is permitted. Availability
+means admission eligibility in this snapshot, not host delivery or receipt.
+POST revalidates under its normal transaction before accepting a selection.
+
+Storage/timeout failures return an error, never an empty candidate list. An
+explicit empty list means no eligible target was found. Clients hide controls
+for unauthorized/absent metadata, preserve unknown state for read errors, and
+refresh instead of guessing a replacement session.
+
+A new managed POST must carry the selected `selection_version` unchanged. This
+opaque SHA-256 value binds source task, workspace, Agent, runtime, provider,
+session, directory, original scope and pin generation. It is CAS evidence, not
+an authorization token. POST rechecks permissions and recomputes the value
+under the admission locks; even same-generation session/directory drift returns
+409 with no persisted action, address change or notification. Migration643
+stores the original request value on the action. Exact request replay compares
+that stored value before new admission, so later pin changes or source closure
+do not rewrite an accepted action or move the current route backwards.
+External selection retains its stable registered-session identity and does not
+require this managed proof. Clients must not replace an unknown request's proof
+with freshly fetched options; a new selection is a new explicit request.
