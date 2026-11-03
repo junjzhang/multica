@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -120,11 +121,25 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if child || (outcome.Status != "completed" && !(outcome.Status == "failed" && outcome.DelegationOutcomeFinal)) {
 		return false, false, nil
 	}
+	commitNotification := func() error {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		if s.Bus != nil {
+			s.Bus.Publish(events.Event{
+				Type:        protocol.EventIssueMailboxChanged,
+				WorkspaceID: util.UUIDToString(address.WorkspaceID),
+				ActorType:   "system",
+				Payload:     map[string]any{"issue_id": util.UUIDToString(address.IssueID)},
+			})
+		}
+		return nil
+	}
 	refuse := func(reason error) (bool, bool, error) {
 		if err := q.FailDelegationResultNotification(ctx, db.FailDelegationResultNotificationParams{TaskID: taskID, DelegationReturnID: returnID, Reason: pgtype.Text{String: reason.Error(), Valid: true}}); err != nil {
 			return false, false, err
 		}
-		return false, true, tx.Commit(ctx)
+		return false, true, commitNotification()
 	}
 	if outcome.IssueID != address.IssueID {
 		return refuse(resultRefusal("result_scope_mismatch"))
@@ -175,7 +190,7 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if err != nil {
 		return false, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := commitNotification(); err != nil {
 		return false, false, err
 	}
 	if handling.ID.Valid {
