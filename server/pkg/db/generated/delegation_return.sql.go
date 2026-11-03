@@ -1201,42 +1201,6 @@ func (q *Queries) SettleCommentDispatchObligation(ctx context.Context, arg Settl
 	return err
 }
 
-const updateIssueDelegationReturnExternalSession = `-- name: UpdateIssueDelegationReturnExternalSession :one
-UPDATE issue_delegation_return
-SET external_session_id = $1
-WHERE id = $2 AND return_kind = 'external_session'
-RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id
-`
-
-type UpdateIssueDelegationReturnExternalSessionParams struct {
-	ExternalSessionID pgtype.UUID `json:"external_session_id"`
-	ID                pgtype.UUID `json:"id"`
-}
-
-// The explicit external takeover endpoint changed the (agent, issue) binding;
-// the accepted address follows that binding. This is the only writer allowed
-// to replace an accepted external address.
-func (q *Queries) UpdateIssueDelegationReturnExternalSession(ctx context.Context, arg UpdateIssueDelegationReturnExternalSessionParams) (IssueDelegationReturn, error) {
-	row := q.db.QueryRow(ctx, updateIssueDelegationReturnExternalSession, arg.ExternalSessionID, arg.ID)
-	var i IssueDelegationReturn
-	err := row.Scan(
-		&i.ID,
-		&i.WorkspaceID,
-		&i.IssueID,
-		&i.DispatcherAgentID,
-		&i.ReturnKind,
-		&i.ExternalSessionID,
-		&i.SourceTaskID,
-		&i.RuntimeID,
-		&i.Provider,
-		&i.SessionID,
-		&i.WorkDir,
-		&i.CreatedAt,
-		&i.ScopeTaskID,
-	)
-	return i, err
-}
-
 const upsertIssueAssignmentDelegation = `-- name: UpsertIssueAssignmentDelegation :one
 INSERT INTO issue_assignment_delegation (issue_id, workspace_id, assignee_type, assignee_id, task_id)
 VALUES ($1, $2, $3, $4, $5)

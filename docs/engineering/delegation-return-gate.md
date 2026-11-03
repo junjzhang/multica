@@ -21,6 +21,13 @@ names either:
 - `external_session` — the registered external host session the dispatcher
   named explicitly.
 
+Both kinds are immutable accepted addresses. Rebinding an external Agent's
+issue route affects newly addressed notifications, but does not update an
+existing delegation return, including one whose result has not yet completed.
+A later dispatch from a different session conflicts until an explicit result
+takeover establishes its own return relationship. Earlier results retain their
+original relationship and notification identity.
+
 Which dispatch an accepted relationship belongs to is recorded separately:
 
 - `comment_delegation_return(comment_id, delegation_return_id)` is the comment

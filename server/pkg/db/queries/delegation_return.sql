@@ -33,15 +33,6 @@ WHERE workspace_id = @workspace_id
   AND dispatcher_agent_id = @dispatcher_agent_id
 FOR UPDATE;
 
--- name: UpdateIssueDelegationReturnExternalSession :one
--- The explicit external takeover endpoint changed the (agent, issue) binding;
--- the accepted address follows that binding. This is the only writer allowed
--- to replace an accepted external address.
-UPDATE issue_delegation_return
-SET external_session_id = @external_session_id
-WHERE id = @id AND return_kind = 'external_session'
-RETURNING *;
-
 -- name: ListIssueDelegationReturns :many
 -- Every accepted return relationship recorded on the issue, oldest first.
 SELECT * FROM issue_delegation_return

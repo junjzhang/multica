@@ -278,20 +278,23 @@ func TestEnsureKeepsFirstAcceptedReturnPerDispatcher(t *testing.T) {
 	}, testUserID); !errors.Is(err, ErrReturnConflict) {
 		t.Fatalf("different session err = %v, want ErrReturnConflict", err)
 	}
-	// An explicit takeover moves the binding; the accepted address follows it.
+	// A routing rebind does not rewrite already accepted returns.
 	if _, err := sessionroute.Bind(context.Background(), testQueries, sessionroute.BindRequest{
 		WorkspaceID: testWorkspaceID, AgentID: agentID, IssueID: issueID, SessionID: secondSession, CreatedBy: testUserID,
 	}); err != nil {
-		t.Fatalf("explicit takeover: %v", err)
+		t.Fatalf("rebind: %v", err)
 	}
-	takenOver, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
+	if _, err := Ensure(context.Background(), testQueries, testWorkspaceID, issueID, Address{
 		DispatcherAgentID: agentID, Kind: KindExternalSession, ExternalSessionID: secondSession,
-	}, testUserID)
-	if err != nil {
-		t.Fatalf("Ensure after takeover: %v", err)
+	}, testUserID); !errors.Is(err, ErrReturnConflict) {
+		t.Fatalf("rebound session err = %v, want ErrReturnConflict", err)
 	}
-	if takenOver.ID != first.ID || util.UUIDToString(takenOver.ExternalSessionID) != secondSession {
-		t.Fatalf("takeover did not move the accepted address: %+v", takenOver)
+	unchanged, err := testQueries.GetDelegationReturnByID(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("read accepted return: %v", err)
+	}
+	if unchanged.ExternalSessionID != first.ExternalSessionID {
+		t.Fatalf("rebind changed the accepted address: %+v", unchanged)
 	}
 
 	// A DIFFERENT dispatcher has its own key and its own accepted address.

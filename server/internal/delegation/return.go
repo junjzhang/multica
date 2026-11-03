@@ -337,8 +337,8 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		}
 		// Reuse the reviewed binding. The first accepted target for
 		// (agent, issue) is fixed, so an ordinary dispatch from a different
-		// physical session cannot retarget it; only the explicit takeover
-		// endpoint calls Bind.
+		// physical session cannot retarget it. A routing rebind does not
+		// change the return already accepted by an earlier dispatch.
 		binding, err = sessionroute.Ensure(ctx, q, sessionroute.BindRequest{
 			WorkspaceID: util.UUIDToString(ws),
 			AgentID:     util.UUIDToString(dispatcher),
@@ -455,22 +455,7 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 		if uuidEqual(existing.ExternalSessionID, parseUUIDOrZero(binding.SessionID)) {
 			return existing, nil
 		}
-		// The explicit takeover endpoint already moved the binding to the
-		// session this request authenticated from. Follow that explicit change;
-		// an ordinary dispatch from a different session never reaches here
-		// because it would not match the binding above.
-		sessionID, parseErr := util.ParseUUID(binding.SessionID)
-		if parseErr != nil {
-			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted binding session", ErrReturnInvalid)
-		}
-		updated, updateErr := q.UpdateIssueDelegationReturnExternalSession(ctx, db.UpdateIssueDelegationReturnExternalSessionParams{
-			ID:                existing.ID,
-			ExternalSessionID: sessionID,
-		})
-		if updateErr != nil {
-			return db.IssueDelegationReturn{}, fmt.Errorf("delegation: follow explicit takeover: %w", updateErr)
-		}
-		return updated, nil
+		return db.IssueDelegationReturn{}, fmt.Errorf("%w: current external binding differs from the accepted snapshot", ErrReturnConflict)
 	default:
 		return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted return kind %s does not match this dispatcher", ErrReturnConflict, existing.ReturnKind)
 	}
