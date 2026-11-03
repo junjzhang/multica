@@ -47,20 +47,19 @@ func externalSessionFor(target delivery.HostTarget) ExternalSession {
 	}
 }
 
-// Comment deliveries keep the exact envelope the frozen mailbox consumer sent.
-// The host deduplicates by delivery id, so changing this text for an in-flight
-// row would change its idempotency fingerprint.
+// Business references stay fixed. Uncertain attempts use receipt lookup rather
+// than rendering or sending another prompt, including across guidance updates.
 func renderCommentDelivery(d delivery.Delivery) string {
 	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
-		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n"+
-		"Read: multica --profile <registered-external-profile> issue get %[3]s --output json\n"+
-		"Read comments: multica --profile <registered-external-profile> issue comment list %[3]s --output json\n"+
+		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n"+
+		"Read: multica issue get %[3]s --output json\n"+
+		"Read comments: multica issue comment list %[3]s --output json\n"+
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
 		d.ID, d.Scope.WorkspaceID, d.Refs.IssueID, d.Refs.CommentID, d.Recipient.ID)
 }
 
 // renderDeliveryNotification is the one host-facing envelope. A comment
-// notification keeps its frozen text; every other kind is a neutral envelope
+// notification carries its fixed references; every other kind is a neutral envelope
 // carrying the stable delivery id and any issue reference. The producer owns
 // payload semantics; this layer only guarantees stable references and that no
 // extra permission is implied.

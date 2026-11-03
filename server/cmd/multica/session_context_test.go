@@ -148,6 +148,8 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			}
 		} else if r.Method == http.MethodGet && r.URL.Path == "/api/issues" {
 			response = `{"issues":[],"total":0}`
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments") {
+			response = `[]`
 		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/runtime-profiles") {
 			response = `{"runtime_profiles":[]}`
 		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/workspaces/") {
@@ -302,6 +304,8 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 		wantPath string
 	}{
 		{"issue list", []string{"issue", "list", "--output", "json"}, "/api/issues"},
+		{"notification issue read", []string{"issue", "get", sessionIssueID, "--output", "json"}, "/api/issues/" + sessionIssueID},
+		{"notification comments read", []string{"issue", "comment", "list", sessionIssueID, "--output", "json"}, "/api/issues/" + sessionIssueID + "/comments"},
 		{"issue comment add", []string{"issue", "comment", "add", sessionIssueID, "--content", "hello from the session", "--output", "json"}, "/api/issues/" + sessionIssueID + "/comments"},
 		{"issue wakeup create", []string{"issue", "wakeup", "create", sessionIssueID, "--event", "comment.created", "--instruction", "watch this issue", "--output", "json"}, ""},
 		// These used to re-read the human profile's workspace after the session

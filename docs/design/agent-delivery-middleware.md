@@ -267,10 +267,13 @@ one unreachable recipient from consuming more than one slot. The worker runs a
 bounded number of sessions concurrently; the claim itself is the fairness bound,
 not a priority scheduler.
 
-The daemon renders the notification from `kind` and the stable references. A
-`comment_mention` row keeps the exact envelope the old mailbox consumer sent, so
-an in-flight row's host idempotency fingerprint does not change; every other
-kind is the neutral envelope with its issue reference and payload.
+The daemon renders the notification from `kind` and the stable references.
+Comment guidance uses the connected session's CLI identity without a profile
+override; other kinds use the neutral issue-reference and payload envelope.
+Guidance updates do not change stored business references or delivery IDs.
+An uncertain prior attempt is receipt-only and must never render or send another
+prompt. Busy retries require the adapter's proven-no-effect outcome; the qualified
+Paseo host removes its pending receipt for that outcome before allowing a retry.
 
 The issue-detail projection (`ListIssueMailboxDeliveries`) also keeps the
 `source_type = 'comment'` filter. A generic delivery may legitimately reference

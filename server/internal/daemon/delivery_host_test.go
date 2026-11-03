@@ -170,10 +170,8 @@ func TestGenericDeliveryPromptCarriesStableIdentityWithoutGrantingPermission(t *
 	}
 }
 
-// A comment notification must keep the exact frozen envelope: the host
-// deduplicates an in-flight row by delivery id, so changing this text would
-// change its idempotency fingerprint.
-func TestCommentDeliveryPromptKeepsFrozenEnvelope(t *testing.T) {
+// Comment references and connected-session instructions travel together.
+func TestCommentDeliveryPromptUsesConnectedSession(t *testing.T) {
 	prompt := renderDeliveryNotification(delivery.Delivery{
 		ID:        "delivery-1",
 		Scope:     delivery.Scope{WorkspaceID: "workspace-1"},
@@ -183,9 +181,9 @@ func TestCommentDeliveryPromptKeepsFrozenEnvelope(t *testing.T) {
 		Refs:      delivery.Refs{IssueID: "issue-1", CommentID: "comment-1"},
 	})
 	want := "Multica has a request for this session.\nMailbox ID: delivery-1\nWorkspace ID: workspace-1\nIssue ID: issue-1\nComment ID: comment-1\nRecipient agent ID: agent-1\n\n" +
-		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n" +
-		"Read: multica --profile <registered-external-profile> issue get issue-1 --output json\n" +
-		"Read comments: multica --profile <registered-external-profile> issue comment list issue-1 --output json\n" +
+		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n" +
+		"Read: multica issue get issue-1 --output json\n" +
+		"Read comments: multica issue comment list issue-1 --output json\n" +
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone."
 	if prompt != want {
 		t.Fatalf("comment prompt changed:\n%s", prompt)

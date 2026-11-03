@@ -62,7 +62,7 @@ func TestClaimDeliveriesKeepsBatchAndFlagsOneInvalidLeaseTimestamp(t *testing.T)
 // read. A wrong json tag would silently drop them while every byte-for-byte
 // template test still passed, so this fixture goes DTO -> delivery.Claim ->
 // renderer and compares the complete envelope.
-func TestClaimDeliveriesMapsStoredRowAndRendersFrozenCommentEnvelope(t *testing.T) {
+func TestClaimDeliveriesMapsStoredRowAndRendersCommentEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"deliveries":[{
 			"id":"delivery-comment-1",
@@ -114,9 +114,9 @@ func TestClaimDeliveriesMapsStoredRowAndRendersFrozenCommentEnvelope(t *testing.
 		"Issue ID: issue-1\n" +
 		"Comment ID: comment-1\n" +
 		"Recipient agent ID: agent-1\n\n" +
-		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n" +
-		"Read: multica --profile <registered-external-profile> issue get issue-1 --output json\n" +
-		"Read comments: multica --profile <registered-external-profile> issue comment list issue-1 --output json\n" +
+		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n" +
+		"Read: multica issue get issue-1 --output json\n" +
+		"Read comments: multica issue comment list issue-1 --output json\n" +
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone."
 	if got := renderDeliveryNotification(claim.Delivery); got != want {
 		t.Fatalf("comment envelope changed:\n%s", got)
