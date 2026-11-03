@@ -288,6 +288,9 @@ malformed projections must remain unknown.
   that has never accepted a delegation return and whose latest run carries none.
   The source run's set and the rerunning actor's address are recorded and linked
   only in the enqueue transaction, after triage and invoke eligibility pass.
+  Replacing a pending run cancels and settles it in that same transaction.
+  Address conflicts and enqueue failures preserve the prior queue; cancellation
+  events are published only after the replacement commits.
 - **Managed mention / comment**: the gate runs before the comment is written.
   The comment, its accepted return, and its durable dispatch obligations commit
   together. A mention that resolves only to blocked targets keeps the comment

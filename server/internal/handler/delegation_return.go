@@ -233,7 +233,7 @@ func writeDelegationReturnError(w http.ResponseWriter, err error) {
 	case errors.Is(err, delegation.ErrReturnConflict):
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"code":  "delegation_return_conflict",
-			"error": "This agent already accepted a different physical return session on this issue. No child work was created; use an explicit session takeover to move the accepted address.",
+			"error": "This agent already accepted a different return session on this issue. The existing return address remains fixed; this dispatch was not accepted.",
 		})
 	case errors.Is(err, delegation.ErrReturnInvalid):
 		writeJSON(w, http.StatusBadRequest, map[string]any{
