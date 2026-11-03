@@ -121,8 +121,10 @@ proven task subtree owned by another profile. Prepare, local-directory Reuse,
 and execution admission check the canonical directory before writing task
 configuration or starting the provider. A normal user directory remains usable
 when it contains Multica context sidecars; those sidecars are not task-root
-ownership. Managed strict result reuse continues through its own root lock and
-provenance checks.
+ownership. A nonempty task owner also prevents user-directory adoption when
+its legacy marker lacks workspace or completion metadata; missing proof never
+converts a daemon-owned directory into a user-owned one. Managed strict result
+reuse continues through its own root lock and provenance checks.
 
 This boundary does not repair historical registrations. Before upgrading a
 daemon that may have used this configuration, stop its execution and GC, then

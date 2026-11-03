@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // ValidateUserWorkDir keeps user-directory writes outside daemon-owned task roots.
@@ -41,14 +40,7 @@ func ValidateUserWorkDir(workspacesRoot, workDir string) error {
 			return fmt.Errorf("local_directory: cannot verify directory ownership: %w", err)
 		}
 		if owner.TaskID != "" {
-			if owner.WorkspaceID == "" {
-				if meta, err := ReadGCMeta(current); err == nil {
-					owner.WorkspaceID = strings.TrimSpace(meta.WorkspaceID)
-				}
-			}
-			if err := ValidateEnvRootOwnerPath(filepath.Dir(filepath.Dir(current)), current, *owner); err == nil {
-				return fmt.Errorf("local_directory: %q belongs to daemon task %s", workDir, owner.TaskID)
-			}
+			return fmt.Errorf("local_directory: %q has a daemon task ownership marker for %s", workDir, owner.TaskID)
 		}
 		if filepath.Dir(current) == current {
 			return nil
