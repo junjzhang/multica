@@ -2325,14 +2325,12 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 		return results
 	}
 	for _, trigger := range triggers {
+		if coverage, handled := h.replayCommentDispatchObligation(ctx, triggerCommentID, trigger.Agent.ID); handled {
+			record(trigger, coverage.status, coverage.reason)
+			continue
+		}
 		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, returnIDs)
 		record(trigger, status, reason)
-		if status == DispatchQueued || status == DispatchCoalesced || status == DispatchDeferred {
-			// Completion replay and edit retrigger are another route that
-			// covers an accepted comment. Settle the durable obligation they
-			// just satisfied so the background consumer does not repeat it.
-			h.settleCommentDispatchObligationForReplay(ctx, triggerCommentID, trigger.Agent.ID, pgtype.UUID{})
-		}
 	}
 	return results
 }
@@ -2709,14 +2707,18 @@ func (h *Handler) mergeCommentIntoPendingTaskWithQueries(ctx context.Context, q 
 	if err != nil {
 		return db.MergeCommentIntoPendingTaskRow{}, err
 	}
-	returnIDs, err := delegation.CommentReturnIDs(ctx, q, commentID)
-	if err != nil {
-		return db.MergeCommentIntoPendingTaskRow{}, err
-	}
-	if err := delegation.LinkRun(ctx, q, row.ID, returnIDs...); err != nil {
+	if err := linkCommentRunReturns(ctx, q, row.ID, commentID); err != nil {
 		return db.MergeCommentIntoPendingTaskRow{}, err
 	}
 	return row, nil
+}
+
+func linkCommentRunReturns(ctx context.Context, q *db.Queries, taskID, commentID pgtype.UUID) error {
+	returnIDs, err := delegation.CommentReturnIDs(ctx, q, commentID)
+	if err != nil {
+		return err
+	}
+	return delegation.LinkRun(ctx, q, taskID, returnIDs...)
 }
 
 func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text) commentMergeResult {
@@ -2831,6 +2833,9 @@ func (h *Handler) registerPlannedCommentForActiveTask(ctx context.Context, issue
 // shape today's schema has no safe place to park, and closing it needs a durable
 // obligation record rather than an in-request hand-off.
 func (h *Handler) propagateUncoveredCommentObligation(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, commentID pgtype.UUID, headSha pgtype.Text) bool {
+	if coverage, handled := h.replayCommentDispatchObligation(ctx, commentID, trigger.Agent.ID); handled {
+		return coverage.settled
+	}
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		registered, err := h.registerPlannedCommentForActiveTask(ctx, issue, trigger.Agent.ID, commentID, pgtype.Text{})
@@ -3457,21 +3462,6 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		} else {
 			sourceTaskID = pgtype.UUID{}
 		}
-		// Legacy clients keep the existing cancel-before-update behavior. Strict
-		// revision writes defer cancellation until the conditional UPDATE wins,
-		// so a race that returns 409 cannot mutate the task queue.
-		if !strictContentEdit {
-			cancelled, err = h.TaskService.CancelTasksByTriggerComment(r.Context(), existing.ID)
-			if err != nil {
-				slog.Warn("cancel tasks for edited comment failed", "comment_id", uuidToString(existing.ID), "error", err)
-				writeError(w, http.StatusInternalServerError, "failed to prepare comment edit")
-				return
-			}
-		}
-		// Resolve the edited content's triggers from the state this edit creates
-		// (old tasks cancelled above), before the row changes. Resolution is
-		// read-only; the write transaction below is the only thing that persists
-		// a valid external handoff.
 		if !isNoteComment(req.Content) {
 			var parentComment *db.Comment
 			if existing.ParentID.Valid {
@@ -3539,9 +3529,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	var comment db.Comment
 	var issueRevision int64
-	transactionalEdit := replaceAttachments || (oldContent != req.Content && strictContentEdit)
+	transactionalEdit := replaceAttachments || oldContent != req.Content
 	if transactionalEdit {
-		// Strict body edits, attachment-set edits, and cancellation of tasks built
+		// Body edits, attachment-set edits, and cancellation of tasks built
 		// from the old body are one database outcome. UpdateComment takes the row
 		// lock before the attachment replacement, so two modern editors cannot
 		// interleave their CAS check and attachment selection. A body + attachment
@@ -3566,7 +3556,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err == nil && oldContent != req.Content && strictContentEdit {
+		if err == nil && oldContent != req.Content {
 			cancelled, err = qtx.CancelAgentTasksByTriggerComment(r.Context(), existing.ID)
 			if err == nil {
 				err = service.SettleTerminalTaskState(r.Context(), qtx, cancelled...)
@@ -3639,11 +3629,6 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		slog.Warn("update comment failed", append(logger.RequestAttrs(r), "error", err, "comment_id", commentId)...)
-		if triggerIssue != nil && !strictContentEdit {
-			// Cancellation committed but the edit did not. Restore the complete
-			// original batch, including the still-valid unchanged comment.
-			h.retriggerCancelledTaskSurvivors(r.Context(), *triggerIssue, cancelled, pgtype.UUID{})
-		}
 		if derr := asDelegationReturnError(err); derr != nil {
 			writeDelegationReturnError(w, derr)
 			return

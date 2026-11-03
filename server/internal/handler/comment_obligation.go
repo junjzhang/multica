@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/attribution"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -231,6 +233,10 @@ func (h *Handler) planCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *d
 		}
 		return commentObligationCoverage{}, false
 	}
+	if err := linkCommentRunReturns(ctx, qsp, row.ID, commentID); err != nil {
+		_ = sp.Rollback(ctx)
+		return commentObligationCoverage{}, false
+	}
 	if err := sp.Commit(ctx); err != nil {
 		return commentObligationCoverage{}, false
 	}
@@ -314,104 +320,171 @@ func (h *Handler) ConsumeCommentDispatchObligations(ctx context.Context, batchSi
 	return stats, nil
 }
 
-func (h *Handler) consumeCommentDispatchObligation(ctx context.Context, obligationID pgtype.UUID) (covered, failed bool, err error) {
+func (h *Handler) consumeCommentDispatchObligation(ctx context.Context, obligationID pgtype.UUID) (bool, bool, error) {
+	coverage, failed, err := h.dispatchCommentObligation(ctx, obligationID, false)
+	return coverage.settled, failed, err
+}
+
+// Replay and the sweeper serialize against edits and each other. The exact
+// obligation identifies the intent generation; a prior edit's run is not proof
+// that the current obligation was delivered.
+func (h *Handler) replayCommentDispatchObligation(ctx context.Context, commentID, agentID pgtype.UUID) (commentObligationCoverage, bool) {
+	obligation, err := h.Queries.GetCommentDispatchObligationForTarget(ctx, db.GetCommentDispatchObligationForTargetParams{
+		CommentID: commentID, AgentID: agentID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return commentObligationCoverage{}, false
+	}
+	if err != nil {
+		return commentObligationCoverage{status: DispatchBlocked, reason: ReasonInternalError}, true
+	}
+	coverage, _, err := h.dispatchCommentObligation(ctx, obligation.ID, true)
+	if err != nil {
+		slog.Warn("replay comment obligation failed", "obligation_id", uuidToString(obligation.ID), "error", err)
+		return commentObligationCoverage{status: DispatchBlocked, reason: ReasonInternalError}, true
+	}
+	return coverage, true
+}
+
+func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pgtype.UUID, replay bool) (commentObligationCoverage, bool, error) {
+	var empty commentObligationCoverage
+	candidate, err := h.Queries.GetCommentDispatchObligation(ctx, obligationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return empty, false, nil
+	}
+	if err != nil {
+		return empty, false, err
+	}
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
-		return false, false, err
+		return empty, false, err
 	}
 	defer tx.Rollback(ctx)
 	q := h.Queries.WithTx(tx)
+	comment, commentErr := q.LockLiveComment(ctx, db.LockLiveCommentParams{ID: candidate.CommentID, WorkspaceID: candidate.WorkspaceID})
+	if commentErr != nil && !errors.Is(commentErr, pgx.ErrNoRows) {
+		return empty, false, commentErr
+	}
 	obligation, err := q.LockCommentDispatchObligation(ctx, obligationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return empty, false, nil
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, false, nil
+		return empty, false, err
+	}
+	if obligation.Status == "failed" || (!replay && obligation.Status != "pending") {
+		return commentObligationCoverage{status: DispatchBlocked, reason: ReasonTargetUnavailable}, false, nil
+	}
+	fail := func(reason DispatchReasonCode, detail string) (commentObligationCoverage, bool, error) {
+		if err := q.FailCommentDispatchObligation(ctx, db.FailCommentDispatchObligationParams{
+			LastError: pgtype.Text{String: string(reason) + ": " + detail, Valid: true}, ID: obligation.ID,
+		}); err != nil {
+			return empty, false, err
 		}
-		return false, false, err
+		return commentObligationCoverage{status: DispatchBlocked, reason: reason}, true, tx.Commit(ctx)
+	}
+	if commentErr != nil {
+		return fail(ReasonTargetUnavailable, "comment no longer exists")
 	}
 	issue, err := q.GetIssue(ctx, obligation.IssueID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(ReasonTargetUnavailable, "issue no longer exists")
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			if failErr := q.FailCommentDispatchObligation(ctx, db.FailCommentDispatchObligationParams{
-				LastError: pgtype.Text{String: "issue no longer exists", Valid: true},
-				ID:        obligation.ID,
-			}); failErr != nil {
-				return false, false, failErr
-			}
-			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return false, false, commitErr
-			}
-			return false, true, nil
-		}
-		return false, false, err
-	}
-	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: obligation.AgentID, WorkspaceID: obligation.WorkspaceID})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			if failErr := q.FailCommentDispatchObligation(ctx, db.FailCommentDispatchObligationParams{
-				LastError: pgtype.Text{String: "accepted target agent no longer exists", Valid: true},
-				ID:        obligation.ID,
-			}); failErr != nil {
-				return false, false, failErr
-			}
-			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return false, false, commitErr
-			}
-			return false, true, nil
-		}
-		return false, false, err
-	}
-	verdict, err := service.AgentReadiness(ctx, h.runtimeLookup(obsmetrics.RuntimeLookupSourceComment), agent)
-	if err != nil {
-		return h.recordCommentObligationRetry(ctx, tx, q, obligation.ID, err)
-	}
-	if verdict.Blocked() {
-		if failErr := q.FailCommentDispatchObligation(ctx, db.FailCommentDispatchObligationParams{
-			LastError: pgtype.Text{String: string(verdict.Reason) + ": " + verdict.Detail, Valid: true},
-			ID:        obligation.ID,
-		}); failErr != nil {
-			return false, false, failErr
-		}
-		if commitErr := tx.Commit(ctx); commitErr != nil {
-			return false, false, commitErr
-		}
-		return false, true, nil
-	}
-	trigger := commentAgentTrigger{Agent: agent, Source: commentAgentTriggerSource(obligation.TriggerSource)}
-	if obligation.SquadID.Valid {
-		squad, squadErr := q.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{ID: obligation.SquadID, WorkspaceID: obligation.WorkspaceID})
-		if squadErr != nil {
-			if errors.Is(squadErr, pgx.ErrNoRows) {
-				if failErr := q.FailCommentDispatchObligation(ctx, db.FailCommentDispatchObligationParams{
-					LastError: pgtype.Text{String: "accepted squad no longer exists", Valid: true},
-					ID:        obligation.ID,
-				}); failErr != nil {
-					return false, false, failErr
-				}
-				if commitErr := tx.Commit(ctx); commitErr != nil {
-					return false, false, commitErr
-				}
-				return false, true, nil
-			}
-			return false, false, squadErr
-		}
-		trigger.Squad = &squad
+		return empty, false, err
 	}
 	var returnIDs []pgtype.UUID
 	if obligation.DelegationReturnID.Valid {
 		returnIDs = []pgtype.UUID{obligation.DelegationReturnID}
 	}
-	coverage := h.coverCommentObligationInTx(ctx, tx, q, issue, obligation.CommentID, acceptedCommentObligation{ID: obligation.ID, Trigger: trigger}, returnIDs)
-	if !coverage.settled {
-		return h.recordCommentObligationRetry(ctx, tx, q, obligation.ID, fmt.Errorf("no covering run yet"))
+	// Only this generation's covering run can prove delivery. In particular,
+	// a completed run with the same comment id from before an edit cannot.
+	if obligation.SettledTaskID.Valid {
+		task, err := q.GetAgentTask(ctx, obligation.SettledTaskID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return empty, false, err
+		}
+		if slices.Contains(task.DeliveredCommentIds, comment.ID) {
+			if err := delegation.LinkRun(ctx, q, task.ID, returnIDs...); err != nil {
+				return empty, false, err
+			}
+			if err := q.SettleCommentDispatchObligation(ctx, db.SettleCommentDispatchObligationParams{ID: obligation.ID, TaskID: task.ID}); err != nil {
+				return empty, false, err
+			}
+			return commentObligationCoverage{status: DispatchCoalesced, reason: ReasonCoalesced, settled: true, settledTask: task.ID}, false, tx.Commit(ctx)
+		}
 	}
-	if err := q.SettleCommentDispatchObligation(ctx, db.SettleCommentDispatchObligationParams{
-		TaskID: coverage.settledTask,
-		ID:     obligation.ID,
-	}); err != nil {
-		return false, false, err
+	if err := q.ReopenCommentDispatchObligation(ctx, obligation.ID); err != nil {
+		return empty, false, err
+	}
+	if comment.AuthorType == "agent" {
+		author, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: comment.AuthorID, WorkspaceID: obligation.WorkspaceID})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && author.ArchivedAt.Valid) {
+			return fail(ReasonInvocationNotAllowed, "comment author no longer available")
+		}
+		if err != nil {
+			return empty, false, err
+		}
+	}
+	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: obligation.AgentID, WorkspaceID: obligation.WorkspaceID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(ReasonTargetUnavailable, "accepted target agent no longer exists")
+	}
+	if err != nil {
+		return empty, false, err
+	}
+	originator := uuidToString(comment.AuthorID)
+	if comment.AuthorType != "member" {
+		originator = uuidToString(h.TaskService.ResolveOriginatorFromTriggerComment(ctx, issue.WorkspaceID, comment.ID))
+	}
+	if !h.canInvokeAgent(ctx, agent, comment.AuthorType, uuidToString(comment.AuthorID), originator, uuidToString(issue.WorkspaceID)) {
+		return fail(ReasonInvocationNotAllowed, "accepted target is no longer invocable")
+	}
+	if agent.ArchivedAt.Valid || agent.ExecutionKind == "external" {
+		return fail(ReasonTargetUnavailable, "accepted target is no longer executable")
+	}
+	trigger := commentAgentTrigger{Agent: agent, Source: commentAgentTriggerSource(obligation.TriggerSource)}
+	if obligation.SquadID.Valid {
+		squad, err := q.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{ID: obligation.SquadID, WorkspaceID: obligation.WorkspaceID})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && squad.LeaderID != agent.ID) {
+			return fail(ReasonTargetUnavailable, "accepted squad leader no longer available")
+		}
+		if err != nil {
+			return empty, false, err
+		}
+		trigger.Squad = &squad
+	}
+	verdict, err := service.AgentReadiness(ctx, h.runtimeLookup(obsmetrics.RuntimeLookupSourceComment), agent)
+	if err != nil {
+		_, _, retryErr := h.recordCommentObligationRetry(ctx, tx, q, obligation.ID, err)
+		return empty, false, retryErr
+	}
+	if verdict.Blocked() {
+		return fail(verdict.Reason, verdict.Detail)
+	}
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return empty, false, err
+	}
+	qsp := h.Queries.WithTx(sp)
+	coverage := h.coverCommentObligationInTx(ctx, sp, qsp, issue, obligation.CommentID, acceptedCommentObligation{ID: obligation.ID, Trigger: trigger}, returnIDs)
+	if coverage.settled {
+		err = qsp.SettleCommentDispatchObligation(ctx, db.SettleCommentDispatchObligationParams{TaskID: coverage.settledTask, ID: obligation.ID})
+	}
+	if err != nil || !coverage.settled {
+		_ = sp.Rollback(ctx)
+		cause := err
+		if cause == nil {
+			cause = fmt.Errorf("no covering run yet")
+		}
+		_, _, retryErr := h.recordCommentObligationRetry(ctx, tx, q, obligation.ID, cause)
+		return commentObligationCoverage{status: DispatchBlocked, reason: ReasonInternalError}, false, retryErr
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return empty, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return false, false, err
+		return empty, false, err
 	}
 	if coverage.merged {
 		h.TaskService.RecordHumanDelegation(ctx, coverage.mergedAttr)
@@ -420,7 +493,7 @@ func (h *Handler) consumeCommentDispatchObligation(ctx context.Context, obligati
 		h.TaskService.ApplyQueuedIssueTaskOverlay(ctx, coverage.task)
 		h.TaskService.PublishQueuedIssueTask(ctx, coverage.task, coverage.attr)
 	}
-	return true, false, nil
+	return coverage, false, nil
 }
 
 func (h *Handler) recordCommentObligationRetry(ctx context.Context, tx pgx.Tx, q *db.Queries, obligationID pgtype.UUID, cause error) (bool, bool, error) {
@@ -450,20 +523,4 @@ func minInt(a, b int32) int32 {
 		return a
 	}
 	return b
-}
-
-// settleCommentDispatchObligationForReplay is used by completion replay and
-// edit retrigger after they cover a comment outside the comment's write
-// transaction. The update is idempotent.
-func (h *Handler) settleCommentDispatchObligationForReplay(ctx context.Context, commentID, agentID, taskID pgtype.UUID) {
-	if err := h.Queries.SettleCommentDispatchObligationsForTarget(ctx, db.SettleCommentDispatchObligationsForTargetParams{
-		TaskID:    taskID,
-		CommentID: commentID,
-		AgentID:   agentID,
-	}); err != nil {
-		slog.Warn("settle replayed comment dispatch obligation failed",
-			"comment_id", uuidToString(commentID),
-			"agent_id", uuidToString(agentID),
-			"error", err)
-	}
 }

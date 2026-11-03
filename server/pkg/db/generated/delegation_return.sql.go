@@ -120,7 +120,7 @@ func (q *Queries) DeleteIssueAssignmentDelegationReturns(ctx context.Context, ar
 const failCommentDispatchObligation = `-- name: FailCommentDispatchObligation :exec
 UPDATE comment_dispatch_obligation
 SET status = 'failed', last_error = $1, updated_at = now()
-WHERE id = $2 AND status = 'pending'
+WHERE id = $2 AND status IN ('pending', 'settled')
 `
 
 type FailCommentDispatchObligationParams struct {
@@ -139,6 +139,39 @@ SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_sourc
 
 func (q *Queries) GetCommentDispatchObligation(ctx context.Context, id pgtype.UUID) (CommentDispatchObligation, error) {
 	row := q.db.QueryRow(ctx, getCommentDispatchObligation, id)
+	var i CommentDispatchObligation
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.IssueID,
+		&i.CommentID,
+		&i.AgentID,
+		&i.SquadID,
+		&i.TriggerSource,
+		&i.DelegationReturnID,
+		&i.Status,
+		&i.Attempts,
+		&i.LastError,
+		&i.SettledTaskID,
+		&i.NextAttemptAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCommentDispatchObligationForTarget = `-- name: GetCommentDispatchObligationForTarget :one
+SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at FROM comment_dispatch_obligation
+WHERE comment_id = $1 AND agent_id = $2
+`
+
+type GetCommentDispatchObligationForTargetParams struct {
+	CommentID pgtype.UUID `json:"comment_id"`
+	AgentID   pgtype.UUID `json:"agent_id"`
+}
+
+func (q *Queries) GetCommentDispatchObligationForTarget(ctx context.Context, arg GetCommentDispatchObligationForTargetParams) (CommentDispatchObligation, error) {
+	row := q.db.QueryRow(ctx, getCommentDispatchObligationForTarget, arg.CommentID, arg.AgentID)
 	var i CommentDispatchObligation
 	err := row.Scan(
 		&i.ID,
@@ -881,8 +914,8 @@ func (q *Queries) LockAgentTaskForDelegation(ctx context.Context, id pgtype.UUID
 
 const lockCommentDispatchObligation = `-- name: LockCommentDispatchObligation :one
 SELECT id, workspace_id, issue_id, comment_id, agent_id, squad_id, trigger_source, delegation_return_id, status, attempts, last_error, settled_task_id, next_attempt_at, created_at, updated_at FROM comment_dispatch_obligation
-WHERE id = $1 AND status = 'pending'
-FOR UPDATE SKIP LOCKED
+WHERE id = $1
+FOR UPDATE
 `
 
 func (q *Queries) LockCommentDispatchObligation(ctx context.Context, id pgtype.UUID) (CommentDispatchObligation, error) {
@@ -964,6 +997,16 @@ func (q *Queries) RecordCommentDispatchObligationAttempt(ctx context.Context, ar
 	return err
 }
 
+const reopenCommentDispatchObligation = `-- name: ReopenCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation SET status = 'pending', updated_at = now()
+WHERE id = $1 AND status = 'settled'
+`
+
+func (q *Queries) ReopenCommentDispatchObligation(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, reopenCommentDispatchObligation, id)
+	return err
+}
+
 const setIssueAssignmentDelegationTask = `-- name: SetIssueAssignmentDelegationTask :exec
 UPDATE issue_assignment_delegation
 SET task_id = $1
@@ -992,7 +1035,7 @@ func (q *Queries) SetIssueAssignmentDelegationTask(ctx context.Context, arg SetI
 const settleCommentDispatchObligation = `-- name: SettleCommentDispatchObligation :exec
 UPDATE comment_dispatch_obligation
 SET status = 'settled', settled_task_id = $1, last_error = NULL, updated_at = now()
-WHERE id = $2 AND status = 'pending'
+WHERE id = $2 AND status IN ('pending', 'settled')
 `
 
 type SettleCommentDispatchObligationParams struct {
@@ -1002,23 +1045,6 @@ type SettleCommentDispatchObligationParams struct {
 
 func (q *Queries) SettleCommentDispatchObligation(ctx context.Context, arg SettleCommentDispatchObligationParams) error {
 	_, err := q.db.Exec(ctx, settleCommentDispatchObligation, arg.TaskID, arg.ID)
-	return err
-}
-
-const settleCommentDispatchObligationsForTarget = `-- name: SettleCommentDispatchObligationsForTarget :exec
-UPDATE comment_dispatch_obligation
-SET status = 'settled', settled_task_id = $1, last_error = NULL, updated_at = now()
-WHERE comment_id = $2 AND agent_id = $3 AND status = 'pending'
-`
-
-type SettleCommentDispatchObligationsForTargetParams struct {
-	TaskID    pgtype.UUID `json:"task_id"`
-	CommentID pgtype.UUID `json:"comment_id"`
-	AgentID   pgtype.UUID `json:"agent_id"`
-}
-
-func (q *Queries) SettleCommentDispatchObligationsForTarget(ctx context.Context, arg SettleCommentDispatchObligationsForTargetParams) error {
-	_, err := q.db.Exec(ctx, settleCommentDispatchObligationsForTarget, arg.TaskID, arg.CommentID, arg.AgentID)
 	return err
 }
 

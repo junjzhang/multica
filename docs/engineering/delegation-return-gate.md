@@ -64,24 +64,49 @@ the one normal rule:
 
 Every attempt is a savepoint. A target that cannot be covered yet leaves its
 obligation pending; the comment and accepted return still commit. There is no
-"active run means rely on an event, no active run means be atomic" branch.
+dependency on a future completion event for a pending obligation.
 
 The pending obligation is consumed by a real periodic consumer,
 `runCommentDispatchObligationSweeper` (wired in `cmd/server`), which locks one
-row, re-checks the target's current authorization/runtime state, runs the same
-intent -> run rule, and settles the row only when a run covers it. A crash after
-the comment commit therefore leaves a row the restarted server can advance
+live comment and then its obligation, re-checks current invocation permission
+and runtime readiness, and settles only with durable run coverage. Recovery
+locks issue, comment, obligation, then task. Edit and delete also lock issue and
+comment before touching obligations or tasks. A legacy edit cancels its old
+tasks inside the same locked transaction as the new body;
+no consumer can insert old work between cancellation and obligation removal.
+A crash after the comment commit therefore leaves a row the restarted server can advance
 without another run completion and without a person editing the comment.
-Transient failures are retried with bounded backoff; a revoked target or deleted
-issue fails the obligation instead of retrying forever. This is a small durable
-work row consumed by an existing sweeper pattern, not a second broker or generic
-execution queue.
+Transient failures are retried with bounded backoff. Authorization uses the
+stored comment's author and `ResolveOriginatorFromTriggerComment`, then the
+same `canInvokeAgent` gate as normal dispatch. A missing or archived agent author
+fails closed. Squad dispatch checks the accepted leader's permission and requires
+that leader still belongs to the accepted squad role; it never silently selects
+a replacement leader. Revocation records a failed obligation with
+`invocation_not_allowed`; an unavailable author, target, squad, comment or issue
+also leaves a diagnostic failure when its obligation still exists. This is a
+small durable work row consumed by an existing sweeper pattern, not a second
+broker or generic execution queue.
 
-A comment written while an active run already exists is newer than that run and
-is already visible to completion reconcile's timestamp window; it is not also
-appended as a planned id (that would give one comment two replay paths). If that
-run finishes before the comment commits, or the post-insert enqueue fails, the
-pending obligation is what recovers the comment.
+A comment newer than an active run stays out of that run's planned set, since
+completion reconciliation already finds it by timestamp. It may immediately
+create a queued follow-up alongside a running task. If a claimed task still
+occupies the pending slot, the obligation stays pending until it can fold or
+start a follow-up. A comment predating an active run must instead be recorded
+in that run's planned inputs so completion reconciliation can find it.
+
+Completion replay, edit retrigger and their recovery fallback use the same
+locked transaction for accepted obligations. Run creation or folding, return
+links and settlement commit together. A settlement failure rolls the attempted
+coverage back and preserves a pending retry, including when a previously
+planned input needs a follow-up. There is no best-effort settlement after an
+independently committed enqueue.
+
+`settled_task_id` records the covering run for this obligation generation. Its
+actual delivered-comment receipt can prove the input was executed; finding it
+also restores the accepted return links in that transaction. A completed run
+that only planned the input still needs replay. Editing the body removes the
+old obligation and records a new one: an old run's receipt for the same comment
+id cannot satisfy the new request.
 
 ## Resolution and refusal
 

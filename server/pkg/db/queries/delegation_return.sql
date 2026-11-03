@@ -213,23 +213,26 @@ LIMIT @batch_size;
 
 -- name: LockCommentDispatchObligation :one
 SELECT * FROM comment_dispatch_obligation
-WHERE id = @id AND status = 'pending'
-FOR UPDATE SKIP LOCKED;
+WHERE id = @id
+FOR UPDATE;
 
 -- name: SettleCommentDispatchObligation :exec
 UPDATE comment_dispatch_obligation
 SET status = 'settled', settled_task_id = sqlc.narg('task_id'), last_error = NULL, updated_at = now()
-WHERE id = @id AND status = 'pending';
+WHERE id = @id AND status IN ('pending', 'settled');
 
--- name: SettleCommentDispatchObligationsForTarget :exec
-UPDATE comment_dispatch_obligation
-SET status = 'settled', settled_task_id = sqlc.narg('task_id'), last_error = NULL, updated_at = now()
-WHERE comment_id = @comment_id AND agent_id = @agent_id AND status = 'pending';
+-- name: GetCommentDispatchObligationForTarget :one
+SELECT * FROM comment_dispatch_obligation
+WHERE comment_id = @comment_id AND agent_id = @agent_id;
+
+-- name: ReopenCommentDispatchObligation :exec
+UPDATE comment_dispatch_obligation SET status = 'pending', updated_at = now()
+WHERE id = @id AND status = 'settled';
 
 -- name: FailCommentDispatchObligation :exec
 UPDATE comment_dispatch_obligation
 SET status = 'failed', last_error = @last_error, updated_at = now()
-WHERE id = @id AND status = 'pending';
+WHERE id = @id AND status IN ('pending', 'settled');
 
 -- name: RecordCommentDispatchObligationAttempt :exec
 -- Leaves a transiently failed obligation pending with the backoff the consumer
