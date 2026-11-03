@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -65,15 +66,15 @@ type BindRequest struct {
 func Resolve(ctx context.Context, q *db.Queries, workspaceID, agentID, issueID string) (Binding, error) {
 	ws, err := util.ParseUUID(workspaceID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: workspace id: %w", err)
+		return Binding{}, fmt.Errorf("%w: workspace_id must be a UUID", ErrInvalidBinding)
 	}
 	agent, err := util.ParseUUID(agentID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: agent id: %w", err)
+		return Binding{}, fmt.Errorf("%w: agent id must be a UUID", ErrInvalidBinding)
 	}
 	issue, err := util.ParseUUID(issueID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: issue id: %w", err)
+		return Binding{}, fmt.Errorf("%w: issue_id must be a UUID", ErrInvalidBinding)
 	}
 	row, err := q.GetActiveAgentSessionBinding(ctx, db.GetActiveAgentSessionBindingParams{
 		WorkspaceID: ws,
@@ -100,60 +101,60 @@ func Resolve(ctx context.Context, q *db.Queries, workspaceID, agentID, issueID s
 	}, nil
 }
 
+// Ensure records the target for one exact key only when that key has no active
+// binding, and returns the accepted target otherwise. A delegation uses this
+// instead of Bind: the first accepted return address is fixed, so an ordinary
+// dispatch (a later assignment, rerun, or mention) cannot silently retarget
+// someone else's result. Only the explicit takeover endpoint calls Bind.
+func Ensure(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error) {
+	ws, agentID, issueID, sessionID, createdBy, err := parseBindRequest(req)
+	if err != nil {
+		return Binding{}, err
+	}
+
+	existing, err := Resolve(ctx, q, util.UUIDToString(ws), util.UUIDToString(agentID), util.UUIDToString(issueID))
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, ErrNotBound) {
+		return Binding{}, err
+	}
+
+	session, err := validateTarget(ctx, q, ws, agentID, issueID, sessionID)
+	if err != nil {
+		return Binding{}, err
+	}
+	created, err := q.CreateAgentSessionBinding(ctx, db.CreateAgentSessionBindingParams{
+		WorkspaceID: ws,
+		AgentID:     agentID,
+		IssueID:     issueID,
+		SessionID:   sessionID,
+		CreatedBy:   createdBy,
+	})
+	if err != nil {
+		// A concurrent Ensure or an explicit Bind won the key between the read
+		// and this insert. The unique active-binding index is the arbiter; the
+		// accepted row is now the one to return.
+		if isUniqueViolation(err) {
+			return Resolve(ctx, q, util.UUIDToString(ws), util.UUIDToString(agentID), util.UUIDToString(issueID))
+		}
+		return Binding{}, fmt.Errorf("sessionroute: create binding: %w", err)
+	}
+	return bindingFromRow(created, session), nil
+}
+
 // Bind records (or replaces) the active target for one exact key. The caller
 // owns the transaction when this must commit with its business write; a
 // replacement revokes the previous row first, so there is never a window with
 // two active targets.
 func Bind(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error) {
-	ws, err := util.ParseUUID(strings.TrimSpace(req.WorkspaceID))
+	ws, agentID, issueID, sessionID, createdBy, err := parseBindRequest(req)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: workspace id: %w", err)
+		return Binding{}, err
 	}
-	agentID, err := util.ParseUUID(strings.TrimSpace(req.AgentID))
+	session, err := validateTarget(ctx, q, ws, agentID, issueID, sessionID)
 	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: agent id: %w", err)
-	}
-	issueID, err := util.ParseUUID(strings.TrimSpace(req.IssueID))
-	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: issue id: %w", err)
-	}
-	sessionID, err := util.ParseUUID(strings.TrimSpace(req.SessionID))
-	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: session id: %w", err)
-	}
-	createdBy := pgtype.UUID{}
-	if req.CreatedBy != "" {
-		createdBy, err = util.ParseUUID(req.CreatedBy)
-		if err != nil {
-			return Binding{}, fmt.Errorf("sessionroute: created by: %w", err)
-		}
-	}
-
-	if _, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: ws}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Binding{}, fmt.Errorf("%w: issue is not in this workspace", ErrInvalidBinding)
-		}
-		return Binding{}, fmt.Errorf("sessionroute: load issue: %w", err)
-	}
-	session, err := q.GetExternalAgentSessionByID(ctx, db.GetExternalAgentSessionByIDParams{ID: sessionID, WorkspaceID: ws})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Binding{}, fmt.Errorf("%w: session is not in this workspace", ErrInvalidBinding)
-	}
-	if err != nil {
-		return Binding{}, fmt.Errorf("sessionroute: load session: %w", err)
-	}
-	if util.UUIDToString(session.AgentID) != util.UUIDToString(agentID) {
-		return Binding{}, fmt.Errorf("%w: session belongs to another agent", ErrInvalidBinding)
-	}
-	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: agentID, WorkspaceID: ws})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Binding{}, fmt.Errorf("%w: agent is not in this workspace", ErrInvalidBinding)
-		}
-		return Binding{}, fmt.Errorf("sessionroute: load agent: %w", err)
-	}
-	if agent.ExecutionKind != "external" || agent.ArchivedAt.Valid {
-		return Binding{}, fmt.Errorf("%w: agent is not an active external agent", ErrInvalidBinding)
+		return Binding{}, err
 	}
 
 	if _, err := q.RevokeActiveAgentSessionBindings(ctx, db.RevokeActiveAgentSessionBindingsParams{
@@ -173,6 +174,77 @@ func Bind(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error) 
 	if err != nil {
 		return Binding{}, fmt.Errorf("sessionroute: create binding: %w", err)
 	}
+	return bindingFromRow(created, session), nil
+}
+
+// parseBindRequest validates the address shape every binding write shares.
+func parseBindRequest(req BindRequest) (ws, agentID, issueID, sessionID pgtype.UUID, createdBy pgtype.UUID, err error) {
+	ws, err = util.ParseUUID(strings.TrimSpace(req.WorkspaceID))
+	if err != nil {
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: workspace_id must be a UUID", ErrInvalidBinding)
+	}
+	agentID, err = util.ParseUUID(strings.TrimSpace(req.AgentID))
+	if err != nil {
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: agent id must be a UUID", ErrInvalidBinding)
+	}
+	issueID, err = util.ParseUUID(strings.TrimSpace(req.IssueID))
+	if err != nil {
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: issue_id must be a UUID", ErrInvalidBinding)
+	}
+	sessionID, err = util.ParseUUID(strings.TrimSpace(req.SessionID))
+	if err != nil {
+		return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("%w: session_id must be a UUID", ErrInvalidBinding)
+	}
+	if req.CreatedBy != "" {
+		createdBy, err = util.ParseUUID(req.CreatedBy)
+		if err != nil {
+			return ws, agentID, issueID, sessionID, createdBy, fmt.Errorf("sessionroute: created by: %w", err)
+		}
+	}
+	return ws, agentID, issueID, sessionID, createdBy, nil
+}
+
+// validateTarget proves the session, issue, agent, and owner all belong to one
+// workspace and that the agent is still an executable external identity. Every
+// caller resolves an address before an enqueue, so a foreign or retired target
+// fails closed here instead of producing an undeliverable route.
+func validateTarget(ctx context.Context, q *db.Queries, ws, agentID, issueID, sessionID pgtype.UUID) (db.ExternalAgentSession, error) {
+	if _, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: ws}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.ExternalAgentSession{}, fmt.Errorf("%w: issue is not in this workspace", ErrInvalidBinding)
+		}
+		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load issue: %w", err)
+	}
+	session, err := q.GetExternalAgentSessionByID(ctx, db.GetExternalAgentSessionByIDParams{ID: sessionID, WorkspaceID: ws})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.ExternalAgentSession{}, fmt.Errorf("%w: session is not in this workspace", ErrInvalidBinding)
+	}
+	if err != nil {
+		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load session: %w", err)
+	}
+	if util.UUIDToString(session.AgentID) != util.UUIDToString(agentID) {
+		return db.ExternalAgentSession{}, fmt.Errorf("%w: session belongs to another agent", ErrInvalidBinding)
+	}
+	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: agentID, WorkspaceID: ws})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.ExternalAgentSession{}, fmt.Errorf("%w: agent is not in this workspace", ErrInvalidBinding)
+		}
+		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load agent: %w", err)
+	}
+	if agent.ExecutionKind != "external" || agent.ArchivedAt.Valid {
+		return db.ExternalAgentSession{}, fmt.Errorf("%w: agent is not an active external agent", ErrInvalidBinding)
+	}
+	if _, err := q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{UserID: session.OwnerUserID, WorkspaceID: ws}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.ExternalAgentSession{}, fmt.Errorf("%w: session owner is not a member of this workspace", ErrInvalidBinding)
+		}
+		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load session owner: %w", err)
+	}
+	return session, nil
+}
+
+func bindingFromRow(created db.ExternalAgentSessionBinding, session db.ExternalAgentSession) Binding {
 	return Binding{
 		ID:            util.UUIDToString(created.ID),
 		WorkspaceID:   util.UUIDToString(created.WorkspaceID),
@@ -185,5 +257,10 @@ func Bind(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error) 
 		HostSessionID: session.SessionID,
 		DaemonID:      session.DaemonID,
 		CreatedAt:     created.CreatedAt.Time,
-	}, nil
+	}
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

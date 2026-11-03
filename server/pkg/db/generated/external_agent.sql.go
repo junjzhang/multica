@@ -345,6 +345,57 @@ func (q *Queries) ListExternalAgentSessionsByAgentIDs(ctx context.Context, agent
 	return items, nil
 }
 
+const listExternalAgentSessionsByHostSession = `-- name: ListExternalAgentSessionsByHostSession :many
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+WHERE workspace_id = $1
+  AND agent_id = $2
+  AND session_id = $3
+ORDER BY created_at ASC, id ASC
+`
+
+type ListExternalAgentSessionsByHostSessionParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	AgentID       pgtype.UUID `json:"agent_id"`
+	HostSessionID string      `json:"host_session_id"`
+}
+
+// An external process names its host session (for Paseo, PASEO_AGENT_ID). The
+// caller must still scope the match to the authenticated agent and workspace;
+// more than one row means the reference is ambiguous and must be rejected
+// rather than resolved to an arbitrary host.
+func (q *Queries) ListExternalAgentSessionsByHostSession(ctx context.Context, arg ListExternalAgentSessionsByHostSessionParams) ([]ExternalAgentSession, error) {
+	rows, err := q.db.Query(ctx, listExternalAgentSessionsByHostSession, arg.WorkspaceID, arg.AgentID, arg.HostSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ExternalAgentSession{}
+	for rows.Next() {
+		var i ExternalAgentSession
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.OwnerUserID,
+			&i.AgentID,
+			&i.Provider,
+			&i.HostID,
+			&i.SessionID,
+			&i.DisplayName,
+			&i.Url,
+			&i.DaemonID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExternalAgentSessionsByIDs = `-- name: ListExternalAgentSessionsByIDs :many
 SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE id = ANY($1::uuid[])
 `

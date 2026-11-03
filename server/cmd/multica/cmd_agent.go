@@ -257,7 +257,23 @@ func resolveProfile(cmd *cobra.Command) string {
 	return val
 }
 
+// newAPIClient builds the client for ordinary business traffic. In a Paseo
+// agent session it fails closed unless the credential authenticates the agent
+// itself, so no new business command can silently act as the human profile and
+// bypass the server's delegation gate.
 func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
+	return newAPIClientWithIdentity(cmd, true)
+}
+
+// newOwnerAPIClient is the explicit owner entry point for registration,
+// credential management, and bootstrap reads. Those flows legitimately act as
+// the human owner even when a Paseo session is present. Everything else uses
+// newAPIClient and is fail-closed by default.
+func newOwnerAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
+	return newAPIClientWithIdentity(cmd, false)
+}
+
+func newAPIClientWithIdentity(cmd *cobra.Command, requireAgentIdentity bool) (*cli.APIClient, error) {
 	taskContext := inDaemonManagedExecutionContext()
 	token := resolveToken(cmd)
 	if taskContext && !strings.HasPrefix(token, "mat_") {
@@ -273,6 +289,15 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 		return nil, fmt.Errorf("agent execution context requires MULTICA_TOKEN to be a task-scoped mat_ token%s", daemonPortOnlyContextHint())
 	}
 
+	// A Paseo agent session must not silently authenticate business traffic as
+	// the human profile that owns the machine: the server would then classify
+	// the caller as a member and exempt the delegation gate.
+	if requireAgentIdentity {
+		if err := cli.RequireAgentSessionIdentity(cmd, token, strings.TrimSpace(os.Getenv(cli.PaseoAgentIDEnv)) != "", taskContext); err != nil {
+			return nil, err
+		}
+	}
+
 	serverURL := resolveServerURL(cmd)
 	workspaceID := resolveWorkspaceID(cmd)
 	if serverURL == "" {
@@ -286,6 +311,22 @@ func newAPIClient(cmd *cobra.Command) (*cli.APIClient, error) {
 	}
 	if taskID := os.Getenv("MULTICA_TASK_ID"); taskID != "" {
 		client.TaskID = taskID
+	}
+	// A managed run is addressed by its own task token; an inherited
+	// PASEO_AGENT_ID must not rebind it. Outside one, an external session names
+	// the exact host session its delegation results return to. The server
+	// still validates that the session belongs to the authenticated agent.
+	if !taskContext {
+		returnSession := cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")
+		if strings.TrimSpace(returnSession) == "" {
+			returnSession = os.Getenv(cli.PaseoAgentIDEnv)
+		}
+		client.ReturnSession = strings.TrimSpace(returnSession)
+	} else if strings.TrimSpace(cli.FlagOrEnv(cmd, "return-session", "MULTICA_RETURN_SESSION", "")) != "" {
+		// A managed run's own task token is its return address. Accepting an
+		// explicit session here would let the host environment rebind a run
+		// Multica already manages.
+		return nil, fmt.Errorf("--return-session and MULTICA_RETURN_SESSION cannot be used inside a managed task; this run's own session is the return address")
 	}
 	return client, nil
 }
@@ -516,7 +557,7 @@ func requireWorkspaceID(cmd *cobra.Command) (string, error) {
 // Agent commands
 
 func runAgentList(cmd *cobra.Command, _ []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -568,7 +609,7 @@ func runAgentList(cmd *cobra.Command, _ []string) error {
 }
 
 func runAgentGet(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -633,7 +674,7 @@ func applyAgentPermissionFlags(cmd *cobra.Command, body map[string]any) {
 }
 
 func runAgentCreate(cmd *cobra.Command, _ []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -733,7 +774,7 @@ func runAgentCreate(cmd *cobra.Command, _ []string) error {
 }
 
 func runAgentUpdate(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -833,7 +874,7 @@ func runAgentUpdate(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentArchive(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -856,7 +897,7 @@ func runAgentArchive(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentRestore(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -879,7 +920,7 @@ func runAgentRestore(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentTasks(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -931,7 +972,7 @@ func runAgentTasks(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentAvatar(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -1013,7 +1054,7 @@ func runAgentAvatar(cmd *cobra.Command, args []string) error {
 // Agent skills subcommands
 
 func runAgentSkillsList(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -1045,7 +1086,7 @@ func runAgentSkillsList(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentSkillsSet(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -1070,7 +1111,7 @@ func runAgentSkillsSet(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentSkillsAdd(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -1145,7 +1186,7 @@ func printAgentSkillsMutationResult(cmd *cobra.Command, agentID string, result j
 // mode and a key/value table otherwise; we never truncate or mask
 // values here — the security gate is on the server, not the printer.
 func runAgentEnvGet(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -1180,7 +1221,7 @@ func runAgentEnvGet(cmd *cobra.Command, args []string) error {
 // equal to "****" as "preserve the existing entry" (see the **** guard
 // in the handler).
 func runAgentEnvSet(cmd *cobra.Command, args []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}

@@ -57,6 +57,7 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				"runtime_id": leaderRuntimeID, "issue_id": issueID, "status": "completed",
 				"is_leader_task": true, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-handoff-leader-session", "work_dir": "/work/worker-handoff-leader",
 			})
 			rootID := dbfx.Comment(t, issueID, fmt.Sprintf("[@Worker](mention://agent/%s) verify the implementation", workerID), testutil.Cols{
 				"author_type": "agent", "author_id": leaderID, "source_task_id": sourceID,
@@ -65,6 +66,7 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				"runtime_id": workerRuntimeID, "issue_id": issueID, "status": "running",
 				"trigger_comment_id": rootID, "squad_id": squadID, "delegated_from_task_id": sourceID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-handoff-worker-session", "work_dir": "/work/worker-handoff-worker",
 			})
 			post := func(content string) CommentResponse {
 				req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{
@@ -72,6 +74,7 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				}), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)
 				if response.AuthorType != "agent" || response.SourceTaskID == nil || *response.SourceTaskID != workerTaskID {
@@ -174,11 +177,13 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 				"trigger_comment_id": rootID, "is_leader_task": true, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
 				"created_at": testutil.Raw("now() - interval '5 minutes'"),
+				"session_id": "worker-replay-leader-session", "work_dir": "/work/worker-replay-leader",
 			})
 			workerTaskID := dbfx.Task(t, workerID, testutil.Cols{
 				"runtime_id": workerRuntimeID, "issue_id": issueID, "status": "running",
 				"trigger_comment_id": rootID, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-replay-worker-session", "work_dir": "/work/worker-replay-worker",
 			})
 			first := claimWorkerReplyRun(t, runtimeID)
 			if first == nil || first.ID != taskID {
@@ -201,9 +206,11 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 				req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", body), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				if mode == "leader_reply" {
 					req.Header.Set("X-Agent-ID", leaderID)
 					req.Header.Set("X-Task-ID", taskID)
+					req.Header.Set("X-Actor-Source", "task_token")
 				}
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)

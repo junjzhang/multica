@@ -28,6 +28,19 @@ func registerExternalSession(t *testing.T, body map[string]any) (int, AgentRespo
 	return w.Code, resp
 }
 
+// cleanupRegisteredExternalAgent removes the identity and sessions a
+// registration test created. Without this, the LIMIT 1 lookups in older tests
+// can select this external agent (no runtime) and fail by ordering.
+func cleanupRegisteredExternalAgent(t *testing.T, agentID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = testPool.Exec(ctx, `DELETE FROM external_agent_session WHERE agent_id = $1`, agentID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM external_agent_token WHERE agent_id = $1`, agentID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent WHERE id = $1`, agentID)
+	})
+}
+
 func externalSessionBody(host, sessionID, displayName, daemonID string) map[string]any {
 	return map[string]any{
 		"provider": "paseo", "host_id": host, "session_id": sessionID,
@@ -68,6 +81,7 @@ func TestRepeatRegistrationUpdatesOnlyTheNamedSession(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("first registration status = %d, want 201", code)
 	}
+	cleanupRegisteredExternalAgent(t, created.ID)
 	code, second := registerExternalSession(t, map[string]any{
 		"agent_id":         created.ID,
 		"external_session": externalSessionBody(host2, "s2", "S2", daemon2),
@@ -125,6 +139,7 @@ func TestRepeatRegistrationRejectsDifferentAgentID(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("first registration status = %d, want 201", code)
 	}
+	cleanupRegisteredExternalAgent(t, first.ID)
 	code, other := registerExternalSession(t, map[string]any{
 		"name":             "Reregistration owner B " + suffix,
 		"external_session": externalSessionBody(host2, "s2", "S2", daemon2),

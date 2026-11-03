@@ -1,0 +1,209 @@
+# Delegation return gate
+
+This slice implements the transactional delegation half of
+[task-session-delivery.md](../design/task-session-delivery.md): an Agent that
+hands work to another executable Agent or squad must name the address its result
+returns to, and that address is accepted before any child work exists. Result
+submission, notification delivery, takeover UI, and the maintenance-window
+cutover remain later slices.
+
+## Canonical binding, intents, and runs
+
+The accepted address is one row per `(workspace, issue, dispatcher agent)` in
+`issue_delegation_return` (`uq_issue_delegation_return_dispatch`). It does not
+include the assignee: the address belongs to the dispatcher, and the worker a
+dispatcher chooses does not change where that dispatcher's results go. Each row
+names either:
+
+- `managed_task` — the source run (`source_task_id`) identified by the
+  server-stamped `X-Task-ID` of a `mat_` task token; or
+- `external_session` — the registered external host session the dispatcher
+  named explicitly.
+
+Which dispatch an accepted relationship belongs to is recorded separately:
+
+- `comment_delegation_return(comment_id, delegation_return_id)` is the comment
+  intent. A comment is a stable business id, so new/fold/reconcile/retrigger
+  can all read the same relation instead of an in-memory set.
+- `issue_assignment_delegation(issue_id, assignee_type, assignee_id, task_id)`
+  plus `issue_assignment_delegation_return` is the current assignment intent.
+  `task_id` is empty for a backlog assignment and points at the run once it
+  starts.
+- `agent_task_delegation_return(task_id, delegation_return_id)` is the set of
+  accepted relationships a run actually carries.
+
+A run links only the intents it covers:
+
+- a new comment run links that comment's relationships;
+- a fold links every folded comment's relationships;
+- completion replay and edit retrigger link the replayed comment's
+  relationships;
+- a rerun links the exact source run's set plus the rerunning actor's
+  relationship;
+- a reassignment links the replaced assignment's intent and corresponding run,
+  plus the reassigning actor's relationship.
+
+Nothing collects "all returns for this issue", "all returns for this worker", or
+"the worker's latest run". That is what keeps two independent requests to the
+same worker from inheriting each other's recipient.
+
+## Comment recovery closure
+
+An agent-authored comment with at least one executable target records one
+`comment_dispatch_obligation` per target in the comment's own transaction. The
+row names the exact executing agent, optional squad, trigger source and accepted
+return; replay never re-derives them from mutable comment text or the issue's
+current assignee. The same transaction then tries to cover the target through
+the one normal rule:
+
+1. fold into a pre-claim run in the same thread (`MergeCommentIntoPendingTask`,
+   with the folded comment's return links);
+2. register a planned input on a claim-receipt run only when the comment
+   predates that run (the lost enqueue race);
+3. otherwise create the run and its return links in the comment transaction.
+
+Every attempt is a savepoint. A target that cannot be covered yet leaves its
+obligation pending; the comment and accepted return still commit. There is no
+dependency on a future completion event for a pending obligation.
+
+The pending obligation is consumed by a real periodic consumer,
+`runCommentDispatchObligationSweeper` (wired in `cmd/server`), which locks one
+live comment and then its obligation, re-checks current invocation permission
+and runtime readiness, and settles only with durable run coverage. Recovery
+locks issue, comment, obligation, then task. Edit and delete also lock issue and
+comment before touching obligations or tasks. A legacy edit cancels its old
+tasks inside the same locked transaction as the new body;
+no consumer can insert old work between cancellation and obligation removal.
+A crash after the comment commit therefore leaves a row the restarted server can advance
+without another run completion and without a person editing the comment.
+Transient failures are retried with bounded backoff. Authorization uses the
+stored comment's author and `ResolveOriginatorFromTriggerComment`, then the
+same `canInvokeAgent` gate as normal dispatch. A missing or archived agent author
+fails closed. Squad dispatch checks the accepted leader's permission and requires
+that leader still belongs to the accepted squad role; it never silently selects
+a replacement leader. Revocation records a failed obligation with
+`invocation_not_allowed`; an unavailable author, target, squad, comment or issue
+also leaves a diagnostic failure when its obligation still exists. This is a
+small durable work row consumed by an existing sweeper pattern, not a second
+broker or generic execution queue.
+
+A comment newer than an active run stays out of that run's planned set, since
+completion reconciliation already finds it by timestamp. It may immediately
+create a queued follow-up alongside a running task. If a claimed task still
+occupies the pending slot, the obligation stays pending until it can fold or
+start a follow-up. A comment predating an active run must instead be recorded
+in that run's planned inputs so completion reconciliation can find it.
+
+Completion replay, edit retrigger and their recovery fallback use the same
+locked transaction for accepted obligations. Run creation or folding, return
+links and settlement commit together. A settlement failure rolls the attempted
+coverage back and preserves a pending retry, including when a previously
+planned input needs a follow-up. There is no best-effort settlement after an
+independently committed enqueue.
+
+`settled_task_id` records the covering run for this obligation generation. Its
+actual delivered-comment receipt can prove the input was executed; finding it
+also restores the accepted return links in that transaction. A completed run
+that only planned the input still needs replay. Editing the body removes the
+old obligation and records a new one: an old run's receipt for the same comment
+id cannot satisfy the new request.
+
+## Resolution and refusal
+
+The gate reads only server-stamped authentication context (`X-Actor-Source`,
+`X-Agent-ID`, `X-Task-ID`) plus an explicit `X-Return-Session` reference; it
+never trusts client identity headers and never selects an Agent's latest or only
+session. Every dispatch resolves the current actor: an issue-level row from an
+earlier dispatcher is never evidence that this dispatch has an address.
+
+| Dispatcher | Accepted evidence | Refusal |
+| --- | --- | --- |
+| managed Agent | active (not completed/failed/cancelled) task for the same Agent and workspace, matching runtime, persisted provider session and work directory | `delegation_return_not_ready` (409) until the asynchronous pin lands; `delegation_return_source_closed` (409) once the run ended; foreign or cross-workspace runs are `delegation_return_invalid` (400) |
+| external Agent | `X-Return-Session` resolving to exactly one session registered to that Agent in the workspace (registered id or provider session id) | `delegation_return_missing` / `delegation_return_invalid` (400); no fallback to the human owner's profile |
+| member | none required | — |
+
+The managed source is re-read under a row lock **inside the transaction that
+persists the new delegation**, together with its agent's authorization and the
+session/work-directory pin. A request that authenticated while the run was
+active but waited on another writer until the run completed is refused, and
+nothing is written. This is separate from a relationship the run already
+accepted: that stored row remains a valid delivery target after the source
+completes, because the result-handling turn resumes its recorded provider
+session by id. It is only new delegations that require an active source. The
+sweeper's replay of an accepted comment executes that stored intent and does not
+accept a new delegation from a closed source; it still applies the current
+revocation/runtime checks.
+
+A managed run's source scope is its original issue, chat, or autopilot; the
+delegated issue is not a substitute scope. A run with no business scope (for
+example a quick create) is still an exact runtime/provider session/work
+directory, and the task token's workspace binding proves tenancy. A continuation
+turn in the same provider session reuses the stored `source_task_id`; a turn
+from a different physical session is a conflict that needs explicit takeover.
+
+## Entry points
+
+- **Issue create**: the HTTP handler resolves the address before the write. The
+  service inserts the issue, the accepted return, and an immediate assignee or
+  squad-leader task in one transaction; the optional Composio overlay and the
+  runtime wakeup happen only after commit. A failure at any of those writes
+  rolls the whole create back. Backlog delegations record the return and start
+  nothing.
+- **Assignment / workflow handoff**: an explicit assignee change validates the
+  address before the issue update commits and records it inside that update's
+  transaction. The assignment intent and the run's links commit with the issue
+  write. A status-only workflow handoff is not an assignment and starts no run,
+  so it is not gated.
+- **Assignment conflict**: the fallback read matches
+  `idx_one_pending_task_per_issue_agent_thread` exactly, including the
+  channel-media deferred exception. A conflict is re-observed in a bounded loop:
+  a still-pending occupant is linked, a run that started or disappeared lets the
+  retry insert a covering run, and an occupant that cannot be resolved rolls the
+  whole issue write back. `inserted=false` with no covering run is never
+  committed.
+- **Rerun**: with a `task_id`, the named run is used exactly. Without one, the
+  rerun follows the current assignment intent's `task_id` (the run that
+  assignment actually started), not the worker's latest run. With no
+  determinable delegated assignment source the request is refused with a 400
+  requiring `task_id`; the legacy latest-run fallback is kept only for an issue
+  that has never accepted a delegation return and whose latest run carries none.
+  The source run's set and the rerunning actor's address are recorded and linked
+  only in the enqueue transaction, after triage and invoke eligibility pass.
+- **Managed mention / comment**: the gate runs before the comment is written.
+  The comment, its accepted return, and its durable dispatch obligations commit
+  together. A mention that resolves only to blocked targets keeps the comment
+  and reports the per-target blocked outcome, with no obligation.
+- **Batch update**: each item's prospective run and address are validated before
+  its write. A refused item keeps its assignee, status, parent, and stage
+  unchanged, is not broadcast, and is not counted as updated; other items still
+  update and process child/stage events.
+
+Members, issues with no executor, status-only writes, and discussions without an
+executable mention are unchanged.
+
+## CLI context
+
+`--return-session` / `MULTICA_RETURN_SESSION` names the external session and is
+sent as `X-Return-Session`. Outside a managed task the current Paseo session id
+(`PASEO_AGENT_ID`) is the default. Inside a managed task the task token is
+authoritative, an explicit session is refused, and an inherited provider session
+is ignored.
+
+Fail-closed identity is the default rule of the business client, not a list of
+annotated commands: when `PASEO_AGENT_ID` is set and the credential is not an
+agent (`mea_`/`mat_`) token, client construction refuses before any request is
+sent. That human profile would be exempt from the server gate. Explicit owner
+registration, credential management, and agent management bootstrap flows use a
+separate owner client; ordinary human commands outside a Paseo session are
+unchanged. A newly added business command therefore inherits the refusal without
+being added to a list.
+
+## Remaining work
+
+Result submission that consumes `agent_task_delegation_return` and persists the
+notification obligation atomically, delivery through the existing managed
+queue/resume path or mailbox, visible failure after session deletion, explicit
+managed takeover UI, and the isolated qualification described in the cutover
+runbook are not part of this slice. The local worktree Finalize/report ordering
+and directory-retention race remain with the result-submission slice; the
+source-row lock here does not claim to fix the whole resource lifecycle.

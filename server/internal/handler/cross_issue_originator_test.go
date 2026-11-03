@@ -58,6 +58,8 @@ func newCrossIssueChain(t *testing.T, ownerUserID string, originatorUserID any) 
 			"status":              "running",
 			"originator_user_id":  originatorUserID,
 			"accountable_user_id": originatorUserID,
+			"session_id":          "cross-issue-chain-session",
+			"work_dir":            "/work/cross-issue-chain",
 		}),
 	}
 }
@@ -174,7 +176,7 @@ func agentCreatesSubIssue(t *testing.T, agentID, taskID, parentIssueID, targetAg
 // confused-deputy shape the gate must judge by the chain's human, not the caller's
 // session.
 func asRun(req *http.Request, agentID, taskID string) *http.Request {
-	return testutil.WithHeaders(req, "X-Agent-ID", agentID, "X-Task-ID", taskID)
+	return testutil.WithHeaders(req, "X-Actor-Source", "task_token", "X-Agent-ID", agentID, "X-Task-ID", taskID)
 }
 
 // ---- reads ----------------------------------------------------------------
@@ -218,7 +220,7 @@ func triggerCommentOf(t *testing.T, taskID string) string {
 
 func runTo(t *testing.T, taskID string) {
 	t.Helper()
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running' WHERE id = $1`, taskID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', session_id = 'cross-issue-run-session', work_dir = '/work/cross-issue' WHERE id = $1`, taskID)
 }
 
 func mention(agentID string) string {
