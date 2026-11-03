@@ -102,11 +102,26 @@ planned input needs a follow-up. There is no best-effort settlement after an
 independently committed enqueue.
 
 `settled_task_id` records the covering run for this obligation generation. Its
-actual delivered-comment receipt can prove the input was executed; finding it
-also restores the accepted return links in that transaction. A completed run
-that only planned the input still needs replay. Editing the body removes the
-old obligation and records a new one: an old run's receipt for the same comment
-id cannot satisfy the new request.
+delivered-comment receipt proves that the input reached that run, not that its
+business work completed. A covering run that received the input remains
+responsible for it; replay restores missing accepted return links without
+creating another execution. A completed run that only planned the input still
+needs replay. A failed run's received inputs stay with the task failure/retry
+policy, not a second independent comment execution chain; its receipt does not
+claim success. Editing the body removes the old obligation and records a new
+one: an old run's receipt for the same comment id cannot satisfy the new request.
+
+Editing or deleting one input can cancel a whole comment batch. That cancellation
+reopens the surviving comments' accepted obligations in the same transaction,
+retaining their exact target, return relationship and original covering task.
+The cancelled task's delivered-input receipt proves admission, not completed
+work: recovery rechecks current authorization and covers those surviving intents
+again. A completed covering run remains idempotent, and an explicit user
+cancellation does not reopen obligations. The changed comment's old obligation
+is replaced or removed by its own mutation; it is not a surviving intent.
+Deletion, batch cancellation and survivor reopening commit together. If deletion
+fails, the original comments, run and accepted obligations remain unchanged;
+post-commit cancellation events and survivor replay only run after success.
 
 ## Resolution and refusal
 

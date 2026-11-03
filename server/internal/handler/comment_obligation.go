@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -346,6 +347,14 @@ func (h *Handler) replayCommentDispatchObligation(ctx context.Context, commentID
 	return coverage, true
 }
 
+func commentChangeCancelledTask(task db.AgentTaskQueue) bool {
+	var cancellation struct {
+		TaskID string `json:"comment_change_cancelled_task_id"`
+	}
+	_ = json.Unmarshal(task.Context, &cancellation)
+	return task.Status == "cancelled" && cancellation.TaskID == uuidToString(task.ID)
+}
+
 func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pgtype.UUID, replay bool) (commentObligationCoverage, bool, error) {
 	var empty commentObligationCoverage
 	candidate, err := h.Queries.GetCommentDispatchObligation(ctx, obligationID)
@@ -404,7 +413,9 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return empty, false, err
 		}
-		if slices.Contains(task.DeliveredCommentIds, comment.ID) {
+		// Delivery proves input admission, not completion of a batch cancelled
+		// by an edit/delete. Its surviving intents still require execution.
+		if !commentChangeCancelledTask(task) && slices.Contains(task.DeliveredCommentIds, comment.ID) {
 			if err := delegation.LinkRun(ctx, q, task.ID, returnIDs...); err != nil {
 				return empty, false, err
 			}
