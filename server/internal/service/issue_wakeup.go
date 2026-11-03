@@ -278,7 +278,18 @@ func StopClosedIssueWakeups(ctx context.Context, q *db.Queries, issue db.Issue) 
 	}); err != nil {
 		return nil, err
 	}
-	return q.CancelUnstartedIssueWakeupTasks(ctx, issue.ID)
+	wakeups, err := q.CancelUnstartedIssueWakeupTasks(ctx, issue.ID)
+	if err != nil {
+		return nil, err
+	}
+	results, err := q.CancelUnstartedDelegationResultTasks(ctx, db.CancelUnstartedDelegationResultTasksParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := SettleTerminalTaskState(ctx, q, results...); err != nil {
+		return nil, err
+	}
+	return append(wakeups, results...), nil
 }
 
 func (s *IssueWakeupService) Create(ctx context.Context, issueID, member, source pgtype.UUID, in WakeupInput) (db.IssueWakeup, error) {

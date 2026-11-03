@@ -134,7 +134,7 @@ earlier dispatcher is never evidence that this dispatch has an address.
 
 | Dispatcher | Accepted evidence | Refusal |
 | --- | --- | --- |
-| managed Agent | active (not completed/failed/cancelled) task for the same Agent and workspace, matching runtime, persisted provider session and work directory | `delegation_return_not_ready` (409) until the asynchronous pin lands; `delegation_return_source_closed` (409) once the run ended; foreign or cross-workspace runs are `delegation_return_invalid` (400) |
+| managed Agent | active (not completed/failed/cancelled) task for the same Agent and workspace, matching runtime, v1 resource-control claim and a provider session/work-directory pin confirmed for the current execution generation | `delegation_return_not_ready` (409) until the asynchronous pin lands; `delegation_return_source_closed` (409) once the run ended; foreign or cross-workspace runs are `delegation_return_invalid` (400) |
 | external Agent | `X-Return-Session` resolving to exactly one session registered to that Agent in the workspace (registered id or provider session id) | `delegation_return_missing` / `delegation_return_invalid` (400); no fallback to the human owner's profile |
 | member | none required | — |
 
@@ -168,14 +168,90 @@ must not reconstruct the destination from the source task's current fields or
 an agent's latest run. If the frozen session, runtime or directory is unusable,
 keep the result and surface delivery failure instead of choosing another
 session. This strict return behavior is separate from ordinary task fallback,
-which remains unchanged; the result-notification slice must wire it through
-`RequireResume`.
+which remains available for ordinary tasks; typed result turns require
+`RequireResume` and cannot enter fresh fallback or ordinary rerun.
 
 The snapshot columns belong to unreleased migration 618. Qualification requires
 a fresh database with the final SQL and a replay from the 610 baseline before
 cutover. A local database that already recorded the older 618 does not acquire
 the snapshot columns by rerunning migrations. Do not backfill a claimed
 original address from the source task's mutable current state.
+
+
+## Result delivery and resource retention
+
+`agent_task_queue.result` and `error` remain the outcome authority. Each actual
+run/return pair in `agent_task_delegation_return` owns one notification pointer
+or a visible refusal. The scheduler recovers from terminal tasks and accepted
+links, including links committed after completion. Notification creation and
+its pointer commit together. Repeated or concurrent consumers cannot create
+another delivery or handling turn for that pair.
+
+Completed tasks are eligible. Failed tasks become eligible only after the
+existing retry policy durably decides that no automatic retry remains. A
+conflicting pending slot leaves that decision unresolved; absence of a child
+alone is not finality. Both retry creation paths copy the complete accepted
+return set. Late links follow the exact `retry_of_task_id` chain. Cancelled
+executions are control facts, not a new result-notification outcome. Runs with
+accepted returns do not also use delegated-failure compensation.
+
+External recipients use the existing generic delivery with the accepted
+session id. Managed recipients use an ordinary queue row with typed result
+input, the original scope, and the frozen runtime/provider/session/workdir.
+Claim verifies the reverse durable notification relation before rendering the
+input. A marker in context alone grants nothing. Unsupported executors are
+visibly refused, including hosted paths that cannot prove exact resume. The
+handling turn does not inherit the executor's outgoing returns, and ordinary
+comments cannot merge into it. Real new delegations it accepts still create
+their own obligations.
+
+For an original task-only scope, the accepted return stores `scope_task_id`.
+A typed handler that delegates more work proves that scope through its current
+durable notification before the new return copies it. The new dependency then
+owns that scope fact; removing the older notification does not change its
+namespace. Quick-create completion may link the original task to a newly
+created issue for navigation, but that later link cannot replace the frozen
+task scope. Source and scope task records remain protected while accepted
+business work or execution/notification dependencies are unresolved.
+
+A typed terminal success must report the verified session and work directory.
+Missing or contradictory addresses produce an input-unknown failure, retain
+the original tuple and notification id, and never resend the input. Failure and
+cancellation reports cannot retire or overwrite the frozen tuple. Resource
+control callbacks report location refinement separately from outcome reporting.
+
+Ordinary pending assignment/comment inputs keep their own unique issue/agent/
+thread slot. Typed result turns are excluded from that index; their locked
+run/return obligation and unique notification pointer provide idempotency.
+Claim-time in-flight serialization still includes both kinds. Migrations build
+the replacement index concurrently before retiring the shared index. Rollback
+requires draining colliding pending turns; it never discards either input.
+Transient notification failures retain the same obligation and record its last
+attempt time, so a blocked prefix cannot starve later eligible recipients.
+
+The daemon advertises `delegation_results_v1`. Claim commits
+`resource_control_required`, a fresh `session_pin_generation`, and the task
+token in one transaction. Old queued work acquires that agreement when claimed
+by a v1 daemon; a task that already requires it cannot be reclaimed by an older
+daemon. Inherited session/workdir values are resume hints until a matching
+current-generation pin confirms both. Before ordinary fresh fallback, the
+`/session` endpoint atomically changes the expected generation and clears its
+confirmation. A repeated transition to the same new generation acknowledges it
+without clearing a newer pin. Late old-generation pins cannot alter the task
+or previously accepted snapshots.
+
+Issue run reads include only materialized/refused notifications or eligible final
+outcomes. A comment-change cancelled run and an automatic-retry intermediate
+attempt have no pending notification of their own; their replacement/final leaf
+owns its actual result notification. This projection does not change resource
+dependency accounting.
+
+Issue run reads expose `result_notifications`. An explicit empty array means
+that the server read the obligations and found none; an omitted field means
+unhydrated or unsupported. Queued, dispatched, and running handling tasks are
+not delivery receipts. External `delivered` means the host accepted the input;
+managed `received` requires a completed handling turn. Unknown values and
+malformed projections must remain unknown.
 
 ## Entry points
 

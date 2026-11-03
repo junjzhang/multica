@@ -36,11 +36,14 @@ func extraManagedRun(t *testing.T, agentID, sessionID, workDir string) (string, 
 	}
 	scope := dbfx.Issue(t, "Managed source scope "+sessionID)
 	taskID := dbfx.Task(t, agentID, testutil.Cols{
-		"issue_id":   scope,
-		"runtime_id": runtimeID,
-		"status":     "running",
-		"session_id": sessionID,
-		"work_dir":   workDir,
+		"issue_id":                  scope,
+		"runtime_id":                runtimeID,
+		"status":                    "running",
+		"session_id":                sessionID,
+		"work_dir":                  workDir,
+		"resource_control_required": true,
+		"session_pin_confirmed":     true,
+		"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 	})
 	return taskID, taskTokenFixture(t, agentID, taskID)
 }

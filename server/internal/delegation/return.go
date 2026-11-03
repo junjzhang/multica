@@ -152,6 +152,9 @@ func validateManagedSource(ctx context.Context, q *db.Queries, ws, agentID pgtyp
 	case "completed", "failed", "cancelled":
 		return fmt.Errorf("%w: source run %s is %s", ErrReturnSourceClosed, util.UUIDToString(task.ID), task.Status)
 	}
+	if !task.ResourceControlRequired || !task.SessionPinConfirmed || !task.SessionPinGeneration.Valid {
+		return fmt.Errorf("%w: source execution has no confirmed resource-control session", ErrReturnNotReady)
+	}
 	// The provider pin is asynchronous. Until both the session and the work
 	// directory are durable there is no address to return to, and the previous
 	// run's session is not a substitute.
@@ -393,6 +396,11 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		params.Provider = pgtype.Text{String: currentRuntime.Provider, Valid: true}
 		params.SessionID = currentTask.SessionID
 		params.WorkDir = currentTask.WorkDir
+		scopeTaskID, err := ManagedSourceTaskScope(ctx, q, currentTask, ws)
+		if err != nil {
+			return db.IssueDelegationReturn{}, err
+		}
+		params.ScopeTaskID = scopeTaskID
 	}
 
 	created, err := q.CreateIssueDelegationReturn(ctx, params)
@@ -420,6 +428,21 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 		if !existing.RuntimeID.Valid || !nonemptyText(existing.Provider) ||
 			!nonemptyText(existing.SessionID) || !nonemptyText(existing.WorkDir) {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: accepted managed address snapshot is missing", ErrReturnConflict)
+		}
+		original, err := q.GetAgentTask(ctx, existing.SourceTaskID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.IssueDelegationReturn{}, fmt.Errorf("%w: original source scope unavailable", ErrReturnConflict)
+		}
+		if err != nil {
+			return db.IssueDelegationReturn{}, fmt.Errorf("load accepted source scope: %w", err)
+		}
+		if !original.IssueID.Valid && !original.ChatSessionID.Valid && !original.AutopilotRunID.Valid {
+			if err := ValidateOriginalTaskScope(ctx, q, existing); err != nil {
+				if errors.Is(err, ErrReturnInvalid) {
+					return db.IssueDelegationReturn{}, fmt.Errorf("%w: %v", ErrReturnConflict, err)
+				}
+				return db.IssueDelegationReturn{}, err
+			}
 		}
 		if existing.RuntimeID == currentTask.RuntimeID &&
 			existing.Provider.String == currentRuntime.Provider &&
