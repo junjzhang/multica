@@ -1026,6 +1026,7 @@ func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*Aut
 // Quick-create tasks have no separate parent record, so GC keys directly on
 // the task itself.
 type TaskGCStatus struct {
+	DurableWorkDir          *string                           `json:"durable_work_dir"`
 	ResourceControlRequired bool                              `json:"resource_control_required"`
 	TerminalReportedAt      *time.Time                        `json:"terminal_reported_at"`
 	ResourceIdentity        *protocol.ManagedResourceAddress  `json:"resource_identity"`

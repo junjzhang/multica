@@ -962,20 +962,26 @@ func (d *Daemon) cleanTaskDir(ctx context.Context, taskDir string) (bytes int64,
 	if resource, err := readManagedResource(taskDir); err == nil {
 		rel, _ := filepath.Rel(taskDir, resource.Address.WorkDir)
 		if parts := strings.Split(rel, string(filepath.Separator)); len(parts) > 0 && parts[0] == "worktree" {
-			w, err := execenv.LoadRetainedWorktree(taskDir, resource.Address.WorkDir, owner.WorkspaceID, resource.Address.AgentID, resource.Address.ScopeID, d.logger)
-			if err != nil {
-				return 0, false
+			if _, err := os.Lstat(filepath.Join(taskDir, "worktree")); errors.Is(err, os.ErrNotExist) {
+				if !d.confirmRemovedWorktree(ctx, taskDir, resource) {
+					return 0, false
+				}
+			} else {
+				w, err := execenv.LoadRetainedWorktree(taskDir, resource.Address.WorkDir, owner.WorkspaceID, resource.Address.AgentID, resource.Address.ScopeID, d.logger)
+				if err != nil {
+					return 0, false
+				}
+				if err := w.RestoreRemovalProof(); err != nil {
+					d.logger.Warn("gc: retaining worktree without finalization proof", "dir", taskDir, "error", err)
+					return 0, false
+				}
+				if err := w.Remove(d.logger); err != nil {
+					return 0, false
+				}
+				request := resource.Address
+				request.ResourcePath = w.Path
+				d.acknowledgeResourceRemoval(ctx, resource.OwnerTaskID, request, durableWorktreePath(w))
 			}
-			if err := w.RestoreRemovalProof(); err != nil {
-				d.logger.Warn("gc: retaining worktree without finalization proof", "dir", taskDir, "error", err)
-				return 0, false
-			}
-			if err := w.Remove(d.logger); err != nil {
-				return 0, false
-			}
-			request := resource.Address
-			request.ResourcePath = w.Path
-			d.acknowledgeResourceRemoval(ctx, resource.OwnerTaskID, request, durableWorktreePath(w))
 		}
 	}
 	quarantine, err := os.MkdirTemp(filepath.Dir(taskDir), ".gc-")

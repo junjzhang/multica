@@ -87,6 +87,18 @@ scan decision when a later task has taken over. New environments also record
 the current runtime and resource group locally; this is GC ownership evidence,
 not a replacement for the server's immutable accepted return address.
 
+A checkout already removed after finalization does not keep its remaining env
+root forever. GC first requires the current owner's persisted deletion receipt
+and terminal execution acknowledgement. Its original runtime, provider, agent,
+session and workdir must still match the saved resource identity. The existing
+finalization checkpoint must also prove the durable repository is accessible
+and still contains the saved work under the recorded branch ownership. Missing
+receipts, inaccessible storage, changed identities or unresolved dependencies
+retain the env root. A missing checkout by itself never permits deletion.
+The saved local conversation owner remains authoritative if quick-create later
+links the original task to an issue; the current task's scope projection is not
+used to reconstruct that original namespace.
+
 Older env roots can prove ownership through `.task_owner` and `.gc_meta.json`.
 The release request supplies that workspace/task identity and the actual root;
 it does not invent an old session. Older provider stores retain their existing

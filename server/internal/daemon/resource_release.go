@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
@@ -270,4 +271,22 @@ func (d *Daemon) acknowledgeResourceRemoval(ctx context.Context, taskID string, 
 	if err := d.client.postJSON(ctx, "/api/daemon/tasks/"+taskID+"/resources-released", receipt, &acknowledgement); err != nil {
 		d.logger.Warn("worktree removal metadata not acknowledged", "task", taskID, "error", err)
 	}
+}
+
+func (d *Daemon) confirmRemovedWorktree(ctx context.Context, root string, resource managedResource) bool {
+	status, err := d.client.GetTaskGCCheck(ctx, resource.OwnerTaskID)
+	if err != nil || status == nil || !isAgentTaskTerminal(status.Status) || !status.ResourceControlRequired || status.TerminalReportedAt == nil || status.DurableWorkDir == nil || strings.TrimSpace(*status.DurableWorkDir) == "" || status.ResourcesRetained == nil || *status.ResourcesRetained || status.ResourceIdentity == nil {
+		d.logger.Info("gc: retaining missing worktree without confirmed removal", "dir", root, "error", err)
+		return false
+	}
+	identity, address := status.ResourceIdentity, resource.Address
+	if identity.SourceTaskID != resource.OwnerTaskID || identity.WorkspaceID != address.WorkspaceID || identity.AgentID != address.AgentID || identity.RuntimeID != address.RuntimeID || identity.Provider != address.Provider || identity.SessionID != address.SessionID || identity.WorkDir != address.WorkDir {
+		d.logger.Info("gc: retaining missing worktree whose owner or address changed", "dir", root)
+		return false
+	}
+	if err := execenv.ValidateRemovedWorktree(root, address.WorkDir, address.WorkspaceID, address.AgentID, address.ScopeType, address.ScopeID, resource.OwnerTaskID, *status.DurableWorkDir, d.logger); err != nil {
+		d.logger.Info("gc: retaining missing worktree without durable finalization proof", "dir", root, "error", err)
+		return false
+	}
+	return true
 }
