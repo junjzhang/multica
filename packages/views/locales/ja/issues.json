@@ -810,6 +810,21 @@
     "strip_no_usage": "使用量の記録なし",
     "sparkline_now": "現在"
   },
+  "result_notifications": {
+    "title": "結果の通知",
+    "unavailable": "通知の状況を確認できません",
+    "empty": "結果の通知はありません",
+    "waiting": "待機中",
+    "delivering": "送信中",
+    "processing": "処理中",
+    "received": "セッションで受信済み",
+    "unknown": "受信状況が不明",
+    "refused": "配信できません",
+    "failed": "配信に失敗",
+    "cancelled": "キャンセル済み",
+    "error_details": "技術的な詳細",
+    "receipt_hint": "通知の受信は、結果の承認を意味しません。"
+  },
   "runs_timeline": {
     "title": "実行履歴",
     "stat_spent": "費用",

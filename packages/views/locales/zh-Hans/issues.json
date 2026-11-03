@@ -810,6 +810,21 @@
     "strip_no_usage": "没有用量记录",
     "sparkline_now": "现在"
   },
+  "result_notifications": {
+    "title": "结果通知",
+    "unavailable": "通知状态未知",
+    "empty": "没有结果通知",
+    "waiting": "等待中",
+    "delivering": "投递中",
+    "processing": "处理中",
+    "received": "会话已接收",
+    "unknown": "接收情况未知",
+    "refused": "无法投递",
+    "failed": "投递失败",
+    "cancelled": "已取消",
+    "error_details": "技术详情",
+    "receipt_hint": "收到通知不代表结果已验收。"
+  },
   "runs_timeline": {
     "title": "运行记录",
     "stat_spent": "已花费",
