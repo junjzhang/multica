@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
@@ -244,6 +244,11 @@ func TestResultReturnUsesNewTaskCredentials(t *testing.T) {
 	d, _, cleanup := newLeaderReuseTestDaemon(t)
 	defer cleanup()
 	source := leaderReuseTestTask("old-source")
+	source.IssueID = ""
+	source.QuickCreatePrompt = "old quick-create instructions"
+	source.QuickCreateAttachmentIDs = []string{"old-attachment"}
+	t.Setenv("MULTICA_QUICK_CREATE_TASK_ID", "ambient-old-source")
+	t.Setenv("MULTICA_QUICK_CREATE_ATTACHMENT_IDS", `["ambient-old-attachment"]`)
 	first, err := d.runTask(context.Background(), source, "claude", 0, d.logger)
 	if err != nil {
 		t.Fatal(err)
@@ -258,8 +263,10 @@ func TestResultReturnUsesNewTaskCredentials(t *testing.T) {
 	}
 	source.Agent.CustomEnv = map[string]string{"CLAUDE_CONFIG_DIR": home}
 	identityFile := filepath.Join(t.TempDir(), "identity")
+	briefFile := filepath.Join(t.TempDir(), "runtime-brief")
 	script := `#!/bin/sh
-printf '%s\n' "$MULTICA_TASK_ID" "$MULTICA_TOKEN" > "` + identityFile + `"
+printf '%s\n' "$MULTICA_TASK_ID" "$MULTICA_TOKEN" "$MULTICA_QUICK_CREATE_TASK_ID" "$MULTICA_QUICK_CREATE_ATTACHMENT_IDS" > "` + identityFile + `"
+cat CLAUDE.md > "` + briefFile + `"
 IFS= read -r _
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"session-leader-reuse","result":"done"}'
 `
@@ -274,8 +281,20 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "new-return-turn\nmat_new_return_credentials\n" {
+	if string(data) != "new-return-turn\nmat_new_return_credentials\n\n\n" {
 		t.Fatalf("return inherited closed source credentials: %q", data)
+	}
+	brief, err := os.ReadFile(briefFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, old := range []string{"Every issue turn runs the same workflow", "This is a quick-create task", "old quick-create instructions", "Final results MUST be delivered via"} {
+		if strings.Contains(string(brief), old) {
+			t.Fatalf("result inherited source execution workflow %q: %s", old, brief)
+		}
+	}
+	if !strings.Contains(string(brief), "original task scope `old-source`") {
+		t.Fatalf("result brief omitted original task scope: %s", brief)
 	}
 }
 
@@ -383,5 +402,35 @@ func TestResultReturnCannotDowngradeMissingBusinessScopeToTaskScope(t *testing.T
 	args, _ := os.ReadFile(argsFile)
 	if strings.Count(string(args), "--invocation-end--") != 1 {
 		t.Fatalf("invalid task scope reached provider: %s", args)
+	}
+}
+
+func TestResultReturnCompletedWithoutAddressRemainsUnknown(t *testing.T) {
+	d, _, cleanup := newLeaderReuseTestDaemon(t)
+	defer cleanup()
+	source := leaderReuseTestTask("source")
+	first, err := d.runTask(context.Background(), source, "claude", 0, d.logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	project := filepath.Join(home, "projects", "source")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, first.SessionID+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source.Agent.CustomEnv = map[string]string{"CLAUDE_CONFIG_DIR": home}
+	writeTestExecutable(t, d.cfg.Agents["claude"].Path, []byte(`#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"observed reply without returned address"}'
+`))
+	got, err := d.runTask(context.Background(), resultTurnTask("result-turn", source, first), "claude", 0, d.logger)
+	if err != nil || got.Status != "blocked" || got.FailureReason != protocol.DelegationResultInputUnknown || got.SessionID != "" {
+		t.Fatalf("missing address was reported as received or filled from hint: %+v %v", got, err)
+	}
+	if !strings.Contains(got.Comment, "observed reply without returned address") {
+		t.Fatalf("unconfirmed provider response was lost: %+v", got)
 	}
 }

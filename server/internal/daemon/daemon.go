@@ -7778,6 +7778,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := validateDelegationResultTask(task, provider); err != nil {
 		return TaskResult{}, err
 	}
+	if task.DelegationResult != nil {
+		task.QuickCreatePrompt = ""
+		task.QuickCreateAttachmentIDs = nil
+		task.RegenerateQuickActionsFor = ""
+	}
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	phaseRecorder.Mark(taskPhasePrepareStarted)
 	// A claim carries the task-row agent id both at the top level and inside
@@ -7891,6 +7896,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
+		ResultHandling:      task.DelegationResult != nil,
 		ScopeTaskID:         originalTaskScopeID(task),
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
@@ -9062,7 +9068,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		return TaskResult{}, err
 	}
 
-	if task.RequireResume && (result.ResumeRejected || result.StrictResumeUnmet || (result.SessionID != "" && result.SessionID != task.PriorSessionID)) {
+	if task.RequireResume && (result.ResumeRejected || result.StrictResumeUnmet || (result.SessionID != "" && result.SessionID != task.PriorSessionID) || (result.Status == "completed" && result.SessionID == "")) {
+		if result.Error == "" {
+			result.Error = "provider did not report the accepted session address"
+			if result.Output != "" {
+				result.Error += "\nObserved response:\n" + result.Output
+			}
+		}
 		result.Status = "failed"
 		result.Error = fmt.Sprintf("strict result return did not retain the accepted session: %s", result.Error)
 		result.SessionID = ""

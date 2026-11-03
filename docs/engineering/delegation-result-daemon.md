@@ -10,7 +10,9 @@ A strict turn must reuse the accepted directory under its env-root lock. A
 missing directory, changed ownership, unsupported source environment, or
 provider refusal before input produces `delegation_result_unavailable`.
 Once provider input may have happened, an unsuccessful or ambiguous outcome
-produces `delegation_result_input_unknown`. Neither outcome permits a fresh
+produces `delegation_result_input_unknown`. A nominal success without a reported
+session address also remains unknown; prior hints are never filled in as receipt
+evidence. Neither outcome permits a fresh
 prompt retry. A post-prompt resume rejection cannot override this rule.
 Busy directories and provider stores keep the same task waiting with its
 preparation lease; cancellation ends that wait. A provider's explicit transient
@@ -39,7 +41,10 @@ For a source with no issue, chat, or autopilot, `scope_task_id` identifies the
 original task namespace. A handling task R uses fresh R credentials while its
 provider state stays in source S's environment. Further result turns preserve
 S rather than creating a store keyed by R. A deleted business scope cannot be
-reinterpreted as this task-only scope.
+reinterpreted as this task-only scope. Its runtime brief describes result
+processing without an issue-comment or quick-create workflow. Source quick-create
+execution fields are cleared, while the new process receives its current task
+identity and credentials.
 
 ## Retained execution environments
 
