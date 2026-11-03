@@ -32,6 +32,7 @@ type ManagedResourceAddress struct {
 // or an existing provider-store group. ResourcePath is the actual directory
 // being considered for removal; WorkDir remains the execution address.
 type ResourceReleaseRequest struct {
+	DaemonID     string `json:"daemon_id,omitempty"`
 	Kind         string `json:"kind"`
 	WorkspaceID  string `json:"workspace_id,omitempty"`
 	SourceTaskID string `json:"source_task_id,omitempty"`

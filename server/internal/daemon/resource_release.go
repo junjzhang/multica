@@ -85,6 +85,7 @@ func readManagedResource(root string) (managedResource, error) {
 }
 
 func (c *Client) ReleaseResource(ctx context.Context, request protocol.ResourceReleaseRequest) (protocol.ResourceReleaseDecision, error) {
+	request.DaemonID = c.mailboxDaemonID
 	var response struct {
 		AdmissionClosed    *bool                              `json:"admission_closed"`
 		ControlRequired    *bool                              `json:"resource_control_required"`

@@ -270,6 +270,55 @@ func TestDelegationResultRetryInheritanceAndLateLink(t *testing.T) {
 	}
 }
 
+func TestDelegationResourceRetentionAndReleaseReceipt(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	ctx := context.Background()
+	source, result, _ := resultFixture(t, "resource-release")
+	finishResultFixture(t, result)
+	req := protocol.ResourceReleaseRequest{Kind: "workdir", SourceTaskID: uuidToString(source.ID), WorkspaceID: testWorkspaceID, ResourcePath: "/work/dispatcher-resource-release", WorkDir: source.WorkDir.String}
+	check := func() protocol.ResourceReleaseDecision {
+		t.Helper()
+		var out protocol.ResourceReleaseDecision
+		testutil.Call(t, testHandler.ReleaseManagedResource, newOwnerDaemonRequest("POST", "/release", req)).Want(200).JSON(&out)
+		return out
+	}
+	if out := check(); out.ReleaseAllowed || out.Reason != "delegation_not_accepted" {
+		t.Fatalf("result completion released unaccepted work: %+v", out)
+	}
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE issue SET status='done' WHERE id=$1`, result.IssueID)
+	if out := check(); out.ReleaseAllowed {
+		t.Fatalf("queued result counted as received: %+v", out)
+	}
+	var turnID string
+	dbfx.QueryRow(t, `SELECT notification_task_id FROM agent_task_delegation_return WHERE task_id=$1`, result.ID).Scan(&turnID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='failed',failure_reason=$2,completed_at=now(),terminal_reported_at=now() WHERE id=$1`, turnID, protocol.DelegationResultInputUnknown)
+	if out := check(); out.ReleaseAllowed {
+		t.Fatal("unknown result delivery released frozen resources")
+	}
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, turnID)
+	if out := check(); !out.ReleaseAllowed || !out.AdmissionClosed {
+		t.Fatalf("received and accepted still retained: %+v", out)
+	}
+	receipt := protocol.ResourceReleaseReceipt{ResourceReleaseRequest: req, DurableWorkDir: "/repo/durable"}
+	for range 2 {
+		var out protocol.ResourceReleaseAcknowledgement
+		testutil.Call(t, testHandler.RecordResourcesReleased, withURLParam(newOwnerDaemonRequest("POST", "/resources-released", receipt), "taskId", uuidToString(source.ID))).Want(200).JSON(&out)
+		if !out.Recorded || out.DurableWorkDir != "/repo/durable" {
+			t.Fatalf("receipt: %+v", out)
+		}
+	}
+	var rawResult string
+	dbfx.QueryRow(t, `SELECT COALESCE(result::text,'null') FROM agent_task_queue WHERE id=$1`, source.ID).Scan(&rawResult)
+	if rawResult != "null" {
+		t.Fatal("location refinement rewrote outcome")
+	}
+}
+
 func TestDelegationResultPendingRetryDecisionDoesNotNotify(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
@@ -442,6 +491,100 @@ func TestDelegationClaimResourceAgreementIsAtomic(t *testing.T) {
 	}
 }
 
+func TestDelegationResourceLegacyAndTerminalObservation(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	ctx := context.Background()
+	for _, kind := range []string{"legacy", "complete", "fail", "cancel"} {
+		t.Run(kind, func(t *testing.T) {
+			rt := dbfx.Runtime(t, "resource receipt "+kind, testutil.Cols{"runtime_mode": "local", "provider": "codex", "daemon_id": "receipt-" + kind})
+			ag := dbfx.Agent(t, "resource receipt "+kind, rt)
+			issue := dbfx.Issue(t, "resource receipt "+kind)
+			id := dbfx.Task(t, ag, testutil.Cols{"runtime_id": rt, "issue_id": issue, "status": "running", "resource_control_required": kind != "legacy", "work_dir": "/receipt/" + kind})
+			if kind == "legacy" {
+				dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now() WHERE id=$1`, id)
+			} else {
+				// A control transition alone is not proof that the executor has stopped.
+				if _, err := testHandler.TaskService.CancelTask(ctx, parseUUID(id)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := protocol.ResourceReleaseRequest{Kind: "task", SourceTaskID: id}
+			check := func() protocol.ResourceReleaseDecision {
+				var out protocol.ResourceReleaseDecision
+				testutil.Call(t, testHandler.ReleaseManagedResource, newOwnerDaemonRequest("POST", "/release", req)).Want(200).JSON(&out)
+				return out
+			}
+			before := check()
+			if kind == "legacy" {
+				if !before.ReleaseAllowed || before.ControlRequired {
+					t.Fatalf("legacy owned resource lost TTL compatibility: %+v", before)
+				}
+				return
+			}
+			if before.ReleaseAllowed || before.Reason != "execution_exit_unknown" {
+				t.Fatalf("control terminal released live executor: %+v", before)
+			}
+			var callback http.HandlerFunc
+			body := map[string]string{}
+			switch kind {
+			case "complete":
+				callback = testHandler.CompleteTask
+				body["output"] = "late completion"
+			case "fail":
+				callback = testHandler.FailTask
+				body["error"] = "late failure"
+			case "cancel":
+				callback = testHandler.AckTaskCancelled
+			}
+			var stamp pgtype.Timestamptz
+			for i := range 2 {
+				testutil.Call(t, callback, withURLParam(newOwnerDaemonRequest("POST", "/terminal", body), "taskId", id)).Want(200)
+				after, _ := testHandler.Queries.GetAgentTask(ctx, parseUUID(id))
+				if !after.TerminalReportedAt.Valid {
+					t.Fatal("actual terminal callback did not record observation")
+				}
+				if i == 0 {
+					stamp = after.TerminalReportedAt
+				} else if !stamp.Time.Equal(after.TerminalReportedAt.Time) {
+					t.Fatal("terminal replay changed original observation")
+				}
+			}
+			if out := check(); !out.ReleaseAllowed {
+				t.Fatalf("confirmed terminal remained protected: %+v", out)
+			}
+		})
+	}
+}
+
+func TestDelegationResourceSharedDirectoryAndProviderStore(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	source, _, _ := resultFixture(t, "shared-resource")
+	rt := dbfx.Runtime(t, "other same-daemon runtime", testutil.Cols{"runtime_mode": "local", "provider": "hermes", "daemon_id": "result-shared-resource"})
+	other := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"runtime_id": rt, "issue_id": uuidToString(source.IssueID), "status": "running", "session_id": "another-session", "work_dir": "/shared-root/other-session"})
+	storeUser := dbfx.Task(t, uuidToString(source.AgentID), testutil.Cols{"runtime_id": uuidToString(source.RuntimeID), "issue_id": uuidToString(source.IssueID), "status": "running", "session_id": "another-codex-session", "work_dir": "/store/user"})
+	for _, req := range []protocol.ResourceReleaseRequest{
+		{Kind: "workdir", SourceTaskID: uuidToString(source.ID), ResourcePath: "/shared-root"},
+		{Kind: "provider_store", RuntimeID: uuidToString(source.RuntimeID), Provider: "codex", AgentID: uuidToString(source.AgentID), ScopeType: "issue", ScopeID: uuidToString(source.IssueID)},
+	} {
+		var out protocol.ResourceReleaseDecision
+		testutil.Call(t, testHandler.ReleaseManagedResource, newOwnerDaemonRequest("POST", "/release", req)).Want(200).JSON(&out)
+		if out.ReleaseAllowed {
+			t.Fatal("shared resource released while another runtime/session used it")
+		}
+		found := false
+		for _, a := range out.ProtectedResources {
+			found = found || a.SourceTaskID == other || a.SourceTaskID == storeUser
+		}
+		if !found {
+			t.Fatalf("other runtime was not considered: %+v", out)
+		}
+	}
+}
+
 func TestDelegationSessionPinGenerationFencesLateAttempts(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
@@ -495,6 +638,23 @@ func TestDelegationSessionPinGenerationFencesLateAttempts(t *testing.T) {
 	}
 }
 
+func TestDelegationResourceWorkdirReturnsAliasCandidates(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	source, _, _ := resultFixture(t, "alias-candidates")
+	req := protocol.ResourceReleaseRequest{Kind: "workdir", SourceTaskID: uuidToString(source.ID), ResourcePath: "/physically-aliased-path"}
+	var out protocol.ResourceReleaseDecision
+	testutil.Call(t, testHandler.ReleaseManagedResource, newOwnerDaemonRequest("POST", "/release", req)).Want(200).JSON(&out)
+	found := false
+	for _, a := range out.ProtectedResources {
+		found = found || a.WorkDir == source.WorkDir.String
+	}
+	if !found {
+		t.Fatal("string-only filter hid a protected physical alias candidate")
+	}
+}
+
 func TestDelegationNotificationProjectionDistinguishesUnknownAndEmpty(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
@@ -522,7 +682,7 @@ func TestDelegationResultStartedCancellationRemainsUnknown(t *testing.T) {
 		t.Fatal("PostgreSQL required")
 	}
 	ctx := context.Background()
-	_, result, _ := resultFixture(t, "cancelled-return")
+	source, result, _ := resultFixture(t, "cancelled-return")
 	finishResultFixture(t, result)
 	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
 		t.Fatal(err)
@@ -555,6 +715,11 @@ func TestDelegationResultStartedCancellationRemainsUnknown(t *testing.T) {
 	}
 	if rows[0].ResultNotifications == nil || len(*rows[0].ResultNotifications) != 1 || (*rows[0].ResultNotifications)[0].Status != "unknown" {
 		t.Fatal("cancel acknowledgement was reported as result receipt")
+	}
+	var release protocol.ResourceReleaseDecision
+	testutil.Call(t, testHandler.ReleaseManagedResource, newOwnerDaemonRequest("POST", "/release", protocol.ResourceReleaseRequest{Kind: "task", SourceTaskID: uuidToString(source.ID)})).Want(200).JSON(&release)
+	if release.ReleaseAllowed || release.Reason != "result_delivery_unknown" {
+		t.Fatalf("cancel acknowledgement released unknown input: %+v", release)
 	}
 }
 

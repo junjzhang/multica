@@ -464,15 +464,14 @@ func TestLegacyProviderStoresUseExistingScopeForRelease(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Error(err)
 				}
-				if request.Provider != provider || request.AgentID != task.AgentID || request.ScopeType != scopeType || request.RuntimeID != "" || request.SessionID != "" {
+				if request.DaemonID != "fixture-daemon" || request.Provider != provider || request.AgentID != task.AgentID || request.ScopeType != scopeType || request.RuntimeID != "" || request.SessionID != "" {
 					t.Errorf("legacy ownership was guessed: %+v", request)
 				}
 				calls.Add(1)
 				w.Write([]byte(`{"release_allowed":true,"resource_control_required":false,"admission_closed":false,"protected_resources":[]}`))
 			}))
 			defer srv.Close()
-			d := New(Config{WorkspacesRoot: t.TempDir(), Profile: profile}, slog.Default())
-			d.client = NewClient(srv.URL)
+			d := New(Config{WorkspacesRoot: t.TempDir(), Profile: profile, DaemonID: "fixture-daemon", ServerBaseURL: srv.URL}, slog.Default())
 			removed, _ := prune(d.reserveProviderStoreForDeletion(context.Background(), provider, time.Hour))
 			if removed != 1 || calls.Load() != 1 {
 				t.Fatalf("legacy TTL stopped: removed=%d calls=%d", removed, calls.Load())

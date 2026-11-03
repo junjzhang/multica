@@ -67,6 +67,13 @@ WHERE id = @task_id AND runtime_id = @runtime_id AND dispatched_at = @dispatched
 UPDATE agent_task_queue SET terminal_reported_at = COALESCE(terminal_reported_at, now())
 WHERE id = @task_id AND status IN ('completed', 'failed', 'cancelled');
 
+-- name: RecordReleasedTaskWorkDir :one
+UPDATE agent_task_queue SET durable_work_dir = @durable_work_dir
+WHERE id = @task_id AND status IN ('completed', 'failed', 'cancelled')
+  AND work_dir = @work_dir
+  AND (durable_work_dir IS NULL OR durable_work_dir = @durable_work_dir)
+RETURNING *;
+
 -- name: SetDelegationResultDelivery :exec
 UPDATE agent_task_delegation_return
 SET notification_delivery_id = @delivery_id, materialized_at = now()
@@ -110,6 +117,24 @@ LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_deliver
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE l.task_id = @task_id AND r.workspace_id = @workspace_id
 ORDER BY r.created_at, r.id;
+
+-- name: ListDaemonResourceTasks :many
+SELECT t.id AS task_id, t.agent_id, t.runtime_id, t.issue_id, t.chat_session_id,
+       t.autopilot_run_id, t.status, t.session_id, t.work_dir,
+       t.resource_control_required, t.terminal_reported_at,
+       rt.workspace_id, rt.provider
+FROM agent_task_queue t JOIN agent_runtime rt ON rt.id = t.runtime_id
+WHERE rt.daemon_id = @daemon_id AND rt.workspace_id = @workspace_id
+  AND (t.status NOT IN ('completed', 'failed', 'cancelled')
+    OR (t.resource_control_required AND t.terminal_reported_at IS NULL)
+    OR t.id = sqlc.narg(source_task_id)
+    OR EXISTS (SELECT 1 FROM issue_delegation_return r WHERE r.source_task_id = t.id OR r.scope_task_id = t.id));
+
+-- name: ListDaemonResourceReturns :many
+SELECT r.* FROM issue_delegation_return r
+LEFT JOIN agent_runtime rt ON rt.id = r.runtime_id
+WHERE r.workspace_id = @workspace_id AND r.return_kind = 'managed_task'
+  AND (rt.daemon_id = @daemon_id OR rt.id IS NULL);
 
 -- name: ListReturnResultDependencies :many
 SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
@@ -220,3 +245,11 @@ WITH locked AS (
  ORDER BY id FOR UPDATE
 )
 SELECT count(*) FROM locked;
+
+-- name: HasAgentResourceOnDaemon :one
+SELECT EXISTS (
+ SELECT 1 FROM agent_runtime rt
+ WHERE rt.workspace_id = @workspace_id AND rt.daemon_id = @daemon_id AND rt.provider = @provider
+   AND (rt.id = (SELECT a.runtime_id FROM agent a WHERE a.id = @agent_id AND a.workspace_id = @workspace_id)
+     OR EXISTS (SELECT 1 FROM agent_task_queue t WHERE t.agent_id = @agent_id AND t.runtime_id = rt.id))
+) AS hosted;
