@@ -294,6 +294,12 @@ func (s *TaskService) ResolveOriginatorFromTriggerComment(ctx context.Context, w
 	return s.resolveOriginatorFromTriggerComment(ctx, workspaceID, commentID)
 }
 
+// ResolveOriginatorFromCommentWithQueries reuses the locked comment and keeps
+// its parent-task attribution read on the caller's transaction.
+func (s *TaskService) ResolveOriginatorFromCommentWithQueries(ctx context.Context, q *db.Queries, comment db.Comment) pgtype.UUID {
+	return s.attributionFromCommentWithQueries(ctx, q, comment, attribution.SourceCommentSource).UserID
+}
+
 // AttributionForMergedComment resolves the FULL attribution snapshot for a comment
 // being coalesced into an already-queued task (MUL-4302). A merge re-attributes the
 // run to the newly-arrived comment's human, so the whole snapshot — source, evidence,
@@ -331,7 +337,7 @@ func (s *TaskService) AttributionForMergedCommentWithQueries(ctx context.Context
 		agentAuthoredSource = attribution.SourceDelegation
 	}
 	attr := s.attributionFromTriggerCommentWithQueries(ctx, q, workspaceID, commentID, agentAuthoredSource)
-	return s.applyAttributionFallback(ctx, attr, agent)
+	return s.applyAttributionFallbackWithQueries(ctx, q, attr, agent)
 }
 
 func (s *TaskService) attributionFromTriggerCommentWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID, agentAuthoredSource attribution.Source) attribution.Result {
@@ -345,7 +351,7 @@ func (s *TaskService) attributionFromTriggerCommentWithQueries(ctx context.Conte
 	if err != nil {
 		return attribution.Result{Source: attribution.SourceUnattributed}
 	}
-	return s.attributionFromComment(ctx, comment, agentAuthoredSource)
+	return s.attributionFromCommentWithQueries(ctx, q, comment, agentAuthoredSource)
 }
 
 // BuildCommentTriggerSummary is the exported wrapper used by the comment-merge
@@ -359,19 +365,6 @@ func (s *TaskService) BuildCommentTriggerSummary(ctx context.Context, workspaceI
 // transaction, for a fold that happens before the comment commits.
 func (s *TaskService) BuildCommentTriggerSummaryWithQueries(ctx context.Context, q *db.Queries, workspaceID, commentID pgtype.UUID) pgtype.Text {
 	return s.buildCommentTriggerSummaryWithQueries(ctx, q, workspaceID, commentID)
-}
-
-// BuildRuntimeMCPOverlayForMerge recomputes the Composio MCP overlay +
-// connected-app metadata for (originatorUserID, agent), used when a merge
-// re-stamps a coalesced task's originator (MUL-4195 review must-fix #1). The
-// overlay is a pure function of (originator, agent); re-stamping it alongside
-// originator_user_id keeps the coalescing run's connected-app capabilities and
-// audit attribution consistent with the latest trigger comment's originator
-// instead of the task's original one. Fails soft to empty (same as the enqueue
-// path) so a transient Composio hiccup never blocks the merge.
-func (s *TaskService) BuildRuntimeMCPOverlayForMerge(ctx context.Context, originatorUserID pgtype.UUID, agent db.Agent) (overlay, connectedApps []byte) {
-	data := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
-	return data.Overlay, data.ConnectedApps
 }
 
 func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.Bus, wakeups ...TaskWakeupNotifier) *TaskService {
@@ -513,6 +506,10 @@ func (s *TaskService) attributionFromTriggerComment(ctx context.Context, workspa
 // re-read it. Kept byte-identical to the inline logic attributionFromTriggerComment
 // used before, so authorization behavior is unchanged.
 func (s *TaskService) attributionFromComment(ctx context.Context, comment db.Comment, agentAuthoredSource attribution.Source) attribution.Result {
+	return s.attributionFromCommentWithQueries(ctx, s.Queries, comment, agentAuthoredSource)
+}
+
+func (s *TaskService) attributionFromCommentWithQueries(ctx context.Context, q *db.Queries, comment db.Comment, agentAuthoredSource attribution.Source) attribution.Result {
 	facts := attribution.CommentFacts{
 		CommentID:  comment.ID,
 		AuthorType: comment.AuthorType,
@@ -523,9 +520,9 @@ func (s *TaskService) attributionFromComment(ctx context.Context, comment db.Com
 	// parent.originator_user_id (set by every agent comment-write path since
 	// migration 120). A NULL/missing source task leaves ParentOriginator
 	// invalid, which ClassifyComment maps to unattributed.
-	if comment.AuthorType == "agent" && comment.SourceTaskID.Valid {
+	if comment.AuthorType == "agent" && comment.SourceTaskID.Valid && q != nil {
 		facts.SourceTaskID = comment.SourceTaskID
-		if parent, err := s.Queries.GetAgentTask(ctx, comment.SourceTaskID); err == nil {
+		if parent, err := q.GetAgentTask(ctx, comment.SourceTaskID); err == nil {
 			facts.ParentOriginator = parent.OriginatorUserID
 			facts.ParentAccountable = parent.AccountableUserID
 		}
@@ -597,7 +594,7 @@ func (s *TaskService) attributionForIssueTaskWithQueries(ctx context.Context, q 
 		// only if that provenance itself has no human (MUL-4302; raised by Bohan on
 		// the stage-cascade fallback).
 		if comment.AuthorType != "system" {
-			return s.attributionFromComment(ctx, comment, agentAuthoredSource)
+			return s.attributionFromCommentWithQueries(ctx, q, comment, agentAuthoredSource)
 		}
 	}
 	// Autopilot-origin issues (origin_id is the autopilot id) from a schedule /
@@ -622,7 +619,7 @@ func (s *TaskService) attributionForIssueTaskWithQueries(ctx context.Context, q 
 		}); err == nil {
 			triggerID = run.TriggerID
 		}
-		return triggerOwnerAttribution(ctx, s.Queries, triggerID, issue.WorkspaceID, issue.OriginID, attribution.EvidenceIssueAssignment, issue.ID)
+		return triggerOwnerAttribution(ctx, q, triggerID, issue.WorkspaceID, issue.OriginID, attribution.EvidenceIssueAssignment, issue.ID)
 	}
 	facts := attribution.DirectFacts{
 		IssueID:     issue.ID,
@@ -636,11 +633,11 @@ func (s *TaskService) attributionForIssueTaskWithQueries(ctx context.Context, q 
 	// origin_id with the agent_task_queue row that created the issue, so the
 	// top-of-chain human is that task's originator_user_id (MUL-4305).
 	if !(issue.CreatorType == "member" && issue.CreatorID.Valid) &&
-		s != nil && s.Queries != nil && issue.OriginType.Valid && issue.OriginID.Valid &&
+		s != nil && q != nil && issue.OriginType.Valid && issue.OriginID.Valid &&
 		(issue.OriginType.String == "quick_create" || issue.OriginType.String == "agent_create") {
 		facts.OriginType = issue.OriginType.String
 		facts.OriginTaskID = issue.OriginID
-		if task, err := s.Queries.GetAgentTask(ctx, issue.OriginID); err == nil {
+		if task, err := q.GetAgentTask(ctx, issue.OriginID); err == nil {
 			facts.OriginOriginator = task.OriginatorUserID
 			facts.OriginAccountable = task.AccountableUserID
 		}
@@ -822,13 +819,21 @@ func pendingSlotTakenErr(err error) bool {
 // Keeping this at the enqueue boundary (not inside the pure classifiers) means
 // owner_fallback needs the agent owner, which every enqueue path has in hand.
 func (s *TaskService) applyAttributionFallback(ctx context.Context, attr attribution.Result, agent db.Agent) (attribution.Result, error) {
+	var q *db.Queries
+	if s != nil {
+		q = s.Queries
+	}
+	return s.applyAttributionFallbackWithQueries(ctx, q, attr, agent)
+}
+
+func (s *TaskService) applyAttributionFallbackWithQueries(ctx context.Context, q *db.Queries, attr attribution.Result, agent db.Agent) (attribution.Result, error) {
 	if attr.Source != attribution.SourceUnattributed {
 		return attr, nil
 	}
-	if s == nil || s.Queries == nil || !agent.WorkspaceID.Valid {
+	if s == nil || q == nil || !agent.WorkspaceID.Valid {
 		return attr, fmt.Errorf("%w: workspace policy unavailable", ErrAttributionFailClosed)
 	}
-	failClosed, err := s.Queries.GetWorkspaceAttributionFailClosed(ctx, agent.WorkspaceID)
+	failClosed, err := q.GetWorkspaceAttributionFailClosed(ctx, agent.WorkspaceID)
 	if err != nil {
 		// Cannot confirm the workspace allows fallback → fail closed rather than
 		// silently run an unattributable task.
@@ -1300,10 +1305,14 @@ func (s *TaskService) EnqueueTaskForIssueWithHandoff(ctx context.Context, issue 
 // a transient github-table hiccup can never over-dedup a review out of
 // existence; the worst case is the pre-TEN-356 coalescing behavior.
 func (s *TaskService) ResolveIssueReviewSHA(ctx context.Context, issueID pgtype.UUID) string {
+	return s.ResolveIssueReviewSHAWithQueries(ctx, s.Queries, issueID)
+}
+
+func (s *TaskService) ResolveIssueReviewSHAWithQueries(ctx context.Context, q *db.Queries, issueID pgtype.UUID) string {
 	if !issueID.Valid {
 		return ""
 	}
-	sha, err := s.Queries.GetIssueReviewHeadSha(ctx, issueID)
+	sha, err := q.GetIssueReviewHeadSha(ctx, issueID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			slog.Warn("resolve issue review sha failed",
@@ -1326,6 +1335,10 @@ func headShaText(sha string) pgtype.Text {
 // key dedup on the reviewed head with a single call (TEN-356).
 func (s *TaskService) ResolveIssueReviewSHAParam(ctx context.Context, issueID pgtype.UUID) pgtype.Text {
 	return headShaText(s.ResolveIssueReviewSHA(ctx, issueID))
+}
+
+func (s *TaskService) ResolveIssueReviewSHAParamWithQueries(ctx context.Context, q *db.Queries, issueID pgtype.UUID) pgtype.Text {
+	return headShaText(s.ResolveIssueReviewSHAWithQueries(ctx, q, issueID))
 }
 
 func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
@@ -1433,6 +1446,7 @@ func (s *TaskService) applyQueuedIssueTaskOverlay(ctx context.Context, q *db.Que
 		RuntimeMcpOverlay:        overlay.Overlay,
 		RuntimeConnectedApps:     overlay.ConnectedApps,
 		ExpectedOriginatorUserID: task.OriginatorUserID,
+		ExpectedTriggerCommentID: task.TriggerCommentID,
 	})
 	if err != nil {
 		slog.Warn("hydrate queued issue task overlay failed",
@@ -1479,7 +1493,7 @@ func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue 
 	attr := s.attributionForIssueTaskWithQueries(ctx, q, issue, triggerCommentID, attribution.SourceCommentSource, actorUserID)
 	// No precise human resolved → owner_fallback (accountable = agent owner), or
 	// refuse the enqueue if the workspace is fail-closed (MUL-4302 §3.5).
-	attr, err = s.applyAttributionFallback(ctx, attr, agent)
+	attr, err = s.applyAttributionFallbackWithQueries(ctx, q, attr, agent)
 	if err != nil {
 		slog.Warn("task enqueue refused: attribution fail-closed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(issue.AssigneeID))
 		return db.AgentTaskQueue{}, attribution.Result{}, err
@@ -1510,7 +1524,7 @@ func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue 
 		TriggerEvidenceRefID: attrEvidenceRef,
 		// Stamp the reviewed head so dedup can distinguish this run's target
 		// from a later request against a new HEAD (TEN-356).
-		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		HeadSha: headShaText(s.ResolveIssueReviewSHAWithQueries(ctx, q, issue.ID)),
 	}
 	var task db.AgentTaskQueue
 	if fireAt.Valid {
@@ -1684,7 +1698,7 @@ func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issu
 	attr := s.attributionForIssueTaskWithQueries(ctx, q, issue, triggerCommentID, attribution.SourceDelegation, actorUserID)
 	// No precise human resolved → owner_fallback (accountable = agent owner), or
 	// refuse the enqueue if the workspace is fail-closed (MUL-4302 §3.5).
-	attr, err = s.applyAttributionFallback(ctx, attr, agent)
+	attr, err = s.applyAttributionFallbackWithQueries(ctx, q, attr, agent)
 	if err != nil {
 		slog.Warn("mention task enqueue refused: attribution fail-closed", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID))
 		return db.AgentTaskQueue{}, attribution.Result{}, err
@@ -1716,7 +1730,7 @@ func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issu
 		TriggerEvidenceRefID: attrEvidenceRef,
 		// Stamp the reviewed head so dedup can distinguish this run's target
 		// from a later request against a new HEAD (TEN-356).
-		HeadSha: headShaText(s.ResolveIssueReviewSHA(ctx, issue.ID)),
+		HeadSha: headShaText(s.ResolveIssueReviewSHAWithQueries(ctx, q, issue.ID)),
 	})
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the

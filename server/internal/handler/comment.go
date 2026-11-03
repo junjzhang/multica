@@ -1887,7 +1887,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	commentObligationsEnabled := authorType == "agent" && commentAddress != nil && len(triggerPlan.triggers) > 0
 	var commentInTxResults map[string]commentEnqueueResult
 	var commentInTxTasks []commentTriggerTask
-	var commentMergedAttrs []attribution.Result
+	var commentMergedTasks []commentTriggerTask
 	commentTriggersHandledInTx := false
 	runCommentTriggerTx := func(tx pgx.Tx, q *db.Queries) error {
 		if !commentObligationsEnabled {
@@ -1901,13 +1901,13 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		results, tasks, attrs, err := h.coverAcceptedCommentObligationsInTx(r.Context(), tx, q, issue, commentID, obligations, commentReturnIDs)
+		results, tasks, merged, err := h.coverAcceptedCommentObligationsInTx(r.Context(), tx, q, issue, commentID, obligations, commentReturnIDs)
 		if err != nil {
 			return err
 		}
 		commentInTxResults = results
 		commentInTxTasks = tasks
-		commentMergedAttrs = attrs
+		commentMergedTasks = merged
 		commentTriggersHandledInTx = true
 		return nil
 	}
@@ -2047,8 +2047,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// native runs now; a blocked mention must not fail the saved comment and is
 	// surfaced per target instead (MUL-4525 §2).
 	if commentTriggersHandledInTx {
-		for _, attr := range commentMergedAttrs {
-			h.TaskService.RecordHumanDelegation(r.Context(), attr)
+		for _, merged := range commentMergedTasks {
+			h.TaskService.ApplyQueuedIssueTaskOverlay(r.Context(), merged.task)
+			h.TaskService.RecordHumanDelegation(r.Context(), merged.attr)
 		}
 		h.publishCommentTriggerTasks(r.Context(), commentInTxTasks)
 		resp.TriggerOutcomes = h.commentTriggerOutcomesAfterCommit(r.Context(), issue, triggerPlan, mailboxDelivered, commentInTxResults)
@@ -2678,7 +2679,6 @@ func (h *Handler) mergeCommentIntoPendingTaskParams(ctx context.Context, q *db.Q
 		}
 		return db.MergeCommentIntoPendingTaskParams{}, attribution.Result{}, commentMergeError
 	}
-	overlay, connectedApps := h.TaskService.BuildRuntimeMCPOverlayForMerge(ctx, attr.UserID, trigger.Agent)
 	params := db.MergeCommentIntoPendingTaskParams{
 		IssueID:                 issue.ID,
 		AgentID:                 trigger.Agent.ID,
@@ -2691,9 +2691,9 @@ func (h *Handler) mergeCommentIntoPendingTaskParams(ctx context.Context, q *db.Q
 		NewTriggerEvidenceKind:  pgtype.Text{String: string(attr.EvidenceKind), Valid: attr.EvidenceKind != ""},
 		NewTriggerEvidenceRefID: attr.EvidenceRefID,
 		NewTriggerSummary:       h.TaskService.BuildCommentTriggerSummaryWithQueries(ctx, q, issue.WorkspaceID, newTriggerCommentID),
-		NewRuntimeMcpOverlay:    overlay,
-		NewRuntimeConnectedApps: connectedApps,
-		HeadSha:                 headSha,
+		// The fold clears the previous actor's optional capabilities atomically.
+		// Callers hydrate this plan after commit using trigger/actor CAS.
+		HeadSha: headSha,
 	}
 	return params, attr, commentMergeSucceeded
 }
@@ -2761,6 +2761,7 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		"agent_id", uuidToString(trigger.Agent.ID),
 		"new_trigger_comment_id", uuidToString(newTriggerCommentID),
 		"coalesced_count", len(row.CoalescedCommentIds))
+	h.TaskService.ApplyQueuedIssueTaskOverlay(ctx, db.AgentTaskQueue{ID: row.ID, AgentID: trigger.Agent.ID, OriginatorUserID: attr.UserID, TriggerCommentID: newTriggerCommentID})
 	// The fold re-attributes the queued run to this comment's author; record that
 	// human's action now, since the run row keeps no history of who acted.
 	h.TaskService.RecordHumanDelegation(ctx, attr)
@@ -3437,7 +3438,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	var commentReturnIDs []pgtype.UUID
 	var commentInTxResults map[string]commentEnqueueResult
 	var commentInTxTasks []commentTriggerTask
-	var commentMergedAttrs []attribution.Result
+	var commentMergedTasks []commentTriggerTask
 	commentTriggersHandledInTx := false
 	if oldContent != req.Content {
 		issue, err := h.Queries.GetIssue(r.Context(), existing.IssueID)
@@ -3503,13 +3504,13 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		results, tasks, attrs, err := h.coverAcceptedCommentObligationsInTx(r.Context(), tx, q, *triggerIssue, existing.ID, obligations, commentReturnIDs)
+		results, tasks, merged, err := h.coverAcceptedCommentObligationsInTx(r.Context(), tx, q, *triggerIssue, existing.ID, obligations, commentReturnIDs)
 		if err != nil {
 			return err
 		}
 		commentInTxResults = results
 		commentInTxTasks = tasks
-		commentMergedAttrs = attrs
+		commentMergedTasks = merged
 		commentTriggersHandledInTx = true
 		return nil
 	}
@@ -3665,8 +3666,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		// saved edit. Mailbox outcomes only report what the transaction
 		// committed, so the caller never sees "queued" for a rolled-back row.
 		if commentTriggersHandledInTx {
-			for _, attr := range commentMergedAttrs {
-				h.TaskService.RecordHumanDelegation(r.Context(), attr)
+			for _, merged := range commentMergedTasks {
+				h.TaskService.ApplyQueuedIssueTaskOverlay(r.Context(), merged.task)
+				h.TaskService.RecordHumanDelegation(r.Context(), merged.attr)
 			}
 			h.publishCommentTriggerTasks(r.Context(), commentInTxTasks)
 			return h.commentTriggerOutcomesAfterCommit(r.Context(), issue, triggerPlan, mailboxDelivered, commentInTxResults)

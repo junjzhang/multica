@@ -2773,12 +2773,12 @@ SELECT comment_thread_root_id(@comment_id::uuid)::uuid AS id;
 
 -- name: SetQueuedAgentTaskRuntimeOverlay :execrows
 -- The delegated issue, accepted return, and task commit atomically before the
--- optional external overlay is built. Hydrate only the untouched original plan;
--- a comment merge may already have replaced the trigger and attribution.
+-- optional external overlay is built. Hydrate only the same trigger/actor plan;
+-- even a same-actor comment merge may have superseded the original request.
 UPDATE agent_task_queue
 SET runtime_mcp_overlay = sqlc.narg(runtime_mcp_overlay),
     runtime_connected_apps = sqlc.narg(runtime_connected_apps)
 WHERE id = @id
-  AND status = 'queued'
-  AND trigger_comment_id IS NULL
+  AND (status = 'queued' OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true'))
+  AND trigger_comment_id IS NOT DISTINCT FROM sqlc.narg(expected_trigger_comment_id)::uuid
   AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(expected_originator_user_id)::uuid;

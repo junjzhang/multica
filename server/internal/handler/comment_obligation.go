@@ -79,10 +79,10 @@ func (h *Handler) recordAcceptedCommentObligations(ctx context.Context, q *db.Qu
 // run. Every attempt is a savepoint so a transient failure leaves the comment
 // transaction healthy; a target that still cannot be covered stays pending for
 // the sweeper instead of being lost after commit.
-func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligations []acceptedCommentObligation, returnIDs []pgtype.UUID) (map[string]commentEnqueueResult, []commentTriggerTask, []attribution.Result, error) {
+func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligations []acceptedCommentObligation, returnIDs []pgtype.UUID) (map[string]commentEnqueueResult, []commentTriggerTask, []commentTriggerTask, error) {
 	results := make(map[string]commentEnqueueResult, len(obligations))
 	var tasks []commentTriggerTask
-	var attrs []attribution.Result
+	var merged []commentTriggerTask
 	for _, obligation := range obligations {
 		coverage := h.coverCommentObligationInTx(ctx, tx, q, issue, commentID, obligation, returnIDs)
 		execSquadID := ""
@@ -98,7 +98,7 @@ func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pg
 			tasks = append(tasks, commentTriggerTask{task: coverage.task, attr: coverage.attr})
 		}
 		if coverage.merged {
-			attrs = append(attrs, coverage.mergedAttr)
+			merged = append(merged, commentTriggerTask{task: coverage.task, attr: coverage.mergedAttr})
 		}
 		if !coverage.settled {
 			continue
@@ -110,7 +110,7 @@ func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pg
 			return nil, nil, nil, fmt.Errorf("settle comment dispatch obligation: %w", err)
 		}
 	}
-	return results, tasks, attrs, nil
+	return results, tasks, merged, nil
 }
 
 // coverCommentObligationInTx uses the same intent -> run rule as replay. A
@@ -148,7 +148,7 @@ func (h *Handler) foldCommentObligationInTx(ctx context.Context, tx pgx.Tx, issu
 		return commentObligationCoverage{}, false
 	}
 	qsp := h.Queries.WithTx(sp)
-	params, attr, mergeResult := h.mergeCommentIntoPendingTaskParams(ctx, qsp, issue, obligation.Trigger, commentID, h.TaskService.ResolveIssueReviewSHAParam(ctx, issue.ID))
+	params, attr, mergeResult := h.mergeCommentIntoPendingTaskParams(ctx, qsp, issue, obligation.Trigger, commentID, h.TaskService.ResolveIssueReviewSHAParamWithQueries(ctx, qsp, issue.ID))
 	if mergeResult != commentMergeSucceeded {
 		_ = sp.Rollback(ctx)
 		if mergeResult == commentMergeAttributionBlocked {
@@ -179,6 +179,7 @@ func (h *Handler) foldCommentObligationInTx(ctx context.Context, tx pgx.Tx, issu
 		settledTask: row.ID,
 		merged:      true,
 		mergedAttr:  attr,
+		task:        db.AgentTaskQueue{ID: row.ID, AgentID: obligation.Trigger.Agent.ID, OriginatorUserID: attr.UserID, TriggerCommentID: commentID},
 	}, true
 }
 
@@ -221,7 +222,7 @@ func (h *Handler) planCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *d
 		CommentID: commentID,
 		IssueID:   issue.ID,
 		AgentID:   obligation.Trigger.Agent.ID,
-		HeadSha:   h.TaskService.ResolveIssueReviewSHAParam(ctx, issue.ID),
+		HeadSha:   h.TaskService.ResolveIssueReviewSHAParamWithQueries(ctx, qsp, issue.ID),
 	})
 	if err != nil {
 		_ = sp.Rollback(ctx)
@@ -446,9 +447,9 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 	}
 	originator := uuidToString(comment.AuthorID)
 	if comment.AuthorType != "member" {
-		originator = uuidToString(h.TaskService.ResolveOriginatorFromTriggerComment(ctx, issue.WorkspaceID, comment.ID))
+		originator = uuidToString(h.TaskService.ResolveOriginatorFromCommentWithQueries(ctx, q, comment))
 	}
-	if !h.canInvokeAgent(ctx, agent, comment.AuthorType, uuidToString(comment.AuthorID), originator, uuidToString(issue.WorkspaceID)) {
+	if !h.canInvokeAgentWithQueries(ctx, q, agent, comment.AuthorType, uuidToString(comment.AuthorID), originator, uuidToString(issue.WorkspaceID)) {
 		return fail(ReasonInvocationNotAllowed, "accepted target is no longer invocable")
 	}
 	if agent.ArchivedAt.Valid || agent.ExecutionKind == "external" {
@@ -465,7 +466,7 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 		}
 		trigger.Squad = &squad
 	}
-	verdict, err := service.AgentReadiness(ctx, h.runtimeLookup(obsmetrics.RuntimeLookupSourceComment), agent)
+	verdict, err := service.AgentReadiness(ctx, service.RuntimeLookup{Queries: q, Metrics: h.Metrics, Source: obsmetrics.RuntimeLookupSourceComment}, agent)
 	if err != nil {
 		_, _, retryErr := h.recordCommentObligationRetry(ctx, tx, q, obligation.ID, err)
 		return empty, false, retryErr
@@ -498,6 +499,7 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 		return empty, false, err
 	}
 	if coverage.merged {
+		h.TaskService.ApplyQueuedIssueTaskOverlay(ctx, coverage.task)
 		h.TaskService.RecordHumanDelegation(ctx, coverage.mergedAttr)
 	}
 	if coverage.taskCreated {
