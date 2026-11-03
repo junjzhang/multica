@@ -6143,6 +6143,16 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 		return nil, true
 	}
 
+	if err := execenv.ValidateUserWorkDir(d.cfg.WorkspacesRoot, assignment.AbsPath); err != nil {
+		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+			kind: terminalTaskReportFail, taskID: task.ID,
+			errorMessage: err.Error(), failureReason: "local_directory_error",
+		}); failErr != nil {
+			taskLog.Error("fail task after local_directory ownership check", "error", failErr)
+		}
+		return nil, true
+	}
+
 	// Worktree mode is the whole point of not serialising: each task gets its
 	// own checkout of the repo inside its env root, so there is no shared
 	// mutable state on the user's path to protect. Skipping the mutex here is
@@ -9062,6 +9072,11 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	ctx = withTaskOutputObserver(ctx, outputObserver)
 	ctx = withSessionPinGeneration(ctx, task.SessionPinGeneration)
 	providerInvoked = true
+	if env.LocalDirectory {
+		if err := execenv.ValidateUserWorkDir(d.cfg.WorkspacesRoot, env.WorkDir); err != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(err)
+		}
+	}
 	result, tools, err := d.executeTaskInput(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
 	strictRefused = (result.ResumeRejectedTransient && result.StrictResumeUnmet) || errors.Is(err, agent.ErrResumeRequired)
 	if err != nil {
