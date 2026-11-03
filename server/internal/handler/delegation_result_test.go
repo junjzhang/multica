@@ -63,6 +63,7 @@ func TestDelegationRetryRequiresCurrentExecutionPin(t *testing.T) {
 		t.Fatalf("confirmed retry rejected: %d %s", w.Code, w.Body.String())
 	}
 	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
 	accepted, ok := acceptedReturn(t, issueID)
 	if !ok || accepted.SessionID.String != "actual-retry-B" || accepted.WorkDir.String != "/work/retry-B" {
 		t.Fatal("return did not freeze actual retry B")
@@ -88,6 +89,7 @@ func TestDelegationResultMaterializesFrozenOriginalTurn(t *testing.T) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
 	accepted, _ := acceptedReturn(t, issueID)
 	resultID := latestTaskIDFor(t, issueID, target)
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='running',started_at=now() WHERE id=$1`, resultID)
@@ -152,6 +154,7 @@ func resultFixture(t *testing.T, name string) (source db.AgentTaskQueue, result 
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
 	address, _ = acceptedReturn(t, issueID)
 	result, err = testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, issueID, target)))
 	if err != nil {
@@ -320,6 +323,7 @@ func TestDelegationResultExternalUsesAcceptedSession(t *testing.T) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
 	result, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, issueID, target)))
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +381,7 @@ func TestDelegationResultRefusesUnavailableOriginalTargets(t *testing.T) {
 			case "archived":
 				dbfx.Exec(t, `UPDATE agent SET archived_at=now() WHERE id=$1`, source.AgentID)
 			case "source-scope":
-				dbfx.Exec(t, `UPDATE agent_task_queue SET issue_id=NULL WHERE id=$1`, source.ID)
+				dbfx.Exec(t, `DELETE FROM issue WHERE id=$1`, source.IssueID)
 			case "cancelled":
 				dbfx.Exec(t, `UPDATE issue SET status='cancelled' WHERE id=$1`, result.IssueID)
 			}
@@ -478,6 +482,7 @@ func TestDelegationSessionPinGenerationFencesLateAttempts(t *testing.T) {
 		t.Fatalf("confirmed B refused: %d %s", w.Code, w.Body.String())
 	}
 	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
 	accepted, _ := acceptedReturn(t, issueID)
 	call(protocol.SessionPinRequest{Generation: generationB, NextGeneration: uuidToString(dbid.NewV7())}, 200)
 	stored, _ := acceptedReturn(t, issueID)
@@ -584,4 +589,49 @@ func (h *resultWorkerHost) DeliverIfIdle(_ context.Context, target delivery.Host
 }
 func (h *resultWorkerHost) LookupReceipt(context.Context, delivery.HostTarget, string) (delivery.Receipt, error) {
 	return delivery.Receipt{}, fmt.Errorf("unexpected receipt lookup")
+}
+
+func TestDelegationResultPreservesOriginalUnscopedTask(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	ctx := context.Background()
+	_, sourceID, token := managedDispatcherFixture(t, "unscoped-result")
+	source, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(sourceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE agent_runtime SET runtime_mode='local',provider='codex',daemon_id='unscoped-result-daemon' WHERE id=$1`, source.RuntimeID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET issue_id=NULL WHERE id=$1`, source.ID)
+	target, _ := executableTarget(t, "unscoped-target")
+	title := fmt.Sprintf("unscoped result %d", time.Now().UnixNano())
+	bumpIssueCounter(t)
+	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), "POST", "/api/issues", createIssueBody(title, target), nil, nil)
+	if w.Code != 201 {
+		t.Fatalf("unscoped admission: %d %s", w.Code, w.Body.String())
+	}
+	issueID, _ := issueIDByTitle(t, title)
+	cleanupDelegatedIssue(t, issueID)
+	result, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, issueID, target)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishResultFixture(t, result)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, source.ID)
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	var turnID string
+	dbfx.QueryRow(t, `SELECT notification_task_id FROM agent_task_delegation_return WHERE task_id=$1`, result.ID).Scan(&turnID)
+	turn, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(turnID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.IssueID.Valid || turn.ChatSessionID.Valid || turn.AutopilotRunID.Valid {
+		t.Fatal("unscoped source was redirected into a replacement scope")
+	}
+	proof, err := service.VerifiedDelegationResult(ctx, testHandler.Queries, turn)
+	if err != nil || proof == nil || proof.SourceTaskID != sourceID {
+		t.Fatalf("original task scope verification: %v", err)
+	}
 }

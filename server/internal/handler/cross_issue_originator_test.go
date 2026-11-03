@@ -53,13 +53,16 @@ func newCrossIssueChain(t *testing.T, ownerUserID string, originatorUserID any) 
 		IssueX:        issueX,
 		IssueY:        seedChainIssue(t, "MUL-6490 coordinated issue", coordinator),
 		TaskA: dbfx.Task(t, coordinator, testutil.Cols{
-			"runtime_id":          handlerTestRuntimeID(t),
-			"issue_id":            issueX,
-			"status":              "running",
-			"originator_user_id":  originatorUserID,
-			"accountable_user_id": originatorUserID,
-			"session_id":          "cross-issue-chain-session",
-			"work_dir":            "/work/cross-issue-chain",
+			"runtime_id":                handlerTestRuntimeID(t),
+			"issue_id":                  issueX,
+			"status":                    "running",
+			"originator_user_id":        originatorUserID,
+			"accountable_user_id":       originatorUserID,
+			"session_id":                "cross-issue-chain-session",
+			"work_dir":                  "/work/cross-issue-chain",
+			"resource_control_required": true,
+			"session_pin_confirmed":     true,
+			"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 		}),
 	}
 }
@@ -220,7 +223,7 @@ func triggerCommentOf(t *testing.T, taskID string) string {
 
 func runTo(t *testing.T, taskID string) {
 	t.Helper()
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', session_id = 'cross-issue-run-session', work_dir = '/work/cross-issue' WHERE id = $1`, taskID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', session_id = 'cross-issue-run-session', work_dir = '/work/cross-issue', resource_control_required=true, session_pin_confirmed=true, session_pin_generation=gen_random_uuid() WHERE id = $1`, taskID)
 }
 
 func mention(agentID string) string {

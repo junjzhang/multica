@@ -294,7 +294,7 @@ func validateResultSourceScope(ctx context.Context, q *db.Queries, source db.Age
 			return resultRefusal("source_scope_foreign")
 		}
 	default:
-		return resultRefusal("unsupported_source_scope")
+		return nil
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return resultRefusal("source_scope_missing")

@@ -13,11 +13,20 @@ import (
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
+func managedSnapshotPinBody(t *testing.T, source, session, dir string) map[string]any {
+	t.Helper()
+	task, err := testHandler.Queries.GetAgentTask(context.Background(), parseUUID(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{"session_id": session, "work_dir": dir, "generation": uuidToString(task.SessionPinGeneration)}
+}
+
 func pinManagedSnapshotSource(t *testing.T, source, session, dir string) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	testHandler.PinTaskSession(w, withURLParam(newOwnerDaemonRequest(http.MethodPost, "/pin-session",
-		map[string]any{"session_id": session, "work_dir": dir}), "taskId", source))
+		managedSnapshotPinBody(t, source, session, dir)), "taskId", source))
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("pin = %d: %s", w.Code, w.Body.String())
 	}
@@ -160,7 +169,7 @@ func TestManagedReturnSnapshotReusesSameAddressAfterSourceChanges(t *testing.T) 
 	accepted, _ := acceptedReturn(t, issueID)
 	pinManagedSnapshotSource(t, source, "ordinary-fallback-session", "/work/fallback")
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed', completed_at=now() WHERE id=$1`, source)
-	turn := dbfx.Task(t, dispatcher, testutil.Cols{"runtime_id": uuidToString(accepted.RuntimeID), "status": "running", "session_id": accepted.SessionID.String, "work_dir": accepted.WorkDir.String})
+	turn := dbfx.Task(t, dispatcher, testutil.Cols{"runtime_id": uuidToString(accepted.RuntimeID), "status": "running", "session_id": accepted.SessionID.String, "work_dir": accepted.WorkDir.String, "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
 	newToken := taskTokenFixture(t, dispatcher, turn)
 	code, _, body := intentComment(t, newToken, issueID, fmt.Sprintf("[@Y](mention://agent/%s) original physical address continued", y), "")
 	if code != http.StatusCreated {
@@ -201,7 +210,7 @@ func TestManagedReturnSnapshotSerializesFirstAcceptanceWithPin(t *testing.T) {
 	pinDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		w := httptest.NewRecorder()
-		testHandler.PinTaskSession(w, withURLParam(newOwnerDaemonRequest(http.MethodPost, "/pin-session", map[string]any{"session_id": "later-pin", "work_dir": "/work/later-pin"}), "taskId", source))
+		testHandler.PinTaskSession(w, withURLParam(newOwnerDaemonRequest(http.MethodPost, "/pin-session", managedSnapshotPinBody(t, source, "later-pin", "/work/later-pin")), "taskId", source))
 		pinDone <- w
 	}()
 	waitForBackendBlockedBy(t, acceptingPID)
