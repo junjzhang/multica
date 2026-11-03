@@ -219,7 +219,7 @@ export function IssueExternalCollaboration({
                       {recipient?.name ?? delivery.recipient_agent_id}
                     </span>
                     <span
-                      className="shrink-0 rounded bg-muted px-1 py-0.5 text-micro text-muted-foreground"
+                      className="shrink-0 rounded-sm bg-muted px-1 py-0.5 text-micro text-muted-foreground"
                       title={delivery.kind || undefined}
                     >
                       {deliveryKindLabel(delivery.kind, t)}
