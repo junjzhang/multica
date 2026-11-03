@@ -428,6 +428,34 @@ func (q *Queries) GetResourceTaskState(ctx context.Context, arg GetResourceTaskS
 	return i, err
 }
 
+const hasAgentResourceOnDaemon = `-- name: HasAgentResourceOnDaemon :one
+SELECT EXISTS (
+ SELECT 1 FROM agent_runtime rt
+ WHERE rt.workspace_id = $1 AND rt.daemon_id = $2 AND rt.provider = $3
+   AND (rt.id = (SELECT a.runtime_id FROM agent a WHERE a.id = $4 AND a.workspace_id = $1)
+     OR EXISTS (SELECT 1 FROM agent_task_queue t WHERE t.agent_id = $4 AND t.runtime_id = rt.id))
+) AS hosted
+`
+
+type HasAgentResourceOnDaemonParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+	Provider    string      `json:"provider"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+}
+
+func (q *Queries) HasAgentResourceOnDaemon(ctx context.Context, arg HasAgentResourceOnDaemonParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasAgentResourceOnDaemon,
+		arg.WorkspaceID,
+		arg.DaemonID,
+		arg.Provider,
+		arg.AgentID,
+	)
+	var hosted bool
+	err := row.Scan(&hosted)
+	return hosted, err
+}
+
 const hasPendingReturnInputs = `-- name: HasPendingReturnInputs :one
 SELECT EXISTS (
  SELECT 1 FROM comment_dispatch_obligation o
@@ -549,6 +577,121 @@ func (q *Queries) InvalidateTaskSessionPin(ctx context.Context, arg InvalidateTa
 		&i.SessionPinGeneration,
 	)
 	return i, err
+}
+
+const listDaemonResourceReturns = `-- name: ListDaemonResourceReturns :many
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id FROM issue_delegation_return r
+LEFT JOIN agent_runtime rt ON rt.id = r.runtime_id
+WHERE r.workspace_id = $1 AND r.return_kind = 'managed_task'
+  AND (rt.daemon_id = $2 OR rt.id IS NULL)
+`
+
+type ListDaemonResourceReturnsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+}
+
+func (q *Queries) ListDaemonResourceReturns(ctx context.Context, arg ListDaemonResourceReturnsParams) ([]IssueDelegationReturn, error) {
+	rows, err := q.db.Query(ctx, listDaemonResourceReturns, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []IssueDelegationReturn{}
+	for rows.Next() {
+		var i IssueDelegationReturn
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.DispatcherAgentID,
+			&i.ReturnKind,
+			&i.ExternalSessionID,
+			&i.SourceTaskID,
+			&i.RuntimeID,
+			&i.Provider,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.CreatedAt,
+			&i.ScopeTaskID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDaemonResourceTasks = `-- name: ListDaemonResourceTasks :many
+SELECT t.id AS task_id, t.agent_id, t.runtime_id, t.issue_id, t.chat_session_id,
+       t.autopilot_run_id, t.status, t.session_id, t.work_dir,
+       t.resource_control_required, t.terminal_reported_at,
+       rt.workspace_id, rt.provider
+FROM agent_task_queue t JOIN agent_runtime rt ON rt.id = t.runtime_id
+WHERE rt.daemon_id = $1 AND rt.workspace_id = $2
+  AND (t.status NOT IN ('completed', 'failed', 'cancelled')
+    OR (t.resource_control_required AND t.terminal_reported_at IS NULL)
+    OR t.id = $3
+    OR EXISTS (SELECT 1 FROM issue_delegation_return r WHERE r.source_task_id = t.id OR r.scope_task_id = t.id))
+`
+
+type ListDaemonResourceTasksParams struct {
+	DaemonID     pgtype.Text `json:"daemon_id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	SourceTaskID pgtype.UUID `json:"source_task_id"`
+}
+
+type ListDaemonResourceTasksRow struct {
+	TaskID                  pgtype.UUID        `json:"task_id"`
+	AgentID                 pgtype.UUID        `json:"agent_id"`
+	RuntimeID               pgtype.UUID        `json:"runtime_id"`
+	IssueID                 pgtype.UUID        `json:"issue_id"`
+	ChatSessionID           pgtype.UUID        `json:"chat_session_id"`
+	AutopilotRunID          pgtype.UUID        `json:"autopilot_run_id"`
+	Status                  string             `json:"status"`
+	SessionID               pgtype.Text        `json:"session_id"`
+	WorkDir                 pgtype.Text        `json:"work_dir"`
+	ResourceControlRequired bool               `json:"resource_control_required"`
+	TerminalReportedAt      pgtype.Timestamptz `json:"terminal_reported_at"`
+	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	Provider                string             `json:"provider"`
+}
+
+func (q *Queries) ListDaemonResourceTasks(ctx context.Context, arg ListDaemonResourceTasksParams) ([]ListDaemonResourceTasksRow, error) {
+	rows, err := q.db.Query(ctx, listDaemonResourceTasks, arg.DaemonID, arg.WorkspaceID, arg.SourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDaemonResourceTasksRow{}
+	for rows.Next() {
+		var i ListDaemonResourceTasksRow
+		if err := rows.Scan(
+			&i.TaskID,
+			&i.AgentID,
+			&i.RuntimeID,
+			&i.IssueID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Status,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.ResourceControlRequired,
+			&i.TerminalReportedAt,
+			&i.WorkspaceID,
+			&i.Provider,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listIssueResultNotifications = `-- name: ListIssueResultNotifications :many
@@ -1405,6 +1548,93 @@ WHERE task_id = $1
 func (q *Queries) RecordDelegationRetryDecisionAttempt(ctx context.Context, taskID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, recordDelegationRetryDecisionAttempt, taskID)
 	return err
+}
+
+const recordReleasedTaskWorkDir = `-- name: RecordReleasedTaskWorkDir :one
+UPDATE agent_task_queue SET durable_work_dir = $1
+WHERE id = $2 AND status IN ('completed', 'failed', 'cancelled')
+  AND work_dir = $3
+  AND (durable_work_dir IS NULL OR durable_work_dir = $1)
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
+`
+
+type RecordReleasedTaskWorkDirParams struct {
+	DurableWorkDir pgtype.Text `json:"durable_work_dir"`
+	TaskID         pgtype.UUID `json:"task_id"`
+	WorkDir        pgtype.Text `json:"work_dir"`
+}
+
+func (q *Queries) RecordReleasedTaskWorkDir(ctx context.Context, arg RecordReleasedTaskWorkDirParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, recordReleasedTaskWorkDir, arg.DurableWorkDir, arg.TaskID, arg.WorkDir)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CommentThreadID,
+		&i.CancelledByType,
+		&i.CancelledByID,
+		&i.CancelledByName,
+		&i.IssueSnapshot,
+		&i.WorkflowStep,
+		&i.DelegationOutcomeFinal,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+		&i.SessionPinConfirmed,
+		&i.SessionPinGeneration,
+	)
+	return i, err
 }
 
 const recordTaskTerminalReport = `-- name: RecordTaskTerminalReport :execrows

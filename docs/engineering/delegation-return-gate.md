@@ -247,6 +247,53 @@ confirmation. A repeated transition to the same new generation acknowledges it
 without clearing a newer pin. Late old-generation pins cannot alter the task
 or previously accepted snapshots.
 
+Finalization commits work, reports the terminal outcome, and only then asks
+`POST /api/daemon/resources/release` while holding the local resource lock.
+`terminal_reported_at` records an actual authorized completion/failure/cancel
+acknowledgement; a control-plane terminal transition cannot manufacture it.
+Task completion alone is not business acceptance. Frozen directories and
+provider stores remain protected until the delegated business is canonically
+done/closed and every pending input, active execution, and pending/unknown
+notification dependency has closed. A handling turn cancelled after it started
+remains input-unknown even after its executor acknowledges exit. Its durable
+notification pointer is retained and it is not automatically resent.
+
+Resource queries cover the actual owned directory tree or provider-store
+scope, including other sessions and runtimes on the same daemon. The returned
+protection list is complete within the authenticated request workspace; it
+never expands a workspace-bound daemon credential into another workspace.
+Provider-store permission is decided by the server's complete provider/agent/
+scope dependency check, not by a daemon path comparison. Supported stores are
+keyed by profile and globally unique agent/scope identities. If a frozen return
+loses its source/runtime lookup, its original scope is unknown: stores for that
+provider and actor remain protected, with the frozen address retained in the
+response. A current actor binding cannot reconstruct the original scope.
+
+Legacy provider-store requests can omit task/runtime/workspace identity, but
+must identify the actual daemon when using a user credential. The server derives
+the agent's real workspace, checks membership, verifies registered daemon
+ownership and current or historical hosting, and rejects conflicting identities.
+A daemon token's workspace and daemon binding cannot be overridden by the body.
+Missing ownership proof never grants release.
+
+Local execution must reject using a daemon-owned task subtree as a user-owned
+in-place directory, including physical aliases. Existing such bindings require
+a maintenance inventory and relocation before enabling deletion; blocking new
+bindings alone does not establish that legacy directories are safe. Workdir
+responses include all protected addresses in the authorized daemon/workspace,
+not only textual path matches. The daemon must also veto physical aliases and
+overlapping directories under its resource lock; an incomplete or unverifiable
+answer grants no deletion. Historical ownership metadata can authorize the
+legacy TTL path when there are no new dependencies. It cannot reconstruct a
+frozen return address or substitute for a v1 terminal acknowledgement.
+
+After confirmed removal, `POST /api/daemon/tasks/{id}/resources-released`
+idempotently refines only the top-level `durable_work_dir`. It neither rewrites
+`result`/`error` nor creates another notification. A typed turn may prove its
+original source through the durable reverse relation, but the receipt updates
+the turn whose directory was actually removed. Removing historical directory
+A never redirects a task that now points at B.
+
 Issue run reads include only materialized/refused notifications or eligible final
 outcomes. A comment-change cancelled run and an automatic-retry intermediate
 attempt have no pending notification of their own; their replacement/final leaf
