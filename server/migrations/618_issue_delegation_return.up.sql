@@ -1,7 +1,9 @@
 -- An accepted delegation return is the exact address one dispatcher's results
 -- go back to on one issue. The address is either a registered external host
 -- session or the managed run whose provider session dispatched the work; an
--- Agent identity alone is not an address.
+-- Agent identity alone is not an address. Managed runtime/provider/session/work
+-- directory values are frozen here; source_task_id records provenance only.
+-- Pinning or completing that task must never retarget an accepted return.
 --
 -- The row is keyed by (workspace, issue, dispatcher agent): distinct actors on
 -- the same issue keep their own accepted address, and one actor keeps one
@@ -19,15 +21,25 @@ CREATE TABLE issue_delegation_return (
         CHECK (return_kind IN ('external_session', 'managed_task')),
     external_session_id UUID,
     source_task_id UUID,
+    runtime_id UUID,
+    provider TEXT,
+    session_id TEXT,
+    work_dir TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (
         (return_kind = 'external_session'
             AND external_session_id IS NOT NULL
-            AND source_task_id IS NULL)
+            AND source_task_id IS NULL
+            AND runtime_id IS NULL AND provider IS NULL
+            AND session_id IS NULL AND work_dir IS NULL)
         OR
         (return_kind = 'managed_task'
             AND source_task_id IS NOT NULL
-            AND external_session_id IS NULL)
+            AND external_session_id IS NULL
+            AND runtime_id IS NOT NULL
+            AND provider IS NOT NULL AND btrim(provider) <> ''
+            AND session_id IS NOT NULL AND btrim(session_id) <> ''
+            AND work_dir IS NOT NULL AND btrim(work_dir) <> '')
     )
 );
 

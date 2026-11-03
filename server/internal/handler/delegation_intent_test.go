@@ -28,7 +28,7 @@ func intentComment(t *testing.T, token, issueID, content, parentID string) (int,
 	return w.Code, c.ID, w.Body.String()
 }
 
-func extraManagedRun(t *testing.T, agentID, sessionID string) (string, string) {
+func extraManagedRun(t *testing.T, agentID, sessionID, workDir string) (string, string) {
 	t.Helper()
 	var runtimeID string
 	if err := testPool.QueryRow(context.Background(), `SELECT runtime_id::text FROM agent WHERE id=$1`, agentID).Scan(&runtimeID); err != nil {
@@ -40,7 +40,7 @@ func extraManagedRun(t *testing.T, agentID, sessionID string) (string, string) {
 		"runtime_id": runtimeID,
 		"status":     "running",
 		"session_id": sessionID,
-		"work_dir":   "/work/" + sessionID,
+		"work_dir":   workDir,
 	})
 	return taskID, taskTokenFixture(t, agentID, taskID)
 }
@@ -74,7 +74,7 @@ func TestManagedSameActorIssueContinuationAndSessionConflict(t *testing.T) {
 	}
 
 	// Same provider session, later turn: a new task id is the same address.
-	_, token2 := extraManagedRun(t, dispatcher, "dispatcher-session-managed-source")
+	_, token2 := extraManagedRun(t, dispatcher, "dispatcher-session-managed-source", "/work/dispatcher-managed-source")
 	contentY := fmt.Sprintf("[@Y](mention://agent/%s) continuation %d", targetY, time.Now().UnixNano())
 	cw := serveAuthenticated(t, token2, http.HandlerFunc(testHandler.CreateComment), http.MethodPost,
 		"/api/issues/"+issueID+"/comments", map[string]any{"content": contentY}, map[string]string{"id": issueID}, nil)
@@ -98,7 +98,7 @@ func TestManagedSameActorIssueContinuationAndSessionConflict(t *testing.T) {
 	}
 
 	// A different physical session on the same issue is a conflict.
-	_, token3 := extraManagedRun(t, dispatcher, "different-physical-session")
+	_, token3 := extraManagedRun(t, dispatcher, "different-physical-session", "/work/different-physical-session")
 	contentZ := fmt.Sprintf("[@Z](mention://agent/%s) other session %d", targetZ, time.Now().UnixNano())
 	zw := serveAuthenticated(t, token3, http.HandlerFunc(testHandler.CreateComment), http.MethodPost,
 		"/api/issues/"+issueID+"/comments", map[string]any{"content": contentZ}, map[string]string{"id": issueID}, nil)

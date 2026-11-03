@@ -16,7 +16,8 @@ dispatcher chooses does not change where that dispatcher's results go. Each row
 names either:
 
 - `managed_task` — the source run (`source_task_id`) identified by the
-  server-stamped `X-Task-ID` of a `mat_` task token; or
+  server-stamped `X-Task-ID` of a `mat_` task token, plus its frozen
+  `runtime_id`, `provider`, `session_id` and `work_dir`; or
 - `external_session` — the registered external host session the dispatcher
   named explicitly.
 
@@ -122,14 +123,17 @@ earlier dispatcher is never evidence that this dispatch has an address.
 | external Agent | `X-Return-Session` resolving to exactly one session registered to that Agent in the workspace (registered id or provider session id) | `delegation_return_missing` / `delegation_return_invalid` (400); no fallback to the human owner's profile |
 | member | none required | — |
 
-The managed source is re-read under a row lock **inside the transaction that
-persists the new delegation**, together with its agent's authorization and the
-session/work-directory pin. A request that authenticated while the run was
+The managed runtime, agent and source task are locked in that order **inside
+the transaction that persists the new delegation**. The source runtime supplies
+the provider; the locked source task supplies its runtime, session and work
+directory. These four address values are copied to the accepted return row. A request that authenticated while the run was
 active but waited on another writer until the run completed is refused, and
 nothing is written. This is separate from a relationship the run already
 accepted: that stored row remains a valid delivery target after the source
-completes, because the result-handling turn resumes its recorded provider
-session by id. It is only new delegations that require an active source. The
+completes. `source_task_id` preserves the original issue/chat/autopilot scope as
+provenance; it is not an address lookup. Ordinary task pin, completion and
+fallback may change or clear that task's resume fields without changing the
+accepted snapshot. It is only new delegations that require an active source. The
 sweeper's replay of an accepted comment executes that stored intent and does not
 accept a new delegation from a closed source; it still applies the current
 revocation/runtime checks.
@@ -138,8 +142,25 @@ A managed run's source scope is its original issue, chat, or autopilot; the
 delegated issue is not a substitute scope. A run with no business scope (for
 example a quick create) is still an exact runtime/provider session/work
 directory, and the task token's workspace binding proves tenancy. A continuation
-turn in the same provider session reuses the stored `source_task_id`; a turn
-from a different physical session is a conflict that needs explicit takeover.
+turn may reuse the binding only when all four frozen address values match,
+even if its task ID differs. The original `source_task_id` stays unchanged.
+Reusing the same task ID does not bypass this comparison: a re-pin, different
+runtime/provider or changed directory is a conflict requiring explicit takeover.
+A missing snapshot fails closed; mutable task history is never a substitute.
+
+Result delivery must use the accepted snapshot and strict session resume. It
+must not reconstruct the destination from the source task's current fields or
+an agent's latest run. If the frozen session, runtime or directory is unusable,
+keep the result and surface delivery failure instead of choosing another
+session. This strict return behavior is separate from ordinary task fallback,
+which remains unchanged; the result-notification slice must wire it through
+`RequireResume`.
+
+The snapshot columns belong to unreleased migration 618. Qualification requires
+a fresh database with the final SQL and a replay from the 610 baseline before
+cutover. A local database that already recorded the older 618 does not acquire
+the snapshot columns by rerunning migrations. Do not backfill a claimed
+original address from the source task's mutable current state.
 
 ## Entry points
 

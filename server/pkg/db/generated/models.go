@@ -1009,6 +1009,10 @@ type IssueDelegationReturn struct {
 	ReturnKind        string             `json:"return_kind"`
 	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
 	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
+	RuntimeID         pgtype.UUID        `json:"runtime_id"`
+	Provider          pgtype.Text        `json:"provider"`
+	SessionID         pgtype.Text        `json:"session_id"`
+	WorkDir           pgtype.Text        `json:"work_dir"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
