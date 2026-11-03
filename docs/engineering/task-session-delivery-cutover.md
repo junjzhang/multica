@@ -37,7 +37,21 @@ Store measured migration and drain durations with the rehearsal evidence. Do not
 
 Identify every path that can create or claim work: interactive API clients, managed Agents using the API, comments and assignments, scheduled wakeups, autopilots, webhooks, and all registered delivery workers. Pausing a browser or one daemon is not a write fence.
 
-Apply and verify the admission and claim fence before waiting for managed executions to finish. Preserve existing results and completion acknowledgements while draining. The current daemon has no public drain operation: its internal claim barrier requires zero active tasks, while `daemon stop` and `/shutdown` cancel the context used by active executions. Pausing autopilots or individual wakeups also leaves interactive dispatch and existing queued tasks enabled. These controls do not establish the required fence. Resolve and rehearse this operational gap before production cutover; do not stop a daemon that still owns active managed executions or report an ordinary shutdown as a completed drain.
+Apply and verify the admission and claim fence before waiting for managed executions to finish. Preserve existing results and completion acknowledgements while draining. The daemon has no public drain operation: its internal claim barrier requires zero active tasks, while `daemon stop` and `/shutdown` cancel active execution contexts. Neither shutdown nor pausing individual producers establishes the required boundary.
+
+A temporary PostgreSQL trigger fence is an operational option for the task queue and delivery leases. Qualify its scripts against both the actual deployed version and the candidate; include every consumer, including a legacy mailbox loop when present. Attach the exact scripts and hashes to the release manifest. Rehearsal scripts restricted to a test database are not production commands.
+
+The reviewed fence must:
+
+- Install both task and delivery guards atomically under table locks, at READ COMMITTED isolation, with bounded lock and statement timeouts. Read back the installed definitions; submission alone is not proof.
+- Reject new transitions or inserts into dispatched/running/waiting task states, and new or replaced delivery leases. Already-admitted task transitions, heartbeats, result reports and existing-lease outcomes remain allowed.
+- Preserve notification identities, targets and receipts. A due deferred task may legitimately become queued before its claim is refused; record that transition rather than claiming a complete write freeze.
+- Offer an idle-only installation that checks for active tasks and leases while holding the same table locks. A failed check rolls back without installing either guard.
+- Be removable atomically without cancelling tasks, replacing queued IDs, or resetting unknown deliveries. If a running parent waits for a newly blocked child, abort the maintenance window and remove the fence so the same work can continue.
+
+Claim requests may return temporary errors while fenced. Do not describe that interval as healthy ordinary operation or leave the fence in place indefinitely. Count pre-fence dispatched/preparing tasks and leases as in flight, even if their provider call has not started. Unknown delivery state does not prove an external host is idle.
+
+This fence does not cover direct cloud fleet commands, node execution, arbitrary plugin effects or work already accepted by an external host. Inventory those integrations, restrict their mutation ingress and drain admitted calls, or establish that they are unconfigured. Verify that no participating writer session bypasses the guards. If those conditions cannot be established, the deployment is not fenced; do not stop busy daemons or claim a completed drain.
 
 After managed executions reach the agreed terminal boundary, stop/fence all message producers and claimants. Verify process state and database activity rather than trusting that a stop command was sent. Let ordinary HTTP transactions drain. Record all remaining leased or uncertain deliveries and reconcile available host receipts using their original IDs. Lease expiry is not proof that a send did not occur.
 
@@ -45,17 +59,18 @@ Take the final consistent backup and delivery inventory only after the write fen
 
 ## Migrate and replace
 
-Apply the reviewed migration artifacts while old readers and writers remain fenced. Complete and verify every concurrent index before starting candidate consumers. Do not reuse occupied migration numbers or declare success from the last migration's exit code alone.
+Apply the reviewed migration artifacts while old readers and writers remain fenced. Complete and verify every concurrent index before starting candidate consumers. Recheck the operational guards after DDL and record whether the backup contains them. Do not reuse occupied migration numbers or declare success from the last migration's exit code alone.
 
 Install the tested backend, calling CLI, and delivery daemon as one compatible set; rebuild/update the frontend for the new issue controls and schemas. Start and verify the upgraded backend before starting the upgraded daemon. The daemon requires `workspace_id` in each delivery claim response; an older backend leaves all such claims unusable and prevents delivery. The host must satisfy the idle-only delivery and receipt contract. Do not replace the host merely because the Multica application changed. Preserve host instance identity, existing sessions, receipts, daemon identity, and credential profiles.
 
 Before reopening normal traffic:
 
 1. Read back artifact identities, backend health, migration ledger, and worker/host capability. Reconcile them with the tested release manifest.
-2. Run the dedicated acceptance issue through managed execution and durable result submission.
-3. Verify that the original Leader session receives the expected notification once. Inspect the host receipt and task/comment records, then verify acceptance or rework through the intended UI/CLI.
-4. Inspect the frozen inventory again. No uncertain delivery may have been reset into a fresh send, and no unrelated managed task may have been restarted.
-5. Reopen admission using the recorded pre-window settings. Confirm that the writer/consumer set is the intended one and that queued work progresses without new unclassified failures.
+2. Keep ordinary queues fenced. If a qualification exception is needed, permit only an explicitly identified, newly created acceptance workspace with one operator, dedicated Agents/runtimes/claimants and no prior task history. Resolve task workspace ownership from the actual Agent record, never a caller-supplied context field. Keep external mutation ingress restricted. Qualify this selective fence and its reversal before using it in production.
+3. Run the dedicated acceptance issue through managed execution and durable result submission. Verify that ordinary workspaces still produce no new provider inputs or delivery calls; ordinary queued, deferred and unknown records remain accounted for.
+4. Verify that the original Leader session receives the expected notification once. Inspect the host receipt and task/comment records, then verify acceptance or rework through the intended UI/CLI.
+5. Inspect the frozen inventory again. No uncertain delivery may have been reset into a fresh send, and no unrelated managed task may have been restarted. If acceptance fails, remove the qualification exception to restore the full fence; preserve the new records and follow recovery below.
+6. Only after acceptance is approved and remaining dedicated acceptance work is accounted for, remove the reviewed queue guards atomically and reopen admission using the recorded pre-window settings. If queued acceptance work is not approved for release, stop its dedicated claimant after it is idle and verify its runtime is unavailable to other claimants before removing the global guards. Confirm the intended writer/consumer set and progress of the original queued IDs, with no new unclassified failures.
 
 A session that no longer exists leaves a visible notification failure and a preserved result. Do not change its receipt address to make the acceptance counter look green.
 
