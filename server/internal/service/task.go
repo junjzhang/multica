@@ -4570,6 +4570,9 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID, supplem
 	var task db.AgentTaskQueue
 	var change *qoderIssueChange
 	err := s.runInTx(ctx, func(q *db.Queries) error {
+		if err := q.LockQoderIssueForTaskTransition(ctx, taskID); err != nil {
+			return err
+		}
 		var err error
 		task, err = q.StartAgentTaskWithSupplement(ctx, db.StartAgentTaskWithSupplementParams{TaskID: taskID, EnableTaskSupplement: enableTaskSupplement})
 		if err != nil {
@@ -4599,6 +4602,9 @@ func (s *TaskService) StartTaskForClaim(ctx context.Context, claim db.LockAgentT
 	}
 	defer tx.Rollback(ctx)
 	qtx := s.Queries.WithTx(tx)
+	if err := qtx.LockQoderIssueForTaskTransition(ctx, claim.ID); err != nil {
+		return nil, fmt.Errorf("lock Qoder issue for task start: %w", err)
+	}
 	task, err := qtx.LockAgentTaskStartClaim(ctx, claim)
 	if err != nil {
 		return nil, fmt.Errorf("lock task start claim: %w", err)
@@ -4795,6 +4801,9 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 	var chatAssistantMsg *db.ChatMessage
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
 		if err := lockChatSessionForTaskWrite(ctx, qtx, taskID); err != nil {
+			return err
+		}
+		if err := qtx.LockQoderIssueForTaskTransition(ctx, taskID); err != nil {
 			return err
 		}
 		t, err := qtx.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
