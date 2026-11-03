@@ -6,11 +6,11 @@
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id,
     return_kind, external_session_id, source_task_id,
-    runtime_id, provider, session_id, work_dir
+    runtime_id, provider, session_id, work_dir, scope_task_id
 ) VALUES (
     @id, @workspace_id, @issue_id, @dispatcher_agent_id,
     @return_kind, sqlc.narg('external_session_id'), sqlc.narg('source_task_id'),
-    sqlc.narg('runtime_id'), sqlc.narg('provider'), sqlc.narg('session_id'), sqlc.narg('work_dir')
+    sqlc.narg('runtime_id'), sqlc.narg('provider'), sqlc.narg('session_id'), sqlc.narg('work_dir'), sqlc.narg('scope_task_id')
 )
 ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
 RETURNING *;

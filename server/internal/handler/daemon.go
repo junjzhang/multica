@@ -23,6 +23,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -2704,6 +2705,9 @@ func (h *Handler) failClaimedTaskBeforeLaunch(
 	status int,
 	claimMessage string,
 ) *claimBuildFailure {
+	if delegation.IsResultTask(*task) {
+		failureReason = protocol.DelegationResultUnavailable
+	}
 	if _, err := h.TaskService.FailTask(
 		ctx,
 		task.ID,
@@ -2827,6 +2831,10 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	}
 	resultTurn, resultErr := service.VerifiedDelegationResult(r.Context(), h.Queries, *task)
 	if resultErr != nil {
+		if !service.IsDelegationResultRefusal(resultErr) {
+			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, resultErr, "result", uuidToString(task.ID))
+		}
+
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Delegated result cannot be delivered to its original session: "+resultErr.Error(), protocol.DelegationResultUnavailable, "result_unavailable", http.StatusConflict, "result unavailable")
 	}
 	resp.ResourceControlRequired = requestHasClientCapability(r, protocol.DaemonCapabilityDelegationResultsV1)
@@ -4780,7 +4788,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
 	// Verify the caller owns this task's workspace.
-	_, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
+	existing, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
 	if !ok {
 		return
 	}
@@ -4799,6 +4807,18 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// re-route below feeds req.Output into the failure classifier, and that
 	// classifier must see exactly the text we are going to persist.
 	sanitizeTaskCompleteRequest(&req)
+	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
+	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
+		writeError(w, 500, "verify result address failed")
+		return
+	}
+	if existing.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	if verificationErr != nil || (turn != nil && (req.SessionID == "" || req.WorkDir == "" || req.SessionID != turn.SessionID || req.WorkDir != turn.WorkDir || req.SessionRolloutMissing || req.RetiredSessionID != "")) {
+		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{Error: "Result handling reported no verified frozen address; input outcome is unknown. " + req.Output, FailureReason: protocol.DelegationResultInputUnknown, BranchName: req.BranchName})
+		return
+	}
 
 	// GH #6402: a daemon whose backend does not (yet) read the provider's
 	// structured terminal reason reports a context-exhausted run as a clean
@@ -5515,6 +5535,29 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 // transaction, token revocation and runtime wake-up as one the daemon reported
 // as failed itself.
 func (h *Handler) failTask(w http.ResponseWriter, r *http.Request, taskID, workspaceID string, req TaskFailRequest) {
+	existing, loadErr := h.Queries.GetAgentTask(r.Context(), parseUUID(taskID))
+	if loadErr != nil {
+		writeError(w, 500, "load terminal task failed")
+		return
+	}
+	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
+	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
+		writeError(w, 500, "verify result address failed")
+		return
+	}
+	if existing.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	if verificationErr != nil || turn != nil {
+		mismatch := verificationErr != nil || (req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir)
+		if mismatch {
+			req.FailureReason = protocol.DelegationResultInputUnknown
+			req.Error = "Result handling reported a different frozen address; input outcome is unknown. " + req.Error
+		}
+		req.SessionID, req.WorkDir, req.RetiredSessionID = "", "", ""
+		req.SessionRolloutMissing = false
+	}
+
 	// MUL-5305: SessionRolloutMissing is applied inside FailTask's terminal
 	// transaction — forcing session_id NULL (overriding the COALESCE that would
 	// keep a stale mid-flight pin) and flagging the row in the same commit that
@@ -5778,6 +5821,29 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 	req.BranchName = util.SanitizeTextForPostgres(req.BranchName)
 	req.DurableWorkDir = util.SanitizeTextForPostgres(req.DurableWorkDir)
 	req.RetiredSessionID = util.SanitizeTextForPostgres(req.RetiredSessionID)
+
+	if task.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	typedResult := delegation.IsResultTask(task)
+	if !typedResult {
+		_, err := h.Queries.GetDelegationResultObligationForTask(r.Context(), task.ID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 500, "verify result ownership failed")
+			return
+		}
+		typedResult = err == nil
+	}
+
+	if typedResult {
+		req.RetiredSessionID = ""
+		if task.StartedAt.Valid {
+			req.FailureReason = protocol.DelegationResultInputUnknown
+			if req.ErrorMessage == "" {
+				req.ErrorMessage = "Result handling was cancelled after execution started; input outcome is unknown."
+			}
+		}
+	}
 
 	// Terminal deliveries first, failing LOUD on persistence errors: these
 	// fields are the only pointer to a cancelled task's work, and the daemon

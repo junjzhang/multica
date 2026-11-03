@@ -35,14 +35,14 @@ const createIssueDelegationReturn = `-- name: CreateIssueDelegationReturn :one
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id,
     return_kind, external_session_id, source_task_id,
-    runtime_id, provider, session_id, work_dir
+    runtime_id, provider, session_id, work_dir, scope_task_id
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
-    $8, $9, $10, $11
+    $8, $9, $10, $11, $12
 )
 ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
-RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at
+RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id
 `
 
 type CreateIssueDelegationReturnParams struct {
@@ -57,6 +57,7 @@ type CreateIssueDelegationReturnParams struct {
 	Provider          pgtype.Text `json:"provider"`
 	SessionID         pgtype.Text `json:"session_id"`
 	WorkDir           pgtype.Text `json:"work_dir"`
+	ScopeTaskID       pgtype.UUID `json:"scope_task_id"`
 }
 
 // The accepted return is written with the dispatching business write in one
@@ -76,6 +77,7 @@ func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIss
 		arg.Provider,
 		arg.SessionID,
 		arg.WorkDir,
+		arg.ScopeTaskID,
 	)
 	var i IssueDelegationReturn
 	err := row.Scan(
@@ -91,6 +93,7 @@ func (q *Queries) CreateIssueDelegationReturn(ctx context.Context, arg CreateIss
 		&i.SessionID,
 		&i.WorkDir,
 		&i.CreatedAt,
+		&i.ScopeTaskID,
 	)
 	return i, err
 }
@@ -255,7 +258,7 @@ func (q *Queries) GetIssueAssignmentDelegation(ctx context.Context, arg GetIssue
 }
 
 const getIssueDelegationReturnForDispatcher = `-- name: GetIssueDelegationReturnForDispatcher :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
 WHERE workspace_id = $1
   AND issue_id = $2
   AND dispatcher_agent_id = $3
@@ -285,6 +288,7 @@ func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg
 		&i.SessionID,
 		&i.WorkDir,
 		&i.CreatedAt,
+		&i.ScopeTaskID,
 	)
 	return i, err
 }
@@ -657,7 +661,7 @@ func (q *Queries) LinkIssueAssignmentDelegationReturn(ctx context.Context, arg L
 }
 
 const listAgentTaskDelegationReturns = `-- name: ListAgentTaskDelegationReturns :many
-SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id
 FROM issue_delegation_return r
 JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
 WHERE l.task_id = $1
@@ -688,6 +692,7 @@ func (q *Queries) ListAgentTaskDelegationReturns(ctx context.Context, taskID pgt
 			&i.SessionID,
 			&i.WorkDir,
 			&i.CreatedAt,
+			&i.ScopeTaskID,
 		); err != nil {
 			return nil, err
 		}
@@ -762,7 +767,7 @@ func (q *Queries) ListIssueAssignmentDelegationReturnIDs(ctx context.Context, ar
 }
 
 const listIssueDelegationReturns = `-- name: ListIssueDelegationReturns :many
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
 WHERE workspace_id = $1 AND issue_id = $2
 ORDER BY created_at, id
 `
@@ -795,6 +800,7 @@ func (q *Queries) ListIssueDelegationReturns(ctx context.Context, arg ListIssueD
 			&i.SessionID,
 			&i.WorkDir,
 			&i.CreatedAt,
+			&i.ScopeTaskID,
 		); err != nil {
 			return nil, err
 		}
@@ -1012,7 +1018,7 @@ func (q *Queries) LockCommentDispatchObligation(ctx context.Context, id pgtype.U
 }
 
 const lockIssueDelegationReturnForDispatcher = `-- name: LockIssueDelegationReturnForDispatcher :one
-SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at FROM issue_delegation_return
+SELECT id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id FROM issue_delegation_return
 WHERE workspace_id = $1
   AND issue_id = $2
   AND dispatcher_agent_id = $3
@@ -1044,6 +1050,7 @@ func (q *Queries) LockIssueDelegationReturnForDispatcher(ctx context.Context, ar
 		&i.SessionID,
 		&i.WorkDir,
 		&i.CreatedAt,
+		&i.ScopeTaskID,
 	)
 	return i, err
 }
@@ -1198,7 +1205,7 @@ const updateIssueDelegationReturnExternalSession = `-- name: UpdateIssueDelegati
 UPDATE issue_delegation_return
 SET external_session_id = $1
 WHERE id = $2 AND return_kind = 'external_session'
-RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at
+RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id
 `
 
 type UpdateIssueDelegationReturnExternalSessionParams struct {
@@ -1225,6 +1232,7 @@ func (q *Queries) UpdateIssueDelegationReturnExternalSession(ctx context.Context
 		&i.SessionID,
 		&i.WorkDir,
 		&i.CreatedAt,
+		&i.ScopeTaskID,
 	)
 	return i, err
 }

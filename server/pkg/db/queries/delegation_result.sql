@@ -111,10 +111,28 @@ LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE l.task_id = @task_id AND r.workspace_id = @workspace_id
 ORDER BY r.created_at, r.id;
 
+-- name: ListReturnResultDependencies :many
+SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
+       t.resource_control_required, t.terminal_reported_at,
+       handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
+       handling.terminal_reported_at AS handling_terminal_reported_at,
+       handling.resource_control_required AS handling_resource_control_required
+FROM agent_task_delegation_return l
+LEFT JOIN agent_task_queue t ON t.id = l.task_id
+LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
+WHERE l.delegation_return_id = @return_id;
+
 -- name: ConfirmTaskSessionPin :execrows
 UPDATE agent_task_queue SET session_pin_confirmed = true
 WHERE id = @task_id AND session_id = @session_id AND work_dir = @work_dir
   AND resource_control_required AND status = 'running' AND session_pin_generation = @generation;
+
+-- name: HasPendingReturnInputs :one
+SELECT EXISTS (
+ SELECT 1 FROM comment_dispatch_obligation o
+ LEFT JOIN comment_delegation_return c ON c.comment_id = o.comment_id
+ WHERE o.status = 'pending' AND (o.delegation_return_id = @return_id OR c.delegation_return_id = @return_id)
+) AS pending;
 
 -- name: ListIssueResultNotifications :many
 SELECT l.*, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
@@ -125,11 +143,25 @@ SELECT l.*, r.dispatcher_agent_id, r.return_kind, r.source_task_id,
     handling.error AS handling_error
 FROM agent_task_delegation_return l
 JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN agent_task_queue outcome ON outcome.id = l.task_id
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE r.issue_id = @issue_id AND r.workspace_id = @workspace_id
+  AND (l.notification_task_id IS NOT NULL OR l.notification_delivery_id IS NOT NULL OR l.notification_error IS NOT NULL
+    OR ((outcome.status = 'completed' OR (outcome.status = 'failed' AND outcome.delegation_outcome_final))
+      AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = outcome.id)))
 ORDER BY r.created_at, r.id;
 
+
+-- name: ListManagedReturnsForScope :many
+SELECT r.* FROM issue_delegation_return r
+JOIN agent_task_queue source ON source.id = r.source_task_id
+LEFT JOIN agent_task_queue root ON root.id = r.scope_task_id
+WHERE r.workspace_id = @workspace_id AND r.return_kind = 'managed_task'
+  AND ((sqlc.narg(issue_id)::uuid IS NOT NULL AND (source.issue_id = sqlc.narg(issue_id) OR root.issue_id = sqlc.narg(issue_id) OR r.issue_id = sqlc.narg(issue_id)))
+    OR (sqlc.narg(chat_session_id)::uuid IS NOT NULL AND (source.chat_session_id = sqlc.narg(chat_session_id) OR root.chat_session_id = sqlc.narg(chat_session_id))))
+ AND (sqlc.narg(after_return_id)::uuid IS NULL OR r.id > sqlc.narg(after_return_id))
+ORDER BY r.id LIMIT 500;
 
 -- name: CancelUnstartedDelegationResultTasks :many
 UPDATE agent_task_queue t
@@ -164,3 +196,27 @@ WHERE task_id = @task_id AND delegation_return_id = @return_id
 UPDATE agent_task_delegation_return SET last_attempt_at = now()
 WHERE task_id = @task_id
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
+
+-- name: ListManagedReturnsForRuntime :many
+SELECT * FROM issue_delegation_return WHERE runtime_id = @runtime_id AND return_kind = 'managed_task'
+ AND (sqlc.narg(after_return_id)::uuid IS NULL OR id > sqlc.narg(after_return_id))
+ORDER BY id LIMIT 500;
+
+-- name: ListManagedReturnsForWorkspace :many
+SELECT * FROM issue_delegation_return WHERE workspace_id = @workspace_id AND return_kind = 'managed_task'
+ AND (sqlc.narg(after_return_id)::uuid IS NULL OR id > sqlc.narg(after_return_id))
+ORDER BY id LIMIT 500;
+
+-- name: GetResourceTaskState :one
+SELECT t.id,t.agent_id,t.status,t.resource_control_required,t.terminal_reported_at
+FROM agent_task_queue t JOIN agent a ON a.id=t.agent_id
+WHERE t.id = @task_id AND a.workspace_id = @workspace_id;
+
+-- name: LockTasksForScopeRemoval :exec
+WITH locked AS (
+ SELECT id FROM agent_task_queue
+ WHERE (sqlc.narg(issue_id)::uuid IS NOT NULL AND issue_id = sqlc.narg(issue_id))
+    OR (sqlc.narg(chat_session_id)::uuid IS NOT NULL AND chat_session_id = sqlc.narg(chat_session_id))
+ ORDER BY id FOR UPDATE
+)
+SELECT count(*) FROM locked;

@@ -1024,6 +1024,7 @@ type IssueDelegationReturn struct {
 	SessionID         pgtype.Text        `json:"session_id"`
 	WorkDir           pgtype.Text        `json:"work_dir"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ScopeTaskID       pgtype.UUID        `json:"scope_task_id"`
 }
 
 type IssueDependency struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/service"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -835,6 +836,10 @@ func isRetryableLockFailure(err error) bool {
 // it. A lock timeout or deadlock is transient and retryable, so it answers 503
 // with a message the delete dialog can show; every other failure stays a 500.
 func failWorkspaceDelete(w http.ResponseWriter, r *http.Request, workspaceID, step string, err error) {
+	if errors.Is(err, service.ErrDelegationResourcesRetained) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	attrs := append(logger.RequestAttrs(r), "error", err, "workspace_id", workspaceID, "step", step)
 	if isRetryableLockFailure(err) {
 		slog.Warn("workspace delete blocked by lock contention", attrs...)
@@ -1209,6 +1214,12 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			// lockWorkspaceTaskOwners.
 			name: "lock task owners",
 			run:  func() error { return lockWorkspaceTaskOwners(ctx, qtx, requester.WorkspaceID) },
+		},
+		{
+			name: "check retained delegation resources",
+			run: func() error {
+				return service.RequireWorkspaceDelegationResourcesReleased(ctx, qtx, requester.WorkspaceID)
+			},
 		},
 		{
 			name: "prepare relationship graph",

@@ -7847,6 +7847,26 @@ func (s *TaskService) ResolveTaskWorkspaceIDChecked(ctx context.Context, task db
 		}
 		note(err)
 	}
+	if delegation.IsResultTask(task) {
+		link, err := s.Queries.GetDelegationResultObligationForTask(ctx, task.ID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		address, err := s.Queries.GetDelegationReturnByID(ctx, link.DelegationReturnID)
+		if err != nil {
+			return "", err
+		}
+		if address.ReturnKind != string(delegation.KindManagedTask) || task.AgentID != address.DispatcherAgentID || task.RuntimeID != address.RuntimeID {
+			return "", errors.New("result task workspace identity mismatch")
+		}
+		if _, err := s.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: task.AgentID, WorkspaceID: address.WorkspaceID}); err != nil {
+			return "", err
+		}
+		return util.UUIDToString(address.WorkspaceID), nil
+	}
 	// Quick-create tasks have no issue / chat / autopilot link — workspace
 	// lives in the context JSONB. Returning "" here is what blocked
 	// requireDaemonTaskAccess (404 on /start, /progress, /complete, /fail

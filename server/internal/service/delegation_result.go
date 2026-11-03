@@ -23,6 +23,11 @@ type resultRefusal string
 
 func (e resultRefusal) Error() string { return string(e) }
 
+func IsDelegationResultRefusal(err error) bool {
+	var refusal resultRefusal
+	return errors.As(err, &refusal) || errors.Is(err, pgx.ErrNoRows) || errors.Is(err, delegation.ErrReturnInvalid)
+}
+
 // ReconcileDelegationResults recovers from committed terminal outcomes and
 // accepted links. The event bus is only a latency optimization, never the outbox.
 func (s *TaskService) ReconcileDelegationResults(ctx context.Context, limit int32) (DelegationResultStats, error) {
@@ -251,12 +256,19 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if runtime.Visibility == "private" && !RuntimeAllowsUser(runtime, agent.OwnerID) {
 		return empty, resultRefusal("runtime_access_revoked")
 	}
+	if address.ScopeTaskID.Valid {
+		source.IssueID, source.ChatSessionID, source.AutopilotRunID = pgtype.UUID{}, pgtype.UUID{}, pgtype.UUID{}
+	}
 	if err := validateResultSourceScope(ctx, q, source, address.WorkspaceID); err != nil {
+		return empty, err
+	}
+	scopeTaskID, err := resultScopeTaskID(ctx, q, source, address)
+	if err != nil {
 		return empty, err
 	}
 	meta := protocol.DelegationResultTurn{
 		ResultTaskID: util.UUIDToString(outcome.ID), DelegationReturnID: util.UUIDToString(address.ID),
-		SourceTaskID: util.UUIDToString(address.SourceTaskID), DelegatedIssueID: util.UUIDToString(address.IssueID), Outcome: outcome.Status,
+		SourceTaskID: util.UUIDToString(address.SourceTaskID), ScopeTaskID: scopeTaskID, DelegatedIssueID: util.UUIDToString(address.IssueID), Outcome: outcome.Status,
 		RuntimeID: util.UUIDToString(address.RuntimeID), Provider: address.Provider.String, SessionID: address.SessionID.String, WorkDir: address.WorkDir.String,
 	}
 	contextJSON, err := json.Marshal(delegation.ResultTaskContext{Type: delegation.ResultTaskType, Result: meta})
@@ -339,9 +351,16 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 	if err != nil {
 		return nil, err
 	}
+	if address.ScopeTaskID.Valid {
+		source.IssueID, source.ChatSessionID, source.AutopilotRunID = pgtype.UUID{}, pgtype.UUID{}, pgtype.UUID{}
+	}
+	scopeTaskID, err := resultScopeTaskID(ctx, q, source, address)
+	if err != nil {
+		return nil, err
+	}
 	expected := protocol.DelegationResultTurn{
 		ResultTaskID: util.UUIDToString(outcome.ID), DelegationReturnID: util.UUIDToString(address.ID),
-		SourceTaskID: util.UUIDToString(source.ID), DelegatedIssueID: util.UUIDToString(address.IssueID), Outcome: outcome.Status,
+		SourceTaskID: util.UUIDToString(source.ID), ScopeTaskID: scopeTaskID, DelegatedIssueID: util.UUIDToString(address.IssueID), Outcome: outcome.Status,
 		RuntimeID: util.UUIDToString(address.RuntimeID), Provider: address.Provider.String,
 		SessionID: address.SessionID.String, WorkDir: address.WorkDir.String,
 	}
@@ -373,8 +392,24 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 		!strictResultProviderSupported(runtime.Provider) || (runtime.Visibility == "private" && !RuntimeAllowsUser(runtime, agent.OwnerID)) {
 		return nil, resultRefusal("frozen_runtime_unavailable")
 	}
+	if address.ScopeTaskID.Valid {
+		source.IssueID, source.ChatSessionID, source.AutopilotRunID = pgtype.UUID{}, pgtype.UUID{}, pgtype.UUID{}
+	}
 	if err := validateResultSourceScope(ctx, q, source, address.WorkspaceID); err != nil {
 		return nil, err
 	}
 	return &expected, nil
+}
+
+func resultScopeTaskID(ctx context.Context, q *db.Queries, source db.AgentTaskQueue, address db.IssueDelegationReturn) (string, error) {
+	if source.IssueID.Valid || source.ChatSessionID.Valid || source.AutopilotRunID.Valid {
+		if address.ScopeTaskID.Valid {
+			return "", resultRefusal("result_scope_mismatch")
+		}
+		return "", nil
+	}
+	if err := delegation.ValidateOriginalTaskScope(ctx, q, address); err != nil {
+		return "", resultRefusal("original_task_scope_unavailable")
+	}
+	return util.UUIDToString(address.ScopeTaskID), nil
 }
