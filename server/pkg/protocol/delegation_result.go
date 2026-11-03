@@ -32,6 +32,7 @@ type ManagedResourceAddress struct {
 // being considered for removal; WorkDir remains the execution address.
 type ResourceReleaseRequest struct {
 	Kind         string `json:"kind"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
 	SourceTaskID string `json:"source_task_id,omitempty"`
 	RuntimeID    string `json:"runtime_id"`
 	Provider     string `json:"provider"`
@@ -65,6 +66,7 @@ type ResourceReleaseAcknowledgement struct {
 // do not grant release.
 type ResourceReleaseDecision struct {
 	AdmissionClosed    bool                     `json:"admission_closed"`
+	ControlRequired    bool                     `json:"resource_control_required"`
 	ReleaseAllowed     bool                     `json:"release_allowed"`
 	Reason             string                   `json:"reason"`
 	ProtectedResources []ManagedResourceAddress `json:"protected_resources"`
