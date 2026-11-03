@@ -1,7 +1,7 @@
 -- name: CreateIssueDelegationReturn :one
 -- The accepted return is written with the dispatching business write in one
 -- transaction. A concurrent dispatch for the same (issue, dispatcher) loses on
--- uq_issue_delegation_return_dispatch and re-reads the winner instead of
+-- uq_current_issue_delegation_return and re-reads the winner instead of
 -- replacing it; another dispatcher has its own key and row.
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id,
@@ -12,16 +12,16 @@ INSERT INTO issue_delegation_return (
     @return_kind, sqlc.narg('external_session_id'), sqlc.narg('source_task_id'),
     sqlc.narg('runtime_id'), sqlc.narg('provider'), sqlc.narg('session_id'), sqlc.narg('work_dir'), sqlc.narg('scope_task_id')
 )
-ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) DO NOTHING
+ON CONFLICT (workspace_id, issue_id, dispatcher_agent_id) WHERE is_current DO NOTHING
 RETURNING *;
 
 -- name: GetIssueDelegationReturnForDispatcher :one
--- One actor's accepted address on one issue, independent of the assignment
+-- One actor's current accepted version on one issue, independent of the assignment
 -- slot it dispatched to.
 SELECT * FROM issue_delegation_return
 WHERE workspace_id = @workspace_id
   AND issue_id = @issue_id
-  AND dispatcher_agent_id = @dispatcher_agent_id;
+  AND dispatcher_agent_id = @dispatcher_agent_id AND is_current;
 
 -- name: LockIssueDelegationReturnForDispatcher :one
 -- The accepted row is locked while a dispatch decides whether it is reusable.
@@ -30,7 +30,7 @@ WHERE workspace_id = @workspace_id
 SELECT * FROM issue_delegation_return
 WHERE workspace_id = @workspace_id
   AND issue_id = @issue_id
-  AND dispatcher_agent_id = @dispatcher_agent_id
+  AND dispatcher_agent_id = @dispatcher_agent_id AND is_current
 FOR UPDATE;
 
 -- name: ListIssueDelegationReturns :many
@@ -147,7 +147,7 @@ LIMIT 1;
 SELECT r.*
 FROM issue_delegation_return r
 JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
-WHERE l.task_id = @task_id
+WHERE l.task_id = @task_id AND l.takeover_id IS NULL
 ORDER BY r.created_at, r.id;
 
 -- name: LinkAgentTaskDelegationReturn :execrows
@@ -167,7 +167,7 @@ ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
 -- name: CopyRetryDelegationReturns :execrows
 INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
 SELECT @child_task_id, parent.delegation_return_id
-FROM agent_task_delegation_return parent WHERE parent.task_id = @parent_task_id
+FROM agent_task_delegation_return parent WHERE parent.task_id = @parent_task_id AND parent.takeover_id IS NULL
 ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
 
 -- name: PropagateRetryDelegationReturns :execrows
@@ -177,7 +177,7 @@ WITH RECURSIVE missing AS (
     SELECT child.id AS task_id, parent.delegation_return_id
     FROM agent_task_delegation_return parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
-    WHERE NOT EXISTS (
+    WHERE parent.takeover_id IS NULL AND NOT EXISTS (
         SELECT 1 FROM agent_task_delegation_return present
         WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
     )

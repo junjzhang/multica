@@ -267,7 +267,8 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 
 	// A rerun is a fresh dispatch, not a reason to change who receives the
 	// result: the source run's complete accepted set is preserved, and the
-	// rerunning agent's own accepted address is added. The address is validated
+	// rerunning agent's current address replaces its own prior versions in the
+	// new run; other dispatchers keep their exact accepted addresses. The address is validated
 	// before anything is cancelled or created, but it is recorded only inside
 	// the enqueue transaction below, after eligibility has passed — a rerun
 	// refused by triage or the invoke gate must leave no accepted return.

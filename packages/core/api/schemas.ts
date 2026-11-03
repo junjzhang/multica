@@ -2264,6 +2264,8 @@ const ManagedResultNotificationStatusSchema = z.enum([
 
 export const ResultNotificationSchema = z.object({
   return_id: z.string().min(1),
+  current_return_id: z.string().min(1).optional().catch(undefined),
+  takeover_id: z.string().min(1).optional().catch(undefined),
   recipient_agent_id: z.string().min(1),
   kind: z.enum(["external_session", "managed_task", "unknown"]).catch("unknown"),
   delivery_id: z.string().min(1).optional().catch(undefined),

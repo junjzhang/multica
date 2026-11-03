@@ -430,6 +430,9 @@ deleted_issue_assignment_delegations AS (
     DELETE FROM issue_assignment_delegation
     WHERE workspace_id = $1 OR issue_id IN (SELECT id FROM ws_issues)
 ),
+deleted_result_takeovers AS (
+    DELETE FROM delegation_result_takeover WHERE workspace_id = $1
+),
 deleted_issue_delegation_returns AS (
     DELETE FROM issue_delegation_return WHERE workspace_id = $1
 ),

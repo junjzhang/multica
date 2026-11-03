@@ -4,13 +4,14 @@ This slice implements the transactional delegation half of
 [task-session-delivery.md](../design/task-session-delivery.md): an Agent that
 hands work to another executable Agent or squad must name the address its result
 returns to, and that address is accepted before any child work exists. Result
-submission, notification delivery, takeover UI, and the maintenance-window
-cutover remain later slices.
+submission and explicit result takeover reuse the durable notification paths.
+Takeover UI and the maintenance-window cutover are separately qualified.
 
 ## Canonical binding, intents, and runs
 
-The accepted address is one row per `(workspace, issue, dispatcher agent)` in
-`issue_delegation_return` (`uq_issue_delegation_return_dispatch`). It does not
+Accepted addresses are immutable versions in `issue_delegation_return`. One
+version is current per `(workspace, issue, dispatcher agent)`, enforced by
+`uq_current_issue_delegation_return`. The key does not
 include the assignee: the address belongs to the dispatcher, and the worker a
 dispatcher chooses does not change where that dispatcher's results go. Each row
 names either:
@@ -376,3 +377,100 @@ managed takeover UI, and the isolated qualification described in the cutover
 runbook are not part of this slice. The local worktree Finalize/report ordering
 and directory-retention race remain with the result-submission slice; the
 source-row lock here does not claim to fix the whole resource lifecycle.
+
+
+## Explicit result takeover
+
+`POST /api/issues/{id}/result-takeovers` accepts a human who can manage the
+original dispatcher Agent and access the selected target scope. The request
+names `client_request_id`, the final `result_task_id`, its `from_return_id`,
+`expected_current_return_id`, and an exact target selector: either
+`{kind: external_session, external_session_id}` or
+`{kind: managed_task, source_task_id, selection_version}`. Managed selection requires a current
+nonterminal execution with a confirmed v1 session pin; a closed historical run
+is not new admission proof. Private chat and autopilot access remain required.
+
+The transaction records an immutable action, chooses a proved address version,
+changes current routing, and creates the saved result's notification obligation
+only if that result has none for this address. Physical address reuse preserves
+the original source-task provenance even when the request selected a newer
+active turn at the same runtime/provider/session/directory and scope. An invalid
+historical snapshot cannot be repaired by guessing or silently cloning it.
+
+The action separately stores the selected source task or registered session ID.
+An identical request-key replay returns that action before re-admitting the
+source, which may since have ended. Different content conflicts. Replay never
+moves a newer current route backwards. A fresh request that changes the current
+address requires the expected-current CAS; requests already selecting the
+current address need not compete merely because they name different results.
+
+Selecting an address with an existing notification records the action and may
+make that address current, but preserves the original notification ID, provenance
+and receipt. In particular, a fresh request key cannot resend an unknown input.
+Responses distinguish the action's stable `target_return_id` from the actual
+`current_return_id`. Clients reload state rather than optimistically replacing
+it. Notification projections include `current_return_id` and an optional
+`takeover_id`; pending/queued/running do not prove host acceptance.
+
+`agent_task_delegation_return.takeover_id` distinguishes a post-result action
+from an input actually carried by the executor. Retry copying, late retry-chain
+propagation, delegated-failure classification and exact-source rerun inheritance
+use only carried inputs. Materialization, typed-task reverse verification,
+read projections and resource retention see both kinds. No action changes the
+executor result/error or starts a new executor attempt.
+
+An explicit Agent rerun from the new session replaces only that dispatcher's
+old address versions in the NEW run's inherited set. Other dispatchers, the old
+run, and existing accepted comment/assignment inputs retain their addresses.
+A human rerun with no explicit dispatcher source preserves the exact source
+run's carried set; it never guesses recipients from the current route.
+
+Migrations 639–642 add action provenance and the current-address partial unique
+index. Deploy the current-address writer with the index retirement: older
+writers infer conflicts from the retired all-versions index. The replacement
+index is built concurrently before the old index is dropped. Do not mix an old
+writer with the completed migration or introduce address-rewriting dual writes.
+
+
+### Takeover target read model
+
+`GET /api/issues/{id}/result-takeover-options?result_task_id=C&from_return_id=A`
+returns one snapshot containing `current_return_id`, `returns`, and `targets`.
+It requires a human who can manage the original dispatcher and proves the
+selected result/return relationship. It neither changes routing nor records an
+action. The existing Agent task-history endpoint is not a candidate source.
+
+Each return view has `return_id`, `kind`, and `target`, whose safe fields are
+`provider`, `session_ref`, and `display_name`. Missing or inaccessible historical
+scope produces `target: null` while retaining the return identity; it is not an
+unbound route. `session_ref` is a stable short digest for display only; provider
+session IDs may themselves be file paths and are never returned by this read
+model. Display names use scope titles only after this human's access check.
+Task-only scopes use a generic run time label, never prompts or directory paths.
+
+Candidate targets carry an explicit registered `external_session_id` or current
+`source_task_id`, `kind`, the same safe display fields, and `available: true`.
+Managed targets also include `selection_version`.
+Only candidates passing the POST's source proof and scope permissions are
+listed. Managed candidates require a nonterminal confirmed v1 pin and supported
+local runtime; no latest or historical task inference is permitted. Availability
+means admission eligibility in this snapshot, not host delivery or receipt.
+POST revalidates under its normal transaction before accepting a selection.
+
+Storage/timeout failures return an error, never an empty candidate list. An
+explicit empty list means no eligible target was found. Clients hide controls
+for unauthorized/absent metadata, preserve unknown state for read errors, and
+refresh instead of guessing a replacement session.
+
+A new managed POST must carry the selected `selection_version` unchanged. This
+opaque SHA-256 value binds source task, workspace, Agent, runtime, provider,
+session, directory, original scope and pin generation. It is CAS evidence, not
+an authorization token. POST rechecks permissions and recomputes the value
+under the admission locks; even same-generation session/directory drift returns
+409 with no persisted action, address change or notification. Migration643
+stores the original request value on the action. Exact request replay compares
+that stored value before new admission, so later pin changes or source closure
+do not rewrite an accepted action or move the current route backwards.
+External selection retains its stable registered-session identity and does not
+require this managed proof. Clients must not replace an unknown request's proof
+with freshly fetched options; a new selection is a new explicit request.

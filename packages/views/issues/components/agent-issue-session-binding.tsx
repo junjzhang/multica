@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link2 } from "lucide-react";
-import type { Agent, AgentSessionSummary, IssueSessionBinding } from "@multica/core/types";
+import type { Agent, IssueSessionBinding } from "@multica/core/types";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useAgentPermissions } from "@multica/core/permissions";
 import {
@@ -22,9 +22,9 @@ import {
   DialogTrigger,
 } from "@multica/ui/components/ui/dialog";
 import { Spinner } from "@multica/ui/components/ui/spinner";
-import { cn } from "@multica/ui/lib/utils";
 import { useT } from "../../i18n";
 import { ExternalSessionLink } from "./external-session-link";
+import { SessionChoice } from "./session-choice";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -37,61 +37,6 @@ function unavailableLabel(reason: string | undefined, t: IssuesT): string | null
     default:
       return reason ? t(($) => $.detail.external_binding_unavailable) : null;
   }
-}
-
-function SessionChoice({
-  session,
-  selected,
-  name,
-  onSelect,
-  t,
-}: {
-  session: AgentSessionSummary;
-  selected: boolean;
-  name: string;
-  onSelect: () => void;
-  t: IssuesT;
-}) {
-  const reason = unavailableLabel(session.unavailable_reason, t);
-  return (
-    <label
-      className={cn(
-        "flex w-full min-w-0 cursor-pointer flex-col gap-0.5 rounded-md border p-2 text-left text-caption transition-colors focus-within:ring-2 focus-within:ring-ring/50",
-        selected ? "border-primary bg-primary/5" : "border-border/70 hover:bg-muted/50",
-        !session.deliverable && "cursor-not-allowed opacity-60 hover:bg-transparent",
-      )}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={session.id}
-        checked={selected}
-        disabled={!session.deliverable}
-        onChange={onSelect}
-        className="sr-only"
-      />
-      <span className="flex min-w-0 items-center gap-1.5">
-        <span className="min-w-0 truncate font-medium">
-          {session.display_name || session.session_id}
-        </span>
-        {selected && (
-          <span className="ml-auto shrink-0 text-micro font-medium text-primary">
-            {t(($) => $.detail.external_binding_selected)}
-          </span>
-        )}
-      </span>
-      <span className="truncate text-micro text-muted-foreground">
-        {t(($) => $.detail.external_session_meta, {
-          provider: session.provider || "external",
-          host: session.host_id,
-        })}
-      </span>
-      <span className="truncate text-micro text-muted-foreground">
-        {t(($) => $.detail.external_session_id, { id: session.session_id })}
-      </span>
-      {reason && <span className="text-micro text-destructive">{reason}</span>}
-    </label>
-  );
 }
 
 function SessionPicker({
@@ -147,11 +92,18 @@ function SessionPicker({
             {sessions.data.map((session) => (
               <SessionChoice
                 key={session.id}
-                session={session}
+                value={session.id}
+                title={session.display_name || session.session_id}
+                available={session.deliverable}
+                reason={unavailableLabel(session.unavailable_reason, t)}
+                details={<>
+                  {t(($) => $.detail.external_session_meta, { provider: session.provider || "external", host: session.host_id })}
+                  <br />
+                  {t(($) => $.detail.external_session_id, { id: session.session_id })}
+                </>}
                 name={`agent-session-${agent.id}`}
                 selected={session.id === selected}
                 onSelect={() => setSelected(session.id)}
-                t={t}
               />
             ))}
           </div>
