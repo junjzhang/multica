@@ -949,12 +949,12 @@ function RunListRow({ run, issueId }: { run: TimelineRun; issueId: string }) {
           />
         </span>
       </div>
-      {expanded && <RunDetails id={detailsId} run={run} reason={reason} />}
+      {expanded && <RunDetails id={detailsId} run={run} reason={reason} issueId={issueId} />}
     </div>
   );
 }
 
-function RunDetails({ id, run, reason }: { id: string; run: TimelineRun; reason: string | null }) {
+function RunDetails({ id, run, reason, issueId }: { id: string; run: TimelineRun; reason: string | null; issueId: string }) {
   const { t } = useT("issues");
   const locale = useLocale();
   const partLabel = useCostPartLabel();
@@ -1046,7 +1046,7 @@ function RunDetails({ id, run, reason }: { id: string; run: TimelineRun; reason:
           </>
         )}
       </dl>
-      <ResultNotifications notifications={run.task.result_notifications} />
+      <ResultNotifications notifications={run.task.result_notifications} task={run.task} issueId={issueId} />
     </div>
   );
 }

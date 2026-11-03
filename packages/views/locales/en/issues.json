@@ -1847,5 +1847,34 @@
   },
   "hover_card": {
     "created_updated": "created {{created}} · updated {{updated}}"
+  },
+  "result_takeover": {
+    "action": "Choose a return session",
+    "title": "Send saved result",
+    "description": "Choose a specific session of {{agent}} to receive this saved result and update the return session. The execution run is not repeated.",
+    "original_notice": "Existing notifications stay unchanged. A running or unknown delivery is not withdrawn.",
+    "choose": "Return session",
+    "loading": "Loading available return sessions…",
+    "read_failed": "Return session information is unavailable. Refresh before choosing.",
+    "empty": "No eligible return sessions are available.",
+    "submit": "Send saved result and update return session",
+    "cancel": "Cancel",
+    "retry": "Retry the same request",
+    "unknown": "The outcome is unknown. Retry uses the original request; it does not create a second notification.",
+    "conflict": "The return route or target changed. Retry the same request to check its outcome, or reload and choose again.",
+    "reload": "Reload and choose again",
+    "rejected": "The request was rejected. Check access and choose an available session.",
+    "saved": "Return-session request recorded. Check the notification status below.",
+    "existing": "This result already has a notification for that session. Its existing status is retained.",
+    "route_changed": "Another return session is now current. This request still refers to the session you selected.",
+    "fixed_target": "Notification target",
+    "current": "Current return session",
+    "historical": "Earlier return session",
+    "target_unavailable": "Target details unavailable",
+    "change_target": "Choose a different session",
+    "close": "Close",
+    "previous_unknown": "The previous request is still unconfirmed. Choosing another session starts a separate request.",
+    "return_reference": "Return {{id}}",
+    "selection_changed": "The selection changed. Choose a current available session again."
   }
 }

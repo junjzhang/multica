@@ -1,3 +1,5 @@
+import type { ResultTakeoverRequest, ResultTakeoverResponse, ResultTakeoverOptions } from "../types/result-takeover";
+import { ResultTakeoverResponseSchema, ResultTakeoverOptionsSchema } from "./result-takeover-schema";
 import type { ZodType } from "zod";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
@@ -1857,6 +1859,33 @@ export class ApiClient {
     return parseWithFallback<Agent[]>(raw, AgentListSchema, [], {
       endpoint: "GET /api/agents",
     });
+  }
+
+  async getResultTakeoverOptions(issueId: string, resultTaskId: string, fromReturnId: string): Promise<ResultTakeoverOptions> {
+    const params = new URLSearchParams({ result_task_id: resultTaskId, from_return_id: fromReturnId });
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeover-options?${params}`);
+    const parsed = parseWithFallback<ResultTakeoverOptions | null>(raw, ResultTakeoverOptionsSchema, null, {
+      endpoint: "GET /api/issues/{id}/result-takeover-options",
+    });
+    if (!parsed || !parsed.returns.some((version) => version.return_id === fromReturnId)) {
+      throw new Error("Return session information is unavailable.");
+    }
+    return parsed;
+  }
+
+  async takeoverIssueResult(issueId: string, data: ResultTakeoverRequest): Promise<ResultTakeoverResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeovers`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<ResultTakeoverResponse | null>(raw, ResultTakeoverResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/result-takeovers",
+    });
+    if (!parsed || parsed.client_request_id !== data.client_request_id
+      || parsed.result_task_id !== data.result_task_id || parsed.from_return_id !== data.from_return_id) {
+      throw new Error("The server did not confirm this result takeover.");
+    }
+    return parsed;
   }
 
   async getAgent(id: string): Promise<Agent> {

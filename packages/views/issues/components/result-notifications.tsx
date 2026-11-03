@@ -1,11 +1,12 @@
 "use client";
 
 import { useId } from "react";
-import type { ResultNotification } from "@multica/core/types";
+import type { AgentTask, ResultNotification } from "@multica/core/types";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { redactSecrets } from "../../common/task-transcript/redact";
 import { useT } from "../../i18n";
+import { ResultTakeover } from "./result-takeover";
 
 function notificationPhase(notification: ResultNotification) {
   if (notification.kind !== "managed_task" && notification.kind !== "external_session") return "unknown";
@@ -28,7 +29,7 @@ function notificationPhase(notification: ResultNotification) {
   }
 }
 
-export function ResultNotifications({ notifications }: { notifications: ResultNotification[] | undefined }) {
+export function ResultNotifications({ notifications, issueId, task }: { notifications: ResultNotification[] | undefined; issueId?: string; task?: AgentTask }) {
   const { t } = useT("issues");
   const { getActorName } = useActorName();
   const headingId = useId();
@@ -67,6 +68,10 @@ export function ResultNotifications({ notifications }: { notifications: ResultNo
                   <span className="min-w-0 flex-1 break-words">{getActorName("agent", notification.recipient_agent_id)}</span>
                   <span className={`shrink-0 ${tone}`}>{labels[phase]}</span>
                 </div>
+                {issueId && task && (task.status === "completed" || task.status === "failed")
+                  && notification.current_return_id && notification.kind !== "unknown" && (
+                    <ResultTakeover issueId={issueId} task={task} notification={notification} notifications={notifications} />
+                  )}
                 {error && (
                   <div className="text-caption text-muted-foreground">
                     <span className="font-medium">{t(($) => $.result_notifications.error_details)}</span>

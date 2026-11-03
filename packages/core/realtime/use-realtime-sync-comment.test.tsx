@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { resultTakeoverKeys, resultTakeoverOptions } from "../issues/result-takeover";
 import type { WSClient } from "../api/ws-client";
 import { issueKeys, issueTasksOptions, type IssueSortParam } from "../issues/queries";
 import type { AgentTask, Issue, ListIssuesCache } from "../types";
@@ -229,5 +230,32 @@ it("refetches an observed fresh task-runs query on the mailbox event without pol
     read.mockRestore();
     setApiInstance(undefined as unknown as ApiClient);
     qc.clear();
+  }
+});
+
+it("refreshes the exact return selection snapshot when another takeover changes the route", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = resultTakeoverKeys.options("ws-1", "issue-1", "result", "A");
+  const historical = { return_id: "A", kind: "managed_task" as const, target: null };
+  qc.setQueryData(key, { current_return_id: "A", returns: [historical], targets: [] });
+  const foreign = resultTakeoverKeys.options("ws-2", "issue-1", "result", "A");
+  qc.setQueryData(foreign, { current_return_id: "foreign", returns: [], targets: [] });
+  const client = new ApiClient("https://api.example.test");
+  const read = vi.spyOn(client, "getResultTakeoverOptions").mockResolvedValue({ current_return_id: "B", returns: [historical], targets: [] });
+  setApiInstance(client);
+  const { ws, handlers } = createRecordingWs();
+  const view = renderHook(() => {
+    useRealtimeSync(ws, createStores());
+    return useQuery({ ...resultTakeoverOptions("ws-1", "issue-1", "result", "A"), staleTime: Infinity });
+  }, { wrapper: createWrapper(qc) });
+  try {
+    expect(view.result.current.data?.current_return_id).toBe("A");
+    expect(read).not.toHaveBeenCalled();
+    await act(async () => handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" }));
+    await waitFor(() => expect(view.result.current.data?.current_return_id).toBe("B"));
+    expect(read).toHaveBeenCalledExactlyOnceWith("issue-1", "result", "A");
+    expect(qc.getQueryState(foreign)?.isInvalidated).toBe(false);
+  } finally {
+    view.unmount(); read.mockRestore(); setApiInstance(undefined as unknown as ApiClient); qc.clear();
   }
 });

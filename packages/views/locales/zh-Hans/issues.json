@@ -1781,5 +1781,34 @@
   },
   "hover_card": {
     "created_updated": "创建于 {{created}} · 更新于 {{updated}}"
+  },
+  "result_takeover": {
+    "action": "选择返回会话",
+    "title": "发送既有结果",
+    "description": "选择 {{agent}} 的具体会话接收已保存的结果，并更新返回会话。不会重跑原运行。",
+    "original_notice": "原有通知保持不变。运行中或回执未知的投递不会被撤回。",
+    "choose": "返回会话",
+    "loading": "正在加载可选返回会话…",
+    "read_failed": "暂时无法读取返回会话，请刷新后再选择。",
+    "empty": "暂无符合条件的返回会话。",
+    "submit": "发送既有结果并更新返回会话",
+    "cancel": "取消",
+    "retry": "重试原请求",
+    "unknown": "请求结果未知。重试会使用原请求，不会重复创建通知。",
+    "conflict": "返回会话或目标已变化。可以重试原请求确认结果，也可以重新加载并选择。",
+    "reload": "重新加载并选择",
+    "rejected": "请求被拒绝，请检查权限并选择可用会话。",
+    "saved": "返回会话请求已记录，请查看下方通知状态。",
+    "existing": "该结果已有发往此会话的通知，将保留原有状态。",
+    "route_changed": "当前返回会话已被其他选择更新，此请求仍对应你选定的会话。",
+    "fixed_target": "通知目标",
+    "current": "当前返回会话",
+    "historical": "先前返回会话",
+    "target_unavailable": "无法读取目标详情",
+    "change_target": "选择其他会话",
+    "close": "关闭",
+    "previous_unknown": "上一次请求的结果仍未确认。选择其他会话会发起独立的新请求。",
+    "return_reference": "返回地址 {{id}}",
+    "selection_changed": "选择依据已变化，请重新选择当前可用的会话。"
   }
 }

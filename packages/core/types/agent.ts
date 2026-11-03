@@ -345,6 +345,8 @@ export interface TaskCancellationActor {
 
 export interface ResultNotification {
   return_id: string;
+  current_return_id?: string;
+  takeover_id?: string;
   recipient_agent_id: string;
   kind: "external_session" | "managed_task" | "unknown";
   delivery_id?: string;

@@ -1847,5 +1847,34 @@
   },
   "hover_card": {
     "created_updated": "a créé {{created}} · mis à jour {{updated}}"
+  },
+  "result_takeover": {
+    "action": "Choisir une session de retour",
+    "title": "Envoyer le résultat enregistré",
+    "description": "Choisissez une session de {{agent}} pour recevoir ce résultat enregistré et mettre à jour la session de retour. L’exécution initiale ne sera pas relancée.",
+    "original_notice": "Les notifications existantes restent inchangées. Une livraison en cours ou incertaine n’est pas annulée.",
+    "choose": "Session de retour",
+    "loading": "Chargement des sessions disponibles…",
+    "read_failed": "Les informations de session sont indisponibles. Actualisez avant de choisir.",
+    "empty": "Aucune session de retour admissible.",
+    "submit": "Envoyer le résultat enregistré et modifier la session",
+    "cancel": "Annuler",
+    "retry": "Réessayer la même requête",
+    "unknown": "Le résultat de la requête est inconnu. Réessayer réutilise la requête initiale sans créer de notification en double.",
+    "conflict": "La session de retour ou la cible a changé. Réessayez la même requête pour vérifier son résultat, ou actualisez pour choisir à nouveau.",
+    "reload": "Actualiser et choisir à nouveau",
+    "rejected": "La requête a été refusée. Vérifiez les droits et choisissez une session disponible.",
+    "saved": "Requête de session de retour enregistrée. Consultez l’état des notifications ci-dessous.",
+    "existing": "Ce résultat possède déjà une notification pour cette session. Son état actuel est conservé.",
+    "route_changed": "Une autre session de retour est désormais active. Cette requête conserve la session que vous aviez choisie.",
+    "fixed_target": "Cible de notification",
+    "current": "Session de retour actuelle",
+    "historical": "Ancienne session de retour",
+    "target_unavailable": "Détails de la cible indisponibles",
+    "change_target": "Choisir une autre session",
+    "close": "Fermer",
+    "previous_unknown": "La requête précédente reste non confirmée. Choisir une autre session crée une requête distincte.",
+    "return_reference": "Retour {{id}}",
+    "selection_changed": "La sélection a changé. Choisissez à nouveau une session actuellement disponible."
   }
 }
