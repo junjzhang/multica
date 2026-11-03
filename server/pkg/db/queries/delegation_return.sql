@@ -126,6 +126,7 @@ ORDER BY created_at, delegation_return_id;
 -- another thread.
 SELECT * FROM agent_task_queue
 WHERE issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND comment_thread_id IS NULL
   AND (
@@ -140,6 +141,7 @@ LIMIT 1;
 -- find the source run whose exact accepted relationships it continues.
 SELECT id FROM agent_task_queue
 WHERE issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
       sqlc.narg('exclude_task_id')::uuid IS NULL
@@ -161,8 +163,44 @@ ORDER BY r.created_at, r.id;
 -- Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
 -- a folded comment, or a retry can link the same relationship again without
 -- rewriting the run's existing set.
+WITH RECURSIVE execution_chain AS (
+    SELECT @task_id::uuid AS id
+    UNION
+    SELECT child.id FROM agent_task_queue child
+    JOIN execution_chain parent ON child.retry_of_task_id = parent.id
+)
 INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-VALUES (@task_id, @delegation_return_id)
+SELECT id, @delegation_return_id FROM execution_chain
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+
+-- name: CopyRetryDelegationReturns :execrows
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT @child_task_id, parent.delegation_return_id
+FROM agent_task_delegation_return parent WHERE parent.task_id = @parent_task_id
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+
+-- name: PropagateRetryDelegationReturns :execrows
+-- Close a concurrent late-link/retry-creation race from the durable parent
+-- relation. Traversal follows retry_of_task_id only, never a newer manual run.
+WITH RECURSIVE missing AS (
+    SELECT child.id AS task_id, parent.delegation_return_id
+    FROM agent_task_delegation_return parent
+    JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM agent_task_delegation_return present
+        WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
+    )
+    ORDER BY child.id, parent.delegation_return_id
+    LIMIT @batch_size
+), descendants AS (
+    SELECT * FROM missing
+    UNION
+    SELECT child.id, parent.delegation_return_id
+    FROM descendants parent
+    JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
+)
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT task_id, delegation_return_id FROM descendants
 ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
 
 -- name: LockRuntimeForDelegation :one
@@ -263,6 +301,7 @@ WHERE id = @id AND status = 'pending';
 -- a planned input or its completion replay cannot see it.
 SELECT * FROM agent_task_queue
 WHERE issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id)
   AND (

@@ -152,6 +152,9 @@ func validateManagedSource(ctx context.Context, q *db.Queries, ws, agentID pgtyp
 	case "completed", "failed", "cancelled":
 		return fmt.Errorf("%w: source run %s is %s", ErrReturnSourceClosed, util.UUIDToString(task.ID), task.Status)
 	}
+	if !task.ResourceControlRequired || !task.SessionPinConfirmed || !task.SessionPinGeneration.Valid {
+		return fmt.Errorf("%w: source execution has no confirmed resource-control session", ErrReturnNotReady)
+	}
 	// The provider pin is asynchronous. Until both the session and the work
 	// directory are durable there is no address to return to, and the previous
 	// run's session is not a substitute.

@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const copyRetryDelegationReturns = `-- name: CopyRetryDelegationReturns :execrows
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT $1, parent.delegation_return_id
+FROM agent_task_delegation_return parent WHERE parent.task_id = $2
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+`
+
+type CopyRetryDelegationReturnsParams struct {
+	ChildTaskID  pgtype.UUID `json:"child_task_id"`
+	ParentTaskID pgtype.UUID `json:"parent_task_id"`
+}
+
+func (q *Queries) CopyRetryDelegationReturns(ctx context.Context, arg CopyRetryDelegationReturnsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, copyRetryDelegationReturns, arg.ChildTaskID, arg.ParentTaskID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createIssueDelegationReturn = `-- name: CreateIssueDelegationReturn :one
 INSERT INTO issue_delegation_return (
     id, workspace_id, issue_id, dispatcher_agent_id,
@@ -272,6 +292,7 @@ func (q *Queries) GetIssueDelegationReturnForDispatcher(ctx context.Context, arg
 const getLatestTaskIDForIssueAndAgent = `-- name: GetLatestTaskIDForIssueAndAgent :one
 SELECT id FROM agent_task_queue
 WHERE issue_id = $1
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = $2
   AND (
       $3::uuid IS NULL
@@ -297,8 +318,9 @@ func (q *Queries) GetLatestTaskIDForIssueAndAgent(ctx context.Context, arg GetLa
 }
 
 const getNewestActiveTaskForIssueAgentThread = `-- name: GetNewestActiveTaskForIssueAgentThread :one
-SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step FROM agent_task_queue
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation FROM agent_task_queue
 WHERE issue_id = $1
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = $2
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($3)
   AND (
@@ -385,13 +407,19 @@ func (q *Queries) GetNewestActiveTaskForIssueAgentThread(ctx context.Context, ar
 		&i.CancelledByName,
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
+		&i.DelegationOutcomeFinal,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+		&i.SessionPinConfirmed,
+		&i.SessionPinGeneration,
 	)
 	return i, err
 }
 
 const getPendingAssignmentTaskForIssueAndAgent = `-- name: GetPendingAssignmentTaskForIssueAndAgent :one
-SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step FROM agent_task_queue
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation FROM agent_task_queue
 WHERE issue_id = $1
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = $2
   AND comment_thread_id IS NULL
   AND (
@@ -477,6 +505,11 @@ func (q *Queries) GetPendingAssignmentTaskForIssueAndAgent(ctx context.Context, 
 		&i.CancelledByName,
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
+		&i.DelegationOutcomeFinal,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+		&i.SessionPinConfirmed,
+		&i.SessionPinGeneration,
 	)
 	return i, err
 }
@@ -548,21 +581,27 @@ func (q *Queries) InsertCommentDispatchObligation(ctx context.Context, arg Inser
 }
 
 const linkAgentTaskDelegationReturn = `-- name: LinkAgentTaskDelegationReturn :execrows
+WITH RECURSIVE execution_chain AS (
+    SELECT $2::uuid AS id
+    UNION
+    SELECT child.id FROM agent_task_queue child
+    JOIN execution_chain parent ON child.retry_of_task_id = parent.id
+)
 INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-VALUES ($1, $2)
+SELECT id, $1 FROM execution_chain
 ON CONFLICT (task_id, delegation_return_id) DO NOTHING
 `
 
 type LinkAgentTaskDelegationReturnParams struct {
-	TaskID             pgtype.UUID `json:"task_id"`
 	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+	TaskID             pgtype.UUID `json:"task_id"`
 }
 
 // Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
 // a folded comment, or a retry can link the same relationship again without
 // rewriting the run's existing set.
 func (q *Queries) LinkAgentTaskDelegationReturn(ctx context.Context, arg LinkAgentTaskDelegationReturnParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkAgentTaskDelegationReturn, arg.TaskID, arg.DelegationReturnID)
+	result, err := q.db.Exec(ctx, linkAgentTaskDelegationReturn, arg.DelegationReturnID, arg.TaskID)
 	if err != nil {
 		return 0, err
 	}
@@ -861,7 +900,7 @@ func (q *Queries) LockAgentForDelegation(ctx context.Context, arg LockAgentForDe
 }
 
 const lockAgentTaskForDelegation = `-- name: LockAgentTaskForDelegation :one
-SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step FROM agent_task_queue WHERE id = $1 FOR SHARE
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation FROM agent_task_queue WHERE id = $1 FOR SHARE
 `
 
 // Re-reads the dispatching managed run under a share lock inside the
@@ -934,6 +973,11 @@ func (q *Queries) LockAgentTaskForDelegation(ctx context.Context, id pgtype.UUID
 		&i.CancelledByName,
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
+		&i.DelegationOutcomeFinal,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+		&i.SessionPinConfirmed,
+		&i.SessionPinGeneration,
 	)
 	return i, err
 }
@@ -1041,6 +1085,39 @@ func (q *Queries) LockRuntimeForDelegation(ctx context.Context, arg LockRuntimeF
 		&i.SharedWith,
 	)
 	return i, err
+}
+
+const propagateRetryDelegationReturns = `-- name: PropagateRetryDelegationReturns :execrows
+WITH RECURSIVE missing AS (
+    SELECT child.id AS task_id, parent.delegation_return_id
+    FROM agent_task_delegation_return parent
+    JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM agent_task_delegation_return present
+        WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
+    )
+    ORDER BY child.id, parent.delegation_return_id
+    LIMIT $1
+), descendants AS (
+    SELECT task_id, delegation_return_id FROM missing
+    UNION
+    SELECT child.id, parent.delegation_return_id
+    FROM descendants parent
+    JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
+)
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
+SELECT task_id, delegation_return_id FROM descendants
+ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+`
+
+// Close a concurrent late-link/retry-creation race from the durable parent
+// relation. Traversal follows retry_of_task_id only, never a newer manual run.
+func (q *Queries) PropagateRetryDelegationReturns(ctx context.Context, batchSize int32) (int64, error) {
+	result, err := q.db.Exec(ctx, propagateRetryDelegationReturns, batchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const recordCommentDispatchObligationAttempt = `-- name: RecordCommentDispatchObligationAttempt :exec
