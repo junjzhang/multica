@@ -1,3 +1,5 @@
+import type { ResultTakeoverRequest, ResultTakeoverResponse, ResultTakeoverOptions } from "../types/result-takeover";
+import { ResultTakeoverResponseSchema, ResultTakeoverOptionsSchema } from "./result-takeover-schema";
 import type { ZodType } from "zod";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
@@ -33,6 +35,9 @@ import type {
   IssueTableRowsRequest,
   IssueTableRowsResponse,
   Agent,
+  AgentSessionSummary,
+  AgentSessionBinding,
+  IssueSessionBinding,
   MikaBootstrapResponse,
   CreateAgentRequest,
   AgentBuilderRuntimeSwitch,
@@ -260,6 +265,9 @@ import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
   AgentListSchema,
+  AgentSessionListResponseSchema,
+  AgentSessionBindingSchema,
+  AgentSessionBindingResponseSchema,
   AgentTaskListSchema,
   AgentTaskPageSchema,
   AgentActivityBucketListSchema,
@@ -1853,8 +1861,92 @@ export class ApiClient {
     });
   }
 
+  async getResultTakeoverOptions(issueId: string, resultTaskId: string, fromReturnId: string): Promise<ResultTakeoverOptions> {
+    const params = new URLSearchParams({ result_task_id: resultTaskId, from_return_id: fromReturnId });
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeover-options?${params}`);
+    const parsed = parseWithFallback<ResultTakeoverOptions | null>(raw, ResultTakeoverOptionsSchema, null, {
+      endpoint: "GET /api/issues/{id}/result-takeover-options",
+    });
+    if (!parsed || !parsed.returns.some((version) => version.return_id === fromReturnId)) {
+      throw new Error("Return session information is unavailable.");
+    }
+    return parsed;
+  }
+
+  async takeoverIssueResult(issueId: string, data: ResultTakeoverRequest): Promise<ResultTakeoverResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeovers`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<ResultTakeoverResponse | null>(raw, ResultTakeoverResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/result-takeovers",
+    });
+    if (!parsed || parsed.client_request_id !== data.client_request_id
+      || parsed.result_task_id !== data.result_task_id || parsed.from_return_id !== data.from_return_id) {
+      throw new Error("The server did not confirm this result takeover.");
+    }
+    return parsed;
+  }
+
   async getAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}`);
+  }
+
+  /** All registered host sessions of one external agent, never a single guess. */
+  async listAgentSessions(agentId: string): Promise<AgentSessionSummary[]> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions`);
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[] } | null>(
+      raw,
+      AgentSessionListResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return parsed.sessions;
+  }
+
+  /** The exact active (agent, issue) target. Null means no binding, not failure. */
+  async getAgentIssueSessionBinding(
+    agentId: string,
+    issueId: string,
+  ): Promise<IssueSessionBinding | null> {
+    const search = new URLSearchParams({ issue_id: issueId });
+    const raw = await this.fetch<unknown>(
+      `/api/agents/${agentId}/session-bindings?${search}`,
+    );
+    const parsed = parseWithFallback<{ binding: IssueSessionBinding | null } | null>(
+      raw,
+      AgentSessionBindingResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/session-bindings" },
+    );
+    if (!parsed) throw new Error("Invalid issue session binding response");
+    return parsed.binding;
+  }
+
+  /**
+   * Saves the target for FUTURE notifications. No local cache is changed here:
+   * callers must surface a failed save instead of pretending the old binding
+   * moved, and a successful save never rewrites an existing delivery.
+   */
+  async bindAgentSession(
+    agentId: string,
+    data: { issue_id: string; session_id: string },
+  ): Promise<AgentSessionBinding> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/session-bindings`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<AgentSessionBinding | null>(
+      raw,
+      AgentSessionBindingSchema,
+      null,
+      { endpoint: "POST /api/agents/{id}/session-bindings" },
+    );
+    if (!parsed) {
+      throw new Error("The server did not confirm the session binding.");
+    }
+    return parsed;
   }
 
   async createAgent(data: CreateAgentRequest): Promise<Agent> {

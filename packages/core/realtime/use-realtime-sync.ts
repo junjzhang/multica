@@ -11,6 +11,7 @@ import { clearWorkspaceStorage } from "../platform/storage-cleanup";
 import { defaultStorage } from "../platform/storage";
 import { getCurrentWsId, getCurrentSlug } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
+import { resultTakeoverKeys } from "../issues/result-takeover";
 import { projectKeys } from "../projects/queries";
 import { pinKeys } from "../pins/queries";
 import { autopilotKeys } from "../autopilots/queries";
@@ -1089,6 +1090,8 @@ export function useRealtimeSync(
       const wsId = getCurrentWsId();
       if (wsId && typeof payload.issue_id === "string" && payload.issue_id) {
         void qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, payload.issue_id) });
+        void qc.invalidateQueries({ queryKey: issueKeys.tasks(payload.issue_id) });
+        void qc.invalidateQueries({ queryKey: resultTakeoverKeys.issue(wsId, payload.issue_id) });
       }
     });
 

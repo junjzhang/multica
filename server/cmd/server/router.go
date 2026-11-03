@@ -1606,12 +1606,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/tasks/{taskId}/messages", h.ListTaskMessages)
 		r.Post("/tasks/{taskId}/cancel-ack", h.AckTaskCancelled)
 
-		// External-agent mailbox delivery. DaemonAuth identifies the machine;
-		// the handler binds each claim to that verified daemon/workspace/owner.
-		r.Post("/mailbox/claim", h.ClaimDaemonMailbox)
-		r.Post("/mailbox/{messageId}/ack", h.AckDaemonMailbox)
-		// Generic delivery worker. It claims non-comment deliveries only, so it
-		// and the frozen mailbox entry never lease the same row.
+		// The one delivery worker consumes every source through this entry.
+		// DaemonAuth identifies the machine; the handler binds each claim to
+		// that verified daemon/workspace/owner.
 		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
 		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
 
@@ -1620,6 +1617,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Get("/chat-sessions/{sessionId}/gc-check", h.GetChatSessionGCCheck)
 		r.Get("/autopilot-runs/{runId}/gc-check", h.GetAutopilotRunGCCheck)
 		r.Get("/tasks/{taskId}/gc-check", h.GetTaskGCCheck)
+		r.Post("/resources/release", h.ReleaseManagedResource)
+		r.Post("/tasks/{taskId}/resources-released", h.RecordResourcesReleased)
 
 		r.Post("/runtimes/{runtimeId}/recover-orphans", h.RecoverOrphanedTasks)
 		r.Post("/tasks/{taskId}/session", h.PinTaskSession)
@@ -2081,6 +2080,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/quick-actions/{quickActionId}/run", h.RunQuickAction)
 					r.Post("/quick-actions/{quickActionId}/render", h.RenderQuickAction)
 					r.Get("/task-runs", h.ListTasksByIssue)
+					r.With(handler.RequireHumanActor).Post("/result-takeovers", h.TakeoverDelegationResult)
+					r.With(handler.RequireHumanActor).Get("/result-takeover-options", h.GetResultTakeoverOptions)
 					r.Get("/usage", h.GetIssueUsage)
 					r.Post("/reactions", h.AddIssueReaction)
 					r.Delete("/reactions", h.RemoveIssueReaction)
@@ -2303,6 +2304,16 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// external agent. Raw token is returned once, hash only.
 					r.With(handler.RequireHumanActor).Post("/tokens", h.CreateExternalAgentToken)
 					r.With(handler.RequireHumanActor).Delete("/tokens/{tokenId}", h.RevokeExternalAgentToken)
+					// Explicit (issue -> session) target for this external
+					// agent. Producers resolve it before enqueueing; a
+					// rebind never retargets an existing delivery.
+					r.With(handler.RequireHumanActor).Post("/session-bindings", h.BindAgentSession)
+					// Read-only projections for the task view. The agent's
+					// own external credential or a human manager may read
+					// them; every session is listed and the exact
+					// (agent, issue) binding is its own read.
+					r.Get("/sessions", h.ListAgentSessions)
+					r.Get("/session-bindings", h.GetAgentSessionBinding)
 					// Mailbox: the recipient's own external credential or an
 					// authorized human owner/admin.
 					r.Get("/mailbox", h.ListAgentMailbox)

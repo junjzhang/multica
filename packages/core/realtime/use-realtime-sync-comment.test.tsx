@@ -1,13 +1,15 @@
 /**
  * @vitest-environment jsdom
  */
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { resultTakeoverKeys, resultTakeoverOptions } from "../issues/result-takeover";
 import type { WSClient } from "../api/ws-client";
-import { issueKeys, type IssueSortParam } from "../issues/queries";
-import type { Issue, ListIssuesCache } from "../types";
+import { issueKeys, issueTasksOptions, type IssueSortParam } from "../issues/queries";
+import type { AgentTask, Issue, ListIssuesCache } from "../types";
+import { ApiClient, setApiInstance } from "../api";
 import { useRealtimeSync, type RealtimeSyncStores } from "./use-realtime-sync";
 
 vi.mock("../platform/workspace-storage", () => ({
@@ -172,17 +174,88 @@ describe("useRealtimeSync — comment activity cache coherence", () => {
 });
 
 
-it("refreshes only the affected issue detail when mailbox delivery or processing changes", () => {
+it("invalidates only the affected detail and task runs when mailbox state changes", () => {
   const qc = new QueryClient();
   const current = issueKeys.detail("ws-1", "issue-1");
   const unrelated = issueKeys.detail("ws-1", "issue-2");
   const foreign = issueKeys.detail("ws-2", "issue-1");
-  for (const key of [current, unrelated, foreign, positionBoardKey]) qc.setQueryData(key, {});
+  const runs = issueKeys.tasks("issue-1");
+  const unrelatedRuns = issueKeys.tasks("issue-2");
+  for (const key of [current, unrelated, foreign, runs, unrelatedRuns, positionBoardKey]) qc.setQueryData(key, {});
   const { ws, handlers } = createRecordingWs();
   const view = renderHook(() => useRealtimeSync(ws, createStores()), { wrapper: createWrapper(qc) });
+  for (const payload of [null, {}, { issue_id: "" }, { issue_id: 42 }]) {
+    handlers["issue_mailbox:changed"]!(payload);
+  }
+  expect(qc.getQueryState(runs)?.isInvalidated).toBe(false);
   handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" });
   expect(qc.getQueryState(current)?.isInvalidated).toBe(true);
-  for (const key of [unrelated, foreign, positionBoardKey]) expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
+  expect(qc.getQueryState(runs)?.isInvalidated).toBe(true);
+  for (const key of [unrelated, unrelatedRuns, foreign, positionBoardKey]) expect(qc.getQueryState(key)?.isInvalidated).toBe(false);
   view.unmount();
   qc.clear();
+});
+
+it("refetches an observed fresh task-runs query on the mailbox event without polling", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const task: AgentTask = {
+    id: "run-1", agent_id: "worker", runtime_id: "runtime", issue_id: "issue-1", status: "completed",
+    priority: 0, dispatched_at: null, started_at: null, completed_at: null, created_at: "2026-11-03T00:00:00Z",
+    result: { output: "Saved result" }, error: null,
+    result_notifications: [{ return_id: "return-1", recipient_agent_id: "leader", kind: "external_session", status: "pending" }],
+  };
+  qc.setQueryData(issueKeys.tasks("issue-1"), [task]);
+  qc.setQueryData(issueKeys.tasks("issue-2"), []);
+  const client = new ApiClient("https://api.example.test");
+  const read = vi.spyOn(client, "listTasksByIssue").mockResolvedValue([{
+    ...task,
+    result_notifications: [{ ...task.result_notifications![0]!, status: "delivered" }],
+  }]);
+  setApiInstance(client);
+  const { ws, handlers } = createRecordingWs();
+  const view = renderHook(() => {
+    useRealtimeSync(ws, createStores());
+    return useQuery(issueTasksOptions("issue-1"));
+  }, { wrapper: createWrapper(qc) });
+  try {
+    expect(view.result.current.data?.[0]?.result_notifications?.[0]?.status).toBe("pending");
+    expect(read).not.toHaveBeenCalled();
+    await act(async () => handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" }));
+    await waitFor(() => expect(view.result.current.data?.[0]?.result_notifications?.[0]?.status).toBe("delivered"));
+    expect(read).toHaveBeenCalledExactlyOnceWith("issue-1");
+    expect(view.result.current.data?.[0]?.result).toEqual(task.result);
+    expect(qc.getQueryState(issueKeys.tasks("issue-2"))?.isInvalidated).toBe(false);
+  } finally {
+    view.unmount();
+    read.mockRestore();
+    setApiInstance(undefined as unknown as ApiClient);
+    qc.clear();
+  }
+});
+
+it("refreshes the exact return selection snapshot when another takeover changes the route", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = resultTakeoverKeys.options("ws-1", "issue-1", "result", "A");
+  const historical = { return_id: "A", kind: "managed_task" as const, target: null };
+  qc.setQueryData(key, { current_return_id: "A", returns: [historical], targets: [] });
+  const foreign = resultTakeoverKeys.options("ws-2", "issue-1", "result", "A");
+  qc.setQueryData(foreign, { current_return_id: "foreign", returns: [], targets: [] });
+  const client = new ApiClient("https://api.example.test");
+  const read = vi.spyOn(client, "getResultTakeoverOptions").mockResolvedValue({ current_return_id: "B", returns: [historical], targets: [] });
+  setApiInstance(client);
+  const { ws, handlers } = createRecordingWs();
+  const view = renderHook(() => {
+    useRealtimeSync(ws, createStores());
+    return useQuery({ ...resultTakeoverOptions("ws-1", "issue-1", "result", "A"), staleTime: Infinity });
+  }, { wrapper: createWrapper(qc) });
+  try {
+    expect(view.result.current.data?.current_return_id).toBe("A");
+    expect(read).not.toHaveBeenCalled();
+    await act(async () => handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" }));
+    await waitFor(() => expect(view.result.current.data?.current_return_id).toBe("B"));
+    expect(read).toHaveBeenCalledExactlyOnceWith("issue-1", "result", "A");
+    expect(qc.getQueryState(foreign)?.isInvalidated).toBe(false);
+  } finally {
+    view.unmount(); read.mockRestore(); setApiInstance(undefined as unknown as ApiClient); qc.clear();
+  }
 });

@@ -100,6 +100,9 @@ type AgentMailboxMessage struct {
 	Kind             string             `json:"kind"`
 	RecipientType    string             `json:"recipient_type"`
 	Payload          []byte             `json:"payload"`
+	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
+	NotificationKey  pgtype.Text        `json:"notification_key"`
+	WithdrawnAt      pgtype.Timestamptz `json:"withdrawn_at"`
 }
 
 type AgentMcpServer struct {
@@ -135,6 +138,18 @@ type AgentSkill struct {
 	SkillID   pgtype.UUID        `json:"skill_id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 	Enabled   bool               `json:"enabled"`
+}
+
+type AgentTaskDelegationReturn struct {
+	TaskID                 pgtype.UUID        `json:"task_id"`
+	DelegationReturnID     pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	NotificationDeliveryID pgtype.UUID        `json:"notification_delivery_id"`
+	NotificationTaskID     pgtype.UUID        `json:"notification_task_id"`
+	NotificationError      pgtype.Text        `json:"notification_error"`
+	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
+	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
+	TakeoverID             pgtype.UUID        `json:"takeover_id"`
 }
 
 type AgentTaskQueue struct {
@@ -195,20 +210,25 @@ type AgentTaskQueue struct {
 	// The row id referenced by trigger_evidence_kind (a comment id, autopilot_run id, rule_version id, source task id, ...). No FK; resolvable per-kind in the app layer (MUL-4302 §2).
 	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
 	// The one human accountable for this run, for audit / visibility / cost only — NEVER consulted for authorization (that is originator_user_id). Invariant: when originator_user_id IS NOT NULL, this equals it; the two diverge only when originator_user_id IS NULL (autopilot rule_owner / degraded owner_fallback name an accountable human while authorization carries none). No FK, no cascade (MUL-4302 §1/§7). NULL means no accountable human was resolved: a pre-migration row, OR a NEW row whose audit source is not-yet-resolved / unattributed (e.g. run_only autopilot until rule_owner lands) — NOT pre-migration only.
-	AccountableUserID         pgtype.UUID `json:"accountable_user_id"`
-	SessionRolloutMissing     bool        `json:"session_rollout_missing"`
-	RetiredSessionID          pgtype.Text `json:"retired_session_id"`
-	QuickActionsDisabled      bool        `json:"quick_actions_disabled"`
-	RegenerateQuickActionsFor pgtype.UUID `json:"regenerate_quick_actions_for"`
-	BranchName                pgtype.Text `json:"branch_name"`
-	DurableWorkDir            pgtype.Text `json:"durable_work_dir"`
-	ChannelContextRevision    pgtype.Int8 `json:"channel_context_revision"`
-	CommentThreadID           pgtype.UUID `json:"comment_thread_id"`
-	CancelledByType           pgtype.Text `json:"cancelled_by_type"`
-	CancelledByID             pgtype.UUID `json:"cancelled_by_id"`
-	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
-	IssueSnapshot             []byte      `json:"issue_snapshot"`
-	WorkflowStep              pgtype.Text `json:"workflow_step"`
+	AccountableUserID         pgtype.UUID        `json:"accountable_user_id"`
+	SessionRolloutMissing     bool               `json:"session_rollout_missing"`
+	RetiredSessionID          pgtype.Text        `json:"retired_session_id"`
+	QuickActionsDisabled      bool               `json:"quick_actions_disabled"`
+	RegenerateQuickActionsFor pgtype.UUID        `json:"regenerate_quick_actions_for"`
+	BranchName                pgtype.Text        `json:"branch_name"`
+	DurableWorkDir            pgtype.Text        `json:"durable_work_dir"`
+	ChannelContextRevision    pgtype.Int8        `json:"channel_context_revision"`
+	CommentThreadID           pgtype.UUID        `json:"comment_thread_id"`
+	CancelledByType           pgtype.Text        `json:"cancelled_by_type"`
+	CancelledByID             pgtype.UUID        `json:"cancelled_by_id"`
+	CancelledByName           pgtype.Text        `json:"cancelled_by_name"`
+	IssueSnapshot             []byte             `json:"issue_snapshot"`
+	WorkflowStep              pgtype.Text        `json:"workflow_step"`
+	DelegationOutcomeFinal    bool               `json:"delegation_outcome_final"`
+	ResourceControlRequired   bool               `json:"resource_control_required"`
+	TerminalReportedAt        pgtype.Timestamptz `json:"terminal_reported_at"`
+	SessionPinConfirmed       bool               `json:"session_pin_confirmed"`
+	SessionPinGeneration      pgtype.UUID        `json:"session_pin_generation"`
 }
 
 type AgentToLabel struct {
@@ -653,6 +673,30 @@ type Comment struct {
 	SuppressedAgentIds []pgtype.UUID      `json:"suppressed_agent_ids"`
 }
 
+type CommentDelegationReturn struct {
+	CommentID          pgtype.UUID        `json:"comment_id"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type CommentDispatchObligation struct {
+	ID                 pgtype.UUID        `json:"id"`
+	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
+	IssueID            pgtype.UUID        `json:"issue_id"`
+	CommentID          pgtype.UUID        `json:"comment_id"`
+	AgentID            pgtype.UUID        `json:"agent_id"`
+	SquadID            pgtype.UUID        `json:"squad_id"`
+	TriggerSource      string             `json:"trigger_source"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	Status             string             `json:"status"`
+	Attempts           int32              `json:"attempts"`
+	LastError          pgtype.Text        `json:"last_error"`
+	SettledTaskID      pgtype.UUID        `json:"settled_task_id"`
+	NextAttemptAt      pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+}
+
 type CommentReaction struct {
 	ID          pgtype.UUID        `json:"id"`
 	CommentID   pgtype.UUID        `json:"comment_id"`
@@ -699,6 +743,21 @@ type DaemonToken struct {
 	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	OwnerID     pgtype.UUID        `json:"owner_id"`
+}
+
+type DelegationResultTakeover struct {
+	ID                      pgtype.UUID        `json:"id"`
+	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
+	ClientRequestID         pgtype.UUID        `json:"client_request_id"`
+	ResultTaskID            pgtype.UUID        `json:"result_task_id"`
+	FromReturnID            pgtype.UUID        `json:"from_return_id"`
+	ExpectedCurrentReturnID pgtype.UUID        `json:"expected_current_return_id"`
+	TargetReturnID          pgtype.UUID        `json:"target_return_id"`
+	TargetKind              string             `json:"target_kind"`
+	TargetSelectorID        pgtype.UUID        `json:"target_selector_id"`
+	CreatedBy               pgtype.UUID        `json:"created_by"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	TargetSelectionVersion  pgtype.Text        `json:"target_selection_version"`
 }
 
 type DingtalkBotIdentity struct {
@@ -749,6 +808,17 @@ type ExternalAgentSession struct {
 	DaemonID    string             `json:"daemon_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ExternalAgentSessionBinding struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	IssueID     pgtype.UUID        `json:"issue_id"`
+	SessionID   pgtype.UUID        `json:"session_id"`
+	CreatedBy   pgtype.UUID        `json:"created_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type ExternalAgentToken struct {
@@ -928,6 +998,23 @@ type Issue struct {
 	MergeGrantedAt     pgtype.Timestamptz `json:"merge_granted_at"`
 }
 
+type IssueAssignmentDelegation struct {
+	IssueID      pgtype.UUID        `json:"issue_id"`
+	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
+	AssigneeType string             `json:"assignee_type"`
+	AssigneeID   pgtype.UUID        `json:"assignee_id"`
+	TaskID       pgtype.UUID        `json:"task_id"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type IssueAssignmentDelegationReturn struct {
+	IssueID            pgtype.UUID        `json:"issue_id"`
+	AssigneeType       string             `json:"assignee_type"`
+	AssigneeID         pgtype.UUID        `json:"assignee_id"`
+	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
 type IssueChildEvent struct {
 	ID           pgtype.UUID        `json:"id"`
 	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
@@ -938,6 +1025,23 @@ type IssueChildEvent struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	ClaimedAt    pgtype.Timestamptz `json:"claimed_at"`
 	ProcessedAt  pgtype.Timestamptz `json:"processed_at"`
+}
+
+type IssueDelegationReturn struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	IssueID           pgtype.UUID        `json:"issue_id"`
+	DispatcherAgentID pgtype.UUID        `json:"dispatcher_agent_id"`
+	ReturnKind        string             `json:"return_kind"`
+	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
+	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
+	RuntimeID         pgtype.UUID        `json:"runtime_id"`
+	Provider          pgtype.Text        `json:"provider"`
+	SessionID         pgtype.Text        `json:"session_id"`
+	WorkDir           pgtype.Text        `json:"work_dir"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ScopeTaskID       pgtype.UUID        `json:"scope_task_id"`
+	IsCurrent         bool               `json:"is_current"`
 }
 
 type IssueDependency struct {

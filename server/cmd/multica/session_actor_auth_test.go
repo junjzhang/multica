@@ -119,6 +119,7 @@ func newActorBindingEnv(t *testing.T) *actorBindingEnv {
 	mux := chi.NewRouter()
 	mux.Get("/api/agents/{id}", h.GetAgent)
 	mux.Get("/api/agents/{id}/mailbox", h.ListAgentMailbox)
+	mux.Get("/api/agents/{id}/sessions", h.ListAgentSessions)
 	mux.Post("/api/issues/{id}/comments", h.CreateComment)
 	authenticated := middleware.Auth(queries, nil, nil, nil)(mux)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -257,4 +258,41 @@ func TestSessionStatusAndWritesUseTheCredentialsOwnAgent(t *testing.T) {
 			t.Fatalf("credential A wrote %d comment(s) under agent A", leaked)
 		}
 	})
+}
+
+func TestSessionStatusUsesExactRegisteredSession(t *testing.T) {
+	for _, change := range []string{"valid second session", "missing", "host changed", "daemon changed"} {
+		t.Run(change, func(t *testing.T) {
+			env := newActorBindingEnv(t)
+			var owner string
+			env.fixture.QueryRow(t, `SELECT owner_id::text FROM agent WHERE id=$1`, env.agentB).Scan(&owner)
+			env.fixture.Insert(t, "external_agent_session", testutil.Cols{
+				"workspace_id": env.workspaceID, "owner_user_id": owner, "agent_id": env.agentB,
+				"provider": "paseo", "host_id": "older-host", "session_id": "older-" + env.sessionB,
+				"display_name": "Earlier conversation", "daemon_id": "older-daemon", "created_at": testutil.Raw("now()-interval '1 day'"),
+			})
+			switch change {
+			case "missing":
+				env.fixture.Exec(t, `DELETE FROM external_agent_session WHERE agent_id=$1 AND session_id=$2`, env.agentB, env.sessionB)
+			case "host changed":
+				env.fixture.Exec(t, `UPDATE external_agent_session SET host_id='new-host' WHERE agent_id=$1 AND session_id=$2`, env.agentB, env.sessionB)
+			case "daemon changed":
+				env.fixture.Exec(t, `UPDATE external_agent_session SET daemon_id='new-daemon' WHERE agent_id=$1 AND session_id=$2`, env.agentB, env.sessionB)
+			}
+			home := t.TempDir()
+			env.writeBinding(t, home, env.tokenB, env.tokenBID)
+			stdout, stderr, code := runCLIProcess(t, home, map[string]string{"PASEO_AGENT_ID": env.sessionB}, "session", "status", "--output", "json")
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode status: %v; %s", err, stderr)
+			}
+			if change == "valid second session" {
+				if code != 0 || !report.Valid || report.Remote.SessionID != env.sessionB || report.Remote.HostID != "host-b" {
+					t.Fatalf("legitimate second session was not verified: code=%d report=%+v", code, report)
+				}
+			} else if code == 0 || report.Valid || report.Error == "" {
+				t.Fatalf("stale session was accepted: code=%d report=%+v", code, report)
+			}
+		})
+	}
 }

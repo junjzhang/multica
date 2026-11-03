@@ -54,6 +54,14 @@ revoked credentials are repaired only by explicit `/multica connect`. A binding
 for another server, workspace, host, or daemon is reported and left untouched
 rather than silently rebound.
 
+Business CLI requests use the file's credential, workspace and exact session
+as one identity: after the own-mailbox check, `X-Return-Session` carries that
+session. Conflicting return-session flags or environment values are rejected.
+Managed tasks keep their `mat_` identity and cannot replace it with an external
+file; explicit owner registration/credential commands retain their separate
+owner entry point. A disconnected Paseo business command does not fall back
+to a human profile.
+
 `disconnect` revokes only the token recorded in this session's file, then
 deletes that file. If the configured owner profile cannot revoke that token —
 because it was issued by another server or workspace — the file is kept and the

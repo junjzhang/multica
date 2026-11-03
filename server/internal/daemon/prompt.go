@@ -69,51 +69,28 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 		b.WriteString(sessionContinuityNoticeFor(task))
 	}
 	b.WriteString(execenv.BuildOnBehalfOfBlock(task.InitiatorName, task.InitiatorEmail))
-	b.WriteString(buildReturnAddressBlock(task))
+	b.WriteString(buildCoordinatorBlock(task))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
 	b.WriteString(buildJoinedWakeupsBlock(task.WakeupJoined))
 	b.WriteString(buildProjectWorkflowBlock(task))
 	return b.String()
 }
 
-// buildReturnAddressBlock names the issue's recorded result recipient. It is a
-// return address, not a delegator: the run may hand work back only by an
-// explicit mention, and a recipient the server did not report is left unsaid
-// rather than inferred from the assignee, the trigger author, or the latest
-// commenter.
-//
-// It renders per turn rather than in the cached brief because the coordinator
-// can change between runs on the same issue, including a run that resumes a
-// prior session (MUL-5377).
-func buildReturnAddressBlock(task Task) string {
-	if !safeMentionID(task.CoordinatorID) {
+// buildCoordinatorBlock reports issue metadata without changing the immutable
+// return addresses accepted by each delegation. It is refreshed on every turn.
+func buildCoordinatorBlock(task Task) string {
+	if !safeMentionID(task.CoordinatorID) || (task.CoordinatorType != "agent" && task.CoordinatorType != "member") {
 		return ""
 	}
-	switch task.CoordinatorType {
-	case "agent":
-		// An agent can be its own coordinator: the server records the creator
-		// as coordinator, and an agent-created issue assigned back to that same
-		// agent is the ordinary case. There is no one to hand back to, and a
-		// mention of this run's own agent would queue another run while this
-		// one is still executing — the pending-task check only covers queued
-		// and dispatched tasks, so the run could wake itself indefinitely.
-		if task.CoordinatorID == task.AgentID {
-			return ""
-		}
-		return fmt.Sprintf(
-			"[Result return address]\n"+
-				"This issue records an agent coordinator: %s. To hand a result back for review or acceptance, post a comment that explicitly mentions [@coordinator](mention://agent/%s). Only that explicit mention reaches the coordinator — nothing returns results automatically.\n"+
-				"The coordinator is this issue's recorded recipient, not evidence of who delegated this or any other task: do not infer recipients for other issues or runs, and do not report a handoff you did not make.\n\n",
-			task.CoordinatorID, task.CoordinatorID)
-	case "member":
-		return fmt.Sprintf(
-			"[Result return address]\n"+
-				"This issue records a member coordinator: %s. A member has no mailbox this run can wake, so report the result in this issue's thread and do not state that the member was notified or woken.\n\n",
-			task.CoordinatorID)
+	if task.CoordinatorType == "agent" && task.CoordinatorID == task.AgentID {
+		return ""
 	}
-	// An unknown actor kind is not a route. Saying nothing keeps the run from
-	// guessing, and old servers that never send the fields reach the same path.
-	return ""
+	return fmt.Sprintf(
+		"[Issue coordinator]\n"+
+			"Recorded %s coordinator: %s. This is issue metadata, not this run's return address.\n"+
+			"When this run has accepted delegation return addresses, Multica routes its saved result to those frozen addresses automatically. Coordinator changes do not move accepted addresses.\n"+
+			"Do not infer a return target from the coordinator or assignee, or send an extra coordinator mention merely to return a result. Do not claim the coordinator was notified or that the result was accepted without evidence.\n\n",
+		task.CoordinatorType, task.CoordinatorID)
 }
 
 // safeMentionID accepts the UUID-shaped ids the server sends and rejects
@@ -342,6 +319,9 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 }
 
 func buildPromptBody(task Task, provider string) string {
+	if result := task.DelegationResult; result != nil {
+		return fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+	}
 	if task.WakeupID != "" {
 		var b strings.Builder
 		fmt.Fprintf(&b, "You are running as a local coding agent for a Multica workspace.\n\nYour assigned issue ID is: %s\n\n[WAKEUP]\n%s\n\n", task.IssueID, task.HandoffNote)

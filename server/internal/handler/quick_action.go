@@ -938,7 +938,7 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		Type:          "comment",
 		QuickActionID: qa.ID,
 	})
-	var delivered map[string]struct{}
+	var delivered mailboxDeliveryResults
 	if err == nil {
 		delivered, err = h.enqueueMailboxDeliveries(r.Context(), qtx, issue, commentID, plan.mailboxTargets, actorType, actorID)
 	}

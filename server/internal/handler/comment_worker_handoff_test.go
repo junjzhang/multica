@@ -19,7 +19,7 @@ func claimWorkerReplyRun(t *testing.T, runtimeID string) *AgentTaskResponse {
 	t.Helper()
 	req := newOwnerDaemonRequest(http.MethodPost, "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil)
 	req = withURLParam(req, "runtimeId", runtimeID)
-	req.Header.Set("X-Client-Capabilities", protocol.DaemonCapabilityCoalescedCommentsV1)
+	req.Header.Set("X-Client-Capabilities", protocol.DaemonCapabilityCoalescedCommentsV1+","+protocol.DaemonCapabilityDelegationResultsV1)
 	var response struct {
 		Task *AgentTaskResponse `json:"task"`
 	}
@@ -57,6 +57,10 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				"runtime_id": leaderRuntimeID, "issue_id": issueID, "status": "completed",
 				"is_leader_task": true, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-handoff-leader-session", "work_dir": "/work/worker-handoff-leader",
+				"resource_control_required": true,
+				"session_pin_confirmed":     true,
+				"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 			})
 			rootID := dbfx.Comment(t, issueID, fmt.Sprintf("[@Worker](mention://agent/%s) verify the implementation", workerID), testutil.Cols{
 				"author_type": "agent", "author_id": leaderID, "source_task_id": sourceID,
@@ -65,6 +69,10 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				"runtime_id": workerRuntimeID, "issue_id": issueID, "status": "running",
 				"trigger_comment_id": rootID, "squad_id": squadID, "delegated_from_task_id": sourceID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-handoff-worker-session", "work_dir": "/work/worker-handoff-worker",
+				"resource_control_required": true,
+				"session_pin_confirmed":     true,
+				"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 			})
 			post := func(content string) CommentResponse {
 				req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{
@@ -72,6 +80,7 @@ func TestWorkerReplyDelivery(t *testing.T) {
 				}), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)
 				if response.AuthorType != "agent" || response.SourceTaskID == nil || *response.SourceTaskID != workerTaskID {
@@ -174,15 +183,29 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 				"trigger_comment_id": rootID, "is_leader_task": true, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
 				"created_at": testutil.Raw("now() - interval '5 minutes'"),
+				"session_id": "worker-replay-leader-session", "work_dir": "/work/worker-replay-leader",
+				"resource_control_required": true,
+				"session_pin_confirmed":     true,
+				"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 			})
 			workerTaskID := dbfx.Task(t, workerID, testutil.Cols{
 				"runtime_id": workerRuntimeID, "issue_id": issueID, "status": "running",
 				"trigger_comment_id": rootID, "squad_id": squadID,
 				"originator_user_id": testUserID, "accountable_user_id": testUserID,
+				"session_id": "worker-replay-worker-session", "work_dir": "/work/worker-replay-worker",
+				"resource_control_required": true,
+				"session_pin_confirmed":     true,
+				"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 			})
 			first := claimWorkerReplyRun(t, runtimeID)
 			if first == nil || first.ID != taskID {
 				t.Fatal("leader run was not claimed")
+			}
+			if mode == "leader_reply" {
+				if _, err := testHandler.TaskService.StartTask(ctx, parseUUID(taskID)); err != nil {
+					t.Fatal(err)
+				}
+				pinManagedSnapshotSource(t, taskID, "worker-replay-leader-session", "/work/worker-replay-leader")
 			}
 			var replyID string
 			if mode == "unplanned" {
@@ -201,9 +224,11 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 				req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", body), "id", issueID)
 				req.Header.Set("X-Agent-ID", workerID)
 				req.Header.Set("X-Task-ID", workerTaskID)
+				req.Header.Set("X-Actor-Source", "task_token")
 				if mode == "leader_reply" {
 					req.Header.Set("X-Agent-ID", leaderID)
 					req.Header.Set("X-Task-ID", taskID)
+					req.Header.Set("X-Actor-Source", "task_token")
 				}
 				var response CommentResponse
 				testutil.Call(t, testHandler.CreateComment, req).Want(http.StatusCreated).JSON(&response)
@@ -228,8 +253,10 @@ func TestWorkerReplyReconcileBoundaries(t *testing.T) {
 			if slices.Contains(task.CoalescedCommentIds, parseUUID(replyID)) {
 				t.Fatalf("%s acquired a creation-time obligation while the leader was dispatched", mode)
 			}
-			if _, err := testHandler.TaskService.StartTask(ctx, parseUUID(taskID)); err != nil {
-				t.Fatal(err)
+			if mode != "leader_reply" {
+				if _, err := testHandler.TaskService.StartTask(ctx, parseUUID(taskID)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			completeWorkerReplyRun(t, taskID)
 			queued := dbfx.Count(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND status = 'queued'`, issueID)

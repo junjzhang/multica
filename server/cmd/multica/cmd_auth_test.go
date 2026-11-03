@@ -32,6 +32,9 @@ func TestMain(m *testing.M) {
 		"MULTICA_WORKSPACE_ID",
 		"MULTICA_SERVER_URL",
 		"MULTICA_TASK_CONFIG_ROOT",
+		"PASEO_AGENT_ID",
+		"MULTICA_EXTERNAL_SESSION_FILE",
+		"MULTICA_RETURN_SESSION",
 	} {
 		os.Unsetenv(key)
 	}

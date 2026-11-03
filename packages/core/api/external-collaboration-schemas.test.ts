@@ -12,6 +12,9 @@ import {
   IssueSchema,
   ListIssuesResponseSchema,
   MailboxMessageListSchema,
+  AgentSessionListResponseSchema,
+  IssueSessionBindingListSchema,
+  AgentSessionBindingResponseSchema,
   TimelineEntriesSchema,
 } from "./schemas";
 import { agentExecutionKind, mentionDispatchKind } from "../agents/execution-kind";
@@ -100,6 +103,23 @@ describe("AgentSchema WORK-9 fields", () => {
   it("drops one malformed agent without hiding the rest", () => {
     const parsed = AgentListSchema.parse([externalAgent, { name: "no id" }, { id: "agent-3" }]);
     expect(parsed.map((agent) => agent.id)).toEqual(["agent-1", "agent-3"]);
+  });
+
+  it("keeps the registered session id distinct from the host id and tolerates older responses", () => {
+    const registered = AgentSchema.parse({
+      ...externalAgent,
+      external_session: { ...externalSession, id: "registered-session-1" },
+    });
+    expect(registered.external_session?.id).toBe("registered-session-1");
+    expect(registered.external_session?.session_id).toBe("agent-1");
+    expect(AgentSchema.parse(externalAgent).external_session?.id).toBeUndefined();
+
+    const malformed = AgentSchema.parse({
+      ...externalAgent,
+      external_session: { ...externalSession, id: 42 },
+    });
+    expect(malformed.external_session?.id).toBeUndefined();
+    expect(malformed.external_session?.session_id).toBe("agent-1");
   });
 });
 
@@ -268,6 +288,17 @@ it("preserves collaboration detail across partial events and accepts explicit cl
     merge_authorization: { allowed: true },
     external_participants: [externalAgent],
     mailbox_deliveries: [],
+    external_session_bindings: [
+      {
+        id: "binding-1",
+        agent_id: externalAgent.id,
+        issue_id: baseIssue.id,
+        session: { id: "session-1", ...externalSession },
+        deliverable: true,
+        unavailable_reason: "",
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ],
   });
   qc.setQueryData(key, detail);
   onIssueUpdated(qc, baseIssue.workspace_id, parseIssue({ ...baseIssue, title: "Renamed" }));
@@ -276,13 +307,145 @@ it("preserves collaboration detail across partial events and accepts explicit cl
   expect(after?.coordinator).toEqual(detail.coordinator);
   expect(after?.merge_authorization).toEqual(detail.merge_authorization);
   expect(after?.external_participants).toEqual(detail.external_participants);
+  expect(after?.external_session_bindings).toEqual(detail.external_session_bindings);
   onIssueUpdated(qc, baseIssue.workspace_id, parseIssue({
     ...baseIssue, coordinator: null, merge_authorization: { allowed: false },
-    external_participants: [], mailbox_deliveries: [],
+    external_participants: [], mailbox_deliveries: [], external_session_bindings: [],
   }));
   const cleared = qc.getQueryData<Issue>(key);
   expect(cleared?.coordinator).toBeNull();
   expect(cleared?.merge_authorization?.allowed).toBe(false);
   expect(cleared?.external_participants).toEqual([]);
   expect(cleared?.mailbox_deliveries).toEqual([]);
+  expect(cleared?.external_session_bindings).toEqual([]);
+});
+
+describe("task session read projections", () => {
+  it("keeps a generic delivery real: no fabricated comment, frozen target kept", () => {
+    const [generic] = MailboxMessageListSchema.parse([
+      {
+        id: "msg-generic",
+        issue_id: "issue-1",
+        comment_id: null,
+        recipient_agent_id: "agent-1",
+        source_session: null,
+        target_session: { id: "session-1", ...externalSession },
+        source_type: "issue_wakeup",
+        kind: "issue_wakeup",
+        delivery_status: "unknown",
+        processing_status: "unread",
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ]);
+    expect(generic?.comment_id).toBe("");
+    expect(generic?.source_session).toBeNull();
+    expect(generic?.target_session?.id).toBe("session-1");
+    expect(generic?.source_type).toBe("issue_wakeup");
+    expect(generic?.kind).toBe("issue_wakeup");
+    expect(generic?.delivery_status).toBe("unknown");
+  });
+
+  it("defaults absent generic fields and degrades an unknown enum without dropping the row", () => {
+    const [row] = MailboxMessageListSchema.parse([
+      {
+        id: "msg-future",
+        comment_id: "",
+        delivery_status: "future_status",
+        processing_status: "future_processing",
+        target_session: { id: 42, provider: "paseo" },
+      },
+    ]);
+    expect(row?.kind).toBe("");
+    expect(row?.source_type).toBe("");
+    expect(row?.target_session).toBeNull();
+    expect(row?.delivery_status).toBe("unknown");
+    expect(row?.processing_status).toBe("unknown");
+  });
+
+  it("lists every registered session and drops only the malformed one", () => {
+    const parsed = AgentSessionListResponseSchema.parse({
+      sessions: [
+        {
+          id: "session-1",
+          provider: "paseo",
+          host_id: "host-1",
+          session_id: "host-session-1",
+          display_name: "Review",
+          url: null,
+          daemon_id: "daemon-1",
+          deliverable: false,
+          unavailable_reason: "agent_archived",
+        },
+        { id: 7 },
+      ],
+    });
+    expect(parsed.sessions).toHaveLength(1);
+    expect(parsed.sessions[0]?.id).toBe("session-1");
+    expect(parsed.sessions[0]?.deliverable).toBe(false);
+    expect(parsed.sessions[0]?.unavailable_reason).toBe("agent_archived");
+
+    const defaults = AgentSessionListResponseSchema.parse({ sessions: [{ id: "session-2" }] });
+    expect(defaults.sessions[0]?.deliverable).toBe(false);
+    expect(defaults.sessions[0]?.unavailable_reason).toBe("");
+    expect(defaults.sessions[0]?.provider).toBe("");
+  });
+
+  it("requires a real issue session binding but degrades malformed ones", () => {
+    const parsed = IssueSessionBindingListSchema.parse([
+      {
+        id: "binding-1",
+        agent_id: "agent-1",
+        issue_id: "issue-1",
+        session: { id: "session-1", ...externalSession },
+        deliverable: true,
+        unavailable_reason: "",
+        created_at: "2026-01-02T00:00:00Z",
+      },
+      {
+        id: "binding-2",
+        agent_id: "agent-2",
+        issue_id: "issue-1",
+        session: { id: 42, provider: "paseo" },
+        deliverable: true,
+      },
+      { agent_id: "missing-id" },
+    ]);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[1]?.id).toBe("binding-2");
+    expect(parsed[1]?.session).toBeNull();
+    expect(parsed[0]?.session?.id).toBe("session-1");
+    expect(parsed[0]?.deliverable).toBe(true);
+
+    expect(AgentSessionBindingResponseSchema.parse({ binding: parsed[0] })?.binding?.agent_id).toBe("agent-1");
+    expect(AgentSessionBindingResponseSchema.parse({ binding: null }).binding).toBeNull();
+    expect(AgentSessionBindingResponseSchema.safeParse("not an object").success).toBe(false);
+  });
+
+  it("carries bindings on the issue and treats a malformed field as absent", () => {
+    const issue = IssueSchema.parse({
+      ...baseIssue,
+      external_session_bindings: [
+        {
+          id: "binding-1",
+          agent_id: "agent-1",
+          issue_id: baseIssue.id,
+          session: { id: "session-1", ...externalSession },
+          deliverable: true,
+          unavailable_reason: "",
+          created_at: "2026-01-02T00:00:00Z",
+        },
+      ],
+    });
+    expect(issue.external_session_bindings?.[0]?.session?.session_id).toBe("agent-1");
+
+    const malformed = IssueSchema.parse({
+      ...baseIssue,
+      external_session_bindings: [{ id: 3 }],
+    });
+    expect(malformed.external_session_bindings).toBeUndefined();
+    expect(IssueSessionBindingListSchema.safeParse([{ id: 3 }]).success).toBe(false);
+
+    const empty = IssueSchema.parse({ ...baseIssue, external_session_bindings: [] });
+    expect(empty.external_session_bindings).toEqual([]);
+  });
 });

@@ -333,7 +333,7 @@ func runWorkspaceCreate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -488,7 +488,7 @@ func runWorkspaceGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace ID is required: pass an id/slug/prefix as argument or set MULTICA_WORKSPACE_ID")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -586,7 +586,7 @@ func runWorkspaceUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no fields to update; use --name, --description, --context, or --issue-prefix")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -611,7 +611,7 @@ func runWorkspaceMcpList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace ID is required: pass an id/slug/prefix as argument or set MULTICA_WORKSPACE_ID")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -648,7 +648,7 @@ func runWorkspaceMcpAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("one of --server-config, --server-config-stdin, or --server-config-file is required")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -694,7 +694,7 @@ func runWorkspaceMcpUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("nothing to update; pass --name and/or one of --server-config, --server-config-stdin, --server-config-file")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -724,7 +724,7 @@ func runWorkspaceMcpRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace ID is required: pass an id/slug/prefix as argument or set MULTICA_WORKSPACE_ID")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -792,7 +792,7 @@ func runWorkspaceMembers(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace ID is required: pass an id/slug/prefix as argument or set MULTICA_WORKSPACE_ID")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -854,7 +854,7 @@ func runWorkspaceMemberInvite(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("workspace ID is required: pass an id/slug/prefix as argument or set MULTICA_WORKSPACE_ID")
 	}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}

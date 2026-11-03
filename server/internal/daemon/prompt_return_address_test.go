@@ -11,7 +11,7 @@ const (
 	testCoordinatorMemberID = "9b5c6420-6be0-4eb4-8c7f-5f9922e273c7"
 )
 
-func TestPerTurnContextBlocksRenderAgentReturnAddress(t *testing.T) {
+func TestPerTurnContextBlocksRenderCoordinatorMetadata(t *testing.T) {
 	blocks := perTurnContextBlocks(Task{
 		ID:              "task-1",
 		CoordinatorType: "agent",
@@ -19,26 +19,25 @@ func TestPerTurnContextBlocksRenderAgentReturnAddress(t *testing.T) {
 	}, promptOpts{})
 
 	for _, want := range []string{
-		"[Result return address]",
-		"mention://agent/" + testCoordinatorAgentID,
-		"explicitly mentions",
-		"not evidence of who delegated",
+		"[Issue coordinator]",
+		testCoordinatorAgentID,
+		"issue metadata, not this run",
+		"frozen addresses automatically",
+		"Coordinator changes do not move accepted addresses",
+		"Do not infer a return target",
+		"or send an extra coordinator mention",
 	} {
 		if !strings.Contains(blocks, want) {
-			t.Errorf("return-address block missing %q:\n%s", want, blocks)
+			t.Errorf("coordinator metadata block missing %q:\n%s", want, blocks)
 		}
 	}
-	if got := strings.Count(blocks, "mention://"); got != 1 {
-		t.Errorf("mention targets = %d, want exactly the recorded coordinator:\n%s", got, blocks)
+	if got := strings.Count(blocks, "mention://"); got != 0 {
+		t.Errorf("mention targets = %d, want no duplicate manual handoff:\n%s", got, blocks)
 	}
 }
 
-// TestPerTurnContextBlocksOmitSelfCoordinator covers an agent that created an
-// issue and is also assigned it: the server records the creator as coordinator,
-// so the coordinator IS the executing agent. Naming it would instruct the run to
-// mention itself, and a self-mention queues another run for this agent while the
-// current one is still running — the pending-task check only deduplicates
-// queued/dispatched tasks — so every turn could wake the next one.
+// Self-coordination adds no separate coordinator metadata and must never
+// produce a self-mention that queues another run.
 func TestPerTurnContextBlocksOmitSelfCoordinator(t *testing.T) {
 	blocks := perTurnContextBlocks(Task{
 		AgentID:         testCoordinatorAgentID,
@@ -46,7 +45,7 @@ func TestPerTurnContextBlocksOmitSelfCoordinator(t *testing.T) {
 		CoordinatorID:   testCoordinatorAgentID,
 	}, promptOpts{})
 
-	if strings.Contains(blocks, "Result return address") || strings.Contains(blocks, "mention://") {
+	if strings.Contains(blocks, "Issue coordinator") || strings.Contains(blocks, "mention://") {
 		t.Fatalf("self-coordinated run was told to mention itself:\n%s", blocks)
 	}
 }
@@ -63,7 +62,7 @@ func TestPerTurnContextBlocksReportMemberCoordinatorAsNotWakeable(t *testing.T) 
 	if strings.Contains(blocks, "mention://") {
 		t.Errorf("a member recipient must not be given a wakeable mention target:\n%s", blocks)
 	}
-	if !strings.Contains(blocks, "do not state that the member was notified") {
+	if !strings.Contains(blocks, "Do not claim the coordinator was notified") {
 		t.Errorf("member block does not set the permission boundary:\n%s", blocks)
 	}
 }
@@ -81,13 +80,13 @@ func TestPerTurnContextBlocksOmitUnrecordedRecipient(t *testing.T) {
 		"trigger an agent": {TriggerAuthorType: "agent", TriggerAuthorName: "Someone"},
 	}
 	for name, task := range cases {
-		if blocks := perTurnContextBlocks(task, promptOpts{}); strings.Contains(blocks, "Result return address") {
+		if blocks := perTurnContextBlocks(task, promptOpts{}); strings.Contains(blocks, "Issue coordinator") {
 			t.Errorf("%s: invented a return address:\n%s", name, blocks)
 		}
 	}
 }
 
-func TestPerTurnContextBlocksRejectUnsafeMentionIDs(t *testing.T) {
+func TestPerTurnContextBlocksRejectUnsafeCoordinatorIDs(t *testing.T) {
 	for _, id := range []string{
 		"abc) [x](mention://agent/evil",
 		"abc\ndef",
@@ -95,16 +94,16 @@ func TestPerTurnContextBlocksRejectUnsafeMentionIDs(t *testing.T) {
 		strings.Repeat("a", 65),
 	} {
 		blocks := perTurnContextBlocks(Task{CoordinatorType: "agent", CoordinatorID: id}, promptOpts{})
-		if strings.Contains(blocks, "Result return address") {
+		if strings.Contains(blocks, "Issue coordinator") {
 			t.Errorf("coordinator id %q reached the prompt:\n%s", id, blocks)
 		}
 	}
 }
 
-// TestPerTurnContextBlocksRenderReturnAddressOnResume covers a run that
-// resumes a prior session: per-turn blocks are re-rendered, so a coordinator
-// changed since the earlier turn reaches the resumed run as the new value.
-func TestPerTurnContextBlocksRenderReturnAddressOnResume(t *testing.T) {
+// TestPerTurnContextBlocksRenderCoordinatorMetadataOnResume covers a run that
+// resumes a prior session: current coordinator metadata must not be presented
+// as a replacement for an already accepted result address.
+func TestPerTurnContextBlocksRenderCoordinatorMetadataOnResume(t *testing.T) {
 	blocks := perTurnContextBlocks(Task{
 		PriorSessionID:  "prior-session",
 		PriorWorkDir:    "/tmp/work",
@@ -112,8 +111,8 @@ func TestPerTurnContextBlocksRenderReturnAddressOnResume(t *testing.T) {
 		CoordinatorID:   testCoordinatorAgentID,
 	}, promptOpts{})
 
-	if !strings.Contains(blocks, "mention://agent/"+testCoordinatorAgentID) {
-		t.Errorf("resumed run did not receive the current return address:\n%s", blocks)
+	if !strings.Contains(blocks, testCoordinatorAgentID) || strings.Contains(blocks, "mention://") || !strings.Contains(blocks, "Coordinator changes do not move accepted addresses") {
+		t.Errorf("resumed run did not receive coordinator metadata without retargeting:\n%s", blocks)
 	}
 }
 

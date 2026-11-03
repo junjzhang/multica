@@ -488,7 +488,7 @@ func TestDeleteComment_CancelsAndRequeuesWhenDeletedInputIsCoalesced(t *testing.
 	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[1:2])
 }
 
-func TestDeleteComment_FailureRestoresCancelledCompleteBatch(t *testing.T) {
+func TestDeleteComment_FailurePreservesOriginalBatch(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -515,10 +515,10 @@ func TestDeleteComment_FailureRestoresCancelledCompleteBatch(t *testing.T) {
 	if existing != 1 {
 		t.Fatalf("failed delete unexpectedly removed trigger")
 	}
-	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[:2])
+	assertOriginalCommentBatch(t, fixture)
 }
 
-func TestDeleteComment_ConcurrentNoOpIsReportedAndRestoresCancelledBatch(t *testing.T) {
+func TestDeleteComment_ConcurrentNoOpPreservesOriginalBatch(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -538,7 +538,17 @@ func TestDeleteComment_ConcurrentNoOpIsReportedAndRestoresCancelledBatch(t *test
 		t.Fatalf("DeleteComment no-op: got %d: %s", w.Code, w.Body.String())
 	}
 
-	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[:2])
+	assertOriginalCommentBatch(t, fixture)
+}
+
+func assertOriginalCommentBatch(t *testing.T, fixture commentDeliveryFixture) {
+	t.Helper()
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2`, fixture.issueID, fixture.agentID); n != 1 {
+		t.Fatalf("failed deletion created %d runs", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE id=$1 AND status='queued' AND trigger_comment_id=$2 AND $3::uuid=ANY(coalesced_comment_ids) AND $4::uuid=ANY(coalesced_comment_ids)`, fixture.taskID, fixture.commentID[2], fixture.commentID[0], fixture.commentID[1]); n != 1 {
+		t.Fatal("failed deletion changed the original comment batch")
+	}
 }
 
 func assertRepairedCommentBatch(t *testing.T, fixture commentDeliveryFixture, wantTrigger string, wantCoalesced []string) {

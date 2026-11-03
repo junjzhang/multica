@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -32,6 +33,9 @@ type MailboxMessageResponse struct {
 	CommentID        string                   `json:"comment_id"`
 	RecipientAgentID string                   `json:"recipient_agent_id"`
 	SourceSession    *ExternalSessionResponse `json:"source_session"`
+	TargetSession    *ExternalSessionResponse `json:"target_session"`
+	SourceType       string                   `json:"source_type"`
+	Kind             string                   `json:"kind"`
 	DeliveryStatus   string                   `json:"delivery_status"`
 	ProcessingStatus string                   `json:"processing_status"`
 	CreatedAt        string                   `json:"created_at"`
@@ -39,13 +43,16 @@ type MailboxMessageResponse struct {
 	LastError        *string                  `json:"last_error"`
 }
 
-func mailboxMessageToResponse(m db.AgentMailboxMessage, source *ExternalSessionResponse) MailboxMessageResponse {
+func mailboxMessageToResponse(m db.AgentMailboxMessage, source, target *ExternalSessionResponse) MailboxMessageResponse {
 	return MailboxMessageResponse{
 		ID:               uuidToString(m.ID),
 		IssueID:          uuidToString(m.IssueID),
 		CommentID:        uuidToString(m.CommentID),
 		RecipientAgentID: uuidToString(m.RecipientAgentID),
 		SourceSession:    source,
+		TargetSession:    target,
+		SourceType:       m.SourceType,
+		Kind:             m.Kind,
 		DeliveryStatus:   m.DeliveryStatus,
 		ProcessingStatus: m.ProcessingStatus,
 		CreatedAt:        timestampToString(m.CreatedAt),
@@ -58,8 +65,8 @@ const (
 	mailboxLimitDefault = 50
 	mailboxLimitMax     = 100
 
-	daemonMailboxClaimDefault = 10
-	daemonMailboxClaimMax     = 50
+	daemonDeliveryClaimDefault = 10
+	daemonDeliveryClaimMax     = 50
 )
 
 // encodeMailboxCursor renders the opaque keyset cursor (created_at, id).
@@ -159,10 +166,14 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list mailbox")
 		return
 	}
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs(rows))
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
 	messages := make([]MailboxMessageResponse, 0, len(rows))
 	for _, row := range rows {
-		messages = append(messages, mailboxMessageToResponse(row, sources[uuidToString(row.SourceSessionID)]))
+		messages = append(messages, mailboxMessageToResponse(
+			row,
+			sessions[uuidToString(row.SourceSessionID)],
+			sessions[uuidToString(row.TargetSessionID)],
+		))
 	}
 	var nextCursor *string
 	if len(rows) == limit {
@@ -176,12 +187,23 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func mailboxSourceSessionIDs(rows []db.AgentMailboxMessage) []pgtype.UUID {
-	out := make([]pgtype.UUID, 0, len(rows))
-	for _, row := range rows {
-		if row.SourceSessionID.Valid {
-			out = append(out, row.SourceSessionID)
+func mailboxDeliverySessionIDs(rows []db.AgentMailboxMessage) []pgtype.UUID {
+	out := make([]pgtype.UUID, 0, len(rows)*2)
+	seen := make(map[string]struct{}, len(rows)*2)
+	add := func(id pgtype.UUID) {
+		if !id.Valid {
+			return
 		}
+		key := uuidToString(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, id)
+	}
+	for _, row := range rows {
+		add(row.SourceSessionID)
+		add(row.TargetSessionID)
 	}
 	return out
 }
@@ -240,11 +262,16 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
-	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs([]db.AgentMailboxMessage{updated}))
+	writeJSON(w, http.StatusOK, mailboxMessageToResponse(
+		updated,
+		sessions[uuidToString(updated.SourceSessionID)],
+		sessions[uuidToString(updated.TargetSessionID)],
+	))
 }
 
-// daemonMailboxContext resolves the verified daemon identity for claim/ack.
+// daemonMailboxContext resolves the verified daemon identity for delivery
+// claim/outcome.
 // Device tokens carry the daemon identity. User credentials require a selector
 // whose ownership is checked in the selected workspace.
 func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (workspaceID string, wsUUID pgtype.UUID, daemonID string, ownerID string, ok bool) {
@@ -307,201 +334,12 @@ func (h *Handler) daemonMailboxContext(w http.ResponseWriter, r *http.Request) (
 	return workspaceID, wsUUID, daemonID, ownerID, true
 }
 
-type claimDaemonMailboxRequest struct {
-	Limit int `json:"limit"`
-}
-
-type daemonMailboxClaimItem struct {
-	Message         MailboxMessageResponse  `json:"message"`
-	ExternalSession ExternalSessionResponse `json:"external_session"`
-	DeliveryToken   string                  `json:"delivery_token"`
-	LeaseExpiresAt  string                  `json:"lease_expires_at"`
-	Content         string                  `json:"content"`
-}
-
-// ClaimDaemonMailbox leases deliverable requests for the verified daemon and
-// returns a rendered notification. The claim is fenced: each message gets a
-// fresh delivery token, stored hashed, and only the daemon that holds the lease
-// can acknowledge it.
-func (h *Handler) ClaimDaemonMailbox(w http.ResponseWriter, r *http.Request) {
-	workspaceID, wsUUID, daemonID, ownerID, ok := h.daemonMailboxContext(w, r)
-	if !ok {
-		return
-	}
-	var req claimDaemonMailboxRequest
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
-	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = daemonMailboxClaimDefault
-	}
-	limit = min(limit, daemonMailboxClaimMax)
-
-	claims, err := delivery.NewQueue(h.Queries, h.TxStarter).Claim(r.Context(), delivery.ClaimRequest{
-		Scope:       delivery.Scope{WorkspaceID: workspaceID},
-		DaemonID:    daemonID,
-		OwnerUserID: ownerID,
-		Limit:       limit,
-		Projection:  delivery.CommentProjection,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to claim mailbox")
-		return
-	}
-	items := make([]daemonMailboxClaimItem, 0, len(claims))
-	for _, claim := range claims {
-		leased, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-			ID:          parseUUID(claim.ID),
-			WorkspaceID: wsUUID,
-		})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load claimed mailbox message")
-			return
-		}
-		session, err := h.Queries.GetExternalAgentSessionByAgentID(r.Context(), leased.RecipientAgentID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load external session")
-			return
-		}
-		content := renderMailboxNotification(leased)
-		var source *ExternalSessionResponse
-		if leased.SourceSessionID.Valid {
-			if row, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
-				ID:          leased.SourceSessionID,
-				WorkspaceID: wsUUID,
-			}); err == nil {
-				source = externalSessionToResponse(row)
-			}
-		}
-		items = append(items, daemonMailboxClaimItem{
-			Message:         mailboxMessageToResponse(leased, source),
-			ExternalSession: *externalSessionToResponse(session),
-			DeliveryToken:   claim.LeaseToken,
-			LeaseExpiresAt:  timestampToString(pgtype.Timestamptz{Time: claim.LeaseExpiresAt, Valid: true}),
-			Content:         content,
-		})
-	}
-	issues := make(map[string]struct{})
-	for _, item := range items {
-		issues[item.Message.IssueID] = struct{}{}
-	}
-	for issueID := range issues {
-		h.publishMailboxChanged(wsUUID, issueID)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
-}
-
-// Stable references keep the host's idempotency fingerprint unchanged when
-// an issue is renamed or its discussion is edited between delivery attempts.
-func renderMailboxNotification(m db.AgentMailboxMessage) string {
-	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
-		"Use the external-agent CLI profile provisioned when this session was registered. If it is unavailable, report that dependency; do not fall back to the user's personal identity.\n"+
-		"Read: multica --profile <registered-external-profile> issue get %[3]s --output json\n"+
-		"Read comments: multica --profile <registered-external-profile> issue comment list %[3]s --output json\n"+
-		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
-		uuidToString(m.ID), uuidToString(m.WorkspaceID), uuidToString(m.IssueID), uuidToString(m.CommentID), uuidToString(m.RecipientAgentID))
-}
-
-type ackDaemonMailboxRequest struct {
-	DeliveryToken string `json:"delivery_token"`
-	Status        string `json:"status"`
-	HostReceipt   string `json:"host_receipt"`
-	Error         string `json:"error"`
-	// RetryClass separates a busy session from a broken dependency. Older
-	// daemons omit it and keep the failure backoff.
-	RetryClass string `json:"retry_class,omitempty"`
-}
-
-// AckDaemonMailbox records the daemon's delivery result. The lease token fences
-// the write: a stale or foreign ack matches no row and cannot overwrite a later
-// lease.
-func (h *Handler) AckDaemonMailbox(w http.ResponseWriter, r *http.Request) {
-	workspaceID, wsUUID, daemonID, _, ok := h.daemonMailboxContext(w, r)
-	if !ok {
-		return
-	}
-	messageID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "messageId"), "message id")
-	if !ok {
-		return
-	}
-	var req ackDaemonMailboxRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.DeliveryToken == "" {
-		writeError(w, http.StatusBadRequest, "delivery_token is required")
-		return
-	}
-	state, ok := mailboxAckState(req.Status)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "status must be 'delivered', 'retry' or 'failed'")
-		return
-	}
-	if !validRetryClass(req.RetryClass) {
-		writeError(w, http.StatusBadRequest, "retry_class must be 'busy', 'unavailable' or 'dependency'")
-		return
-	}
-	if _, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-		ID:          messageID,
-		WorkspaceID: wsUUID,
-	}); err != nil {
-		writeError(w, http.StatusNotFound, "mailbox message not found")
-		return
-	}
-	// Both device credentials and owner-verified selectors fence the lease.
-	if _, err := delivery.NewQueue(h.Queries, h.TxStarter).RecordOutcome(r.Context(), delivery.OutcomeRequest{
-		Scope:       delivery.Scope{WorkspaceID: workspaceID},
-		DeliveryID:  uuidToString(messageID),
-		DaemonID:    daemonID,
-		LeaseToken:  req.DeliveryToken,
-		State:       state,
-		RetryClass:  delivery.RetryClass(req.RetryClass),
-		HostReceipt: req.HostReceipt,
-		Error:       req.Error,
-	}); err != nil {
-		if errors.Is(err, delivery.ErrLeaseLost) {
-			writeError(w, http.StatusConflict, "delivery lease is stale or does not belong to this daemon")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to acknowledge delivery")
-		return
-	}
-	updated, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{
-		ID:          messageID,
-		WorkspaceID: wsUUID,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load acknowledged mailbox message")
-		return
-	}
-	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.IssueID))
-	sources := h.externalSessionsByID(r.Context(), mailboxSourceSessionIDs([]db.AgentMailboxMessage{updated}))
-	writeJSON(w, http.StatusOK, mailboxMessageToResponse(updated, sources[uuidToString(updated.SourceSessionID)]))
-}
-
 func validRetryClass(class string) bool {
 	switch class {
 	case "", "busy", "unavailable", "dependency":
 		return true
 	default:
 		return false
-	}
-}
-
-// mailboxAckState maps the frozen mailbox ack vocabulary onto the delivery
-// core's outcome states.
-func mailboxAckState(status string) (delivery.OutcomeState, bool) {
-	switch status {
-	case "delivered":
-		return delivery.OutcomeDelivered, true
-	case "retry":
-		return delivery.OutcomeRetry, true
-	case "failed":
-		return delivery.OutcomeRejected, true
-	default:
-		return "", false
 	}
 }
 
@@ -515,26 +353,50 @@ type commentMentionDeliveryPayload struct {
 	CommentID string `json:"comment_id"`
 }
 
+// mailboxDeliveryResults is the per-agent outcome of persisting a comment
+// handoff. A queued entry means the delivery row committed; any other reason
+// means the target was not addressed (for example no active session binding)
+// and the comment response must say so instead of claiming a handoff.
+type mailboxDeliveryResults map[string]DispatchReasonCode
+
+// queuedMailboxAgents returns the agents whose delivery actually committed.
+func (r mailboxDeliveryResults) queuedMailboxAgents() map[string]struct{} {
+	out := make(map[string]struct{}, len(r))
+	for agentID, reason := range r {
+		if reason == ReasonQueued {
+			out[agentID] = struct{}{}
+		}
+	}
+	return out
+}
+
 // enqueueMailboxDeliveries persists one delivery per explicit external mention
 // through the delivery core. q may be a transaction handle: CreateComment and
 // UpdateComment pass their write transaction so the comment content and every
 // valid handoff commit or roll back together. A persistence failure fails the
 // whole call; the caller must not treat any target as queued.
-func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (map[string]struct{}, error) {
-	out := map[string]struct{}{}
+//
+// The session a handoff addresses is resolved by the application from the
+// explicit (agent, issue) binding and then frozen on the delivery. A missing
+// binding is reported per target and never falls back to another session of
+// the same agent.
+func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, issue db.Issue, commentID pgtype.UUID, recipients []commentMentionTarget, actorType, actorID string) (mailboxDeliveryResults, error) {
+	out := mailboxDeliveryResults{}
 	if len(recipients) == 0 {
 		return out, nil
 	}
+	workspaceID := uuidToString(issue.WorkspaceID)
+	issueID := uuidToString(issue.ID)
 	var sourceSessionID string
 	if actorType == "agent" {
-		if session, err := q.GetExternalAgentSessionByAgentID(ctx, parseUUID(actorID)); err == nil {
-			sourceSessionID = uuidToString(session.ID)
+		if binding, err := sessionroute.Resolve(ctx, q, workspaceID, actorID, issueID); err == nil {
+			sourceSessionID = binding.SessionID
 		}
 	}
 	store := delivery.NewPostgres(q)
 	payload, err := json.Marshal(commentMentionDeliveryPayload{
 		Schema:    "comment_mention.v1",
-		IssueID:   uuidToString(issue.ID),
+		IssueID:   issueID,
 		CommentID: uuidToString(commentID),
 	})
 	if err != nil {
@@ -545,8 +407,20 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			continue
 		}
 		agent := *target.MailboxAgent
-		_, err := store.Enqueue(ctx, delivery.EnqueueRequest{
-			Scope: delivery.Scope{WorkspaceID: uuidToString(issue.WorkspaceID)},
+		agentID := uuidToString(agent.ID)
+		binding, err := sessionroute.Resolve(ctx, q, workspaceID, agentID, issueID)
+		if errors.Is(err, sessionroute.ErrNotBound) {
+			// The mention names an identity with no explicit target on this
+			// issue. Fail the target, keep the comment: the author can bind a
+			// session and ask again.
+			out[agentID] = ReasonTargetUnavailable
+			continue
+		}
+		if err != nil {
+			return out, fmt.Errorf("resolve session binding for agent %s: %w", agentID, err)
+		}
+		_, err = store.Enqueue(ctx, delivery.EnqueueRequest{
+			Scope: delivery.Scope{WorkspaceID: workspaceID},
 			Source: delivery.Source{
 				Type:      "comment",
 				Key:       uuidToString(commentID),
@@ -554,11 +428,13 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 				ActorID:   actorID,
 				SessionID: sourceSessionID,
 			},
-			Recipient: delivery.Recipient{Type: "agent", ID: uuidToString(agent.ID)},
-			Kind:      "comment_mention",
-			Payload:   payload,
+			Target:          delivery.Target{SessionID: binding.SessionID},
+			Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+			NotificationKey: "comment:" + uuidToString(commentID) + ":agent:" + agentID,
+			Kind:            "comment_mention",
+			Payload:         payload,
 			Refs: delivery.Refs{
-				IssueID:   uuidToString(issue.ID),
+				IssueID:   issueID,
 				CommentID: uuidToString(commentID),
 			},
 		})
@@ -566,9 +442,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			// Keep already-persisted recipients in the result for diagnostics.
 			// Callers own a transaction, so a failure rolls every one of them
 			// back and none is reported as queued.
-			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", uuidToString(agent.ID), err)
+			return out, fmt.Errorf("enqueue comment delivery for agent %s: %w", agentID, err)
 		}
-		out[uuidToString(agent.ID)] = struct{}{}
+		out[agentID] = ReasonQueued
 	}
 	return out, nil
 }

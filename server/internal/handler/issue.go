@@ -20,7 +20,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/attribution"
 	"github.com/multica-ai/multica/server/internal/channelmedia"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/dispatch"
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -114,6 +116,11 @@ type IssueResponse struct {
 	MergeAuthorization   *IssueMergeAuthorizationResponse `json:"merge_authorization,omitempty"`
 	ExternalParticipants *[]AgentResponse                 `json:"external_participants,omitempty"`
 	MailboxDeliveries    *[]MailboxMessageResponse        `json:"mailbox_deliveries,omitempty"`
+	// ExternalSessionBindings is the active target for each (agent, issue)
+	// pair. It is separate from the participant's single agent-detail session:
+	// one agent may serve several issues from different sessions, and an
+	// existing delivery keeps the target it froze when it was created.
+	ExternalSessionBindings *[]AgentSessionBindingViewResponse `json:"external_session_bindings,omitempty"`
 	// duplicateOfIssueID is the raw mark, kept off the wire; see DuplicateOf.
 	duplicateOfIssueID pgtype.UUID
 }
@@ -294,10 +301,14 @@ func assertIssueStatusStillActive(ctx context.Context, qtx *db.Queries, workspac
 // inside a transaction that re-verifies the status under the shared catalog
 // lock (see assertIssueStatusStillActive). Request writes also carry trusted
 // wakeup actor identity in transaction-local settings, including built-in targets.
-func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(q *db.Queries) error) error {
+func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, fn func(pgx.Tx, *db.Queries) error) error {
 	_, hasActor := ctx.Value(wakeupActorKey{}).(wakeupActor)
-	if !hasActor && (statusKey == "" || issuestatus.IsBuiltIn(statusKey)) {
-		return fn(h.Queries)
+	// A built-in non-terminal status has nothing to clean up, so it can take the
+	// fast path. done and cancelled do withdraw notifications, and that
+	// withdrawal must commit with the status write even when no wakeup actor is
+	// installed.
+	if !hasActor && !closeStatusNeedsTransaction(statusKey) && (statusKey == "" || issuestatus.IsBuiltIn(statusKey)) {
+		return fn(nil, h.Queries)
 	}
 	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
@@ -309,25 +320,58 @@ func (h *Handler) runWithIssueStatusGuard(ctx context.Context, workspaceID pgtyp
 	if err := assertIssueStatusStillActive(ctx, qtx, workspaceID, statusKey); err != nil {
 		return err
 	}
-	if err := fn(qtx); err != nil {
+	if err := fn(tx, qtx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
+// closeStatusNeedsTransaction reports whether a built-in status write can run
+// the close rule. done and cancelled are the only terminal built-ins; a custom
+// status already takes the guarded transaction because it is not built in.
+func closeStatusNeedsTransaction(statusKey string) bool {
+	return statusKey == issuestatus.Done || statusKey == issuestatus.Cancelled
+}
+
 // updateIssueWithStatusGuard writes params under the status-archive guard.
-func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams) (db.Issue, error) {
+// The close rule compares the status read under the write transaction's issue
+// row lock. The request read the issue before this transaction, and another
+// writer can reopen it (and queue a new notification) in between; deciding
+// "same status, skip the close rule" from that snapshot would swallow a real
+// todo->cancelled transition.
+func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams, afterWrite func(pgx.Tx, *db.Queries, db.Issue) error) (db.Issue, error) {
 	var issue db.Issue
 	var cancelledWakeups []db.AgentTaskQueue
-	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(q *db.Queries) error {
+	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(tx pgx.Tx, q *db.Queries) error {
 		if params.DuplicateOfIssueID.Valid {
 			if err := lockAndCheckDuplicateMark(ctx, q, workspaceID, params.ID, params.DuplicateOfIssueID); err != nil {
 				return err
 			}
 		}
+		// The fast path only carries built-in non-terminal statuses, where the
+		// close rule cannot run. Every write that can reach it holds the issue
+		// row lock, so previousStatus is the row's committed state under this
+		// transaction rather than the request's earlier read.
+		previousStatus := ""
+		if tx != nil && params.Status.Valid {
+			current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
+				ID:          params.ID,
+				WorkspaceID: workspaceID,
+			})
+			if err != nil {
+				return fmt.Errorf("lock issue for status write: %w", err)
+			}
+			previousStatus = current.Status
+		}
 		var innerErr error
-		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params)
-		return innerErr
+		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params, previousStatus)
+		if innerErr != nil {
+			return innerErr
+		}
+		if afterWrite != nil {
+			return afterWrite(tx, q, issue)
+		}
+		return nil
 	})
 	if err != nil {
 		return issue, err
@@ -339,11 +383,16 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 // updateIssueStoppingWakeups writes params and, when the write moves the issue
 // into a done/closed status, ends its wakeups with the same queries. Callers
 // run it inside the status write's transaction and broadcast the returned runs
-// after commit.
-func updateIssueStoppingWakeups(ctx context.Context, q *db.Queries, params db.UpdateIssueParams) (db.Issue, []db.AgentTaskQueue, error) {
+// after commit. A write that resends the status the issue already has is not a
+// new cancellation: a full-object client editing an already-cancelled issue
+// must not withdraw a notification created after that cancellation.
+func updateIssueStoppingWakeups(ctx context.Context, q *db.Queries, params db.UpdateIssueParams, previousStatus string) (db.Issue, []db.AgentTaskQueue, error) {
 	issue, err := q.UpdateIssue(ctx, params)
 	if err != nil || !params.Status.Valid {
 		return issue, nil, err
+	}
+	if previousStatus != "" && previousStatus == issue.Status {
+		return issue, nil, nil
 	}
 	cancelled, err := service.StopClosedIssueWakeups(ctx, q, issue)
 	if err != nil {
@@ -3515,6 +3564,22 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		return out
 	}
 
+	// An agent handing work to an agent or squad must name a return address
+	// before the issue exists. The service records this address and inserts an
+	// immediate run in the same transaction; a missing or invalid address is
+	// refused here, so no half-created delegation can commit.
+	var delegationReturn *delegation.Address
+	delegationCreatedBy := ""
+	if delegationReturnRequired(creatorType, assigneeType) {
+		address, derr := h.resolveDelegationAddress(r, workspaceID, creatorType, actualCreatorID)
+		if derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
+		}
+		delegationReturn = &address
+		delegationCreatedBy = requestUserID(r)
+	}
+
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
 		WorkspaceID:     wsUUID,
 		Title:           req.Title,
@@ -3538,6 +3603,9 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		AllowDuplicate:  req.AllowDuplicate,
 		CoordinatorType: coordinatorType,
 		CoordinatorID:   coordinatorID,
+
+		DelegationReturn:    delegationReturn,
+		DelegationCreatedBy: delegationCreatedBy,
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
@@ -3594,6 +3662,10 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if writeIssueLimitReached(w, err) {
+		return
+	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
 		return
 	}
 	if err != nil {
@@ -3759,7 +3831,7 @@ func refreshUntouchedNullableIssueParams(params *db.UpdateIssueParams, current d
 
 var errIssueFieldConflict = errors.New("issue text field conflict")
 
-func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.UUID, params db.UpdateIssueParams, rawFields map[string]json.RawMessage, titleBase, descriptionBase *string, attachmentIDs []pgtype.UUID, statusKey string) (db.Issue, db.Issue, bool, error) {
+func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.UUID, params db.UpdateIssueParams, rawFields map[string]json.RawMessage, titleBase, descriptionBase *string, attachmentIDs []pgtype.UUID, statusKey string, afterWrite func(pgx.Tx, *db.Queries, db.Issue) error) (db.Issue, db.Issue, bool, error) {
 	if h.TxStarter == nil {
 		return db.Issue{}, db.Issue{}, false, errors.New("atomic issue update requires transaction starter")
 	}
@@ -3831,7 +3903,7 @@ func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.
 	}
 	refreshUntouchedNullableIssueParams(&params, current, rawFields)
 
-	issue, cancelledWakeups, err := updateIssueStoppingWakeups(ctx, qtx, params)
+	issue, cancelledWakeups, err := updateIssueStoppingWakeups(ctx, qtx, params, current.Status)
 	if err != nil {
 		return db.Issue{}, current, false, fmt.Errorf("update locked issue: %w", err)
 	}
@@ -3856,6 +3928,11 @@ func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.
 			if err != nil {
 				return db.Issue{}, current, false, fmt.Errorf("reload issue after attachment link: %w", err)
 			}
+		}
+	}
+	if afterWrite != nil {
+		if err := afterWrite(tx, qtx, issue); err != nil {
+			return db.Issue{}, current, false, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -4121,6 +4198,80 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Decide the prospective run BEFORE the write, because a refused
+	// delegation must leave no business change behind. WillEnqueueRun starts
+	// work only for an explicit assignment (or on create); a workflow handoff
+	// that only moves the status, and a status-only write, are display state
+	// and must not be gated.
+	prospectiveIssue := prevIssue
+	prospectiveIssue.AssigneeType = params.AssigneeType
+	prospectiveIssue.AssigneeID = params.AssigneeID
+	if params.Status.Valid {
+		prospectiveIssue.Status = params.Status.String
+	}
+	if params.Priority.Valid {
+		prospectiveIssue.Priority = params.Priority.String
+	}
+	prospectiveExplicitAssigneeChanged := (touchedType || touchedID) &&
+		(prevIssue.AssigneeType.String != params.AssigneeType.String ||
+			uuidToString(prevIssue.AssigneeID) != uuidToString(params.AssigneeID))
+	prospectiveTrigger, prospectiveWillRun := h.IssueService.WillEnqueueRun(r.Context(),
+		service.IssueTriggerInput{
+			Issue:              prospectiveIssue,
+			AssigneeChanged:    prospectiveExplicitAssigneeChanged,
+			EnteredHandoffStep: handoff != nil,
+		},
+		h.issueTriggerWriteProbe(r, actorType, actorID, prospectiveIssue),
+	)
+	prospectiveWillRun = prospectiveWillRun && !req.SuppressRun
+	// A backlog assignment starts nothing but still records the dispatcher's
+	// address, so a later start cannot guess. Only an explicit assignee change
+	// is a delegation; a status-only workflow handoff is not.
+	prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.SuppressRun &&
+		params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
+	dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, actorType, actorID, prospectiveAssignment, params.AssigneeType)
+	if derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
+	var assignmentTask db.AgentTaskQueue
+	var assignmentAttr attribution.Result
+	assignmentTaskInserted := false
+	afterIssueWrite := func(tx pgx.Tx, q *db.Queries, issue db.Issue) error {
+		if !prospectiveAssignment {
+			return nil
+		}
+		accepted, recordErr := recordDelegationReturn(r.Context(), q, issue, dispatchReturn, requestUserID(r))
+		if recordErr != nil {
+			return recordErr
+		}
+		target := delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+		var replaced *delegation.Assignee
+		if prospectiveExplicitAssigneeChanged {
+			replaced = previousAssignee(prevIssue)
+		}
+		dispatch, dispatchErr := h.prepareAssignmentDispatch(r.Context(), q, issue, target, replaced, accepted)
+		if dispatchErr != nil {
+			return dispatchErr
+		}
+		taskID := pgtype.UUID{}
+		if prospectiveWillRun {
+			task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, actorType, actorID, req.HandoffNote, dispatch.returnIDs)
+			if enqueueErr != nil {
+				return enqueueErr
+			}
+			if task.ID.Valid {
+				taskID = task.ID
+			}
+			if inserted {
+				assignmentTask = task
+				assignmentAttr = attr
+				assignmentTaskInserted = true
+			}
+		}
+		return commitAssignmentIntent(r.Context(), q, issue, dispatch, taskID)
+	}
+
 	attachmentIDs, ok := parseUUIDSliceOrBadRequest(w, req.AttachmentIDs, "attachment_ids")
 	if !ok {
 		return
@@ -4134,15 +4285,19 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil || req.TitleBase != nil || req.DescriptionBase != nil || len(attachmentIDs) > 0 {
 		var lockedPrev db.Issue
 		issue, lockedPrev, attachmentsChanged, err = h.updateIssueAtomically(
-			writeCtx, prevIssue.WorkspaceID, params, rawFields, req.TitleBase, req.DescriptionBase, attachmentIDs, statusKeyForGuard,
+			writeCtx, prevIssue.WorkspaceID, params, rawFields, req.TitleBase, req.DescriptionBase, attachmentIDs, statusKeyForGuard, afterIssueWrite,
 		)
 		if lockedPrev.ID.Valid {
 			prevIssue = lockedPrev
 		}
 	} else {
-		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, params)
+		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, params, afterIssueWrite)
 	}
 	if err != nil {
+		if derr := asDelegationReturnError(err); derr != nil {
+			writeDelegationReturnError(w, derr)
+			return
+		}
 		if writeIssueStatusRaceError(w, err) {
 			return
 		}
@@ -4202,8 +4357,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// issue went to, whether their run started, and the brief it reads. The
 	// run gets that brief from its claim; its handoff note stays the
 	// caller's own.
-	handoffNote := req.HandoffNote
-	trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
+	_, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:              issue,
 			AssigneeChanged:    explicitAssigneeChanged,
@@ -4276,8 +4430,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	if handoff != nil && req.StopPreviousAssigneeRuns {
 		h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, actorType, actorID)
 	}
-	if willRun {
-		h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, handoffNote)
+	if assignmentTaskInserted {
+		// The run committed with the issue and its accepted assignment intent.
+		// Build the optional external overlay and wake the runtime only now.
+		h.TaskService.ApplyQueuedIssueTaskOverlay(r.Context(), assignmentTask)
+		h.TaskService.PublishQueuedIssueTask(r.Context(), assignmentTask, assignmentAttr)
 	}
 
 	// Sub-issue rules on the parent (the child_done system rule and sub-issue
@@ -4437,6 +4594,10 @@ func (h *Handler) DeleteIssue(w http.ResponseWriter, r *http.Request) {
 
 	deleteResult, err := h.deleteIssueAndCollectAttachmentURLs(r.Context(), issue, nil)
 	if err != nil {
+		if errors.Is(err, service.ErrDelegationResourcesRetained) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to delete issue")
 		return
 	}
@@ -4496,6 +4657,12 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 			ID: issue.ID, WorkspaceID: issue.WorkspaceID,
 		}); err != nil {
 			return issueDeleteResult{}, fmt.Errorf("lock issue for delete: %w", err)
+		}
+		if err := qtx.LockTasksForScopeRemoval(ctx, db.LockTasksForScopeRemovalParams{IssueID: issue.ID}); err != nil {
+			return issueDeleteResult{}, err
+		}
+		if err := h.TaskService.RequireDelegationScopeReleased(ctx, qtx, issue.WorkspaceID, issue.ID, pgtype.UUID{}); err != nil {
+			return issueDeleteResult{}, err
 		}
 		detached, err := qtx.DetachDirectChildIssues(ctx, db.DetachDirectChildIssuesParams{
 			WorkspaceID: issue.WorkspaceID, ParentIssueID: issue.ID, ExcludedIssueIds: excludedIssueIDs,
@@ -4558,6 +4725,11 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 		// Mailbox rows have no foreign key; remove them with the issue so a
 		// deleted request cannot be claimed against a missing target.
 		if err := qtx.DeleteAgentMailboxMessagesForIssue(ctx, issue.ID); err != nil {
+			return issueDeleteResult{}, err
+		}
+		// Bindings route future notifications; a deleted issue must not leave
+		// an exact key behind that a recreated id could inherit.
+		if err := qtx.DeleteAgentSessionBindingsForIssue(ctx, issue.ID); err != nil {
 			return issueDeleteResult{}, err
 		}
 		if err := qtx.DeleteIssue(ctx, db.DeleteIssueParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
@@ -4873,7 +5045,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		// Project workflow (MUL-7420), per issue: an issue whose workflow does
 		// not list the batch status is skipped like the other per-item guards;
 		// entering a handoff step reassigns this issue to the step's handler.
-		callerType, _ := h.resolveActor(r, userID, workspaceID)
+		callerType, callerActorID := h.resolveActor(r, userID, workspaceID)
 		callerRun := h.agentRunOnIssue(r, callerType, prevIssue)
 		handoff, err := h.applyIssueWorkflow(r.Context(), prevIssue, &params, req.Updates.Status != nil, batchTouchedType || batchTouchedID, false, callerRun)
 		if err != nil {
@@ -4889,6 +5061,79 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Decide the prospective run and validate the dispatcher's return
+		// BEFORE writing the issue. A refused delegation must skip the whole
+		// item: no assignee/status/parent/stage change, no issue:updated event,
+		// and no child/stage event either. The per-item guards above already
+		// have this shape; the delegation gate belongs among them, not after
+		// the write.
+		prospectiveIssue := prevIssue
+		prospectiveIssue.AssigneeType = params.AssigneeType
+		prospectiveIssue.AssigneeID = params.AssigneeID
+		if params.Status.Valid {
+			prospectiveIssue.Status = params.Status.String
+		}
+		if params.Priority.Valid {
+			prospectiveIssue.Priority = params.Priority.String
+		}
+		prospectiveExplicitAssigneeChanged := (batchTouchedType || batchTouchedID) &&
+			(prevIssue.AssigneeType.String != params.AssigneeType.String ||
+				uuidToString(prevIssue.AssigneeID) != uuidToString(params.AssigneeID))
+		prospectiveTrigger, prospectiveWillRun := h.IssueService.WillEnqueueRun(r.Context(),
+			service.IssueTriggerInput{
+				Issue:              prospectiveIssue,
+				AssigneeChanged:    prospectiveExplicitAssigneeChanged,
+				EnteredHandoffStep: handoff != nil,
+			},
+			h.issueTriggerWriteProbe(r, callerType, callerActorID, prospectiveIssue),
+		)
+		prospectiveWillRun = prospectiveWillRun && !req.Updates.SuppressRun
+		prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun &&
+			params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
+		dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, callerType, callerActorID, prospectiveAssignment, params.AssigneeType)
+		if derr != nil {
+			slog.Warn("batch dispatch refused: delegation return unavailable",
+				append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
+			continue
+		}
+		var assignmentTask db.AgentTaskQueue
+		var assignmentAttr attribution.Result
+		assignmentTaskInserted := false
+		afterIssueWrite := func(tx pgx.Tx, q *db.Queries, issue db.Issue) error {
+			if !prospectiveAssignment {
+				return nil
+			}
+			accepted, recordErr := recordDelegationReturn(r.Context(), q, issue, dispatchReturn, requestUserID(r))
+			if recordErr != nil {
+				return recordErr
+			}
+			target := delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+			var replaced *delegation.Assignee
+			if prospectiveExplicitAssigneeChanged {
+				replaced = previousAssignee(prevIssue)
+			}
+			dispatch, dispatchErr := h.prepareAssignmentDispatch(r.Context(), q, issue, target, replaced, accepted)
+			if dispatchErr != nil {
+				return dispatchErr
+			}
+			taskID := pgtype.UUID{}
+			if prospectiveWillRun {
+				task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, callerType, callerActorID, req.Updates.HandoffNote, dispatch.returnIDs)
+				if enqueueErr != nil {
+					return enqueueErr
+				}
+				if task.ID.Valid {
+					taskID = task.ID
+				}
+				if inserted {
+					assignmentTask = task
+					assignmentAttr = attr
+					assignmentTaskInserted = true
+				}
+			}
+			return commitAssignmentIntent(r.Context(), q, issue, dispatch, taskID)
+		}
+
 		writeCtx := withWakeupHandedTo(r.Context(), h.handedToAgent(r.Context(), prevIssue, params, handoff != nil))
 		var issue db.Issue
 		if req.Updates.Description != nil {
@@ -4897,15 +5142,20 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			// legacy single-update clients that omit description_base.
 			var lockedPrev db.Issue
 			issue, lockedPrev, _, err = h.updateIssueAtomically(
-				writeCtx, prevIssue.WorkspaceID, params, rawUpdates, nil, nil, nil, issueStatusGuard,
+				writeCtx, prevIssue.WorkspaceID, params, rawUpdates, nil, nil, nil, issueStatusGuard, afterIssueWrite,
 			)
 			if err == nil {
 				prevIssue = lockedPrev
 			}
 		} else {
-			issue, err = h.updateIssueWithStatusGuard(writeCtx, wsUUID, issueStatusGuard, params)
+			issue, err = h.updateIssueWithStatusGuard(writeCtx, wsUUID, issueStatusGuard, params, afterIssueWrite)
 		}
 		if err != nil {
+			if derr := asDelegationReturnError(err); derr != nil {
+				slog.Warn("batch dispatch refused: delegation return unavailable",
+					append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
+				continue
+			}
 			// The archive race is a property of the batch's shared target
 			// status, not of one issue, so every remaining item would fail the
 			// same way. Abort with 409 instead of reporting a partial update.
@@ -4918,7 +5168,6 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 
 		prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 		resp := issueToResponse(issue, prefix)
-		actorType, actorID := h.resolveActor(r, userID, workspaceID)
 		h.advanceRunStep(r.Context(), callerRun, prevIssue, issue)
 
 		fillBatch(&resp)
@@ -4930,14 +5179,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		priorityChanged := req.Updates.Priority != nil && prevIssue.Priority != issue.Priority
 		projectChanged := req.Updates.ProjectID != nil && uuidToString(prevIssue.ProjectID) != uuidToString(issue.ProjectID)
 
-		batchHandoffNote := req.Updates.HandoffNote
-		trigger, willRun := h.IssueService.WillEnqueueRun(r.Context(),
+		_, willRun := h.IssueService.WillEnqueueRun(r.Context(),
 			service.IssueTriggerInput{
 				Issue:              issue,
 				AssigneeChanged:    explicitAssigneeChanged,
 				EnteredHandoffStep: handoff != nil,
 			},
-			h.issueTriggerWriteProbe(r, actorType, actorID, issue),
+			h.issueTriggerWriteProbe(r, callerType, callerActorID, issue),
 		)
 		willRun = willRun && !req.Updates.SuppressRun
 		batchPayload := map[string]any{
@@ -4953,7 +5201,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		if handoff != nil {
 			batchPayload["workflow_handoff"] = workflowHandoffPayload(issue, handoff, h.workflowHandoffBrief(r.Context(), issue, handoff), willRun)
 		}
-		h.publish(protocol.EventIssueUpdated, workspaceID, actorType, actorID, batchPayload)
+		h.publish(protocol.EventIssueUpdated, workspaceID, callerType, callerActorID, batchPayload)
 
 		// Reassignment does not cancel existing tasks (#4963 / MUL-4113) —
 		// mirrors UpdateIssue. See that handler for the rationale.
@@ -4962,10 +5210,13 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		// copy of the enqueue rule (the historical source of four-entry-point
 		// drift, MUL-3375). suppress_run applies batch-wide.
 		if handoff != nil && req.Updates.StopPreviousAssigneeRuns {
-			h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, actorType, actorID)
+			h.stopPreviousAssigneeRuns(r.Context(), prevIssue, issue, callerType, callerActorID)
 		}
-		if willRun {
-			h.dispatchIssueRun(r.Context(), issue, trigger, actorType, actorID, batchHandoffNote)
+		if assignmentTaskInserted {
+			// The run and its accepted assignment intent committed with the
+			// issue write. Publish only now.
+			h.TaskService.ApplyQueuedIssueTaskOverlay(r.Context(), assignmentTask)
+			h.TaskService.PublishQueuedIssueTask(r.Context(), assignmentTask, assignmentAttr)
 		}
 
 		// No status change — not even → cancelled — cancels active tasks here,

@@ -61,6 +61,7 @@ type apiRequest struct {
 	WorkspaceID   string
 	AgentID       string
 	TaskID        string
+	ReturnSession string
 	Body          string
 }
 
@@ -81,7 +82,9 @@ type fakeAPI struct {
 	// visibility of an agent is not a credential-identity check.
 	mailboxAgentID string
 	// mailboxStatus forces the identity check itself to fail.
-	mailboxStatus int
+	mailboxStatus  int
+	sessionsBody   string
+	sessionsStatus int
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
@@ -98,6 +101,7 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			WorkspaceID:   r.Header.Get("X-Workspace-ID"),
 			AgentID:       r.Header.Get("X-Agent-ID"),
 			TaskID:        r.Header.Get("X-Task-ID"),
+			ReturnSession: r.Header.Get("X-Return-Session"),
 			Body:          string(body),
 		})
 		status := http.StatusOK
@@ -117,6 +121,24 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			default:
 				response = `{"messages":[],"next_cursor":null}`
 			}
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/sessions") {
+			if api.sessionsStatus != 0 {
+				status = api.sessionsStatus
+			}
+			if api.sessionsBody != "" {
+				response = api.sessionsBody
+			} else {
+				var fixture struct {
+					ExternalSession *sessionRegisteredAddress `json:"external_session"`
+				}
+				_ = json.Unmarshal([]byte(api.agentBody), &fixture)
+				sessions := []sessionRegisteredAddress{}
+				if fixture.ExternalSession != nil {
+					sessions = append(sessions, *fixture.ExternalSession)
+				}
+				encoded, _ := json.Marshal(map[string]any{"sessions": sessions})
+				response = string(encoded)
+			}
 		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/agents/") {
 			if api.agentStatus != 0 {
 				status = api.agentStatus
@@ -126,6 +148,8 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			}
 		} else if r.Method == http.MethodGet && r.URL.Path == "/api/issues" {
 			response = `{"issues":[],"total":0}`
+		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/comments") {
+			response = `[]`
 		} else if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/runtime-profiles") {
 			response = `{"runtime_profiles":[]}`
 		} else if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/workspaces/") {
@@ -280,6 +304,8 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 		wantPath string
 	}{
 		{"issue list", []string{"issue", "list", "--output", "json"}, "/api/issues"},
+		{"notification issue read", []string{"issue", "get", sessionIssueID, "--output", "json"}, "/api/issues/" + sessionIssueID},
+		{"notification comments read", []string{"issue", "comment", "list", sessionIssueID, "--output", "json"}, "/api/issues/" + sessionIssueID + "/comments"},
 		{"issue comment add", []string{"issue", "comment", "add", sessionIssueID, "--content", "hello from the session", "--output", "json"}, "/api/issues/" + sessionIssueID + "/comments"},
 		{"issue wakeup create", []string{"issue", "wakeup", "create", sessionIssueID, "--event", "comment.created", "--instruction", "watch this issue", "--output", "json"}, ""},
 		// These used to re-read the human profile's workspace after the session
@@ -309,6 +335,9 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 				t.Fatalf("command request = %s, want %s (session workspace, not the human profile's)", got[1].Path, tc.wantPath)
 			}
 			for _, req := range got {
+				if req.ReturnSession != "paseo-agent-1" {
+					t.Errorf("return session = %q, want the credential file's exact session", req.ReturnSession)
+				}
 				if req.Authorization != "Bearer mea_session_token" {
 					t.Errorf("%s Authorization = %q, want the session's mea credential", req.Path, req.Authorization)
 				}
@@ -369,7 +398,7 @@ func TestCLIProcessUsesSessionIdentityForOrdinaryCommands(t *testing.T) {
 			t.Fatalf("requests = %d, want identity check + list (%#v)", len(got), got)
 		}
 		for _, req := range got {
-			if req.Authorization != "Bearer mea_explicit_token" || req.WorkspaceID != "ws-explicit" {
+			if req.Authorization != "Bearer mea_explicit_token" || req.WorkspaceID != "ws-explicit" || req.ReturnSession != "paseo-agent-9" {
 				t.Fatalf("explicit binding was not used: %#v", got)
 			}
 		}
@@ -566,6 +595,9 @@ func TestCLIProcessKeepsManagedTaskIdentity(t *testing.T) {
 	}
 	if got[0].Authorization != "Bearer mat_task_token" || got[0].AgentID != "agent-managed" || got[0].TaskID != "task-managed" {
 		t.Errorf("managed identity was not preserved: %#v", got[0])
+	}
+	if got[0].ReturnSession != "" {
+		t.Fatalf("managed request inherited external return session %q", got[0].ReturnSession)
 	}
 	if got := externalAPI.recorded(); len(got) != 0 {
 		t.Fatalf("incidental PASEO_AGENT_ID replaced the managed identity: %#v", got)
@@ -779,7 +811,7 @@ func TestSessionStatusRejectsRemoteBindingDrift(t *testing.T) {
 		{"session", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-other","daemon_id":"daemon-1"}}`, "session"},
 		{"daemon", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-other"}}`, "daemon"},
 		{"execution kind", `{"id":"agent-1","name":"A","execution_kind":"managed","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "execution_kind"},
-		{"session removed", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":null}`, "no longer returns an external session"},
+		{"session removed", `{"id":"agent-1","name":"A","execution_kind":"external","external_session":null}`, "not registered"},
 		{"agent id", `{"id":"agent-other","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`, "not the recorded"},
 	}
 	for _, tc := range cases {
@@ -874,6 +906,124 @@ func TestCLIProcessFailsClosedWhenActorCheckCannotVerify(t *testing.T) {
 			got := api.recorded()
 			if len(got) != 1 || got[0].Method != http.MethodGet || got[0].Path != "/api/agents/agent-1/mailbox" {
 				t.Fatalf("requests = %#v, want only the own-mailbox identity check", got)
+			}
+		})
+	}
+}
+
+func TestCLIProcessBoundReturnSessionCannotDrift(t *testing.T) {
+	cases := []struct {
+		name   string
+		env    map[string]string
+		args   []string
+		wantOK bool
+	}{
+		{"same flag", nil, []string{"--return-session", "paseo-agent-1"}, true},
+		{"same env", map[string]string{"MULTICA_RETURN_SESSION": "paseo-agent-1"}, nil, true},
+		{"different flag", nil, []string{"--return-session", "other-session"}, false},
+		{"different env", map[string]string{"MULTICA_RETURN_SESSION": "other-session"}, nil, false},
+		{"conflicting env cannot be masked", map[string]string{"MULTICA_RETURN_SESSION": "other-session"}, []string{"--return-session", "paseo-agent-1"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			home := t.TempDir()
+			writeHumanProfile(t, home, api.server.URL)
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+			env := map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			args := append([]string{"issue", "comment", "add", sessionIssueID, "--content", "exact return", "--output", "json"}, tc.args...)
+			_, stderr, code := api.runCLI(t, home, env, args...)
+			if !tc.wantOK {
+				if code == 0 || !strings.Contains(stderr, "return session") || len(api.recorded()) != 0 {
+					t.Fatalf("conflicting return reached HTTP: exit=%d requests=%d stderr=%s", code, len(api.recorded()), stderr)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("same target refused: %s", stderr)
+			}
+			requests := api.recorded()
+			if len(requests) != 2 || requests[1].Method != http.MethodPost {
+				t.Fatalf("missing verified business write: %#v", requests)
+			}
+			for _, req := range requests {
+				if req.Authorization != "Bearer mea_session_token" || req.WorkspaceID != "ws-external" || req.ReturnSession != "paseo-agent-1" {
+					t.Fatal("credential, workspace and return session did not come from the same binding")
+				}
+			}
+		})
+	}
+}
+
+func TestCLIProcessOwnerBootstrapIgnoresBusinessSessionBinding(t *testing.T) {
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprint(connected), func(t *testing.T) {
+			owner := newFakeAPI(t)
+			external := newFakeAPI(t)
+			home := t.TempDir()
+			writeHumanProfile(t, home, owner.server.URL)
+			if connected {
+				writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", external.server.URL, nil))
+			}
+			_, stderr, code := owner.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "agent", "external", "register", "--name", "Fixture", "--host-id", "host-1", "--session-id", "paseo-agent-1", "--daemon-id", "daemon-1", "--output", "json")
+			if code != 0 {
+				t.Fatalf("owner bootstrap refused: %s", stderr)
+			}
+			requests := owner.recorded()
+			if len(requests) != 1 || requests[0].Path != "/api/agents/external" || requests[0].Authorization != "Bearer mul_owner_token" || requests[0].WorkspaceID != "ws-owner" || len(external.recorded()) != 0 {
+				t.Fatal("owner bootstrap used the session credential or scope")
+			}
+		})
+	}
+}
+
+func TestCLIProcessNonPaseoSessionUsesExplicitCredentials(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		t.Run(fmt.Sprint(manual), func(t *testing.T) {
+			api := newFakeAPI(t)
+			home := t.TempDir()
+			writeHumanProfile(t, home, api.server.URL)
+			env := map[string]string{}
+			args := []string{"issue", "comment", "add", sessionIssueID, "--content", "non-Paseo caller", "--output", "json"}
+			wantToken, wantWorkspace, wantReturn := "Bearer mul_owner_token", "ws-owner", ""
+			if manual {
+				env = map[string]string{"MULTICA_TOKEN": "mea_manual", "MULTICA_SERVER_URL": api.server.URL, "MULTICA_WORKSPACE_ID": "ws-manual", "MULTICA_RETURN_SESSION": "env-session"}
+				args = append(args, "--return-session", "flag-session")
+				wantToken, wantWorkspace, wantReturn = "Bearer mea_manual", "ws-manual", "flag-session"
+			}
+			_, stderr, code := api.runCLI(t, home, env, args...)
+			if code != 0 {
+				t.Fatalf("non-Paseo command refused: %s", stderr)
+			}
+			requests := api.recorded()
+			if len(requests) != 1 || requests[0].Authorization != wantToken || requests[0].WorkspaceID != wantWorkspace || requests[0].ReturnSession != wantReturn {
+				t.Fatalf("non-Paseo identity/return contract changed: %#v", requests)
+			}
+		})
+	}
+}
+
+func TestSessionStatusCannotVerifyWithoutSessionRegistry(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError, http.StatusOK} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.agentBody = `{"id":"agent-1","name":"A","execution_kind":"external","external_session":{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}}`
+			api.sessionsStatus = status
+			if status == http.StatusOK {
+				api.sessionsBody = "invalid JSON"
+			}
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+			stdout, stderr, code := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode: %v %s", err, stderr)
+			}
+			if code == 0 || report.Valid || !strings.Contains(report.Error, "cannot verify registered session") {
+				t.Fatalf("failed list fell back to presentation DTO: %+v", report)
 			}
 		})
 	}

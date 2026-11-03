@@ -184,9 +184,15 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 }
 
 const getExternalAgentSessionByAgentID = `-- name: GetExternalAgentSessionByAgentID :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE agent_id = $1
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1
 `
 
+// Presentation only: an agent may own several sessions, and the frozen agent
+// DTO still carries one. The oldest session is the stable choice; no delivery
+// path may address a message through this lookup.
 func (q *Queries) GetExternalAgentSessionByAgentID(ctx context.Context, agentID pgtype.UUID) (ExternalAgentSession, error) {
 	row := q.db.QueryRow(ctx, getExternalAgentSessionByAgentID, agentID)
 	var i ExternalAgentSession
@@ -339,6 +345,57 @@ func (q *Queries) ListExternalAgentSessionsByAgentIDs(ctx context.Context, agent
 	return items, nil
 }
 
+const listExternalAgentSessionsByHostSession = `-- name: ListExternalAgentSessionsByHostSession :many
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+WHERE workspace_id = $1
+  AND agent_id = $2
+  AND session_id = $3
+ORDER BY created_at ASC, id ASC
+`
+
+type ListExternalAgentSessionsByHostSessionParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	AgentID       pgtype.UUID `json:"agent_id"`
+	HostSessionID string      `json:"host_session_id"`
+}
+
+// An external process names its host session (for Paseo, PASEO_AGENT_ID). The
+// caller must still scope the match to the authenticated agent and workspace;
+// more than one row means the reference is ambiguous and must be rejected
+// rather than resolved to an arbitrary host.
+func (q *Queries) ListExternalAgentSessionsByHostSession(ctx context.Context, arg ListExternalAgentSessionsByHostSessionParams) ([]ExternalAgentSession, error) {
+	rows, err := q.db.Query(ctx, listExternalAgentSessionsByHostSession, arg.WorkspaceID, arg.AgentID, arg.HostSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ExternalAgentSession{}
+	for rows.Next() {
+		var i ExternalAgentSession
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.OwnerUserID,
+			&i.AgentID,
+			&i.Provider,
+			&i.HostID,
+			&i.SessionID,
+			&i.DisplayName,
+			&i.Url,
+			&i.DaemonID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExternalAgentSessionsByIDs = `-- name: ListExternalAgentSessionsByIDs :many
 SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE id = ANY($1::uuid[])
 `
@@ -365,6 +422,80 @@ func (q *Queries) ListExternalAgentSessionsByIDs(ctx context.Context, ids []pgty
 			&i.DaemonID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExternalAgentSessionsForRead = `-- name: ListExternalAgentSessionsForRead :many
+SELECT s.id, s.workspace_id, s.owner_user_id, s.agent_id, s.provider, s.host_id, s.session_id, s.display_name, s.url, s.daemon_id, s.created_at, s.updated_at,
+       (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+       EXISTS (
+           SELECT 1 FROM member m
+           WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
+       )::boolean AS owner_is_member
+FROM external_agent_session s
+JOIN agent a ON a.id = s.agent_id AND a.workspace_id = s.workspace_id
+WHERE s.workspace_id = $1 AND s.agent_id = $2
+ORDER BY s.created_at ASC, s.id ASC
+`
+
+type ListExternalAgentSessionsForReadParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+}
+
+type ListExternalAgentSessionsForReadRow struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID   pgtype.UUID        `json:"owner_user_id"`
+	AgentID       pgtype.UUID        `json:"agent_id"`
+	Provider      string             `json:"provider"`
+	HostID        string             `json:"host_id"`
+	SessionID     string             `json:"session_id"`
+	DisplayName   string             `json:"display_name"`
+	Url           pgtype.Text        `json:"url"`
+	DaemonID      string             `json:"daemon_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	AgentArchived bool               `json:"agent_archived"`
+	OwnerIsMember bool               `json:"owner_is_member"`
+}
+
+// All registered host sessions of one external agent, with the two conditions
+// that make a session undeliverable at read time: the agent was archived, or
+// the session owner is no longer a workspace member. A missing binding is not
+// an error; the UI shows the agent's sessions without a current target.
+func (q *Queries) ListExternalAgentSessionsForRead(ctx context.Context, arg ListExternalAgentSessionsForReadParams) ([]ListExternalAgentSessionsForReadRow, error) {
+	rows, err := q.db.Query(ctx, listExternalAgentSessionsForRead, arg.WorkspaceID, arg.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExternalAgentSessionsForReadRow{}
+	for rows.Next() {
+		var i ListExternalAgentSessionsForReadRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.OwnerUserID,
+			&i.AgentID,
+			&i.Provider,
+			&i.HostID,
+			&i.SessionID,
+			&i.DisplayName,
+			&i.Url,
+			&i.DaemonID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.AgentArchived,
+			&i.OwnerIsMember,
 		); err != nil {
 			return nil, err
 		}
@@ -414,7 +545,7 @@ SET display_name = $1,
     url = $2,
     daemon_id = $3,
     updated_at = now()
-WHERE agent_id = $4
+WHERE id = $4 AND workspace_id = $5
 RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at
 `
 
@@ -422,17 +553,21 @@ type UpdateExternalAgentSessionProfileParams struct {
 	DisplayName string      `json:"display_name"`
 	Url         pgtype.Text `json:"url"`
 	DaemonID    string      `json:"daemon_id"`
-	AgentID     pgtype.UUID `json:"agent_id"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
 // Only presentation and the delivering daemon are mutable; the identity tuple
-// is immutable once registered.
+// is immutable once registered. The exact session id scopes the write: an
+// agent may own several host sessions and re-registering one must never touch
+// a sibling's profile or daemon.
 func (q *Queries) UpdateExternalAgentSessionProfile(ctx context.Context, arg UpdateExternalAgentSessionProfileParams) (ExternalAgentSession, error) {
 	row := q.db.QueryRow(ctx, updateExternalAgentSessionProfile,
 		arg.DisplayName,
 		arg.Url,
 		arg.DaemonID,
-		arg.AgentID,
+		arg.ID,
+		arg.WorkspaceID,
 	)
 	var i ExternalAgentSession
 	err := row.Scan(

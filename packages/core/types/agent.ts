@@ -40,12 +40,33 @@ export type AgentExecutionKind = "managed" | "external";
  * session, and `daemon_id` names the Multica daemon that delivers to it.
  */
 export interface ExternalSession {
+  id?: string;
   provider: string;
   host_id: string;
   session_id: string;
   display_name: string;
   url: string | null;
   daemon_id: string;
+}
+
+/**
+ * One registered session of an external agent. The read projection adds
+ * deliverability so the task view can explain an archived agent or an owner
+ * who left the workspace instead of silently offering an unreachable target.
+ */
+export interface AgentSessionSummary extends ExternalSession {
+  id: string;
+  deliverable: boolean;
+  unavailable_reason?: string;
+}
+
+/** The frozen wire shape returned when an explicit binding is saved. */
+export interface AgentSessionBinding {
+  id: string;
+  agent_id: string;
+  issue_id: string;
+  session_id: string;
+  created_at: string;
 }
 
 /**
@@ -322,6 +343,31 @@ export interface TaskCancellationActor {
   name?: string;
 }
 
+export interface ResultNotification {
+  return_id: string;
+  current_return_id?: string;
+  takeover_id?: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task" | "unknown";
+  delivery_id?: string;
+  handling_task_id?: string;
+  status:
+    | "pending"
+    | "queued"
+    | "deferred"
+    | "dispatched"
+    | "waiting_local_directory"
+    | "running"
+    | "received"
+    | "cancelled"
+    | "leased"
+    | "delivered"
+    | "failed"
+    | "refused"
+    | "unknown";
+  error?: string;
+}
+
 export interface AgentTask {
   wakeup_id?: string;
   id: string;
@@ -351,6 +397,8 @@ export interface AgentTask {
   completed_at: string | null;
   result: unknown;
   error: string | null;
+  /** Undefined means unknown/unhydrated; [] means hydrated with no notifications. */
+  result_notifications?: ResultNotification[];
   // Empty string when the task is not in a failed state (the backend uses
   // `omitempty`, so the field may also be missing on non-failed tasks).
   // Open string on the wire, not a closed enum: the backend's classifier

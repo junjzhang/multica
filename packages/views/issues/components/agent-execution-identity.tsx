@@ -20,16 +20,20 @@ import { ExternalSessionLink } from "./external-session-link";
 export function AgentExecutionStatus({
   agent,
   detailed = true,
+  showSession = true,
   className,
 }: {
   agent: Agent;
   detailed?: boolean;
+  /** The issue card uses its own binding instead of this agent-level session. */
+  showSession?: boolean;
   className?: string;
 }) {
   const { t } = useT("issues");
   const kind = agentExecutionKind(agent);
 
   if (kind === "external") {
+    if (!showSession) return null;
     if (!agent.external_session) {
       return (
         <span className={cn("text-micro text-muted-foreground", className)}>
@@ -73,10 +77,12 @@ export function AgentExecutionStatus({
 export function ExternalAgentCard({
   agent,
   ownerName,
+  showSession = true,
   className,
 }: {
   agent: Agent;
   ownerName?: string | null;
+  showSession?: boolean;
   className?: string;
 }) {
   const { t } = useT("issues");
@@ -102,7 +108,7 @@ export function ExternalAgentCard({
             </span>
           )}
         </div>
-        <AgentExecutionStatus agent={agent} detailed className="mt-1" />
+        <AgentExecutionStatus agent={agent} detailed showSession={showSession} className="mt-1" />
         {ownerName && (
           <div className="mt-0.5 truncate text-micro text-muted-foreground">
             {t(($) => $.detail.external_owned_by, { name: ownerName })}

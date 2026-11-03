@@ -98,8 +98,8 @@ func newAutopilotDelegationFixture(t *testing.T, targetAgentID, autopilotCreator
 	var leaderTaskID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority,
-			originator_user_id, accountable_user_id, originator_source)
-		VALUES ($1, $2, $3, 'running', 0, $4, $4, 'trigger_owner') RETURNING id
+			originator_user_id, accountable_user_id, originator_source, session_id, work_dir, resource_control_required, session_pin_confirmed, session_pin_generation)
+		VALUES ($1, $2, $3, 'running', 0, $4, $4, 'trigger_owner', 'autopilot-mention-session', '/work/autopilot-mention', true, true, gen_random_uuid()) RETURNING id
 	`, leaderID, runtimeID, issueID, autopilotCreatorUserID).Scan(&leaderTaskID); err != nil {
 		t.Fatalf("create leader task: %v", err)
 	}
@@ -161,8 +161,8 @@ func seedTaskOnIssue(t *testing.T, agentID, issueID, runtimeID string, originato
 	var taskID string
 	if err := testPool.QueryRow(context.Background(), `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority,
-			originator_user_id, accountable_user_id, originator_source)
-		VALUES ($1, $2, $3, 'running', 0, $4, $4, CASE WHEN $4::uuid IS NULL THEN NULL ELSE 'trigger_owner' END) RETURNING id
+			originator_user_id, accountable_user_id, originator_source, session_id, work_dir, resource_control_required, session_pin_confirmed, session_pin_generation)
+		VALUES ($1, $2, $3, 'running', 0, $4, $4, CASE WHEN $4::uuid IS NULL THEN NULL ELSE 'trigger_owner' END, 'autopilot-mention-session', '/work/autopilot-mention', true, true, gen_random_uuid()) RETURNING id
 	`, agentID, runtimeID, issueID, originator).Scan(&taskID); err != nil {
 		t.Fatalf("seed task on issue: %v", err)
 	}
@@ -259,6 +259,7 @@ func TestCreateComment_AutopilotLeaderMentionEnqueuesPrivateWorker(t *testing.T)
 	})
 	r.Header.Set("X-Agent-ID", fx.LeaderAgentID)
 	r.Header.Set("X-Task-ID", fx.LeaderTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", issueID)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
@@ -441,6 +442,7 @@ func TestUpdateComment_AutopilotAuthorityReStampedToEditingTask(t *testing.T) {
 		})
 		r.Header.Set("X-Agent-ID", fx.LeaderAgentID)
 		r.Header.Set("X-Task-ID", editTaskID)
+		r.Header.Set("X-Actor-Source", "task_token")
 		r = withURLParam(r, "commentId", commentID)
 		testHandler.UpdateComment(w, r)
 		if w.Code != http.StatusOK {

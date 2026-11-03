@@ -37,28 +37,17 @@ const (
 	DefaultLeaseDuration = 2 * time.Minute
 )
 
-// Projection separates the two consumers of the one mailbox table. The legacy
-// comment entry renders an issue/comment notification from a frozen DTO; the
-// generic entry carries kind+payload and never fabricates either field. Their
-// filters are disjoint, so a row can only be leased by one of them.
-type Projection int
-
-const (
-	CommentProjection Projection = iota
-	GenericProjection
-)
-
 // ClaimRequest asks for a bounded batch of deliverable rows bound to the
 // verified daemon. OwnerUserID and DaemonID are the same binding the mailbox
 // claim already enforced: the recipient's session must belong to this daemon
-// and its human owner.
+// and its human owner. Every source type is eligible: comment notifications and
+// generic events share this one claim and the same outcome state machine.
 type ClaimRequest struct {
 	Scope         Scope
 	DaemonID      string
 	OwnerUserID   string
 	Limit         int
 	LeaseDuration time.Duration
-	Projection    Projection
 }
 
 func (r ClaimRequest) validate() error {
@@ -70,11 +59,6 @@ func (r ClaimRequest) validate() error {
 	}
 	if strings.TrimSpace(r.OwnerUserID) == "" {
 		return errors.New("delivery: daemon owner is required")
-	}
-	switch r.Projection {
-	case CommentProjection, GenericProjection:
-	default:
-		return errors.New("delivery: unknown projection")
 	}
 	return nil
 }
@@ -199,11 +183,15 @@ func NewQueue(q *db.Queries, tx TxBeginner) *Queue {
 	return &Queue{q: q, tx: tx}
 }
 
-// Claim leases at most one deliverable row per recipient session. Two workers
+// Claim leases at most one deliverable row per physical session. Two workers
 // (or two daemons) can therefore never deliver to the same session at once, and
-// an unreachable recipient cannot hold more than one slot. The per-recipient
+// an unreachable recipient cannot hold more than one slot. Two sessions of the
+// same agent are different targets and proceed independently. The per-session
 // advisory lock serialises concurrent claim transactions; the conditional lease
 // re-checks eligibility so a lost race simply skips the row.
+//
+// The session row is loaded by the delivery's frozen Target, never by the
+// recipient agent's current binding.
 func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 	if err := req.validate(); err != nil {
 		return nil, err
@@ -236,11 +224,10 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 	qtx := q.q.WithTx(tx)
 
 	candidates, err := qtx.ListClaimableDeliveryIDs(ctx, db.ListClaimableDeliveryIDsParams{
-		WorkspaceID:       workspaceID,
-		CommentProjection: req.Projection == CommentProjection,
-		OwnerUserID:       ownerID,
-		DaemonID:          req.DaemonID,
-		RowLimit:          int32(limit),
+		WorkspaceID: workspaceID,
+		OwnerUserID: ownerID,
+		DaemonID:    req.DaemonID,
+		RowLimit:    int32(limit),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("delivery: find claimable rows: %w", err)
@@ -248,25 +235,45 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 
 	claims := make([]Claim, 0, len(candidates))
 	for _, candidate := range candidates {
-		recipientID := util.UUIDToString(candidate.RecipientAgentID)
-		locked, err := qtx.TryLockDeliveryRecipient(ctx, recipientID)
+		targetSessionID := util.UUIDToString(candidate.TargetSessionID)
+		locked, err := qtx.TryLockDeliveryTarget(ctx, targetSessionID)
 		if err != nil {
-			return nil, fmt.Errorf("delivery: lock recipient %s: %w", recipientID, err)
+			return nil, fmt.Errorf("delivery: lock target %s: %w", targetSessionID, err)
 		}
 		if !locked {
-			// Another claim transaction is already leasing this recipient.
+			// Another claim transaction is already leasing this session.
 			continue
+		}
+		// The candidate list carried no status on purpose. Read the row under
+		// the same lock the lease takes: another worker may have leased and sent
+		// it, then lost the ack or recorded unknown and let the lease expire.
+		// That row is now a verification, even though the candidate hint that
+		// queued this claim still said pending.
+		previous, err := qtx.LockClaimableDelivery(ctx, db.LockClaimableDeliveryParams{
+			ID:              candidate.ID,
+			WorkspaceID:     workspaceID,
+			TargetSessionID: candidate.TargetSessionID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The row is no longer this target's to lease.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("delivery: lock %s: %w", util.UUIDToString(candidate.ID), err)
 		}
 		token, err := newLeaseToken()
 		if err != nil {
 			return nil, err
 		}
 		leased, err := qtx.LeaseClaimableDelivery(ctx, db.LeaseClaimableDeliveryParams{
-			ID:             candidate.ID,
-			WorkspaceID:    workspaceID,
-			LeaseTokenHash: pgtype.Text{String: auth.HashToken(token), Valid: true},
-			LeaseOwner:     pgtype.Text{String: req.DaemonID, Valid: true},
-			LeaseExpiresAt: pgtypeTime(time.Now().Add(leaseDuration)),
+			ID:              candidate.ID,
+			WorkspaceID:     workspaceID,
+			TargetSessionID: candidate.TargetSessionID,
+			OwnerUserID:     ownerID,
+			DaemonID:        req.DaemonID,
+			LeaseTokenHash:  pgtype.Text{String: auth.HashToken(token), Valid: true},
+			LeaseOwner:      pgtype.Text{String: req.DaemonID, Valid: true},
+			LeaseExpiresAt:  pgtypeTime(time.Now().Add(leaseDuration)),
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Another claimant leased or acknowledged the row first.
@@ -275,9 +282,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		if err != nil {
 			return nil, fmt.Errorf("delivery: lease %s: %w", util.UUIDToString(candidate.ID), err)
 		}
-		session, err := qtx.GetExternalAgentSessionByAgentID(ctx, candidate.RecipientAgentID)
+		session, err := qtx.GetExternalAgentSessionByID(ctx, db.GetExternalAgentSessionByIDParams{
+			ID:          candidate.TargetSessionID,
+			WorkspaceID: workspaceID,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("delivery: load session for %s: %w", recipientID, err)
+			return nil, fmt.Errorf("delivery: load target session %s: %w", targetSessionID, err)
 		}
 		d := deliveryFromRow(leased)
 		claims = append(claims, Claim{
@@ -291,7 +301,12 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			},
 			LeaseToken:     token,
 			LeaseExpiresAt: leased.LeaseExpiresAt.Time,
-			VerifyOnly:     verifyOnly(req.Projection, candidate.DeliveryStatus),
+			// The row read under the row lock, not the pre-lock candidate, is
+			// authoritative for both the prior delivery status and the
+			// withdrawal marker. A cancellation or another worker's send can
+			// commit between the candidate list and this lease; either must
+			// turn the lease into verification-only, never a second send.
+			VerifyOnly: verifyOnly(previous.DeliveryStatus, previous.WithdrawnAt.Valid),
 		})
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -302,15 +317,25 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 
 // verifyOnly decides whether a reclaimed row may be sent again. Any lease that
 // expired without a recorded outcome is ambiguous: the host may have accepted
-// the request before the worker or its acknowledgement disappeared. Only a row
-// the host explicitly refused (pending, with a known no-effect result) is safe
-// to deliver again. The legacy comment projection keeps its existing replay
-// behavior because its frozen consumer never looks up receipts.
-func verifyOnly(projection Projection, previousStatus string) bool {
-	if previousStatus == "unknown" {
+// the request before the worker or its acknowledgement disappeared. The same
+// holds for a row already marked unknown. Only a row the host explicitly
+// refused (pending, with a known no-effect result) is safe to deliver again.
+// A withdrawn row is never safe to send, whatever the candidate list suggested
+// earlier. This applies to every source: a comment notification recovers
+// exactly like a generic event, by looking up its original receipt.
+func verifyOnly(previousStatus string, withdrawn bool) bool {
+	if withdrawn {
 		return true
 	}
-	return projection == GenericProjection && previousStatus == "leased"
+	switch previousStatus {
+	case "pending":
+		return false
+	case "leased", "unknown":
+		return true
+	default:
+		// An unexpected state must not be read as proof of non-delivery.
+		return true
+	}
 }
 
 func pgtypeTime(value time.Time) pgtype.Timestamptz {

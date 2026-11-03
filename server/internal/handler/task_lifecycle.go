@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,8 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // RecoverOrphanedTasks is called by the daemon at startup for each runtime
@@ -62,10 +66,7 @@ func (h *Handler) RecoverOrphanedTasks(w http.ResponseWriter, r *http.Request) {
 // work_dir as soon as they're known — typically right after the agent
 // emits its first system message — so a crash mid-run doesn't lose the
 // resume pointer needed to continue the conversation on the next attempt.
-type PinTaskSessionRequest struct {
-	SessionID string `json:"session_id,omitempty"`
-	WorkDir   string `json:"work_dir,omitempty"`
-}
+type PinTaskSessionRequest = protocol.SessionPinRequest
 
 func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
@@ -78,11 +79,30 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.SessionID == "" && req.WorkDir == "" {
+	if req.SessionID == "" && req.WorkDir == "" && req.NextGeneration == "" {
 		writeError(w, http.StatusBadRequest, "session_id or work_dir required")
 		return
 	}
 
+	var generation, nextGeneration pgtype.UUID
+	if req.Generation != "" {
+		var ok bool
+		generation, ok = parseUUIDOrBadRequest(w, req.Generation, "generation")
+		if !ok {
+			return
+		}
+	}
+	if req.NextGeneration != "" {
+		var ok bool
+		nextGeneration, ok = parseUUIDOrBadRequest(w, req.NextGeneration, "next_generation")
+		if !ok {
+			return
+		}
+		if !generation.Valid || generation == nextGeneration || req.SessionID != "" || req.WorkDir != "" {
+			writeError(w, 400, "invalid session generation transition")
+			return
+		}
+	}
 	params := db.UpdateAgentTaskSessionParams{ID: parseUUID(taskID)}
 	if req.SessionID != "" {
 		params.SessionID = pgtype.Text{String: req.SessionID, Valid: true}
@@ -119,10 +139,47 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "pin session failed")
 		return
 	}
+	task, err := qtx.LockTaskSessionPin(r.Context(), params.ID)
+	if err != nil {
+		writeError(w, 500, "load current session generation failed")
+		return
+	}
+	if nextGeneration.Valid {
+		updated, err := qtx.InvalidateTaskSessionPin(r.Context(), db.InvalidateTaskSessionPinParams{TaskID: task.ID, Generation: generation, NextGeneration: nextGeneration})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 409, "session generation changed or strict return cannot start fresh")
+			return
+		}
+		if err != nil {
+			writeError(w, 500, "invalidate session pin failed")
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, 500, "commit session generation failed")
+			return
+		}
+		writeJSON(w, 200, protocol.SessionPinAcknowledgement{Generation: uuidToString(updated.SessionPinGeneration)})
+		return
+	}
+	if task.ResourceControlRequired && (!generation.Valid || generation != task.SessionPinGeneration) {
+		writeError(w, http.StatusConflict, "stale or missing provider session generation")
+		return
+	}
+	turn, err := service.VerifiedDelegationResult(r.Context(), qtx, task)
+	if err != nil || (turn != nil && ((req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir))) {
+		writeError(w, http.StatusConflict, "result task must retain its frozen session and directory")
+		return
+	}
 	if err := qtx.UpdateAgentTaskSession(r.Context(), params); err != nil {
 		slog.Warn("pin-session failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusInternalServerError, "pin session failed")
 		return
+	}
+	if req.SessionID != "" && req.WorkDir != "" {
+		if _, err := qtx.ConfirmTaskSessionPin(r.Context(), db.ConfirmTaskSessionPinParams{TaskID: params.ID, SessionID: params.SessionID, WorkDir: params.WorkDir, Generation: generation}); err != nil {
+			writeError(w, http.StatusInternalServerError, "confirm current execution session failed")
+			return
+		}
 	}
 	// The statement re-reads the row, ignores anything that is not a cancelled
 	// chat task, and refuses to move the pointer when a newer turn already owns
@@ -208,13 +265,53 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		return h.canInvokeAgent(r.Context(), agent, actorType, actorID, originatorUserID, workspaceID)
 	}
 
-	task, err := h.TaskService.RerunIssue(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke)
+	// A rerun is a fresh dispatch, not a reason to change who receives the
+	// result: the source run's complete accepted set is preserved, and the
+	// rerunning agent's current address replaces its own prior versions in the
+	// new run; other dispatchers keep their exact accepted addresses. The address is validated
+	// before anything is cancelled or created, but it is recorded only inside
+	// the enqueue transaction below, after eligibility has passed — a rerun
+	// refused by triage or the invoke gate must leave no accepted return.
+	dispatchReturn, derr := h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})
+	if derr != nil {
+		writeDelegationReturnError(w, derr)
+		return
+	}
+	// The source run is the named task, or the run the current assignment
+	// intent points to when the request names none. It is never "the target
+	// worker's latest run": that can be a different dispatcher's independent
+	// comment thread. Ordinary human reruns with no delegated assignment keep
+	// the legacy latest-run fallback, but a run that carries accepted returns
+	// is never treated as an assignment.
+	inheritTaskID := sourceTaskID
+	if !inheritTaskID.Valid {
+		resolved, srcErr := h.defaultRerunSourceTask(r.Context(), issue)
+		if srcErr != nil {
+			if errors.Is(srcErr, errRerunSourceRequired) {
+				writeError(w, http.StatusBadRequest, "rerun requires task_id: the current assignment has no determinable delegated source run")
+				return
+			}
+			slog.Warn("resolve default rerun source failed", "issue_id", id, "error", srcErr)
+			writeError(w, http.StatusInternalServerError, "failed to resolve rerun source")
+			return
+		}
+		inheritTaskID = resolved
+	}
+	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, service.RerunDelegation{
+		Address:       dispatchReturn,
+		CreatedBy:     requestUserID(r),
+		InheritTaskID: inheritTaskID,
+	})
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
 		return
 	}
 	if errors.Is(err, service.ErrIssueInTriage) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonIssueInTriage)
+		return
+	}
+	if derr := asDelegationReturnError(err); derr != nil {
+		writeDelegationReturnError(w, derr)
 		return
 	}
 	// Not a dispatch refusal: the issue may well be runnable, and only the named
@@ -228,6 +325,65 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 	resp := taskToResponse(*task, uuidToString(issue.WorkspaceID))
 	h.hydrateTaskAttributions(r.Context(), []*TaskAttribution{resp.Attribution})
 	writeJSON(w, http.StatusAccepted, resp)
+}
+
+var errRerunSourceRequired = errors.New("rerun has no delegated assignment source")
+
+// defaultRerunSourceTask resolves "rerun the current assignment" to the exact
+// run that assignment intent points at. When no intent exists, the legacy
+// latest-run fallback is allowed only for an issue that has never accepted a
+// delegation return and whose latest run carries none; otherwise a caller must
+// name the source run explicitly.
+func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (pgtype.UUID, error) {
+	if (issue.AssigneeType.String != "agent" && issue.AssigneeType.String != "squad") || !issue.AssigneeID.Valid {
+		return pgtype.UUID{}, nil
+	}
+	assignee := delegation.Assignee{Type: issue.AssigneeType.String, ID: util.UUIDToString(issue.AssigneeID)}
+	intent, err := delegation.LoadAssignmentIntent(ctx, h.Queries, issue.ID, assignee)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if intent != nil {
+		if !intent.TaskID.Valid {
+			return pgtype.UUID{}, errRerunSourceRequired
+		}
+		return intent.TaskID, nil
+	}
+	returns, err := h.Queries.ListIssueDelegationReturns(ctx, db.ListIssueDelegationReturnsParams{
+		WorkspaceID: issue.WorkspaceID,
+		IssueID:     issue.ID,
+	})
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if len(returns) > 0 {
+		return pgtype.UUID{}, errRerunSourceRequired
+	}
+	targetAgentID := issue.AssigneeID
+	if issue.AssigneeType.String == "squad" {
+		if squad, squadErr := h.Queries.GetSquad(ctx, issue.AssigneeID); squadErr == nil {
+			targetAgentID = squad.LeaderID
+		}
+	}
+	latest, err := h.Queries.GetLatestTaskIDForIssueAndAgent(ctx, db.GetLatestTaskIDForIssueAndAgentParams{
+		IssueID:       issue.ID,
+		AgentID:       targetAgentID,
+		ExcludeTaskID: pgtype.UUID{},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pgtype.UUID{}, nil
+		}
+		return pgtype.UUID{}, err
+	}
+	inherited, err := delegation.RunReturnIDs(ctx, h.Queries, latest)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	if len(inherited) > 0 {
+		return pgtype.UUID{}, errRerunSourceRequired
+	}
+	return latest, nil
 }
 
 // RetrySourceContextQuickCreate manually re-enqueues a failed issue-less

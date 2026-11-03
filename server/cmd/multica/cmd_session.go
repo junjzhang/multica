@@ -95,15 +95,16 @@ type sessionRemoteReport struct {
 
 // sessionAgentResponse is the part of GET /api/agents/{id} this command reads.
 type sessionAgentResponse struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	ExecutionKind   string `json:"execution_kind"`
-	ExternalSession *struct {
-		Provider  string `json:"provider"`
-		HostID    string `json:"host_id"`
-		SessionID string `json:"session_id"`
-		DaemonID  string `json:"daemon_id"`
-	} `json:"external_session"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ExecutionKind string `json:"execution_kind"`
+}
+
+type sessionRegisteredAddress struct {
+	Provider  string `json:"provider"`
+	HostID    string `json:"host_id"`
+	SessionID string `json:"session_id"`
+	DaemonID  string `json:"daemon_id"`
 }
 
 func runSessionStatus(cmd *cobra.Command, _ []string) error {
@@ -198,10 +199,8 @@ func (r *sessionStatusReport) fillBinding(binding *externalSessionContext) {
 	}
 }
 
-// verifySessionBinding asks the server whether this credential belongs to the
-// declared agent and whether the remote session is still the recorded one. A
-// reachable server that names a different agent or session is a mismatch, not
-// a success.
+// verifySessionBinding checks the credential subject, agent metadata and exact
+// registered session tuple. The agent's presentation session is not a route.
 func verifySessionBinding(parent context.Context, binding *externalSessionContext) sessionRemoteReport {
 	ctx, cancel := cli.APIContext(parent)
 	defer cancel()
@@ -229,28 +228,40 @@ func verifySessionBinding(parent context.Context, binding *externalSessionContex
 	}
 	report.AgentName = agent.Name
 	report.ExecutionKind = agent.ExecutionKind
-	if agent.ExternalSession != nil {
-		report.Provider = agent.ExternalSession.Provider
-		report.HostID = agent.ExternalSession.HostID
-		report.SessionID = agent.ExternalSession.SessionID
-		report.DaemonID = agent.ExternalSession.DaemonID
-	}
 	switch {
 	case agent.ID != binding.AgentID:
 		report.Error = fmt.Sprintf("server returned agent %s, not the recorded %s", agent.ID, binding.AgentID)
+		return report
 	case agent.ExecutionKind != "external":
 		report.Error = fmt.Sprintf("server reports execution_kind %q, not external", agent.ExecutionKind)
-	case agent.ExternalSession == nil:
-		report.Error = "server no longer returns an external session for this agent"
-	case agent.ExternalSession.Provider != binding.Provider:
-		report.Error = fmt.Sprintf("server binds agent to provider %s, not the recorded %s", agent.ExternalSession.Provider, binding.Provider)
-	case agent.ExternalSession.HostID != binding.HostID:
-		report.Error = fmt.Sprintf("server binds agent to host %s, not the recorded %s", agent.ExternalSession.HostID, binding.HostID)
-	case agent.ExternalSession.SessionID != binding.SessionID:
-		report.Error = fmt.Sprintf("server binds agent to session %s, not the recorded %s", agent.ExternalSession.SessionID, binding.SessionID)
-	case agent.ExternalSession.DaemonID != binding.DaemonID:
-		report.Error = fmt.Sprintf("server binds agent to daemon %s, not the recorded %s", agent.ExternalSession.DaemonID, binding.DaemonID)
+		return report
 	}
+	// The agent DTO shows one presentation session. Only the session registry
+	// can verify a file for another conversation belonging to the same agent.
+	var registry struct {
+		Sessions []sessionRegisteredAddress `json:"sessions"`
+	}
+	if err := client.GetJSON(ctx, path+"/sessions", &registry); err != nil {
+		report.Error = "cannot verify registered session: " + describeSessionRemoteError(err)
+		return report
+	}
+	matches := 0
+	for _, session := range registry.Sessions {
+		if session.Provider != binding.Provider || session.HostID != binding.HostID || session.SessionID != binding.SessionID {
+			continue
+		}
+		matches++
+		report.Provider, report.HostID, report.SessionID, report.DaemonID = session.Provider, session.HostID, session.SessionID, session.DaemonID
+	}
+	switch {
+	case matches == 0:
+		report.Error = "the recorded provider/host/session is not registered to this agent"
+	case matches > 1:
+		report.Error = "the registered provider/host/session is ambiguous"
+	case report.DaemonID != binding.DaemonID:
+		report.Error = fmt.Sprintf("server routes this session through daemon %s, not the recorded %s", report.DaemonID, binding.DaemonID)
+	}
+
 	return report
 }
 

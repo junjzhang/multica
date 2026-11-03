@@ -64,15 +64,34 @@ func newClaimFixture(t *testing.T, pool *pgxpool.Pool) (workspaceID, agentID, ow
 	return workspaceID, agentID, ownerID, daemonID
 }
 
+// fixtureSessionID returns the session the fixture registered for one agent.
+func fixtureSessionID(t *testing.T, pool *pgxpool.Pool, agentID string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT id::text FROM external_agent_session WHERE agent_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		util.MustParseUUID(agentID)).Scan(&id); err != nil {
+		t.Fatalf("load fixture session: %v", err)
+	}
+	return id
+}
+
 func enqueueGeneric(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, key string) Delivery {
+	t.Helper()
+	return enqueueGenericTo(t, pool, workspaceID, agentID, fixtureSessionID(t, pool, agentID), key)
+}
+
+func enqueueGenericTo(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, targetSessionID, key string) Delivery {
 	t.Helper()
 	store := NewPostgres(db.New(pool))
 	created, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "ci_run", Key: key},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "ci_run", Key: key},
+		Target:          Target{SessionID: targetSessionID},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "ci:" + key,
+		Kind:            "ci_terminal",
+		Payload:         json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic delivery: %v", err)
@@ -80,51 +99,41 @@ func enqueueGeneric(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID, key 
 	return created
 }
 
-func TestQueueClaimSeparatesProjectionsAndBindsToDaemonOwner(t *testing.T) {
+// Every source type shares one claim. A comment notification and a generic
+// event are leased by the same call, each bound to the verified daemon/owner.
+func TestQueueClaimCoversCommentAndGenericAndBindsToDaemonOwner(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
-	generic := enqueueGeneric(t, pool, workspaceID, agentID, "run-42")
+	secondSession := addFixtureSession(t, pool, workspaceID, ownerID, agentID, daemonID)
+	generic := enqueueGenericTo(t, pool, workspaceID, agentID, secondSession, "run-42")
 	comment := enqueueComment(t, pool, workspaceID, agentID)
 
 	queue := NewQueue(db.New(pool), pool)
-	genericClaims, err := queue.Claim(context.Background(), ClaimRequest{
+	claims, err := queue.Claim(context.Background(), ClaimRequest{
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	})
 	if err != nil {
-		t.Fatalf("claim generic: %v", err)
+		t.Fatalf("claim: %v", err)
 	}
-	if len(genericClaims) != 1 || genericClaims[0].ID != generic.ID {
-		t.Fatalf("generic claims = %+v, want only %s", genericClaims, generic.ID)
+	if len(claims) != 2 {
+		t.Fatalf("claims = %+v, want the comment and the generic row", claims)
 	}
-	if genericClaims[0].Session.SessionID == "" || genericClaims[0].VerifyOnly {
-		t.Fatalf("generic claim = %+v", genericClaims[0])
+	byID := map[string]Claim{}
+	for _, claim := range claims {
+		byID[claim.ID] = claim
 	}
-	// One in-flight row per session also blocks the other projection: finish it
-	// before asserting the comment entry can lease its own row.
-	if _, err := queue.RecordOutcome(context.Background(), OutcomeRequest{
-		Scope:      Scope{WorkspaceID: workspaceID},
-		DeliveryID: genericClaims[0].ID,
-		DaemonID:   daemonID,
-		LeaseToken: genericClaims[0].LeaseToken,
-		State:      OutcomeDelivered,
-	}); err != nil {
-		t.Fatalf("record generic delivered: %v", err)
+	if _, ok := byID[comment.ID]; !ok {
+		t.Fatalf("comments were not claimable through the unified path: %+v", claims)
 	}
-
-	commentClaims, err := queue.Claim(context.Background(), ClaimRequest{
-		Scope:       Scope{WorkspaceID: workspaceID},
-		DaemonID:    daemonID,
-		OwnerUserID: ownerID,
-		Projection:  CommentProjection,
-	})
-	if err != nil {
-		t.Fatalf("claim comment: %v", err)
+	if _, ok := byID[generic.ID]; !ok {
+		t.Fatalf("generic deliveries were not claimable through the unified path: %+v", claims)
 	}
-	if len(commentClaims) != 1 || commentClaims[0].ID != comment.ID {
-		t.Fatalf("comment claims = %+v, want only %s", commentClaims, comment.ID)
+	for _, claim := range claims {
+		if claim.Session.SessionID == "" || claim.VerifyOnly {
+			t.Fatalf("first claim of %s = %+v, want a deliverable lease", claim.ID, claim)
+		}
 	}
 
 	// A different daemon identity can never lease this recipient's rows.
@@ -133,12 +142,10 @@ func TestQueueClaimSeparatesProjectionsAndBindsToDaemonOwner(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    otherDaemon,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	}); err != nil || len(claims) != 0 {
 		t.Fatalf("foreign daemon claims = %+v err=%v, want none", claims, err)
 	}
 }
-
 func enqueueComment(t *testing.T, pool *pgxpool.Pool, workspaceID, agentID string) Delivery {
 	t.Helper()
 	return enqueueCommentForIssue(t, pool, workspaceID, agentID, uuid.NewString())
@@ -149,12 +156,14 @@ func enqueueCommentForIssue(t *testing.T, pool *pgxpool.Pool, workspaceID, agent
 	commentID := uuid.NewString()
 	store := NewPostgres(db.New(pool))
 	created, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "comment", Key: commentID},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "comment_mention",
-		Payload:   json.RawMessage(fmt.Sprintf(`{"schema":"comment_mention.v1","issue_id":%q,"comment_id":%q}`, issueID, commentID)),
-		Refs:      Refs{IssueID: issueID, CommentID: commentID},
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "comment", Key: commentID},
+		Target:          Target{SessionID: fixtureSessionID(t, pool, agentID)},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "comment:" + commentID + ":agent:" + agentID,
+		Kind:            "comment_mention",
+		Payload:         json.RawMessage(fmt.Sprintf(`{"schema":"comment_mention.v1","issue_id":%q,"comment_id":%q}`, issueID, commentID)),
+		Refs:            Refs{IssueID: issueID, CommentID: commentID},
 	})
 	if err != nil {
 		t.Fatalf("enqueue comment delivery: %v", err)
@@ -173,7 +182,6 @@ func TestQueueClaimLeasesOneRowPerSessionUntilAcknowledged(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	}
 
 	claims, err := queue.Claim(context.Background(), request)
@@ -224,7 +232,6 @@ func TestQueueRecordOutcomeBusyShortDelayAndStaleTokenFences(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	})
 	if err != nil || len(claims) != 1 {
 		t.Fatalf("claim = %+v err=%v", claims, err)
@@ -271,7 +278,6 @@ func TestQueueReclaimsExpiredLeaseAndUnknownForVerificationOnly(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	}
 	claims, err := queue.Claim(context.Background(), request)
 	if err != nil || len(claims) != 1 {
@@ -328,7 +334,6 @@ func TestQueueClaimSkipsArchivedOrReboundSessions(t *testing.T) {
 		Scope:       Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
-		Projection:  GenericProjection,
 	}
 	if _, err := pool.Exec(context.Background(),
 		`UPDATE agent SET archived_at = now() WHERE id = $1`, agentID); err != nil {
@@ -350,6 +355,12 @@ func TestQueueClaimSkipsArchivedOrReboundSessions(t *testing.T) {
 // committed. The lease itself must re-check the recipient's in-flight rows;
 // otherwise both projections rent the same session even though the advisory
 // lock only serialised the two claims.
+// TestLeaseClaimableDeliveryRechecksInflightAfterLock reproduces the
+// interleaving where two claim rounds list the same session's older row before
+// either leases it. The second list is a pre-lock snapshot, but its lease
+// statement runs after the first claim committed. The lease itself must
+// re-check the session's in-flight rows; otherwise a stale candidate — or a
+// different row of the same session — is leased twice.
 func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
@@ -361,109 +372,118 @@ func TestLeaseClaimableDeliveryRechecksInflightAfterLock(t *testing.T) {
 	workspaceUUID := mustParseUUID(t, workspaceID)
 	recipientUUID := mustParseUUID(t, agentID)
 	ownerUUID := mustParseUUID(t, ownerID)
+	targetSessionID := fixtureSessionID(t, pool, agentID)
+	targetSessionUUID := mustParseUUID(t, targetSessionID)
 
-	list := func(tx pgx.Tx, commentProjection bool) []db.ListClaimableDeliveryIDsRow {
+	list := func(tx pgx.Tx) []db.ListClaimableDeliveryIDsRow {
 		t.Helper()
 		rows, err := queries.WithTx(tx).ListClaimableDeliveryIDs(ctx, db.ListClaimableDeliveryIDsParams{
-			WorkspaceID:       workspaceUUID,
-			CommentProjection: commentProjection,
-			OwnerUserID:       ownerUUID,
-			DaemonID:          daemonID,
-			RowLimit:          5,
+			WorkspaceID: workspaceUUID,
+			OwnerUserID: ownerUUID,
+			DaemonID:    daemonID,
+			RowLimit:    5,
 		})
 		if err != nil {
-			t.Fatalf("list claimable (comment=%v): %v", commentProjection, err)
+			t.Fatalf("list claimable: %v", err)
 		}
 		return rows
 	}
 	lease := func(tx pgx.Tx, deliveryID, token string) error {
 		t.Helper()
 		_, err := queries.WithTx(tx).LeaseClaimableDelivery(ctx, db.LeaseClaimableDeliveryParams{
-			ID:             mustParseUUID(t, deliveryID),
-			WorkspaceID:    workspaceUUID,
-			LeaseTokenHash: pgtype.Text{String: token, Valid: true},
-			LeaseOwner:     pgtype.Text{String: daemonID, Valid: true},
-			LeaseExpiresAt: pgtypeTime(time.Now().Add(time.Minute)),
+			ID:              mustParseUUID(t, deliveryID),
+			WorkspaceID:     workspaceUUID,
+			TargetSessionID: targetSessionUUID,
+			OwnerUserID:     ownerUUID,
+			DaemonID:        daemonID,
+			LeaseTokenHash:  pgtype.Text{String: token, Valid: true},
+			LeaseOwner:      pgtype.Text{String: daemonID, Valid: true},
+			LeaseExpiresAt:  pgtypeTime(time.Now().Add(time.Minute)),
 		})
 		return err
 	}
 
-	// The generic entry lists first, before anyone holds a lease, so its
-	// snapshot shows no in-flight row for this recipient.
+	// Both claim transactions list before anyone holds a lease. The session is
+	// the same, so each snapshot sees only its oldest row.
 	txB, err := pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("begin generic claim: %v", err)
+		t.Fatalf("begin second claim: %v", err)
 	}
 	defer txB.Rollback(ctx)
-	genericCandidates := list(txB, false)
-	if len(genericCandidates) != 1 || util.UUIDToString(genericCandidates[0].ID) != generic.ID {
-		t.Fatalf("generic candidates = %+v, want only %s", genericCandidates, generic.ID)
-	}
-
-	// The comment entry lists, locks the recipient, leases its row and commits
-	// while the generic claim transaction is still open.
+	secondCandidates := list(txB)
 	txA, err := pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("begin comment claim: %v", err)
+		t.Fatalf("begin first claim: %v", err)
 	}
-	commentCandidates := list(txA, true)
-	if len(commentCandidates) != 1 || util.UUIDToString(commentCandidates[0].ID) != comment.ID {
+	firstCandidates := list(txA)
+	if len(firstCandidates) != 1 || len(secondCandidates) != 1 || firstCandidates[0].ID != secondCandidates[0].ID {
 		txA.Rollback(ctx)
-		t.Fatalf("comment candidates = %+v, want only %s", commentCandidates, comment.ID)
+		t.Fatalf("candidates = %+v and %+v, want the same single row", firstCandidates, secondCandidates)
 	}
-	locked, err := queries.WithTx(txA).TryLockDeliveryRecipient(ctx, agentID)
+	olderID := util.UUIDToString(firstCandidates[0].ID)
+	inflight := comment
+	if olderID == generic.ID {
+		inflight = generic
+	}
+
+	// The first claimant locks the session, leases its row and commits while
+	// the second claim transaction is still open.
+	locked, err := queries.WithTx(txA).TryLockDeliveryTarget(ctx, targetSessionID)
 	if err != nil {
 		txA.Rollback(ctx)
-		t.Fatalf("lock recipient for comment claim: %v", err)
+		t.Fatalf("lock target for first claim: %v", err)
 	}
 	if !locked {
 		txA.Rollback(ctx)
-		t.Fatal("comment claim could not take the recipient lock")
+		t.Fatal("first claim could not take the target lock")
 	}
-	if err := lease(txA, comment.ID, "comment-lease"); err != nil {
+	if err := lease(txA, olderID, "first-lease"); err != nil {
 		txA.Rollback(ctx)
-		t.Fatalf("lease comment row: %v", err)
+		t.Fatalf("lease older row: %v", err)
 	}
 	if err := txA.Commit(ctx); err != nil {
-		t.Fatalf("commit comment claim: %v", err)
+		t.Fatalf("commit first claim: %v", err)
 	}
 
-	// The generic claimant now takes the released lock and leases its stale
-	// candidate. The row is still eligible on its own, but the recipient already
-	// has a committed in-flight lease, so the lease must match no row.
-	locked, err = queries.WithTx(txB).TryLockDeliveryRecipient(ctx, agentID)
+	// The second claimant now takes the released lock. Its stale candidate is
+	// no longer eligible, and the session's other row is blocked by the
+	// committed in-flight lease; neither may be leased.
+	locked, err = queries.WithTx(txB).TryLockDeliveryTarget(ctx, targetSessionID)
 	if err != nil {
-		t.Fatalf("lock recipient for generic claim: %v", err)
+		t.Fatalf("lock target for second claim: %v", err)
 	}
 	if !locked {
-		t.Fatal("generic claim could not take the recipient lock after the comment claim committed")
+		t.Fatal("second claim could not take the target lock after the first committed")
 	}
-	if err := lease(txB, generic.ID, "generic-lease"); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("generic lease error = %v, want pgx.ErrNoRows", err)
+	if err := lease(txB, olderID, "second-lease"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("stale candidate lease error = %v, want pgx.ErrNoRows", err)
+	}
+	otherID := comment.ID
+	if inflight.ID == comment.ID {
+		otherID = generic.ID
+	}
+	if err := lease(txB, otherID, "other-lease"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("other row lease error = %v, want pgx.ErrNoRows", err)
 	}
 	if err := txB.Rollback(ctx); err != nil {
-		t.Fatalf("rollback generic claim: %v", err)
+		t.Fatalf("rollback second claim: %v", err)
 	}
 
-	var inflight int
+	var inflightRows int
 	var leasedID string
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*), COALESCE(min(id::text), '')
 		FROM agent_mailbox_message
 		WHERE recipient_agent_id = $1
 		  AND delivery_status = 'leased'
-		  AND lease_expires_at > now()`, recipientUUID).Scan(&inflight, &leasedID); err != nil {
+		  AND lease_expires_at > now()`, recipientUUID).Scan(&inflightRows, &leasedID); err != nil {
 		t.Fatalf("count in-flight rows: %v", err)
 	}
-	if inflight != 1 || leasedID != comment.ID {
-		t.Fatalf("in-flight rows = %d (lease %s), want only the comment row %s", inflight, leasedID, comment.ID)
+	if inflightRows != 1 || leasedID != inflight.ID {
+		t.Fatalf("in-flight rows = %d (lease %s), want only %s", inflightRows, leasedID, inflight.ID)
 	}
 }
-
-// A generic delivery may carry an issue reference, but the frozen issue
-// projection only renders comment-shaped rows. It must never leak a generic row
-// into the issue response.
-func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
+func TestListIssueMailboxDeliveriesIncludesGenericRows(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, _, _ := newClaimFixture(t, pool)
 	issueID := uuid.NewString()
@@ -471,12 +491,14 @@ func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
 
 	store := NewPostgres(db.New(pool))
 	generic, err := store.Enqueue(context.Background(), EnqueueRequest{
-		Scope:     Scope{WorkspaceID: workspaceID},
-		Source:    Source{Type: "ci_run", Key: "run-issue-" + uuid.NewString()},
-		Recipient: Recipient{Type: "agent", ID: agentID},
-		Kind:      "ci_terminal",
-		Refs:      Refs{IssueID: issueID},
-		Payload:   json.RawMessage(`{"run_id":"run-42","conclusion":"success"}`),
+		Scope:           Scope{WorkspaceID: workspaceID},
+		Source:          Source{Type: "issue_wakeup", Key: "wakeup-issue-" + uuid.NewString()},
+		Target:          Target{SessionID: fixtureSessionID(t, pool, agentID)},
+		Recipient:       Recipient{Type: "agent", ID: agentID},
+		NotificationKey: "wakeup:run-issue:" + uuid.NewString(),
+		Kind:            "issue_wakeup",
+		Refs:            Refs{IssueID: issueID},
+		Payload:         json.RawMessage(`{"schema":"issue_wakeup.v1","issue_id":"` + issueID + `"}`),
 	})
 	if err != nil {
 		t.Fatalf("enqueue generic delivery with an issue reference: %v", err)
@@ -489,12 +511,16 @@ func TestListIssueMailboxDeliveriesExcludesGenericRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list issue mailbox deliveries: %v", err)
 	}
-	if len(rows) != 1 || util.UUIDToString(rows[0].ID) != comment.ID {
+	got := map[string]bool{}
+	for _, row := range rows {
+		got[util.UUIDToString(row.ID)] = true
+	}
+	if len(rows) != 2 || !got[comment.ID] || !got[generic.ID] {
 		ids := make([]string, 0, len(rows))
 		for _, row := range rows {
 			ids = append(ids, util.UUIDToString(row.ID))
 		}
-		t.Fatalf("issue deliveries = %v, want only the comment row %s (generic %s must not leak)", ids, comment.ID, generic.ID)
+		t.Fatalf("issue deliveries = %v, want the comment %s and generic %s", ids, comment.ID, generic.ID)
 	}
 }
 

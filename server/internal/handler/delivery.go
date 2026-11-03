@@ -10,21 +10,33 @@ import (
 	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
-// daemonDeliveryClaim is the generic claim projection. It deliberately has no
-// issue_id/comment_id: a generic delivery carries kind+payload and must not
-// fabricate an issue-shaped notification for the legacy comment DTO.
+// daemonDeliveryClaim is the one claim projection for every source type. The
+// worker renders the notification from kind+payload and the stable references
+// below: a comment delivery carries its issue/comment ids, a generic event may
+// carry only an issue id or none at all. workspace_id comes from the stored
+// delivery row, not the claiming request: the frozen envelope must describe the
+// row the lease actually covers.
 type daemonDeliveryClaim struct {
 	ID               string                `json:"id"`
+	WorkspaceID      string                `json:"workspace_id"`
 	Kind             string                `json:"kind"`
 	Payload          json.RawMessage       `json:"payload"`
+	SourceType       string                `json:"source_type"`
+	IssueID          string                `json:"issue_id,omitempty"`
+	CommentID        string                `json:"comment_id,omitempty"`
 	RecipientAgentID string                `json:"recipient_agent_id"`
 	RecipientType    string                `json:"recipient_type"`
+	TargetSessionID  string                `json:"target_session_id"`
 	ExternalSession  daemonDeliverySession `json:"external_session"`
 	DeliveryStatus   string                `json:"delivery_status"`
 	Attempts         int32                 `json:"attempts"`
 	VerifyOnly       bool                  `json:"verify_only"`
 	DeliveryToken    string                `json:"delivery_token"`
 	LeaseExpiresAt   string                `json:"lease_expires_at"`
+}
+
+type claimDaemonDeliveriesRequest struct {
+	Limit int `json:"limit"`
 }
 
 type daemonDeliverySession struct {
@@ -34,30 +46,29 @@ type daemonDeliverySession struct {
 	DaemonID  string `json:"daemon_id"`
 }
 
-// ClaimDaemonDeliveries leases generic deliveries for the verified daemon. The
-// legacy comment entry claims source_type='comment'; this entry claims every
-// other source, so the two consumers can never lease the same row.
+// ClaimDaemonDeliveries leases every deliverable source for the verified
+// daemon. Comments and generic events share one claim and one outcome state
+// machine; there is no second consumer that could lease the same row.
 func (h *Handler) ClaimDaemonDeliveries(w http.ResponseWriter, r *http.Request) {
-	workspaceID, _, daemonID, ownerID, ok := h.daemonMailboxContext(w, r)
+	workspaceID, wsUUID, daemonID, ownerID, ok := h.daemonMailboxContext(w, r)
 	if !ok {
 		return
 	}
-	var req claimDaemonMailboxRequest
+	var req claimDaemonDeliveriesRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 	limit := req.Limit
 	if limit <= 0 {
-		limit = daemonMailboxClaimDefault
+		limit = daemonDeliveryClaimDefault
 	}
-	limit = min(limit, daemonMailboxClaimMax)
+	limit = min(limit, daemonDeliveryClaimMax)
 
 	claims, err := delivery.NewQueue(h.Queries, h.TxStarter).Claim(r.Context(), delivery.ClaimRequest{
 		Scope:       delivery.Scope{WorkspaceID: workspaceID},
 		DaemonID:    daemonID,
 		OwnerUserID: ownerID,
 		Limit:       limit,
-		Projection:  delivery.GenericProjection,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to claim deliveries")
@@ -67,10 +78,15 @@ func (h *Handler) ClaimDaemonDeliveries(w http.ResponseWriter, r *http.Request) 
 	for _, claim := range claims {
 		items = append(items, daemonDeliveryClaim{
 			ID:               claim.ID,
+			WorkspaceID:      claim.Scope.WorkspaceID,
 			Kind:             claim.Kind,
 			Payload:          claim.Payload,
+			SourceType:       claim.Source.Type,
+			IssueID:          claim.Refs.IssueID,
+			CommentID:        claim.Refs.CommentID,
 			RecipientAgentID: claim.Recipient.ID,
 			RecipientType:    claim.Recipient.Type,
+			TargetSessionID:  claim.Delivery.Target.SessionID,
 			ExternalSession: daemonDeliverySession{
 				Provider:  claim.Session.Provider,
 				HostID:    claim.Session.HostID,
@@ -83,6 +99,17 @@ func (h *Handler) ClaimDaemonDeliveries(w http.ResponseWriter, r *http.Request) 
 			DeliveryToken:  claim.LeaseToken,
 			LeaseExpiresAt: claim.LeaseExpiresAt.UTC().Format(time.RFC3339),
 		})
+	}
+	// The issue detail shows per-message delivery state, so a lease is a
+	// visible transition there just like an outcome.
+	issues := make(map[string]struct{})
+	for _, claim := range claims {
+		if claim.Refs.IssueID != "" {
+			issues[claim.Refs.IssueID] = struct{}{}
+		}
+	}
+	for issueID := range issues {
+		h.publishMailboxChanged(wsUUID, issueID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deliveries": items})
 }
@@ -109,7 +136,7 @@ type daemonDeliveryOutcome struct {
 // produced the claim, and a stale token is refused rather than overwriting a
 // later lease.
 func (h *Handler) RecordDaemonDeliveryOutcome(w http.ResponseWriter, r *http.Request) {
-	workspaceID, _, daemonID, _, ok := h.daemonMailboxContext(w, r)
+	workspaceID, wsUUID, daemonID, _, ok := h.daemonMailboxContext(w, r)
 	if !ok {
 		return
 	}
@@ -164,6 +191,9 @@ func (h *Handler) RecordDaemonDeliveryOutcome(w http.ResponseWriter, r *http.Req
 		}
 		writeError(w, http.StatusInternalServerError, "failed to record delivery outcome")
 		return
+	}
+	if stored.Refs.IssueID != "" {
+		h.publishMailboxChanged(wsUUID, stored.Refs.IssueID)
 	}
 	writeJSON(w, http.StatusOK, daemonDeliveryOutcome{
 		ID:               stored.ID,

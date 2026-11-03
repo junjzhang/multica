@@ -29,12 +29,30 @@ func externalWakeFixture(t *testing.T) (principalFixture, *IssueWakeupService, p
 	agent := f.Agent(t, fmt.Sprintf("agent-external-%d", n), "", testutil.Cols{
 		"owner_id": f.UserID, "execution_kind": "external",
 	})
-	f.Insert(t, "external_agent_session", testutil.Cols{
+	session := f.Insert(t, "external_agent_session", testutil.Cols{
 		"workspace_id": f.WorkspaceID, "owner_user_id": f.UserID, "agent_id": agent,
 		"provider": "paseo", "host_id": fmt.Sprintf("host-%d", n), "session_id": fmt.Sprintf("session-%d", n),
 		"display_name": "external session", "daemon_id": daemonID,
 	})
+	// Wakeup producers resolve the explicit (agent, issue) binding; there is
+	// no implicit session fallback.
+	f.Insert(t, "external_agent_session_binding", testutil.Cols{
+		"workspace_id": f.WorkspaceID, "agent_id": agent, "issue_id": issue, "session_id": session,
+	})
 	return f, s, issue, agent, daemonID
+}
+
+// fixtureExternalSessionID returns the session the external fixture registered
+// for one agent.
+func fixtureExternalSessionID(t *testing.T, f principalFixture, agent string) string {
+	t.Helper()
+	var id string
+	if err := f.Pool.QueryRow(context.Background(),
+		`SELECT id::text FROM external_agent_session WHERE agent_id=$1 ORDER BY created_at ASC LIMIT 1`,
+		util.MustParseUUID(agent)).Scan(&id); err != nil {
+		t.Fatalf("load external fixture session: %v", err)
+	}
+	return id
 }
 
 func wakeupDeliveryPattern(w pgtype.UUID) string {
@@ -55,7 +73,7 @@ func newestWakeupDelivery(t *testing.T, f principalFixture, w pgtype.UUID) db.Ag
 	err := f.Pool.QueryRow(context.Background(), `SELECT id,workspace_id,issue_id,comment_id,recipient_agent_id,
 			source_session_id,sender_type,sender_id,delivery_status,processing_status,lease_token_hash,lease_owner,
 			lease_expires_at,attempts,next_attempt_at,delivered_at,host_receipt,last_error,created_at,updated_at,
-			source_type,source_key,kind,recipient_type,payload
+			source_type,source_key,kind,recipient_type,payload,withdrawn_at
 		FROM agent_mailbox_message
 		WHERE workspace_id=$1 AND source_type=$2 AND source_key LIKE $3
 		ORDER BY created_at DESC, id DESC LIMIT 1`,
@@ -64,7 +82,7 @@ func newestWakeupDelivery(t *testing.T, f principalFixture, w pgtype.UUID) db.Ag
 		&row.SourceSessionID, &row.SenderType, &row.SenderID, &row.DeliveryStatus, &row.ProcessingStatus,
 		&row.LeaseTokenHash, &row.LeaseOwner, &row.LeaseExpiresAt, &row.Attempts, &row.NextAttemptAt,
 		&row.DeliveredAt, &row.HostReceipt, &row.LastError, &row.CreatedAt, &row.UpdatedAt,
-		&row.SourceType, &row.SourceKey, &row.Kind, &row.RecipientType, &row.Payload)
+		&row.SourceType, &row.SourceKey, &row.Kind, &row.RecipientType, &row.Payload, &row.WithdrawnAt)
 	if err != nil {
 		t.Fatalf("read wakeup delivery: %v", err)
 	}
@@ -84,7 +102,7 @@ type wakeupQueueClient struct {
 func (c wakeupQueueClient) ClaimDeliveries(ctx context.Context, workspaceID string, limit int) ([]delivery.Claim, error) {
 	return c.q.Claim(ctx, delivery.ClaimRequest{
 		Scope: delivery.Scope{WorkspaceID: workspaceID}, DaemonID: c.daemon,
-		OwnerUserID: c.owner, Limit: limit, Projection: delivery.GenericProjection,
+		OwnerUserID: c.owner, Limit: limit,
 	})
 }
 
@@ -277,10 +295,11 @@ func TestWakeupExternalDeliveryWaitsBehindBusySession(t *testing.T) {
 	f, s, issue, agent, daemonID := externalWakeFixture(t)
 	ctx := context.Background()
 	// Pretend the host is still working on an earlier notification.
-	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,source_type,source_key,kind,payload,
+	blockingSession := fixtureExternalSessionID(t, f, agent)
+	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,target_session_id,source_type,source_key,kind,payload,
 			delivery_status,lease_token_hash,lease_owner,lease_expires_at,attempts)
-		VALUES (gen_random_uuid(),$1,$2,'agent','issue_wakeup','wakeup:busy','issue_wakeup','{}'::jsonb,
-			'leased','hash',$3,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, daemonID)
+		VALUES (gen_random_uuid(),$1,$2,'agent',$3,'issue_wakeup','wakeup:busy','issue_wakeup','{}'::jsonb,
+			'leased','hash',$4,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, blockingSession, daemonID)
 
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "at", Instruction: "Check it now", AfterSeconds: 60})
 	wakeTick(t, f, s, w.ID)
@@ -292,7 +311,7 @@ func TestWakeupExternalDeliveryWaitsBehindBusySession(t *testing.T) {
 		t.Helper()
 		claims, err := delivery.NewQueue(f.q, f.Pool).Claim(ctx, delivery.ClaimRequest{
 			Scope: delivery.Scope{WorkspaceID: f.WorkspaceID}, DaemonID: daemonID,
-			OwnerUserID: f.UserID, Limit: 5, Projection: delivery.GenericProjection,
+			OwnerUserID: f.UserID, Limit: 5,
 		})
 		if err != nil {
 			t.Fatalf("claim: %v", err)
@@ -359,8 +378,9 @@ func TestWakeupExternalDisableWithdrawsUnacceptedDelivery(t *testing.T) {
 	}
 }
 
-// A lease the host may already have acted on is never withdrawn: cancellation
-// only stops what was provably not accepted.
+// A lease the host may already have acted on is never rewritten: disabling
+// only stops what was provably not accepted. It still records the withdrawal,
+// so a later known no-effect answer cannot turn the attempt into a retry.
 func TestWakeupExternalDisableKeepsLeasedDelivery(t *testing.T) {
 	f, s, issue, agent, daemonID := externalWakeFixture(t)
 	ctx := context.Background()
@@ -373,16 +393,21 @@ func TestWakeupExternalDisableKeepsLeasedDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := newestWakeupDelivery(t, f, w.ID)
-	if row.DeliveryStatus != "leased" || row.LastError.Valid {
-		t.Fatalf("leased delivery after disable = status %q error %+v", row.DeliveryStatus, row.LastError)
+	if row.DeliveryStatus != "leased" {
+		t.Fatalf("leased delivery after disable = status %q, want leased", row.DeliveryStatus)
+	}
+	if !row.WithdrawnAt.Valid {
+		t.Fatal("leased delivery after disable carries no withdrawal marker")
+	}
+	if !row.LastError.Valid || !strings.Contains(row.LastError.String, "Wakeup disabled") {
+		t.Fatalf("leased delivery reason = %+v, want the withdrawal reason", row.LastError)
 	}
 }
 
-// Disabling while the host call is in flight cannot withdraw that attempt. A
-// busy answer records a retry, the row returns to pending without a lease, and
-// the next claim treats it as a first delivery: the contract allows exactly one
-// late send, and the rule itself must not fire again.
-func TestWakeupExternalDisableDuringLeaseThenBusyAllowsOneRetry(t *testing.T) {
+// Disabling while the host call is in flight cannot withdraw that attempt, but
+// it must remember the withdrawal: a busy answer settles the row as failed and
+// it is never sent again. The rule itself must not fire again either.
+func TestWakeupExternalDisableDuringLeaseThenBusyDoesNotResurrect(t *testing.T) {
 	f, s, issue, agent, daemonID := externalWakeFixture(t)
 	ctx := context.Background()
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "at", Instruction: "Check it", AfterSeconds: 60})
@@ -410,42 +435,30 @@ func TestWakeupExternalDisableDuringLeaseThenBusyAllowsOneRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := newestWakeupDelivery(t, f, w.ID)
-	if row.DeliveryStatus != "leased" || row.LastError.Valid {
+	if row.DeliveryStatus != "leased" || !row.WithdrawnAt.Valid {
 		stopWakeupTestWorker(t, cancel, done)
-		t.Fatalf("in-flight delivery after disable = status %q error %+v, want it left leased", row.DeliveryStatus, row.LastError)
+		t.Fatalf("in-flight delivery after disable = status %q withdrawn_at %+v, want it leased and withdrawn", row.DeliveryStatus, row.WithdrawnAt)
 	}
 
 	release <- &delivery.HostError{Kind: delivery.HostBusy, Code: "agent_busy"}
-	waitForWakeup(t, "the busy retry to be recorded", func() bool {
-		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "pending"
+	waitForWakeup(t, "the busy answer to settle the withdrawn notification", func() bool {
+		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "failed"
 	})
 	stopWakeupTestWorker(t, cancel, done)
 
 	row = newestWakeupDelivery(t, f, w.ID)
-	if row.LeaseTokenHash.Valid || !row.NextAttemptAt.Valid {
-		t.Fatalf("busy retry = lease %+v next_attempt_at %+v, want a claimable pending row", row.LeaseTokenHash, row.NextAttemptAt)
+	if row.LeaseTokenHash.Valid {
+		t.Fatalf("settled notification kept a lease: %+v", row.LeaseTokenHash)
+	}
+	if !row.LastError.Valid || !strings.Contains(row.LastError.String, "Wakeup disabled") {
+		t.Fatalf("settled notification reason = %+v, want the withdrawal reason", row.LastError)
 	}
 
-	// The next claim after the retry is a first delivery, not a receipt check.
+	// Give the row a fresh delivery opportunity: the withdrawal still wins.
 	f.Exec(t, "UPDATE agent_mailbox_message SET next_attempt_at=now() WHERE id=$1", row.ID)
-	worker = newWakeupTestWorker(f, daemonID, host)
-	cancel, done = startWakeupTestWorker(worker)
-	waitForWakeup(t, "the retried notification to be accepted", func() bool {
-		return newestWakeupDelivery(t, f, w.ID).DeliveryStatus == "delivered"
-	})
-	stopWakeupTestWorker(t, cancel, done)
-
-	sends, lookups := host.counts()
-	if sends != 2 {
-		t.Fatalf("host attempts = %d, want the initial attempt plus exactly one retry", sends)
-	}
-	if lookups != 0 {
-		t.Fatalf("receipt lookups = %d, want the retry treated as a first delivery", lookups)
-	}
-	for _, id := range host.sentIDs() {
-		if id != util.UUIDToString(row.ID) {
-			t.Fatalf("host saw delivery %s, want only %s", id, util.UUIDToString(row.ID))
-		}
+	runWakeupTestWorkerRound(t, newWakeupTestWorker(f, daemonID, host))
+	if sends, lookups := host.counts(); sends != 1 || lookups != 0 {
+		t.Fatalf("host saw %d sends and %d lookups, want one send and no replay", sends, lookups)
 	}
 
 	// The rule is disabled: it neither fires nor mints a second notification.
@@ -456,10 +469,6 @@ func TestWakeupExternalDisableDuringLeaseThenBusyAllowsOneRetry(t *testing.T) {
 	wakeDispatch(t, s, got)
 	if n := countWakeupDeliveries(t, f, w.ID, agent, ""); n != 1 {
 		t.Fatalf("a disabled rule produced %d notifications, want 1", n)
-	}
-	runWakeupTestWorkerRound(t, newWakeupTestWorker(f, daemonID, host))
-	if sends, _ := host.counts(); sends != 2 {
-		t.Fatalf("host attempts after the rule was disabled = %d, want 2", sends)
 	}
 }
 
@@ -629,10 +638,11 @@ func TestWakeupExternalEveryWaitsForUndeliveredFiring(t *testing.T) {
 
 	// The session is still working on an earlier generic delivery, so the
 	// recipient lease, not the rule, is what holds the wakeup row.
-	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,source_type,source_key,kind,payload,
+	blockingSession := fixtureExternalSessionID(t, f, agent)
+	f.Exec(t, `INSERT INTO agent_mailbox_message(id,workspace_id,recipient_agent_id,recipient_type,target_session_id,source_type,source_key,kind,payload,
 			delivery_status,lease_token_hash,lease_owner,lease_expires_at,attempts)
-		VALUES (gen_random_uuid(),$1,$2,'agent','generic','blocking','test_blocker','{}'::jsonb,
-			'leased','hash',$3,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, daemonID)
+		VALUES (gen_random_uuid(),$1,$2,'agent',$3,'generic','blocking','test_blocker','{}'::jsonb,
+			'leased','hash',$4,now()+interval '5 minutes',1)`, f.WorkspaceID, agent, blockingSession, daemonID)
 
 	w := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "every", IntervalSeconds: 60, Instruction: "Check the job"})
 	wakeTick(t, f, s, w.ID)

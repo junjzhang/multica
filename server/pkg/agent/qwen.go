@@ -78,6 +78,9 @@ func buildQwenArgs(opts ExecOptions, logger *slog.Logger) []string {
 }
 
 func (b *qwenBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("qwen", opts); err != nil {
+		return nil, err
+	}
 	execName := b.cfg.ExecutablePath
 	if execName == "" {
 		execName = "qwen"

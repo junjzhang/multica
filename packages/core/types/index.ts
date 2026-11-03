@@ -1,5 +1,6 @@
 export type { Issue, IssueStatus, BuiltInIssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction, SourceContextAttachment, SourceContextAuthor, SourceContextIssueSnapshot, SourceContextCommentSnapshot, SourceContextSnapshot, SourceContextLimitUsage, SourceContextPreview, SourceContextAuthorState, IssueSourceContext,
   IssueDuplicateOf, IssueCoordinator, IssueMergeAuthorization, MailboxMessage, MailboxDeliveryStatus, MailboxProcessingStatus,
+  IssueSessionBinding,
 } from "./issue";
 export type {
   IssueStatusCategory,
@@ -36,9 +37,12 @@ export type {
   AgentPermissionMode,
   AgentExecutionKind,
   ExternalSession,
+  AgentSessionSummary,
+  AgentSessionBinding,
   AgentInvocationTarget,
   AgentInvocationTargetInput,
   AgentTask,
+  ResultNotification,
   TaskUsage,
   TaskAttribution,
   AttributionUser,
@@ -362,3 +366,5 @@ export type {
 export type { IssueWakeup, IssueWakeupInput, SystemWakeup, WorkspaceSystemWakeup, WakeupPreview, IssueWakeupSummaryRow, WakeupCondition, WakeupPausedReason, WakeupRun, PausedWakeup, WakeupSource } from "./issue-wakeup";
 
 export type { WorkspaceWakeup, WorkspaceWakeupPage, WorkspaceWakeupFilters, WakeupScope } from "./issue-wakeup";
+
+export type { ResultTakeoverTarget, ResultTakeoverRequest, ResultTakeoverResponse, ResultReturnTargetDisplay, ResultReturnVersion, ResultTakeoverChoice, ResultTakeoverOptions } from "./result-takeover";

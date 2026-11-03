@@ -31,7 +31,13 @@ ON CONFLICT (workspace_id, owner_user_id, provider, host_id, session_id) DO NOTH
 RETURNING *;
 
 -- name: GetExternalAgentSessionByAgentID :one
-SELECT * FROM external_agent_session WHERE agent_id = $1;
+-- Presentation only: an agent may own several sessions, and the frozen agent
+-- DTO still carries one. The oldest session is the stable choice; no delivery
+-- path may address a message through this lookup.
+SELECT * FROM external_agent_session
+WHERE agent_id = $1
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
 
 -- name: GetExternalAgentSessionByID :one
 SELECT * FROM external_agent_session WHERE id = $1 AND workspace_id = $2;
@@ -50,15 +56,33 @@ SELECT * FROM external_agent_session WHERE agent_id = ANY(@agent_ids::uuid[]);
 -- name: ListExternalAgentSessionsByIDs :many
 SELECT * FROM external_agent_session WHERE id = ANY(@ids::uuid[]);
 
+-- name: ListExternalAgentSessionsForRead :many
+-- All registered host sessions of one external agent, with the two conditions
+-- that make a session undeliverable at read time: the agent was archived, or
+-- the session owner is no longer a workspace member. A missing binding is not
+-- an error; the UI shows the agent's sessions without a current target.
+SELECT s.*,
+       (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+       EXISTS (
+           SELECT 1 FROM member m
+           WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
+       )::boolean AS owner_is_member
+FROM external_agent_session s
+JOIN agent a ON a.id = s.agent_id AND a.workspace_id = s.workspace_id
+WHERE s.workspace_id = @workspace_id AND s.agent_id = @agent_id
+ORDER BY s.created_at ASC, s.id ASC;
+
 -- name: UpdateExternalAgentSessionProfile :one
 -- Only presentation and the delivering daemon are mutable; the identity tuple
--- is immutable once registered.
+-- is immutable once registered. The exact session id scopes the write: an
+-- agent may own several host sessions and re-registering one must never touch
+-- a sibling's profile or daemon.
 UPDATE external_agent_session
 SET display_name = @display_name,
     url = sqlc.narg('url'),
     daemon_id = @daemon_id,
     updated_at = now()
-WHERE agent_id = @agent_id
+WHERE id = @id AND workspace_id = @workspace_id
 RETURNING *;
 
 -- name: WorkspaceDaemonOwnedByUser :one
@@ -90,3 +114,14 @@ WHERE id = @id
   AND workspace_id = @workspace_id
   AND revoked_at IS NULL
 RETURNING *;
+
+-- name: ListExternalAgentSessionsByHostSession :many
+-- An external process names its host session (for Paseo, PASEO_AGENT_ID). The
+-- caller must still scope the match to the authenticated agent and workspace;
+-- more than one row means the reference is ambiguous and must be rejected
+-- rather than resolved to an arbitrary host.
+SELECT * FROM external_agent_session
+WHERE workspace_id = @workspace_id
+  AND agent_id = @agent_id
+  AND session_id = @host_session_id
+ORDER BY created_at ASC, id ASC;

@@ -243,6 +243,12 @@ func externalSessionForCommand() (*externalSessionContext, error) {
 // sessionContextConflicts rejects explicit inputs that disagree with the
 // binding instead of silently preferring one of them.
 func sessionContextConflicts(cmd *cobra.Command, ctx *externalSessionContext) error {
+	if inheritedFlagChanged(cmd, "return-session") && strings.TrimSpace(flagValue(cmd, "return-session")) != ctx.SessionID {
+		return fmt.Errorf("--return-session conflicts with the Paseo session binding's return session")
+	}
+	if value := strings.TrimSpace(os.Getenv("MULTICA_RETURN_SESSION")); value != "" && value != ctx.SessionID {
+		return fmt.Errorf("MULTICA_RETURN_SESSION conflicts with the Paseo session binding's return session")
+	}
 	if inheritedFlagChanged(cmd, "profile") {
 		return fmt.Errorf("--profile cannot be combined with a Paseo session binding; the binding already selects its credential, server and workspace")
 	}

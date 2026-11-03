@@ -80,6 +80,7 @@ import type {
   PluginPreview,
   PluginSurfaceLaunch,
   ResourceLabelsResponse,
+  ResultNotification,
   RuntimeModelListRequest,
   SearchIssuesResponse,
   SearchProjectsResponse,
@@ -1238,6 +1239,7 @@ export const EMPTY_CREATE_FEEDBACK_RESPONSE: CreateFeedbackResponse = {
 };
 
 export const ExternalSessionSchema = z.object({
+  id: z.string().optional().catch(undefined),
   provider: z.string().default(""),
   host_id: z.string().default(""),
   session_id: z.string().default(""),
@@ -1245,6 +1247,16 @@ export const ExternalSessionSchema = z.object({
   url: z.string().nullable().default(null),
   daemon_id: z.string().default(""),
 }).loose();
+
+/**
+ * A frozen target or active binding must name a real session record. The
+ * legacy actor-level `external_session` may omit `id` for older backends, but
+ * a target that cannot be identified is not a usable address: parse it as
+ * absent instead of rendering a blank link.
+ */
+const IdentifiedExternalSessionSchema = ExternalSessionSchema.extend({
+  id: z.string().min(1),
+});
 
 const AgentInvocationTargetSchema = z.object({
   target_type: z.string().default("workspace"),
@@ -1329,9 +1341,12 @@ const IssueMergeAuthorizationSchema = z.object({
 export const MailboxMessageSchema = z.object({
   id: z.string(),
   issue_id: z.string().default(""),
-  comment_id: z.string().default(""),
+  comment_id: z.string().nullish().transform((value) => value ?? "").catch(""),
   recipient_agent_id: z.string().default(""),
   source_session: ExternalSessionSchema.nullable().default(null).catch(null),
+  target_session: IdentifiedExternalSessionSchema.nullable().default(null).catch(null),
+  source_type: z.string().default("").catch(""),
+  kind: z.string().default("").catch(""),
   delivery_status: z.enum(["pending", "leased", "delivered", "failed", "unknown"]).catch("unknown"),
   processing_status: z.enum(["unread", "read", "handled", "unknown"]).catch("unknown"),
   created_at: z.string().default(""),
@@ -1348,6 +1363,64 @@ export const MailboxMessageListSchema = z.array(z.unknown())
       return parsed.success ? [parsed.data] : [];
     }),
   );
+
+export const AgentSessionSummarySchema = ExternalSessionSchema.extend({
+  id: z.string(),
+  deliverable: z.boolean().default(false).catch(false),
+  unavailable_reason: z.string().default("").catch(""),
+}).loose();
+
+/** Drop one malformed session without hiding the agent's other sessions. */
+export const AgentSessionListResponseSchema = z
+  .object({ sessions: z.array(z.unknown()) })
+  .loose()
+  .transform((value, ctx) => {
+    const sessions = value.sessions.flatMap((item) => {
+      const parsed = AgentSessionSummarySchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    });
+    if (value.sessions.length > 0 && sessions.length === 0) {
+      ctx.addIssue({ code: "custom", message: "No valid registered sessions in response", path: ["sessions"] });
+      return z.NEVER;
+    }
+    return { sessions };
+  });
+
+export const AgentSessionBindingSchema = z.object({
+  id: z.string(),
+  agent_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  session_id: z.string().default(""),
+  created_at: z.string().default(""),
+}).loose();
+
+export const IssueSessionBindingSchema = z.object({
+  id: z.string(),
+  agent_id: z.string().default(""),
+  issue_id: z.string().default(""),
+  session: IdentifiedExternalSessionSchema.nullable().default(null).catch(null),
+  deliverable: z.boolean().default(false).catch(false),
+  unavailable_reason: z.string().default("").catch(""),
+  created_at: z.string().default(""),
+}).loose();
+
+/** Keep valid bindings; an entirely malformed list cannot prove absence. */
+export const IssueSessionBindingListSchema = z.array(z.unknown())
+  .transform((items, ctx) => {
+    const bindings = items.flatMap((item) => {
+      const parsed = IssueSessionBindingSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    });
+    if (items.length > 0 && bindings.length === 0) {
+      ctx.addIssue({ code: "custom", message: "No valid issue session bindings in response" });
+      return z.NEVER;
+    }
+    return bindings;
+  });
+
+export const AgentSessionBindingResponseSchema = z
+  .object({ binding: IssueSessionBindingSchema.nullable() })
+  .loose();
 
 export const CommentSchema = z.object({
   id: z.string(),
@@ -1633,6 +1706,7 @@ export const IssueSchema = z.object({
     )
     .optional().catch(undefined),
   mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
+  external_session_bindings: z.array(z.unknown()).pipe(IssueSessionBindingListSchema).optional().catch(undefined),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({
@@ -2179,6 +2253,34 @@ const TaskUsageSchema = z.object({
   cost_usd_ticks: z.number().optional(),
 }).loose();
 
+const ExternalResultNotificationStatusSchema = z.enum([
+  "pending", "leased", "delivered", "failed", "refused", "unknown",
+]).catch("unknown");
+
+const ManagedResultNotificationStatusSchema = z.enum([
+  "pending", "queued", "deferred", "dispatched", "waiting_local_directory",
+  "running", "received", "cancelled", "refused", "unknown",
+]).catch("unknown");
+
+export const ResultNotificationSchema = z.object({
+  return_id: z.string().min(1),
+  current_return_id: z.string().min(1).optional().catch(undefined),
+  takeover_id: z.string().min(1).optional().catch(undefined),
+  recipient_agent_id: z.string().min(1),
+  kind: z.enum(["external_session", "managed_task", "unknown"]).catch("unknown"),
+  delivery_id: z.string().min(1).optional().catch(undefined),
+  handling_task_id: z.string().min(1).optional().catch(undefined),
+  status: z.unknown(),
+  error: z.string().min(1).optional().catch(undefined),
+}).loose().transform((note): ResultNotification => ({
+  ...note,
+  status: note.kind === "external_session"
+    ? ExternalResultNotificationStatusSchema.parse(note.status)
+    : note.kind === "managed_task"
+      ? ManagedResultNotificationStatusSchema.parse(note.status)
+      : "unknown",
+}));
+
 export const AgentTaskSchema = z.object({
   wakeup_id: z.string().optional().catch(undefined),
   cancelled_by_comment_change: z.boolean().optional().catch(undefined),
@@ -2194,6 +2296,8 @@ export const AgentTaskSchema = z.object({
   completed_at: z.string().nullable().default(null),
   result: z.unknown().default(null),
   error: z.string().nullable().default(null),
+  // Invalid metadata is unknown, never a known-empty list or a missing run.
+  result_notifications: z.array(ResultNotificationSchema).optional().catch(undefined),
   failure_reason: z.string().optional(),
   created_at: z.string().default(""),
   chat_session_id: z.string().optional(),

@@ -1,0 +1,1 @@
+ALTER TABLE agent_task_delegation_return DROP COLUMN last_attempt_at;

@@ -2,9 +2,9 @@
 
 An existing Paseo conversation connects once and then uses ordinary `multica`
 commands under its own external agent identity. Tasks created there record that
-agent as author and default coordinator, and a managed run is told the issue's
-recorded result recipient so an explicit handoff returns to the same
-conversation through the existing mailbox.
+agent as author and default coordinator. Executable delegation freezes that
+session as its accepted result address; saved results return there through the
+existing delivery paths. The coordinator remains issue metadata.
 
 This document is the minimal contract for the CLI half. The Paseo plugin that
 writes the binding, and the coordinator's integration/deployment, are separate
@@ -122,11 +122,15 @@ managed task, and no synthetic task id may enter attribution.
   provider, host, session, daemon) or why it could not confirm it.
 
 `valid` is only true after the server confirms the credential's own agent with
-the own-mailbox read **and** `GET /api/agents/<agent_id>` returns the same
-external agent and provider/host/session/daemon. A file on disk is never
+the own-mailbox read, `GET /api/agents/<agent_id>` confirms agent metadata, and
+`GET /api/agents/<agent_id>/sessions` contains the exact provider/host/session
+with the recorded daemon. The agent DTO's single presentation session is not
+routing authority. An unavailable session-list endpoint is unverifiable; no
+old-DTO or latest-session fallback is used. A file on disk is never
 presented as authorization; a 401/403 reports the credential as rejected or as
-belonging to another agent, a 404 as a missing agent, and an unreachable server
-as unverified. `session status` also applies the same `--profile`,
+belonging to another agent. Missing agent metadata is reported as missing;
+an unreadable session registry or unreachable server remains unverified.
+`session status` also applies the same `--profile`,
 `MULTICA_TOKEN`, endpoint and workspace conflict rules as ordinary commands, so
 it cannot report a binding those commands would refuse.
 
@@ -140,31 +144,21 @@ removed after `/multica disconnect`). A malformed, expired or mismatched file is
 `invalid`. Inside a managed task, status explains that the task credential is
 authoritative instead.
 
-## Result return address
+## Coordinator metadata and result return
 
-The issue coordinator is the recorded result recipient (no new DB state):
+Claim responses carry optional `coordinator_type` / `coordinator_id` from the
+issue row, including on resumed turns. The daemon presents them as
+`[Issue coordinator]` metadata, not as a delegation return address.
 
-- Claim responses gain optional `coordinator_type` / `coordinator_id`, filled
-  from the issue row at claim time. Missing type or id stays empty.
-- Every claim, including one that resumes a prior session, carries the current
-  value, so a coordinator changed between runs reaches the next run.
-- The daemon renders a per-turn `[Result return address]` block:
-  - `agent` recipient: an explicit `mention://agent/<id>` target is the only
-    handoff that reaches it; nothing returns results automatically.
-  - `member` recipient: members have no mailbox to wake; report in the issue
-    thread and do not claim they were notified.
-  - no recipient, unknown actor kind, or an old server that never sent the
-    fields: no block. The run does not infer a recipient from the assignee, the
-    trigger author or the latest commenter.
-  - the agent coordinator is the executing agent itself (an agent-created issue
-    assigned back to its creator): no block either. Naming the run's own agent
-    would tell it to mention itself, and a self-mention queues another run while
-    this one is still executing, so the run would keep waking itself.
-- The block states the permission boundary: the coordinator is this issue's
-  recorded recipient, not evidence of who delegated this or any other task.
+Runs with accepted delegation return addresses have their saved results routed
+to those frozen addresses automatically. Changing the issue coordinator does
+not retarget existing obligations. Agents must not infer a return address from
+the coordinator, assignee, trigger author or latest commenter, and must not add
+a coordinator mention merely to duplicate the result return.
 
-This keeps the fixed-coordinator concept from growing into a general delegator
-model: it is a recorded return address and a wakeability fact, nothing more.
+Missing/unknown coordinator identities and self-coordination omit this metadata
+block. Neither coordinator metadata nor task completion proves that a recipient
+received or accepted a result.
 
 ## Out of scope
 

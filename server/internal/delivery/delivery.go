@@ -36,9 +36,9 @@ type Scope struct {
 	WorkspaceID string
 }
 
-// Source identifies what produced the request. Type+Key is the idempotency
-// key inside one scope and recipient; ActorType/ActorID/SessionID describe the
-// sender when the source is a session and are part of the immutable content.
+// Source identifies what produced the request. Type+Key name the originating
+// event and belong to the immutable content; ActorType/ActorID/SessionID
+// describe the sender when the source is a session and are part of it too.
 type Source struct {
 	Type      string
 	Key       string
@@ -50,9 +50,21 @@ type Source struct {
 // Recipient is one authorized delivery target. Version one supports agents;
 // the type is stored so a later host adapter can add recipient kinds without a
 // second storage path.
+//
+// Recipient is the business projection the mailbox and issue views render. It
+// is not the route: Target below is.
 type Recipient struct {
 	Type string
 	ID   string
+}
+
+// Target is the frozen address of one physical host session. The core treats
+// it as an opaque identity: an application producer resolves the authorized
+// issue binding first and freezes the resulting session here. Claim, retry and
+// receipt lookup use this identity and never resolve the recipient's current
+// binding again.
+type Target struct {
+	SessionID string
 }
 
 // Refs optionally links a delivery to the business objects that own the real
@@ -69,13 +81,20 @@ type Refs struct {
 }
 
 // EnqueueRequest is the complete, immutable request stored by a Store.
+//
+// NotificationKey identifies one notification, not an issue or a session.
+// Retrying the same request with the same key returns the stored delivery,
+// even when the producer now resolves a different session; conflicting
+// immutable content under one key fails.
 type EnqueueRequest struct {
-	Scope     Scope
-	Source    Source
-	Recipient Recipient
-	Kind      string
-	Payload   json.RawMessage
-	Refs      Refs
+	Scope           Scope
+	Source          Source
+	Target          Target
+	Recipient       Recipient
+	NotificationKey string
+	Kind            string
+	Payload         json.RawMessage
+	Refs            Refs
 }
 
 // Delivery is a stored request plus its delivery and processing receipts.
@@ -85,7 +104,9 @@ type Delivery struct {
 	ID               string
 	Scope            Scope
 	Source           Source
+	Target           Target
 	Recipient        Recipient
+	NotificationKey  string
 	Kind             string
 	Payload          json.RawMessage
 	Refs             Refs
@@ -114,6 +135,15 @@ func (r EnqueueRequest) Validate() error {
 	}
 	if strings.TrimSpace(r.Recipient.ID) == "" {
 		return errors.New("delivery: recipient id is required")
+	}
+	if strings.TrimSpace(r.Target.SessionID) == "" {
+		return errors.New("delivery: target session id is required")
+	}
+	if strings.TrimSpace(r.NotificationKey) == "" {
+		return errors.New("delivery: notification key is required")
+	}
+	if len(r.NotificationKey) > 300 {
+		return fmt.Errorf("delivery: notification key exceeds %d bytes", 300)
 	}
 	if strings.TrimSpace(r.Kind) == "" {
 		return errors.New("delivery: kind is required")
@@ -146,8 +176,20 @@ type Store interface {
 }
 
 // sameContent reports whether an existing delivery holds exactly what req asks
-// to enqueue. A legacy comment row may predate immutable payload snapshots; for
-// those, matching kind and references are the available identity.
+// to enqueue. The notification key is unique per workspace, so a key that names
+// a different recipient or a different source event is a collision between two
+// logical notifications, not a replay: returning that row would hand the caller
+// someone else's message. A legacy comment row may predate immutable payload
+// snapshots and source keys; for those, matching kind, references and recipient
+// are the available identity, and only the legacy (recipient, comment) lookup
+// can find them.
+//
+// Target and Source.SessionID are route snapshots, not logical notification
+// identity, and are deliberately not compared. They record where the message
+// was addressed and which session the sender used when the row was created; a
+// producer retry that re-resolves after an explicit rebind must replay the
+// original delivery with its original route instead of failing or creating a
+// second one. The stored Source.SessionID stays untouched.
 func (r EnqueueRequest) sameContent(existing Delivery) bool {
 	if existing.Kind != r.Kind {
 		return false
@@ -155,9 +197,17 @@ func (r EnqueueRequest) sameContent(existing Delivery) bool {
 	if existing.Refs != r.Refs {
 		return false
 	}
+	if existing.Recipient != r.Recipient {
+		return false
+	}
+	if existing.Source.Type != r.Source.Type {
+		return false
+	}
+	if existing.Source.Key != "" && existing.Source.Key != r.Source.Key {
+		return false
+	}
 	if existing.Source.ActorType != r.Source.ActorType ||
-		existing.Source.ActorID != r.Source.ActorID ||
-		existing.Source.SessionID != r.Source.SessionID {
+		existing.Source.ActorID != r.Source.ActorID {
 		return false
 	}
 	if len(existing.Payload) == 0 {

@@ -40,6 +40,9 @@ type claudeBackend struct {
 }
 
 func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "claude"
@@ -92,6 +95,21 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 	if err := claudeRootSudoPreflight(args, cmd.Env); err != nil {
 		cancel()
 		return nil, err
+	}
+	if opts.RequireResume {
+		// Claude Code's --resume loads the named local transcript before it
+		// processes any input. findClaudeSessionFile reads the same store the
+		// CLI uses, so a missing transcript is a strict failure before launch
+		// rather than a post-run guess based on stderr or SessionID.
+		configDir, err := claudeConfigDir(cmd.Env, cmd.Dir)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("%w: resolve claude session store: %v", ErrResumeRequired, err)
+		}
+		if _, err := findClaudeSessionFile(configDir, opts.ResumeSessionID); err != nil {
+			cancel()
+			return nil, fmt.Errorf("%w: claude has no local transcript for session %q: %v", ErrResumeRequired, opts.ResumeSessionID, err)
+		}
 	}
 
 	var usageSnapshot *claudeUsageSnapshot

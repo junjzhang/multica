@@ -157,13 +157,50 @@ func TestPaseoDeliveryHostMapsBusyAndNeverSendsOrdinary(t *testing.T) {
 }
 
 func TestGenericDeliveryPromptCarriesStableIdentityWithoutGrantingPermission(t *testing.T) {
-	prompt := renderGenericDelivery(delivery.Delivery{
+	prompt := renderDeliveryNotification(delivery.Delivery{
 		ID:        "delivery-1",
 		Kind:      "ci_terminal",
 		Payload:   []byte(`{"run_id":"run-42","conclusion":"success"}`),
 		Recipient: delivery.Recipient{Type: "agent", ID: "agent-1"},
 	})
 	for _, want := range []string{"delivery-1", "ci_terminal", "run-42", "does not grant new permissions"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt %q is missing %q", prompt, want)
+		}
+	}
+}
+
+// Comment references and connected-session instructions travel together.
+func TestCommentDeliveryPromptUsesConnectedSession(t *testing.T) {
+	prompt := renderDeliveryNotification(delivery.Delivery{
+		ID:        "delivery-1",
+		Scope:     delivery.Scope{WorkspaceID: "workspace-1"},
+		Kind:      "comment_mention",
+		Payload:   []byte(`{"schema":"comment_mention.v1","issue_id":"issue-1","comment_id":"comment-1"}`),
+		Recipient: delivery.Recipient{Type: "agent", ID: "agent-1"},
+		Refs:      delivery.Refs{IssueID: "issue-1", CommentID: "comment-1"},
+	})
+	want := "Multica has a request for this session.\nMailbox ID: delivery-1\nWorkspace ID: workspace-1\nIssue ID: issue-1\nComment ID: comment-1\nRecipient agent ID: agent-1\n\n" +
+		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n" +
+		"Read: multica issue get issue-1 --output json\n" +
+		"Read comments: multica issue comment list issue-1 --output json\n" +
+		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone."
+	if prompt != want {
+		t.Fatalf("comment prompt changed:\n%s", prompt)
+	}
+}
+
+// A generic result notification carries the stable issue reference the external
+// recipient needs to read the result back.
+func TestGenericDeliveryPromptCarriesIssueReference(t *testing.T) {
+	prompt := renderDeliveryNotification(delivery.Delivery{
+		ID:        "delivery-2",
+		Kind:      "issue_wakeup",
+		Payload:   []byte(`{"schema":"issue_wakeup.v1"}`),
+		Recipient: delivery.Recipient{Type: "agent", ID: "agent-1"},
+		Refs:      delivery.Refs{IssueID: "issue-2"},
+	})
+	for _, want := range []string{"delivery-2", "issue_wakeup", "Issue ID: issue-2", "issue_wakeup.v1"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt %q is missing %q", prompt, want)
 		}

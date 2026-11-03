@@ -646,7 +646,7 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 		t.Fatalf("retry provenance = status:%q attempt:%d leader:%v squad:%q wakeup:%q; want queued attempt 2 with the original leader context",
 			retryStatus, retryAttempt, retryLeader, retrySquadID, retryWakeupID)
 	}
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', dispatched_at = now(), started_at = now() WHERE id = $1`, retryID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', dispatched_at = now(), started_at = now(), session_id = 'stage-leader-session', work_dir = '/work/stage-leader', resource_control_required=true, session_pin_confirmed=true, session_pin_generation=gen_random_uuid() WHERE id = $1`, retryID)
 
 	// Act through the normal issue handler with the retry task as the agent
 	// identity: the operation the stage wake asks the leader to perform.
@@ -654,6 +654,7 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 	req = newRequest("PUT", "/api/issues/"+stage2.ID, map[string]any{"status": "todo"})
 	req.Header.Set("X-Agent-ID", sq.LeaderID)
 	req.Header.Set("X-Task-ID", retryID)
+	req.Header.Set("X-Actor-Source", "task_token")
 	req = withURLParam(req, "id", stage2.ID)
 	testHandler.UpdateIssue(w, req)
 	if w.Code != http.StatusOK {
@@ -682,6 +683,7 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 	})
 	req.Header.Set("X-Agent-ID", sq.LeaderID)
 	req.Header.Set("X-Task-ID", retryID)
+	req.Header.Set("X-Actor-Source", "task_token")
 	req = withURLParam(req, "id", stage2.ID)
 	testHandler.CreateComment(w, req)
 	if w.Code != http.StatusCreated {

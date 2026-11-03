@@ -271,8 +271,8 @@ func TestCreateComment_SquadLeaderSelfMentionCompletedTaskDoesNotFakeSuccess(t *
 	// active run to cover the comment.
 	var completedTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, is_leader_task, squad_id, started_at, completed_at)
-		VALUES ($1, $2, 'completed', 0, $3, true, $4, now(), now())
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, is_leader_task, squad_id, started_at, completed_at, session_id, work_dir)
+		VALUES ($1, $2, 'completed', 0, $3, true, $4, now(), now(), 'self-mention-session', '/work/self-mention')
 		RETURNING id
 	`, leaderID, handlerTestRuntimeID(t), issueID, squadID).Scan(&completedTaskID); err != nil {
 		t.Fatalf("seed completed leader task: %v", err)

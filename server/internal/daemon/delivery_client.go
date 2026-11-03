@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,13 +12,18 @@ import (
 	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
-// deliveryClaimDTO mirrors the generic claim response. It is deliberately
-// separate from MailboxClaim: a generic delivery has no issue or comment, and
-// the legacy DTO must keep rendering an issue-shaped notification.
+// deliveryClaimDTO mirrors the one claim response shared by comment
+// notifications and generic events. SourceType records where the delivery came
+// from; Kind selects the host envelope and is a separate concept. WorkspaceID
+// is the stored row's workspace, which owns the frozen envelope content.
 type deliveryClaimDTO struct {
 	ID               string          `json:"id"`
+	WorkspaceID      string          `json:"workspace_id"`
 	Kind             string          `json:"kind"`
 	Payload          json.RawMessage `json:"payload"`
+	SourceType       string          `json:"source_type"`
+	IssueID          string          `json:"issue_id"`
+	CommentID        string          `json:"comment_id"`
 	RecipientAgentID string          `json:"recipient_agent_id"`
 	RecipientType    string          `json:"recipient_type"`
 	ExternalSession  struct {
@@ -42,12 +48,24 @@ type deliveryOutcomeDTO struct {
 	ProcessingStatus string  `json:"processing_status"`
 }
 
-// ClaimDeliveries leases generic (non-comment) deliveries for this daemon.
+// mailboxStatus extracts the HTTP status from the daemon client's request
+// error so claim/outcome failures can be classified without string matching.
+func mailboxStatus(err error) int {
+	var reqErr *requestError
+	if !errors.As(err, &reqErr) {
+		return 0
+	}
+	return reqErr.StatusCode
+}
+
+// ClaimDeliveries leases every deliverable source for this daemon: comment
+// notifications and generic events arrive through the same claim and outcome
+// contract.
 func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit int) ([]delivery.Claim, error) {
 	var resp struct {
 		Deliveries []deliveryClaimDTO `json:"deliveries"`
 	}
-	if err := c.postDaemonMailboxJSON(ctx, workspaceID, "/api/daemon/deliveries/claim", map[string]any{"limit": limit}, &resp); err != nil {
+	if err := c.postDaemonDeliveryJSON(ctx, workspaceID, "/api/daemon/deliveries/claim", map[string]any{"limit": limit}, &resp); err != nil {
 		if mailboxStatus(err) == http.StatusNotFound {
 			return nil, fmt.Errorf("%w: %v", delivery.ErrNotFound, err)
 		}
@@ -63,10 +81,12 @@ func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit 
 		claim := delivery.Claim{
 			Delivery: delivery.Delivery{
 				ID:             item.ID,
-				Scope:          delivery.Scope{WorkspaceID: workspaceID},
+				Scope:          delivery.Scope{WorkspaceID: item.WorkspaceID},
+				Source:         delivery.Source{Type: item.SourceType},
 				Recipient:      recipient,
 				Kind:           item.Kind,
 				Payload:        item.Payload,
+				Refs:           delivery.Refs{IssueID: item.IssueID, CommentID: item.CommentID},
 				DeliveryStatus: item.DeliveryStatus,
 				Attempts:       item.Attempts,
 			},
@@ -80,13 +100,31 @@ func (c *Client) ClaimDeliveries(ctx context.Context, workspaceID string, limit 
 			LeaseToken: item.DeliveryToken,
 			VerifyOnly: item.VerifyOnly,
 		}
+		// The stored row's workspace is the authoritative frozen-envelope
+		// input. A response missing it, or carrying a different workspace than
+		// the one this client claimed, is not a usable lease: keep the ack in
+		// the claimed workspace and let the worker record a retry without
+		// calling the host.
+		if item.WorkspaceID == "" {
+			claim.ClaimError = fmt.Sprintf("delivery claim %s has no workspace_id, so its frozen envelope cannot be trusted", item.ID)
+		} else if item.WorkspaceID != workspaceID {
+			claim.ClaimError = fmt.Sprintf("delivery claim %s belongs to workspace %s, not the claimed workspace %s", item.ID, item.WorkspaceID, workspaceID)
+		}
+		if claim.ClaimError != "" {
+			claim.Scope.WorkspaceID = workspaceID
+		}
 		leaseExpiresAt, err := time.Parse(time.RFC3339, item.LeaseExpiresAt)
 		if err != nil {
 			// Skip only this lease instead of discarding the whole batch. The
 			// worker records a retry for it: the host was never called, and
 			// leaving the row leased would later turn a never-sent delivery
 			// into an unverifiable unknown.
-			claim.ClaimError = fmt.Sprintf("delivery claim %s has an invalid lease_expires_at %q: %v", item.ID, item.LeaseExpiresAt, err)
+			leaseError := fmt.Sprintf("delivery claim %s has an invalid lease_expires_at %q: %v", item.ID, item.LeaseExpiresAt, err)
+			if claim.ClaimError != "" {
+				claim.ClaimError += "; " + leaseError
+			} else {
+				claim.ClaimError = leaseError
+			}
 			claims = append(claims, claim)
 			continue
 		}
@@ -111,7 +149,7 @@ func (c *Client) RecordDeliveryOutcome(ctx context.Context, workspaceID string, 
 	}
 	path := "/api/daemon/deliveries/" + url.PathEscape(req.DeliveryID) + "/outcome"
 	var resp deliveryOutcomeDTO
-	if err := c.postDaemonMailboxJSON(ctx, workspaceID, path, body, &resp); err != nil {
+	if err := c.postDaemonDeliveryJSON(ctx, workspaceID, path, body, &resp); err != nil {
 		switch mailboxStatus(err) {
 		case http.StatusConflict:
 			return delivery.Delivery{}, fmt.Errorf("%w: %v", delivery.ErrLeaseLost, err)

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
 func paseoTestSession() ExternalSession {
@@ -30,7 +32,7 @@ func TestPaseoDeliveryRejectsDifferentHostBeforeSending(t *testing.T) {
 		return []byte(`{"agentId":"paseo-agent-1","status":"sent"}`), nil, nil
 	}}
 	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "private request")
-	var deliveryErr *MailboxDeliveryError
+	var deliveryErr *delivery.HostError
 	if !errors.As(err, &deliveryErr) || deliveryErr.Code != "paseo_host_mismatch" || sent {
 		t.Fatalf("wrong host must reject before send: error=%v sent=%v", err, sent)
 	}
@@ -46,8 +48,8 @@ func TestPaseoHostProbeFailureRemainsRetryable(t *testing.T) {
 		return nil, nil, nil
 	}}
 	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "request")
-	var failure *MailboxDeliveryError
-	if !errors.As(err, &failure) || !mailboxDeliveryRetryable(failure.Kind) || sent {
+	var hostErr *delivery.HostError
+	if !errors.As(err, &hostErr) || hostErr.Kind != delivery.HostUnavailable || sent {
 		t.Fatalf("read-only probe failure must retry without sending: err=%v sent=%v", err, sent)
 	}
 }
@@ -126,53 +128,53 @@ func TestPaseoDeliveryErrorsAreTypedAndContentFree(t *testing.T) {
 		stdout   string
 		stderr   string
 		runErr   error
-		wantKind MailboxDeliveryErrorKind
+		wantKind delivery.HostErrorKind
 		wantCode string
 	}{
 		{
 			name:     "busy is known no effect",
 			stderr:   `{"error":{"code":"agent_busy","message":"Agent is running"}}`,
 			runErr:   &exec.ExitError{},
-			wantKind: MailboxDeliveryBusy,
+			wantKind: delivery.HostBusy,
 			wantCode: mailboxErrorAgentBusy,
 		},
 		{
 			name:     "unknown outcome is not retried",
 			stderr:   `{"error":{"code":"agent_request_outcome_unknown","message":"outcome unknown"}}`,
 			runErr:   &exec.ExitError{},
-			wantKind: MailboxDeliveryOutcomeUnknown,
+			wantKind: delivery.HostOutcomeUnknown,
 			wantCode: mailboxErrorOutcomeUnknown,
 		},
 		{
 			name:     "host unreachable is retryable",
 			stderr:   `{"error":{"code":"DAEMON_UNREACHABLE","message":"Cannot connect"}}`,
 			runErr:   &exec.ExitError{},
-			wantKind: MailboxDeliveryUnavailable,
+			wantKind: delivery.HostUnavailable,
 			wantCode: "DAEMON_UNREACHABLE",
 		},
 		{
 			name:     "old cli flag is unsupported",
 			stderr:   "error: unknown option '--if-idle'",
 			runErr:   &exec.ExitError{},
-			wantKind: MailboxDeliveryUnsupported,
+			wantKind: delivery.HostUnsupported,
 		},
 		{
 			name:     "unrecognized failure is ambiguous",
 			stderr:   "segfault",
 			runErr:   &exec.ExitError{},
-			wantKind: MailboxDeliveryOutcomeUnknown,
+			wantKind: delivery.HostOutcomeUnknown,
 			wantCode: mailboxErrorOutcomeUnknown,
 		},
 		{
 			name:     "success with wrong agent id is ambiguous",
 			stdout:   `{"agentId":"other-agent","status":"sent"}`,
-			wantKind: MailboxDeliveryOutcomeUnknown,
+			wantKind: delivery.HostOutcomeUnknown,
 			wantCode: mailboxErrorOutcomeUnknown,
 		},
 		{
 			name:     "success with invalid json is ambiguous",
 			stdout:   `not json`,
-			wantKind: MailboxDeliveryOutcomeUnknown,
+			wantKind: delivery.HostOutcomeUnknown,
 			wantCode: mailboxErrorOutcomeUnknown,
 		},
 	}
@@ -184,7 +186,7 @@ func TestPaseoDeliveryErrorsAreTypedAndContentFree(t *testing.T) {
 			if err == nil {
 				t.Fatal("Deliver succeeded, want typed error")
 			}
-			var typed *MailboxDeliveryError
+			var typed *delivery.HostError
 			if !errors.As(err, &typed) {
 				t.Fatalf("error is not typed: %T %v", err, err)
 			}
@@ -205,8 +207,8 @@ func TestPaseoDeliveryMissingBinaryIsActionableDependencyError(t *testing.T) {
 	run := paseoRunner(t, "", "", errors.New("exec: \"paseo\": executable file not found in $PATH"))
 	transport := &paseoCliTransport{bin: "paseo", run: run}
 	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "prompt")
-	var typed *MailboxDeliveryError
-	if !errors.As(err, &typed) || typed.Kind != MailboxDeliveryUnsupported {
+	var typed *delivery.HostError
+	if !errors.As(err, &typed) || typed.Kind != delivery.HostUnsupported {
 		t.Fatalf("err = %v, want unsupported dependency error", err)
 	}
 	if !strings.Contains(err.Error(), "paseo CLI could not be started") {
@@ -226,8 +228,8 @@ func TestPaseoDeliveryInterruptedByDaemonStopIsAmbiguous(t *testing.T) {
 	}
 	transport := &paseoCliTransport{bin: "paseo", run: run}
 	_, err := transport.Deliver(ctx, paseoTestSession(), "mailbox-1", "prompt")
-	var typed *MailboxDeliveryError
-	if !errors.As(err, &typed) || typed.Kind != MailboxDeliveryOutcomeUnknown {
+	var typed *delivery.HostError
+	if !errors.As(err, &typed) || typed.Kind != delivery.HostOutcomeUnknown {
 		t.Fatalf("err = %v, want ambiguous outcome on daemon stop", err)
 	}
 }
@@ -242,8 +244,8 @@ func TestPaseoDeliveryTimeoutIsAmbiguous(t *testing.T) {
 	}
 	transport := &paseoCliTransport{bin: "paseo", timeout: 10 * time.Millisecond, run: run}
 	_, err := transport.Deliver(context.Background(), paseoTestSession(), "mailbox-1", "prompt")
-	var typed *MailboxDeliveryError
-	if !errors.As(err, &typed) || typed.Kind != MailboxDeliveryOutcomeUnknown || typed.Code != "delivery_timeout" {
+	var typed *delivery.HostError
+	if !errors.As(err, &typed) || typed.Kind != delivery.HostOutcomeUnknown || typed.Code != "delivery_timeout" {
 		t.Fatalf("err = %v, want ambiguous delivery timeout", err)
 	}
 }
