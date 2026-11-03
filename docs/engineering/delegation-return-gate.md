@@ -257,7 +257,10 @@ protection list is complete within the authenticated request workspace; it
 never expands a workspace-bound daemon credential into another workspace.
 Provider-store permission is decided by the server's complete provider/agent/
 scope dependency check, not by a daemon path comparison. Supported stores are
-keyed by profile and globally unique agent/scope identities.
+keyed by profile and globally unique agent/scope identities. If a frozen return
+loses its source/runtime lookup, its original scope is unknown: stores for that
+provider and actor remain protected, with the frozen address retained in the
+response. A current actor binding cannot reconstruct the original scope.
 
 Legacy provider-store requests can omit task/runtime/workspace identity, but
 must identify the actual daemon when using a user credential. The server derives

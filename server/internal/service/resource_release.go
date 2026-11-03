@@ -52,7 +52,7 @@ func resourceMatches(req protocol.ResourceReleaseRequest, a protocol.ManagedReso
 	case "workdir":
 		return resourcePathsOverlap(req.ResourcePath, a.WorkDir)
 	case "provider_store":
-		return req.Provider == a.Provider && req.AgentID == a.AgentID && (req.ScopeType == "agent" || (req.ScopeType == a.ScopeType && req.ScopeID == a.ScopeID))
+		return req.Provider == a.Provider && req.AgentID == a.AgentID && (a.ScopeType == "" || req.ScopeType == "agent" || (req.ScopeType == a.ScopeType && req.ScopeID == a.ScopeID))
 	}
 	return false
 }
@@ -117,6 +117,8 @@ func (s *TaskService) ResourceRelease(ctx context.Context, workspace pgtype.UUID
 		a.SourceTaskID, a.WorkspaceID, a.AgentID = util.UUIDToString(ref.SourceTaskID), util.UUIDToString(ref.WorkspaceID), util.UUIDToString(ref.DispatcherAgentID)
 		a.RuntimeID, a.Provider, a.SessionID, a.WorkDir = util.UUIDToString(ref.RuntimeID), ref.Provider.String, ref.SessionID.String, ref.WorkDir.String
 		if !found && req.Kind == "provider_store" && req.AgentID == a.AgentID && req.Provider == a.Provider {
+			// The frozen return proves the provider and actor, but not the lost scope.
+			a.ScopeType, a.ScopeID = "", ""
 			block("source_scope_unknown", a)
 			continue
 		}
