@@ -16,7 +16,9 @@ evidence. Neither outcome permits a fresh
 prompt retry. A post-prompt resume rejection cannot override this rule.
 Busy directories and provider stores keep the same task waiting with its
 preparation lease; cancellation ends that wait. A provider's explicit transient
-refusal with `StrictResumeUnmet` also proves no input occurred. That combination
+refusal with `StrictResumeUnmet` also proves no input occurred. `StrictResumeUnmet`
+alone is only an identity failure and can describe an error after input; it must
+remain unknown rather than authorize resource release. That combination
 waits in the same task and retries the same strict session; an ambiguous or
 post-input failure never takes this path. Starting a task or observing
 a session status event is not evidence that the result input was accepted.

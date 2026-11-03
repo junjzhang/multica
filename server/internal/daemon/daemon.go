@@ -9063,7 +9063,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	ctx = withSessionPinGeneration(ctx, task.SessionPinGeneration)
 	providerInvoked = true
 	result, tools, err := d.executeTaskInput(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
-	strictRefused = result.StrictResumeUnmet || errors.Is(err, agent.ErrResumeRequired)
+	strictRefused = (result.ResumeRejectedTransient && result.StrictResumeUnmet) || errors.Is(err, agent.ErrResumeRequired)
 	if err != nil {
 		return TaskResult{}, err
 	}

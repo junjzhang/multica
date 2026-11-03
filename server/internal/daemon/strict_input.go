@@ -19,7 +19,7 @@ func (d *Daemon) executeTaskInput(ctx context.Context, backend agent.Backend, pr
 		}
 		if !waitingReported {
 			waitingReported = true
-			taskLog.Info("original provider session is busy; waiting without changing the task")
+			taskLog.Info("original provider session is busy; waiting without changing the task", "error", result.Error)
 			_ = d.client.ReportProgress(ctx, taskID, "Waiting for the original provider session", 1, 2)
 		}
 		if err := sleepWithContext(ctx, envRootBusyRetryInterval); err != nil {
