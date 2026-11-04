@@ -135,6 +135,13 @@ reports that the selected host needs updating. Terminal controls are removed
 from displayed diagnostics, preserving newlines and tabs; RPC metadata is not
 part of the displayed message. Composer errors also omit the CLI marker.
 
+The same normalization and redaction apply to verification reports from both
+connect and status, including remote HTTP errors and display metadata in JSON
+and table output. Validation uses the original server values before rendering;
+normalization cannot turn an invalid binding into an authorized one. RPC
+diagnostics prefer the SDK's structured `userMessage` instead of reconstructing
+it from transport metadata.
+
 ## `multica session status`
 
 `multica session status --output json` reports inspection state without secrets:

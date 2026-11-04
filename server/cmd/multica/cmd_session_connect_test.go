@@ -137,10 +137,12 @@ func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
 		{"save failure recovery", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved. The newly issued credential was revoked; Run multica session connect."}}' >&2; exit 1`, "credential was revoked; Run multica session connect"},
 		{"save and revoke failure", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved and the credential could not be revoked. Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111 from the owner profile."}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
 		{"Node warning before envelope", `printf '%s\n' '(node:1) ExperimentalWarning: runtime warning' >&2; printf '%s' '{"error":{"message":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111. mea_secret_value"}}' >&2; printf '%s\n' 'another warning' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
-		{"JSON and malformed braces in warnings", `printf '%s\n' 'Warning {bad} {"a":1} and {"error":{"message":"ordinary warning"}}' >&2; printf '%s' '{"error":{"code":"handler_error","message":"Request failed: [multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111. requestType=plugin.rpc.invoke.request code=handler_error"}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
+		{"JSON and malformed braces in warnings", `printf '%s\n' 'Warning {bad} {"a":1} and {"error":{"message":"ordinary warning"}}' >&2; printf '%s' '{"error":{"code":"handler_error","message":"Request failed: transport description requestType=plugin.rpc.invoke.request code=handler_error","userMessage":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111."}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
 		{"old daemon", `printf '%s' '{"error":{"code":"DAEMON_UPDATE_REQUIRED","message":"Update the host to invoke plugin RPCs. mea_secret_value"}}' >&2; exit 1`, "update the Paseo host"},
 		{"controls split credential", `printf '%s' '{"error":{"message":"[multica:session-connect] credential mea_sec\u0000ret_value"}}' >&2; exit 1`, "credential [redacted]"},
-		{"terminal controls", `printf '%s' '{"error":{"message":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111.\u001b]52;c;cHduZWQ=\u0007\u001b[31mRED\u001b[0m\u009b31m\r\n\t下一步 mea_secret_value requestType=plugin.rpc.invoke.request code=handler_error"}}' >&2; exit 1`, "\n\t下一步 [redacted]"},
+		{"terminal controls", `printf '%s' '{"error":{"message":"transport description code=handler_error","userMessage":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111.\u001b]52;c;cHduZWQ=\u0007\u001b[31mRED\u001b[0m\u009b31m\r\n\t下一步 mea_secret_value"}}' >&2; exit 1`, "\n\t下一步 [redacted]"},
+		{"structured message ignores transport metadata", `printf '%s' '{"error":{"code":"invalid_request","message":"Do not print this requestType=other.request code=invalid_request","userMessage":"[multica:session-connect] Keep this recovery instruction."}}' >&2; exit 1`, "Keep this recovery instruction."},
+		{"empty marker", `printf '%s' '{"error":{"userMessage":"[multica:session-connect] \u0000\t"}}' >&2; exit 1`, "session connect failed"},
 		{"bridge missing", `printf '%s' "error: unknown command 'rpc'" >&2; exit 1`, "lacks `plugin rpc`"},
 		{"raw failure", `printf '%s' 'mea_secret_value' >&2; exit 1`, "session connect failed"},
 	} {
@@ -195,5 +197,123 @@ func TestSessionConnectMissingPaseo(t *testing.T) {
 	}
 	if len(api.recorded()) != 0 {
 		t.Fatal("missing Paseo caused an API fallback")
+	}
+}
+
+func TestSessionReportsSanitizeRemoteDiagnostics(t *testing.T) {
+	for _, operation := range []string{"connect", "status"} {
+		for _, output := range []string{"json", "table"} {
+			t.Run(operation+"/"+output, func(t *testing.T) {
+				api := newFakeAPI(t)
+				api.mailboxStatus = 500
+				api.mailboxBody = "upstream failure \x1b]52;c;cHduZWQ=\a\x1b[31mRED\x1b[0m token mea_ses\x00sion_token\n\t恢复"
+				home := t.TempDir()
+				env := connectProcessEnv(t, home, api.server.URL)
+				writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+				stdout, stderr, code := api.runCLI(t, home, env, "session", operation, "--output", output)
+				if code == 0 {
+					t.Fatalf("remote verification failure exited 0: %s", stdout)
+				}
+				diagnostic := stdout + stderr
+				if output == "json" {
+					var report sessionStatusReport
+					if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+						t.Fatal(err)
+					}
+					if report.Valid || report.Status != "invalid" || report.Remote == nil {
+						t.Fatalf("unexpected report: %#v", report)
+					}
+					diagnostic = report.Error + "\n" + report.Remote.Error
+				}
+				if !strings.Contains(diagnostic, "upstream failure") || !strings.Contains(diagnostic, "[redacted]") {
+					t.Fatalf("diagnostic lost failure detail: %q", diagnostic)
+				}
+				if strings.Contains(diagnostic, "mea_session_token") {
+					t.Fatal("remote response leaked a credential")
+				}
+				if strings.IndexFunc(diagnostic, func(r rune) bool { return r != '\n' && r != '\t' && unicode.IsControl(r) }) >= 0 {
+					t.Fatalf("remote response leaked controls: %q", diagnostic)
+				}
+			})
+		}
+	}
+}
+
+func TestSessionStatusSanitizesRemoteDisplayName(t *testing.T) {
+	for _, output := range []string{"json", "table"} {
+		t.Run(output, func(t *testing.T) {
+			api := newFakeAPI(t)
+			body, err := json.Marshal(map[string]string{"id": "agent-1", "execution_kind": "external", "name": "Visible \x1b[31m mea_ses\x00sion_token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.agentBody = string(body)
+			api.sessionsBody = `{"sessions":[{"provider":"paseo","host_id":"host-1","session_id":"paseo-agent-1","daemon_id":"daemon-1"}]}`
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+			stdout, stderr, code := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", output)
+			if code != 0 {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			display := stdout
+			if output == "json" {
+				var report sessionStatusReport
+				if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+					t.Fatal(err)
+				}
+				if !report.Valid || report.Remote == nil {
+					t.Fatalf("unexpected report: %#v", report)
+				}
+				display = report.Remote.AgentName
+			}
+			if !strings.Contains(display, "Visible") || !strings.Contains(display, "[redacted]") || strings.Contains(display, "mea_session_token") {
+				t.Fatalf("unsafe display name: %q", display)
+			}
+			if strings.IndexFunc(display, func(r rune) bool { return r != '\n' && r != '\t' && unicode.IsControl(r) }) >= 0 {
+				t.Fatal("display name retained controls")
+			}
+		})
+	}
+}
+
+func TestSessionStatusRejectsUnsafeRemoteMetadataBeforeRendering(t *testing.T) {
+	attack := "remote \x1b]52;c;cHduZWQ=\a mea_ses\x00sion_token"
+	for _, tc := range []struct{ name, kind, daemon, want string }{
+		{"execution kind", attack, "daemon-1", "[redacted]"},
+		{"daemon", "external", attack, "[redacted]"},
+		{"normalization must not authorize", "ext\x00ernal", "daemon-1", "not external"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			agent, err := json.Marshal(map[string]string{"id": "agent-1", "name": "External", "execution_kind": tc.kind})
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry, err := json.Marshal(map[string]any{"sessions": []map[string]string{{"provider": "paseo", "host_id": "host-1", "session_id": "paseo-agent-1", "daemon_id": tc.daemon}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.agentBody, api.sessionsBody = string(agent), string(registry)
+			home := t.TempDir()
+			writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, nil))
+			stdout, stderr, code := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "session", "status", "--output", "json")
+			if code == 0 {
+				t.Fatalf("invalid raw metadata authorized: %s", stdout)
+			}
+			var report sessionStatusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("%v stderr=%s", err, stderr)
+			}
+			if report.Valid || report.Remote == nil {
+				t.Fatalf("unexpected report: %#v", report)
+			}
+			text := report.Error + report.Remote.Error + report.Remote.ExecutionKind + report.Remote.DaemonID
+			if !strings.Contains(text, tc.want) || strings.Contains(text, "mea_session_token") {
+				t.Fatalf("unsafe metadata: %q", text)
+			}
+			if strings.IndexFunc(text, func(r rune) bool { return r != '\n' && r != '\t' && unicode.IsControl(r) }) >= 0 {
+				t.Fatal("unsafe controls in report")
+			}
+		})
 	}
 }

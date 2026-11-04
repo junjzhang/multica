@@ -56,7 +56,9 @@ describe("composer commands", () => {
     const recovery = "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111.";
     const host: CommandHost = {
       async rpc() {
-        throw new Error(`Request failed: [multica:session-connect] ${recovery} requestType=plugin.rpc.invoke.request code=handler_error`);
+        throw Object.assign(new Error(`Request failed: [multica:session-connect] ${recovery} requestType=plugin.rpc.invoke.request code=handler_error`), {
+          userMessage: `[multica:session-connect] ${recovery}`,
+        });
       },
       openPanel: vi.fn(),
     };

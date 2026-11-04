@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -39,6 +41,7 @@ const (
 )
 
 var (
+	sessionSecretPattern = regexp.MustCompile(`\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 	// errExternalSessionFileMissing lets session status report `disconnected`
 	// for a default path that was never written (or was removed by
 	// `/multica disconnect`) instead of calling that file invalid. Commands
@@ -49,6 +52,16 @@ var (
 	// Visibility of that agent says nothing about who the token belongs to.
 	errExternalSessionActorMismatch = errors.New("the session credential does not belong to the agent named in the binding")
 )
+
+func safeSessionDiagnostic(message string) string {
+	message = strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, message)
+	return sessionSecretPattern.ReplaceAllString(message, "[redacted]")
+}
 
 // verifyExternalSessionActor proves the credential's own identity before a
 // business command runs. GET /api/agents/{id}/mailbox is the existing

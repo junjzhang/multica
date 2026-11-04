@@ -48,12 +48,11 @@ export async function runMulticaCommand(
   const subcommand = parseSubcommand(rawArgs);
   const view = await host.rpc(CONTRACTS[subcommand], { agentId }).catch((error: unknown) => {
     if (error instanceof Error) {
-      const marker = error.message.indexOf(SESSION_CONNECT_ERROR_PREFIX);
+      const message = "userMessage" in error && typeof error.userMessage === "string"
+        ? error.userMessage : error.message;
+      const marker = message.indexOf(SESSION_CONNECT_ERROR_PREFIX);
       if (marker >= 0) {
-        const message = error.message.slice(marker + SESSION_CONNECT_ERROR_PREFIX.length)
-          .replace(/ code=handler_error$/, "")
-          .replace(/ requestType=plugin\.rpc\.invoke\.request$/, "");
-        throw new Error(message);
+        throw new Error(message.slice(marker + SESSION_CONNECT_ERROR_PREFIX.length));
       }
     }
     throw error;

@@ -8,18 +8,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/spf13/cobra"
 )
 
 // Written by integrations/paseo-multica/server/service.ts after redaction.
 const sessionConnectErrorPrefix = "[multica:session-connect] "
-
-var sessionConnectSecretPattern = regexp.MustCompile(`\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 
 var sessionConnectCmd = &cobra.Command{
 	Use:   "connect",
@@ -82,8 +78,9 @@ func sessionConnectRPCError(data []byte) error {
 		data = data[start:]
 		var failure struct {
 			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Code        string `json:"code"`
+				Message     string `json:"message"`
+				UserMessage string `json:"userMessage"`
 			} `json:"error"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(data))
@@ -94,18 +91,15 @@ func sessionConnectRPCError(data []byte) error {
 		if failure.Error.Code == "DAEMON_UPDATE_REQUIRED" {
 			return errors.New("the selected Paseo daemon does not support plugin RPCs; update the Paseo host before connecting")
 		}
-		if marker := strings.Index(failure.Error.Message, sessionConnectErrorPrefix); marker >= 0 {
-			message := failure.Error.Message[marker+len(sessionConnectErrorPrefix):]
-			message = strings.TrimSuffix(message, " code=handler_error")
-			message = strings.TrimSuffix(message, " requestType=plugin.rpc.invoke.request")
-			message = strings.Map(func(r rune) rune {
-				if r != '\n' && r != '\t' && unicode.IsControl(r) {
-					return -1
-				}
-				return r
-			}, message)
-			message = sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]")
-			return errors.New(message)
+		message := failure.Error.UserMessage
+		if message == "" {
+			message = failure.Error.Message
+		}
+		if marker := strings.Index(message, sessionConnectErrorPrefix); marker >= 0 {
+			message = safeSessionDiagnostic(message[marker+len(sessionConnectErrorPrefix):])
+			if strings.TrimSpace(message) != "" {
+				return errors.New(message)
+			}
 		}
 		// Warnings may contain complete JSON objects before the actual envelope.
 		data = data[int(decoder.InputOffset()):]

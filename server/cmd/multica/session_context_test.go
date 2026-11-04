@@ -89,6 +89,7 @@ type fakeAPI struct {
 	mailboxAgentID string
 	// mailboxStatus forces the identity check itself to fail.
 	mailboxStatus  int
+	mailboxBody    string
 	sessionsBody   string
 	sessionsStatus int
 }
@@ -118,6 +119,9 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 			case api.mailboxStatus != 0:
 				status = api.mailboxStatus
 				response = `{"error":"identity check failed"}`
+				if api.mailboxBody != "" {
+					response = api.mailboxBody
+				}
 			case api.agentStatus == http.StatusUnauthorized || api.agentStatus == http.StatusForbidden:
 				status = api.agentStatus
 				response = `{"error":"invalid token"}`
