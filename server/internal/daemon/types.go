@@ -76,6 +76,7 @@ type ProjectWorkflowData struct {
 // Task represents a claimed task from the server.
 // Agent data (name, skills) is populated by the claim endpoint.
 type Task struct {
+	AcceptedReturns      *[]protocol.AcceptedReturn     `json:"accepted_returns,omitempty"`
 	SessionPinGeneration string                         `json:"session_pin_generation,omitempty"`
 	RequireResume        bool                           `json:"require_resume,omitempty"`
 	DelegationResult     *protocol.DelegationResultTurn `json:"delegation_result,omitempty"`

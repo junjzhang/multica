@@ -29,6 +29,17 @@ credentials, MCP credentials, and current authorized configuration belong to
 the new task. A retained session is not permission to reuse the source task's
 closed credentials.
 
+Claims and issue run reads include `accepted_returns`, the complete accepted
+automatic-return relationships at that read. Each entry identifies the frozen
+return and recipient without exposing provider-store paths or credentials.
+An explicit empty array means the read found no relationship; an absent field
+means unknown, including an older server. A failed read fails the claim or API
+request instead of presenting an empty set. The daemon adds this snapshot to
+each turn, including result-handling turns. Before an explicit final handoff,
+refresh the run because late dispatch links may have added relationships.
+`result_notifications` describes outcome delivery and cannot establish that
+an active run has no accepted return.
+
 A v1 claim supplies a new `session_pin_generation`. Provider status callbacks
 carry that generation; an asynchronous callback never reads a later attempt's
 value. Before an ordinary fresh retry or worktree repair turn, the daemon uses

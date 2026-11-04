@@ -2282,6 +2282,13 @@ export const ResultNotificationSchema = z.object({
 }));
 
 export const AgentTaskSchema = z.object({
+  accepted_returns: z.array(z.object({
+    return_id: z.string().min(1),
+    recipient_agent_id: z.string().min(1),
+    kind: z.enum(["external_session", "managed_task"]),
+    source_task_id: z.string().min(1).optional(),
+    external_session_id: z.string().min(1).optional(),
+  })).optional().catch(undefined),
   wakeup_id: z.string().optional().catch(undefined),
   cancelled_by_comment_change: z.boolean().optional().catch(undefined),
   cancelled_by: TaskCancellationActorSchema.optional().catch(undefined),

@@ -2853,6 +2853,11 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Daemon does not support strict delegated result delivery.", protocol.DelegationResultUnavailable, "result_unsupported", http.StatusConflict, "result unsupported")
 	}
 	resp.RequireResume, resp.DelegationResult = resultTurn != nil, resultTurn
+	returns := []AgentTaskResponse{resp}
+	if err := h.hydrateAcceptedReturns(r.Context(), parseUUID(runtimeWorkspaceID), returns); err != nil {
+		return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "accepted_returns", uuidToString(task.ID))
+	}
+	resp.AcceptedReturns = returns[0].AcceptedReturns
 	// Preserve PostgreSQL's microseconds: second-resolution display timestamps
 	// cannot distinguish stale claims reclaimed within the same second.
 	if task.DispatchedAt.Valid {
@@ -6268,6 +6273,10 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.hydrateResultNotifications(r.Context(), issue.WorkspaceID, issue.ID, resp); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load result notification state")
+		return
+	}
+	if err := h.hydrateAcceptedReturns(r.Context(), issue.WorkspaceID, resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load accepted return relationships")
 		return
 	}
 	h.hydrateTaskSupplementMetadata(r.Context(), r, issue.WorkspaceID, tasks, resp)
