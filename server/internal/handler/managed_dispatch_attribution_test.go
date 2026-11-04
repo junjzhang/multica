@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -133,5 +134,44 @@ func TestManagedQuickCreatePreservesCurrentInvocation(t *testing.T) {
 				t.Fatalf("completed source added a run: %d", n)
 			}
 		})
+	}
+}
+
+func TestManagedQuickCreateRejectsConcurrentSourceClosure(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	_, sourceID, token := managedDispatcherFixture(t, "quick-source-closure")
+	dbfx.Exec(t, `UPDATE agent_task_queue SET originator_user_id=$2,accountable_user_id=$2 WHERE id=$1`, sourceID, testUserID)
+	target, runtimeID := executableTarget(t, "quick-source-closure-target")
+	dbfx.Exec(t, `UPDATE agent_runtime SET metadata='{"cli_version":"0.6.5"}'::jsonb WHERE id=$1`, runtimeID)
+	t.Cleanup(func() { dbfx.Exec(t, `DELETE FROM agent_task_queue WHERE agent_id=$1`, target) })
+
+	tx, err := testPool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(t.Context())
+	if _, err := tx.Exec(t.Context(), `UPDATE agent_task_queue SET status='completed' WHERE id=$1`, sourceID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Auth and the handler see the committed running state; enqueue waits on
+	// the source row until completion commits, then must recheck its authority.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- serveAuthenticated(t, token, http.HandlerFunc(testHandler.QuickCreateIssue), http.MethodPost, "/api/issues/quick-create",
+			map[string]any{"agent_id": target, "prompt": "Must not cross source completion"}, nil, nil)
+	}()
+	waitForBackendBlockedBy(t, lockHolderPID(t, tx))
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	w := waitForResponse(t, done)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("enqueue after source completion = %d: %s", w.Code, w.Body.String())
+	}
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE agent_id=$1`, target); n != 0 {
+		t.Fatalf("created %d tasks after source completed", n)
 	}
 }
