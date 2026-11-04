@@ -125,6 +125,12 @@ After RPC succeeds for the current session, connect runs the same inspection
 as status below. A successful plugin reply or file creation alone cannot
 produce a successful exit. Both commands use the same non-secret report.
 
+Connect failures authored by the plugin carry `[multica:session-connect]`
+after redaction. The CLI displays only that marked message from Paseo's JSON
+error envelope, retaining recovery instructions and non-secret token/agent IDs
+when saving the binding or revoking a new credential fails. Unmarked process
+output stays private. Runtime warnings before the envelope do not hide it.
+
 ## `multica session status`
 
 `multica session status --output json` reports inspection state without secrets:

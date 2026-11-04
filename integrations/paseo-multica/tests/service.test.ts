@@ -274,9 +274,13 @@ describe("session service", () => {
     expect(api.registrations).toHaveLength(0);
   });
 
-  it("revokes a credential that could not be stored and reports the cleanup", async () => {
+  it.each([
+    { revokeError: null, recovery: /The newly issued credential was revoked; run \/multica connect again\./, revokedAgents: [AGENT_A] },
+    { revokeError: new Error("network failed"), recovery: new RegExp(`Revoke token [0-9a-f-]{36} for agent ${AGENT_A} from the owner profile`), revokedAgents: [] },
+  ])("keeps actionable recovery for a save failure ($recovery)", async ({ revokeError, recovery, revokedAgents }) => {
     const home = await makeHome();
     const api = new FakeApi();
+    api.revokeError = revokeError;
     const service = createSessionService({
       home,
       paseo: fakeHost(),
@@ -284,7 +288,7 @@ describe("session service", () => {
       store: {
         read: readSessionContext,
         write: async () => {
-          throw new Error("disk full");
+          throw new Error(`disk full ${EXTERNAL_TOKEN}`);
         },
         remove: removeSessionContext,
       },
@@ -292,9 +296,14 @@ describe("session service", () => {
       now: () => NOW,
     });
 
-    await expect(service.connect(SESSION_A)).rejects.toThrow(/disk full.*revoked/s);
-    expect(api.revoked).toHaveLength(1);
-    expect(api.revoked[0]?.agentId).toBe(AGENT_A);
+    const error = await service.connect(SESSION_A).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(ConfigurationError);
+    if (!(error instanceof Error)) throw new Error("Expected connection error");
+    expect(error.message).toMatch(/^\[multica:session-connect\] /);
+    expect(error.message).toMatch(recovery);
+    expect(error.message).toContain("disk full [redacted]");
+    expect(error.message).not.toContain(EXTERNAL_TOKEN);
+    expect(api.revoked.map((record) => record.agentId)).toEqual(revokedAgents);
   });
 
   it("reports status, revocation failure, and idempotent disconnect", async () => {

@@ -112,11 +112,16 @@ func externalSessionFilePath() (path string, explicit, present bool, err error) 
 	if !externalSessionIDCLIPattern.MatchString(agentID) {
 		return "", false, false, fmt.Errorf("%s %q is not a usable Paseo agent id", paseoAgentIDEnv, agentID)
 	}
+	path, err = defaultExternalSessionFilePath(agentID)
+	return path, false, true, err
+}
+
+func defaultExternalSessionFilePath(agentID string) (string, error) {
 	dir, err := cli.ProfileDir("")
 	if err != nil {
-		return "", false, false, fmt.Errorf("resolve external session directory: %w", err)
+		return "", fmt.Errorf("resolve external session directory: %w", err)
 	}
-	return filepath.Join(dir, "external-sessions", externalSessionProvider, agentID+".json"), false, true, nil
+	return filepath.Join(dir, "external-sessions", externalSessionProvider, agentID+".json"), nil
 }
 
 // readExternalSessionContext loads and validates the binding for this process.

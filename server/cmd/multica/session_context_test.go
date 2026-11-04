@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,11 @@ func TestCLIProcessChild(t *testing.T) {
 		}
 	}
 	rootCmd.SetArgs(args)
+	if os.Getenv("MULTICA_TEST_CLI_CANCELED") == "1" {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rootCmd.SetContext(ctx)
+	}
 	if err := rootCmd.Execute(); err != nil {
 		if err != errSilent {
 			fmt.Fprintln(os.Stderr, cli.FormatError(err, debugFlag))

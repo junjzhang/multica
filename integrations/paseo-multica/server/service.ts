@@ -345,7 +345,18 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     });
   }
 
-  return { connect, status, disconnect };
+  return {
+    async connect(agentId) {
+      try {
+        return await connect(agentId);
+      } catch (error) {
+        // The CLI may expose only marked, redacted plugin-authored diagnostics.
+        throw new ConfigurationError(`[multica:session-connect] ${describeError(error)}`);
+      }
+    },
+    status,
+    disconnect,
+  };
 }
 
 function registrationFor(host: HostSession, daemonId: string): RegisterExternalAgentInput {

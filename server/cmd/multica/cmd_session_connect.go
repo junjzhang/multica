@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/multica-ai/multica/server/internal/cli"
 )
+
+// Written by integrations/paseo-multica/server/service.ts after redaction.
+const sessionConnectErrorPrefix = "[multica:session-connect] "
+
+var sessionConnectSecretPattern = regexp.MustCompile(`\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 
 var sessionConnectCmd = &cobra.Command{
 	Use:   "connect",
@@ -43,10 +47,13 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 	var stdout, stderr bytes.Buffer
 	process.Stdout, process.Stderr = &stdout, &stderr
 	if err := process.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("Paseo CLI was not found on PATH; install Paseo with `plugin rpc` support before connecting")
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("Paseo session connect interrupted or timed out; inspect `multica session status` before retrying")
 		}
-		// Never echo arbitrary subprocess output: RPC failures can include credentials.
+		// Unmarked subprocess output remains private, including runtime warnings.
 		if strings.Contains(stderr.String(), "unknown command 'rpc'") {
 			return fmt.Errorf("Paseo CLI lacks `plugin rpc`; update Paseo before connecting")
 		}
@@ -55,22 +62,15 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if json.Unmarshal(stderr.Bytes(), &failure) == nil {
-			message := strings.ToLower(failure.Error.Message)
-			for _, reason := range []struct{ match, safe string }{
-				{"plugin is not available", "Paseo Multica plugin is unavailable; enable paseo-multica on the current host"},
-				{"does not contribute rpc", "Paseo Multica plugin lacks session.connect; update the plugin"},
-				{"session is archived", "the current Paseo session is archived; restore it before connecting"},
-				{"session no longer exists", "the current session does not exist on the selected Paseo host; check the daemon target"},
-				{"refusing to rebind", "the existing binding conflicts with the plugin's host, server, workspace or daemon; restore its original configuration before connecting"},
-				{"refusing to overwrite", "the existing binding is incompatible; inspect it before connecting"},
-			} {
-				if strings.Contains(message, reason.match) {
-					return fmt.Errorf("%s", reason.safe)
+		if start := bytes.IndexByte(stderr.Bytes(), '{'); start >= 0 {
+			if json.NewDecoder(bytes.NewReader(stderr.Bytes()[start:])).Decode(&failure) == nil {
+				if marker := strings.Index(failure.Error.Message, sessionConnectErrorPrefix); marker >= 0 {
+					message := failure.Error.Message[marker+len(sessionConnectErrorPrefix):]
+					return errors.New(sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]"))
 				}
 			}
 		}
-		return fmt.Errorf("Paseo session connect failed; check the current host's paseo-multica plugin and its connection settings")
+		return fmt.Errorf("Paseo session connect failed; ensure paseo-multica and its session.connect method are available on the selected host and check its connection settings")
 	}
 	var connected struct {
 		State     string `json:"state"`
@@ -108,7 +108,7 @@ func sessionConnectPreflight(cmd *cobra.Command) (string, error) {
 	if value := strings.TrimSpace(os.Getenv("MULTICA_RETURN_SESSION")); value != "" && value != agentID {
 		return "", fmt.Errorf("MULTICA_RETURN_SESSION conflicts with the current Paseo session")
 	}
-	dir, err := cli.ProfileDir("")
+	defaultPath, err := defaultExternalSessionFilePath(agentID)
 	if err != nil {
 		return "", err
 	}
@@ -116,7 +116,7 @@ func sessionConnectPreflight(cmd *cobra.Command) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if path != filepath.Join(dir, "external-sessions", externalSessionProvider, agentID+".json") {
+	if path != defaultPath {
 		return "", fmt.Errorf("%s must name the current session's default binding file before connecting", externalSessionFileEnv)
 	}
 	return agentID, nil

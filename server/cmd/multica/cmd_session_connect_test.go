@@ -130,9 +130,12 @@ func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
 		{"wrong session", `printf '%s' '{"state":"connected","sessionId":"other","token":"mea_secret_value"}'`, "did not confirm"},
 		{"malformed", `printf '%s' 'mea_secret_value'`, "did not confirm"},
 		{"unverified", `printf '%s' '{"state":"unverified"}'`, "did not confirm"},
-		{"plugin missing", `printf '%s' '{"error":{"message":"Plugin is not available: paseo-multica mea_secret_value"}}' >&2; exit 1`, "plugin is unavailable"},
-		{"archived", `printf '%s' '{"error":{"message":"This Paseo session is archived. mea_secret_value"}}' >&2; exit 1`, "session is archived"},
-		{"conflict", `printf '%s' '{"error":{"message":"foreign workspace mea_secret_value Refusing to rebind this session"}}' >&2; exit 1`, "binding conflicts"},
+		{"plugin missing", `printf '%s' '{"error":{"message":"Plugin is not available: paseo-multica mea_secret_value"}}' >&2; exit 1`, "ensure paseo-multica"},
+		{"archived", `printf '%s' '{"error":{"message":"Request failed: [multica:session-connect] This Paseo session is archived. mea_secret_value"}}' >&2; exit 1`, "session is archived"},
+		{"conflict", `printf '%s' '{"error":{"message":"[multica:session-connect] foreign workspace mea_secret_value Refusing to rebind this session"}}' >&2; exit 1`, "Refusing to rebind"},
+		{"save failure recovery", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved. The newly issued credential was revoked; run /multica connect again."}}' >&2; exit 1`, "credential was revoked; run /multica connect again"},
+		{"save and revoke failure", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved and the credential could not be revoked. Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111 from the owner profile."}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
+		{"Node warning before envelope", `printf '%s\n' '(node:1) ExperimentalWarning: runtime warning' >&2; printf '%s' '{"error":{"message":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111. mea_secret_value"}}' >&2; printf '%s\n' 'another warning' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
 		{"bridge missing", `printf '%s' "error: unknown command 'rpc'" >&2; exit 1`, "lacks `plugin rpc`"},
 		{"raw failure", `printf '%s' 'mea_secret_value' >&2; exit 1`, "session connect failed"},
 	} {
@@ -155,5 +158,31 @@ func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
 				t.Fatal("unconfirmed RPC reached the API")
 			}
 		})
+	}
+}
+
+func TestSessionConnectCanceledBeforeRPC(t *testing.T) {
+	api := newFakeAPI(t)
+	home := t.TempDir()
+	env := connectProcessEnv(t, home, api.server.URL)
+	env["MULTICA_TEST_CLI_CANCELED"] = "1"
+	_, stderr, code := api.runCLI(t, home, env, "session", "connect")
+	if code == 0 || !strings.Contains(stderr, "inspect `multica session status` before retrying") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if _, err := os.Stat(env["CONNECT_ARGS"]); !os.IsNotExist(err) {
+		t.Fatalf("canceled RPC ran: %v", err)
+	}
+}
+
+func TestSessionConnectMissingPaseo(t *testing.T) {
+	api := newFakeAPI(t)
+	home := t.TempDir()
+	_, stderr, code := api.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1", "PATH": t.TempDir()}, "session", "connect")
+	if code == 0 || !strings.Contains(stderr, "Paseo CLI was not found on PATH") {
+		t.Fatalf("code=%d stderr=%s", code, stderr)
+	}
+	if len(api.recorded()) != 0 {
+		t.Fatal("missing Paseo caused an API fallback")
 	}
 }
