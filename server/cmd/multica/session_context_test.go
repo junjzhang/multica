@@ -247,6 +247,15 @@ func defaultSessionPath(home, sessionID string) string {
 	return filepath.Join(home, ".multica", "external-sessions", "paseo", sessionID+".json")
 }
 
+func assertSessionConnectHint(t *testing.T, message string) {
+	t.Helper()
+	cli := strings.Index(message, "multica session connect")
+	manual := strings.Index(message, "/multica connect")
+	if cli < 0 || (manual >= 0 && manual < cli) {
+		t.Fatalf("diagnostic must prioritize the executable CLI connect command: %q", message)
+	}
+}
+
 func sessionBinding(sessionID, serverURL string, overrides map[string]any) map[string]any {
 	binding := map[string]any{
 		"version":      1,
@@ -422,7 +431,8 @@ func TestCLIProcessFailsClosedWithoutBinding(t *testing.T) {
 	if exitCode == 0 {
 		t.Fatalf("exit code = 0, want a failure; stderr:\n%s", stderr)
 	}
-	for _, want := range []string{"no Multica binding", "/multica connect"} {
+	assertSessionConnectHint(t, stderr)
+	for _, want := range []string{"no Multica binding", "multica session connect"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
@@ -682,6 +692,7 @@ func TestSessionStatusDistinguishesInvalidFromConnected(t *testing.T) {
 	if report.Valid || report.Status != "invalid" {
 		t.Fatalf("status = %q valid = %t, want invalid/false", report.Status, report.Valid)
 	}
+	assertSessionConnectHint(t, report.Error)
 	if report.Remote == nil || !report.Remote.Checked || !strings.Contains(report.Remote.Error, "rejected") {
 		t.Errorf("remote check did not report the rejection: %#v", report.Remote)
 	}
@@ -709,6 +720,7 @@ func TestSessionStatusReportsDisconnectedAndMalformed(t *testing.T) {
 		if report.Status != "disconnected" || report.Valid || report.Error == "" {
 			t.Fatalf("report = %#v, want disconnected with an actionable error", report)
 		}
+		assertSessionConnectHint(t, report.Error)
 	})
 
 	t.Run("default file removed after connect", func(t *testing.T) {
@@ -723,6 +735,7 @@ func TestSessionStatusReportsDisconnectedAndMalformed(t *testing.T) {
 		if report.Status != "disconnected" || report.Valid || !strings.Contains(report.Error, "no Multica binding") {
 			t.Fatalf("report = %#v, want disconnected for a missing default file", report)
 		}
+		assertSessionConnectHint(t, report.Error)
 		if got := api.recorded(); len(got) != 0 {
 			t.Fatalf("missing binding still contacted the server: %#v", got)
 		}

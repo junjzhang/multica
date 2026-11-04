@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func connectProcessEnv(t *testing.T, home, serverURL string) map[string]string {
@@ -133,9 +134,12 @@ func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
 		{"plugin missing", `printf '%s' '{"error":{"message":"Plugin is not available: paseo-multica mea_secret_value"}}' >&2; exit 1`, "ensure paseo-multica"},
 		{"archived", `printf '%s' '{"error":{"message":"Request failed: [multica:session-connect] This Paseo session is archived. mea_secret_value"}}' >&2; exit 1`, "session is archived"},
 		{"conflict", `printf '%s' '{"error":{"message":"[multica:session-connect] foreign workspace mea_secret_value Refusing to rebind this session"}}' >&2; exit 1`, "Refusing to rebind"},
-		{"save failure recovery", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved. The newly issued credential was revoked; run /multica connect again."}}' >&2; exit 1`, "credential was revoked; run /multica connect again"},
+		{"save failure recovery", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved. The newly issued credential was revoked; Run multica session connect."}}' >&2; exit 1`, "credential was revoked; Run multica session connect"},
 		{"save and revoke failure", `printf '%s' '{"error":{"message":"[multica:session-connect] The binding could not be saved and the credential could not be revoked. Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111 from the owner profile."}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
 		{"Node warning before envelope", `printf '%s\n' '(node:1) ExperimentalWarning: runtime warning' >&2; printf '%s' '{"error":{"message":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111. mea_secret_value"}}' >&2; printf '%s\n' 'another warning' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
+		{"JSON and malformed braces in warnings", `printf '%s\n' 'Warning {bad} {"a":1} and {"error":{"message":"ordinary warning"}}' >&2; printf '%s' '{"error":{"code":"handler_error","message":"Request failed: [multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111. requestType=plugin.rpc.invoke.request code=handler_error"}}' >&2; exit 1`, "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111"},
+		{"old daemon", `printf '%s' '{"error":{"code":"DAEMON_UPDATE_REQUIRED","message":"Update the host to invoke plugin RPCs. mea_secret_value"}}' >&2; exit 1`, "update the Paseo host"},
+		{"terminal controls", `printf '%s' '{"error":{"message":"[multica:session-connect] Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111.\u001b]52;c;cHduZWQ=\u0007\u001b[31mRED\u001b[0m\u009b31m\r\n\t下一步 mea_secret_value requestType=plugin.rpc.invoke.request code=handler_error"}}' >&2; exit 1`, "\n\t下一步 [redacted]"},
 		{"bridge missing", `printf '%s' "error: unknown command 'rpc'" >&2; exit 1`, "lacks `plugin rpc`"},
 		{"raw failure", `printf '%s' 'mea_secret_value' >&2; exit 1`, "session connect failed"},
 	} {
@@ -153,6 +157,12 @@ func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
 			}
 			if strings.Contains(stdout+stderr, "mea_secret_value") {
 				t.Fatal("RPC output leaked a credential")
+			}
+			if strings.IndexFunc(stdout+stderr, func(r rune) bool { return r != '\n' && r != '\t' && unicode.IsControl(r) }) >= 0 {
+				t.Fatal("RPC output contains terminal controls")
+			}
+			if strings.Contains(stdout+stderr, "requestType=") || strings.Contains(stdout+stderr, "code=handler_error") {
+				t.Fatal("RPC metadata reached the user diagnostic")
 			}
 			if len(api.recorded()) != 0 {
 				t.Fatal("unconfirmed RPC reached the API")

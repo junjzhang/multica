@@ -69,7 +69,8 @@ connect reuses a locally valid, host-compatible binding; it verifies that
 credential against the bound agent's own mailbox endpoint before trusting it.
 That endpoint authorizes the credential's subject rather than a merely visible
 agent, so another agent's credential cannot validate this binding. Expired or
-revoked credentials are repaired only by explicit `/multica connect`. A binding
+revoked credentials are repaired only by explicit `multica session connect`
+(or `/multica connect` in the composer). A binding
 for another server, workspace, host, or daemon is reported and left untouched
 rather than silently rebound.
 
@@ -124,6 +125,6 @@ with `paseo plugin install <absolute path>` on the daemon host.
   the credential. A credential revoked elsewhere therefore shows as needing
   attention. If that request cannot complete, the panel reports the binding as
   unverified instead of claiming a connection. `status` never repairs anything;
-  `/multica connect` does that explicitly.
+  `multica session connect` (or `/multica connect` in the composer) does that explicitly.
 - No automatic enrollment of existing sessions, no automatic model messages, no
   MCP server, and no provider reload.

@@ -129,7 +129,11 @@ Connect failures authored by the plugin carry `[multica:session-connect]`
 after redaction. The CLI displays only that marked message from Paseo's JSON
 error envelope, retaining recovery instructions and non-secret token/agent IDs
 when saving the binding or revoking a new credential fails. Unmarked process
-output stays private. Runtime warnings before the envelope do not hide it.
+output stays private. Runtime warnings, including embedded JSON objects, are
+skipped while looking for an actionable envelope. A daemon capability refusal
+reports that the selected host needs updating. Terminal controls are removed
+from displayed diagnostics, preserving newlines and tabs; RPC metadata is not
+part of the displayed message. Composer errors also omit the CLI marker.
 
 ## `multica session status`
 

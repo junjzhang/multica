@@ -51,4 +51,16 @@ describe("composer commands", () => {
     await expect(runMulticaCommand(host, SESSION_A, "status")).rejects.toThrow(/not connected/);
     expect(openPanel).not.toHaveBeenCalled();
   });
+
+  it("shows recovery instructions without CLI markers or RPC metadata", async () => {
+    const recovery = "Revoke token 33333333-3333-4333-8333-333333333333 for agent 11111111-1111-4111-8111-111111111111.";
+    const host: CommandHost = {
+      async rpc() {
+        throw new Error(`Request failed: [multica:session-connect] ${recovery} requestType=plugin.rpc.invoke.request code=handler_error`);
+      },
+      openPanel: vi.fn(),
+    };
+    await expect(runMulticaCommand(host, SESSION_A, "connect")).rejects.toThrow(new Error(recovery));
+    expect(host.openPanel).not.toHaveBeenCalled();
+  });
 });

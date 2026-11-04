@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 )
@@ -57,18 +58,8 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 		if strings.Contains(stderr.String(), "unknown command 'rpc'") {
 			return fmt.Errorf("Paseo CLI lacks `plugin rpc`; update Paseo before connecting")
 		}
-		var failure struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if start := bytes.IndexByte(stderr.Bytes(), '{'); start >= 0 {
-			if json.NewDecoder(bytes.NewReader(stderr.Bytes()[start:])).Decode(&failure) == nil {
-				if marker := strings.Index(failure.Error.Message, sessionConnectErrorPrefix); marker >= 0 {
-					message := failure.Error.Message[marker+len(sessionConnectErrorPrefix):]
-					return errors.New(sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]"))
-				}
-			}
+		if diagnostic := sessionConnectRPCError(stderr.Bytes()); diagnostic != nil {
+			return diagnostic
 		}
 		return fmt.Errorf("Paseo session connect failed; ensure paseo-multica and its session.connect method are available on the selected host and check its connection settings")
 	}
@@ -80,6 +71,46 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("Paseo plugin did not confirm a connection for the current session; inspect `multica session status`")
 	}
 	return runSessionStatus(cmd, nil)
+}
+
+func sessionConnectRPCError(data []byte) error {
+	for len(data) > 0 {
+		start := bytes.IndexByte(data, '{')
+		if start < 0 {
+			break
+		}
+		data = data[start:]
+		var failure struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		if decoder.Decode(&failure) != nil {
+			data = data[1:]
+			continue
+		}
+		if failure.Error.Code == "DAEMON_UPDATE_REQUIRED" {
+			return errors.New("the selected Paseo daemon does not support plugin RPCs; update the Paseo host before connecting")
+		}
+		if marker := strings.Index(failure.Error.Message, sessionConnectErrorPrefix); marker >= 0 {
+			message := failure.Error.Message[marker+len(sessionConnectErrorPrefix):]
+			message = strings.TrimSuffix(message, " code=handler_error")
+			message = strings.TrimSuffix(message, " requestType=plugin.rpc.invoke.request")
+			message = sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]")
+			message = strings.Map(func(r rune) rune {
+				if r != '\n' && r != '\t' && unicode.IsControl(r) {
+					return -1
+				}
+				return r
+			}, message)
+			return errors.New(message)
+		}
+		// Warnings may contain complete JSON objects before the actual envelope.
+		data = data[int(decoder.InputOffset()):]
+	}
+	return nil
 }
 
 func sessionConnectPreflight(cmd *cobra.Command) (string, error) {

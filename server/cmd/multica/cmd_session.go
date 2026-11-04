@@ -16,7 +16,7 @@ import (
 
 var sessionCmd = &cobra.Command{
 	Use:   "session",
-	Short: "Inspect this process's external session identity",
+	Short: "Connect and inspect this process's external session identity",
 }
 
 var sessionStatusCmd = &cobra.Command{
@@ -137,7 +137,7 @@ func inspectExternalSession(parent context.Context, cmd *cobra.Command) sessionS
 	if !present {
 		return sessionStatusReport{
 			Status: "disconnected",
-			Error:  "no external session context in this process; run `/multica connect` in the Paseo session, or pass " + externalSessionFileEnv,
+			Error:  "no external session context in this process; " + externalSessionConnectHint + ", or pass " + externalSessionFileEnv,
 		}
 	}
 	report := sessionStatusReport{Status: "invalid", ContextFile: path, ExplicitContextFile: explicit}
@@ -214,7 +214,7 @@ func verifySessionBinding(parent context.Context, binding *externalSessionContex
 	// in the same workspace.
 	if err := verifyExternalSessionActor(ctx, client, binding.AgentID); err != nil {
 		if errors.Is(err, errExternalSessionActorMismatch) {
-			report.Error = "the session credential authenticates a different agent than the binding declares; reconnect the session so it issues a credential for this agent"
+			report.Error = "the session credential authenticates a different agent than the binding declares; " + externalSessionConnectHint
 		} else {
 			report.Error = describeSessionRemoteError(err)
 		}
@@ -272,7 +272,7 @@ func describeSessionRemoteError(err error) string {
 	if errors.As(err, &httpErr) {
 		switch httpErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			return "server rejected the session credential; reconnect the session to issue a new one"
+			return "server rejected the session credential; " + externalSessionConnectHint
 		case http.StatusNotFound:
 			return "the recorded agent no longer exists in this workspace"
 		}

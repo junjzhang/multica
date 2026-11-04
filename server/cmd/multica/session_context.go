@@ -35,7 +35,7 @@ const (
 	externalSessionVersion     = 1
 	externalSessionProvider    = "paseo"
 	externalSessionTokenPrefix = "mea_"
-	externalSessionConnectHint = "run `/multica connect` in the Paseo session to connect it"
+	externalSessionConnectHint = "run `multica session connect` in the Paseo session (or `/multica connect` in the composer)"
 )
 
 var (

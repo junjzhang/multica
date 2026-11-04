@@ -1,4 +1,5 @@
 const SECRET_PATTERN = /\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b/g;
+export const SESSION_CONNECT_ERROR_PREFIX = "[multica:session-connect] ";
 
 /**
  * Removes credential-shaped text from messages that can reach a UI, a log, or

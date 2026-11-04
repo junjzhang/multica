@@ -275,7 +275,7 @@ describe("session service", () => {
   });
 
   it.each([
-    { revokeError: null, recovery: /The newly issued credential was revoked; run \/multica connect again\./, revokedAgents: [AGENT_A] },
+    { revokeError: null, recovery: /The newly issued credential was revoked; Run multica session connect/, revokedAgents: [AGENT_A] },
     { revokeError: new Error("network failed"), recovery: new RegExp(`Revoke token [0-9a-f-]{36} for agent ${AGENT_A} from the owner profile`), revokedAgents: [] },
   ])("keeps actionable recovery for a save failure ($recovery)", async ({ revokeError, recovery, revokedAgents }) => {
     const home = await makeHome();

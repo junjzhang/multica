@@ -1,5 +1,5 @@
 import type { StatusView } from "../shared/contracts";
-import { describeError } from "../shared/redaction";
+import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
 import { createMulticaApi, type ApiCredential, type MulticaApi, type RegisterExternalAgentInput } from "./api";
 import { resolveHostSession, type HostSession, type PaseoHostAdapter } from "./host";
@@ -39,6 +39,7 @@ export interface SessionService {
 }
 
 const DEFAULT_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const CONNECT_HINT = "Run multica session connect (or /multica connect in the composer)";
 const locks = new Map<string, Promise<unknown>>();
 
 /**
@@ -162,7 +163,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         const conflict = conflictFor(existing.context, host, owner, config.daemonId);
         if (conflict) {
           throw new ConfigurationError(
-            `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it, then connect again.`,
+            `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it. ${CONNECT_HINT}.`,
           );
         }
         if (!isExpired(existing.context, now())) {
@@ -226,7 +227,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         throw new ConfigurationError(
           `The Multica session binding could not be saved (${describeError(
             error,
-          )}). The newly issued credential was revoked; run /multica connect again.`,
+          )}). The newly issued credential was revoked; ${CONNECT_HINT}.`,
         );
       }
       return viewFor(context, "connected");
@@ -248,7 +249,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       if (existing.status === "missing") {
         return hostError
           ? disconnectedView(hostError)
-          : disconnectedView("This Paseo session has no Multica binding. Run /multica connect.");
+          : disconnectedView(`This Paseo session has no Multica binding. ${CONNECT_HINT}.`);
       }
       if (existing.status === "invalid") {
         return invalidView(hostError ? `${existing.reason} ${hostError}` : existing.reason);
@@ -261,7 +262,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         const config = await readConfig();
         const owner = await loadOwnerProfile(deps.home, config.ownerProfile);
         const conflict = conflictFor(context, host, owner, config.daemonId);
-        if (conflict) return viewFor(context, "invalid", `${conflict} Run /multica connect after fixing the configuration.`);
+        if (conflict) return viewFor(context, "invalid", `${conflict} ${CONNECT_HINT} after fixing the configuration.`);
       } catch (error) {
         return viewFor(context, "invalid", describeError(error));
       }
@@ -269,7 +270,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         return viewFor(
           context,
           "invalid",
-          `The Multica credential expired at ${context.expires_at}. Run /multica connect to repair it.`,
+          `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`,
         );
       }
       try {
@@ -278,7 +279,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
           return viewFor(
             context,
             "invalid",
-            "Multica no longer accepts this session's credential (it was revoked, expired, or its external agent is gone). Run /multica connect to repair it.",
+            `Multica no longer accepts this session's credential (it was revoked, expired, or its external agent is gone). ${CONNECT_HINT} to repair it.`,
           );
         }
       } catch (error) {
@@ -351,7 +352,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         return await connect(agentId);
       } catch (error) {
         // The CLI may expose only marked, redacted plugin-authored diagnostics.
-        throw new ConfigurationError(`[multica:session-connect] ${describeError(error)}`);
+        throw new ConfigurationError(`${SESSION_CONNECT_ERROR_PREFIX}${describeError(error)}`);
       }
     },
     status,
