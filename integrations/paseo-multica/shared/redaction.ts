@@ -1,4 +1,4 @@
-const SECRET_PATTERN = /\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b/g;
+const SECRET_PATTERN = /(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b/g;
 const CONTROL_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 export const SESSION_CONNECT_ERROR_PREFIX = "[multica:session-connect] ";
 

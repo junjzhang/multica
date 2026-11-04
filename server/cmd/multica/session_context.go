@@ -41,7 +41,7 @@ const (
 )
 
 var (
-	sessionSecretPattern = regexp.MustCompile(`\b(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
+	sessionSecretPattern = regexp.MustCompile(`(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 	// errExternalSessionFileMissing lets session status report `disconnected`
 	// for a default path that was never written (or was removed by
 	// `/multica disconnect`) instead of calling that file invalid. Commands
