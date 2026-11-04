@@ -83,7 +83,7 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 }
 
 func sessionConnectPreflight(cmd *cobra.Command) (string, error) {
-	if inDaemonManagedExecutionContext() {
+	if inDaemonManagedExecutionContext() || inDaemonTaskIdentityContext() {
 		return "", fmt.Errorf("cannot connect an external session inside a daemon-managed task; its task credential is authoritative")
 	}
 	agentID := strings.TrimSpace(os.Getenv(paseoAgentIDEnv))

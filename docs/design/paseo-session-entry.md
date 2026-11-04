@@ -107,6 +107,24 @@ A session request carries the `mea_` token and the binding's workspace. It does
 not send `X-Agent-ID`/`X-Task-ID`: an external session is authorship, not a
 managed task, and no synthetic task id may enter attribution.
 
+## `multica session connect`
+
+An agent can explicitly connect with `multica session connect --output json`.
+The current `PASEO_AGENT_ID` is required. The CLI calls the installed Paseo
+`plugin rpc paseo-multica session.connect` command, which reuses Paseo's
+authenticated SDK connection and the plugin's existing connection transaction.
+Paseo must provide the `plugin rpc` CLI entry; no version-based fallback runs.
+
+Before RPC, connect rejects managed task identity and explicit profile, token,
+server or workspace overrides. The plugin settings select those values.
+An explicit context path must equal the current session's default path.
+Return-session overrides must match `PASEO_AGENT_ID`. The plugin owns host
+validation, conflict refusal, locking, credential reuse and cleanup.
+
+After RPC succeeds for the current session, connect runs the same inspection
+as status below. A successful plugin reply or file creation alone cannot
+produce a successful exit. Both commands use the same non-secret report.
+
 ## `multica session status`
 
 `multica session status --output json` reports inspection state without secrets:

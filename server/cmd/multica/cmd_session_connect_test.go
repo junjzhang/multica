@@ -71,3 +71,89 @@ func TestSessionConnectVerifiesActor(t *testing.T) {
 		})
 	}
 }
+
+func TestSessionConnectRefusesOverridesBeforeRPC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"missing session", map[string]string{"PASEO_AGENT_ID": ""}, nil, "PASEO_AGENT_ID"},
+		{"invalid session", map[string]string{"PASEO_AGENT_ID": "../other"}, nil, "PASEO_AGENT_ID"},
+		{"managed agent", map[string]string{"MULTICA_AGENT_ID": "managed-agent"}, nil, "daemon-managed"},
+		{"managed port", map[string]string{"MULTICA_DAEMON_PORT": "1234"}, nil, "daemon-managed"},
+		{"task root", map[string]string{"MULTICA_TASK_CONFIG_ROOT": "/task-private"}, nil, "daemon-managed"},
+		{"profile", nil, []string{"--profile", "owner"}, "--profile"},
+		{"server flag", nil, []string{"--server-url", "https://different.test"}, "--server-url"},
+		{"workspace flag", nil, []string{"--workspace-id", "other"}, "--workspace-id"},
+		{"server env", map[string]string{"MULTICA_SERVER_URL": "https://different.test"}, nil, "MULTICA_SERVER_URL"},
+		{"workspace env", map[string]string{"MULTICA_WORKSPACE_ID": "other"}, nil, "MULTICA_WORKSPACE_ID"},
+		{"token env", map[string]string{"MULTICA_TOKEN": "mul_owner_secret"}, nil, "MULTICA_TOKEN"},
+		{"return env", map[string]string{"MULTICA_RETURN_SESSION": "other"}, nil, "MULTICA_RETURN_SESSION"},
+		{"return flag", nil, []string{"--return-session", "other"}, "--return-session"},
+		{"foreign file", map[string]string{"MULTICA_EXTERNAL_SESSION_FILE": "/other/session.json"}, nil, "MULTICA_EXTERNAL_SESSION_FILE"},
+		{"output", nil, []string{"--output", "yaml"}, "--output"},
+		{"unexpected argument", nil, []string{"another-session"}, "unknown command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			home := t.TempDir()
+			writeHumanProfile(t, home, api.server.URL)
+			env := connectProcessEnv(t, home, api.server.URL)
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			args := append([]string{"session", "connect"}, tc.args...)
+			stdout, stderr, code := api.runCLI(t, home, env, args...)
+			if code == 0 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			if _, err := os.Stat(env["CONNECT_ARGS"]); !os.IsNotExist(err) {
+				t.Fatalf("RPC ran before refusal: %v", err)
+			}
+			if len(api.recorded()) != 0 {
+				t.Fatal("unexpected API request or human fallback")
+			}
+			if _, err := os.Stat(defaultSessionPath(home, "paseo-agent-1")); !os.IsNotExist(err) {
+				t.Fatalf("binding changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSessionConnectRejectsUnconfirmedRPC(t *testing.T) {
+	for _, tc := range []struct {
+		name, response string
+		want           string
+	}{
+		{"wrong session", `printf '%s' '{"state":"connected","sessionId":"other","token":"mea_secret_value"}'`, "did not confirm"},
+		{"malformed", `printf '%s' 'mea_secret_value'`, "did not confirm"},
+		{"unverified", `printf '%s' '{"state":"unverified"}'`, "did not confirm"},
+		{"plugin missing", `printf '%s' '{"error":{"message":"Plugin is not available: paseo-multica mea_secret_value"}}' >&2; exit 1`, "plugin is unavailable"},
+		{"archived", `printf '%s' '{"error":{"message":"This Paseo session is archived. mea_secret_value"}}' >&2; exit 1`, "session is archived"},
+		{"conflict", `printf '%s' '{"error":{"message":"foreign workspace mea_secret_value Refusing to rebind this session"}}' >&2; exit 1`, "binding conflicts"},
+		{"bridge missing", `printf '%s' "error: unknown command 'rpc'" >&2; exit 1`, "lacks `plugin rpc`"},
+		{"raw failure", `printf '%s' 'mea_secret_value' >&2; exit 1`, "session connect failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			home := t.TempDir()
+			env := connectProcessEnv(t, home, api.server.URL)
+			bin := strings.Split(env["PATH"], string(os.PathListSeparator))[0]
+			if err := os.WriteFile(filepath.Join(bin, "paseo"), []byte("#!/bin/sh\n"+tc.response+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, code := api.runCLI(t, home, env, "session", "connect", "--output", "json")
+			if code == 0 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			if strings.Contains(stdout+stderr, "mea_secret_value") {
+				t.Fatal("RPC output leaked a credential")
+			}
+			if len(api.recorded()) != 0 {
+				t.Fatal("unconfirmed RPC reached the API")
+			}
+		})
+	}
+}
