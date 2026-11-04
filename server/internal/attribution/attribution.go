@@ -251,7 +251,7 @@ func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 	case "agent":
 		r := Result{EvidenceKind: EvidenceComment, EvidenceRefID: f.CommentID}
 		if f.ExternalOriginator.Valid && !f.SourceTaskID.Valid {
-			r := AgentDelegation(f.ExternalOriginator, EvidenceComment, f.CommentID)
+			r := AgentDelegation(f.ExternalOriginator, f.ExternalOriginator, pgtype.UUID{}, EvidenceComment, f.CommentID)
 			r.Source = agentAuthoredSource
 			return r
 		}
@@ -283,16 +283,18 @@ func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 	}
 }
 
-// AgentDelegation preserves a server-verified human principal without marking
-// an agent's action as the human's own action.
-func AgentDelegation(userID pgtype.UUID, evidenceKind EvidenceKind, evidenceRefID pgtype.UUID) Result {
-	if !userID.Valid {
-		return Unattributed(evidenceKind, evidenceRefID)
-	}
-	return finalizeAttribution(Result{
-		UserID: userID, Source: SourceDelegation,
+// AgentDelegation preserves verified caller provenance, including a powerless
+// source accountable to a human, without recording a direct human action.
+func AgentDelegation(userID, accountableUserID, sourceTaskID pgtype.UUID, evidenceKind EvidenceKind, evidenceRefID pgtype.UUID) Result {
+	result := Result{
+		UserID: userID, AccountableUserID: accountableUserID,
+		DelegatedFromTaskID: sourceTaskID, Source: SourceDelegation,
 		EvidenceKind: evidenceKind, EvidenceRefID: evidenceRefID,
-	})
+	}
+	if !userID.Valid && !accountableUserID.Valid {
+		result.Source = SourceUnattributed
+	}
+	return finalizeAttribution(result)
 }
 
 // DirectFacts are the facts for a run with no trigger comment: a direct issue

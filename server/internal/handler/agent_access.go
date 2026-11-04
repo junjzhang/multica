@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/attribution"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -436,4 +437,34 @@ func externalOriginatorUserID(r *http.Request, actorType string) pgtype.UUID {
 	}
 	userID, _ := util.ParseUUID(requestUserID(r))
 	return userID
+}
+
+// A non-nil result records an explicit invocation, even when its verified
+// source has no human authority. Only derived/background work may fall back
+// to the target issue's historical provenance.
+func (h *Handler) dispatchAttributionFromRequest(r *http.Request, actorType, actorID string) *attribution.Result {
+	result := attribution.Unattributed(attribution.EvidenceIssueAssignment, pgtype.UUID{})
+	if actorType == "member" {
+		result = attribution.DirectHumanRun(memberActorUserID(actorType, actorID), attribution.EvidenceIssueAssignment, pgtype.UUID{})
+		return &result
+	}
+	if actorType != "agent" {
+		return &result
+	}
+	if r.Header.Get("X-Actor-Source") == "external_agent" {
+		userID := externalOriginatorUserID(r, actorType)
+		result = attribution.AgentDelegation(userID, userID, pgtype.UUID{}, attribution.EvidenceIssueAssignment, pgtype.UUID{})
+		return &result
+	}
+	sourceID := h.commentSourceTaskID(r)
+	if !sourceID.Valid {
+		return &result
+	}
+	result.DelegatedFromTaskID = sourceID
+	source, err := h.Queries.GetAgentTask(r.Context(), sourceID)
+	if err != nil || uuidToString(source.AgentID) != actorID || isTerminalTaskStatus(source.Status) {
+		return &result
+	}
+	result = attribution.AgentDelegation(source.OriginatorUserID, source.AccountableUserID, source.ID, attribution.EvidenceIssueAssignment, pgtype.UUID{})
+	return &result
 }

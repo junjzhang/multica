@@ -13,11 +13,17 @@ Multica owns the issue, explicit handoffs, and delivery receipts. An external ho
 
 ## Invocation provenance
 
-External dispatch preserves the token owner's authenticated invocation principal
-in the queued run's `originator_user_id`, with delegation provenance and no
-direct-human activity stamp. The actor remains the external Agent; the target's
-normal invocation policy still applies at each hop. A pending assignment with a
-different authorization principal cannot absorb the external dispatch.
+Explicit dispatch carries its authenticated provenance separately from the
+target issue's history. Members act as themselves; external Agents carry their
+token owner's verified principal; managed Agents carry the current source run's
+principal, accountability and task identity. An explicitly powerless source
+stays powerless, even on another person's issue or when rerunning their work.
+Only derived/background enqueue without current invocation facts uses historical
+issue provenance. Agent actions have delegation provenance and no direct-human
+activity stamp. The target's normal invocation policy still applies at each hop.
+A pending assignment with a different authorization principal cannot absorb the
+dispatch. Quick-create also preserves managed caller lineage and fences source
+completion against enqueue.
 
 External-authored comments store `external_originator_user_id` in the same
 transaction as their content and dispatch obligation. It is server-stamped,

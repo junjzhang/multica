@@ -83,7 +83,7 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 // already covers the target; the assignment intent still commits. Any other
 // error rolls the whole assignment back, so a rejected or failed enqueue can
 // never leave an assignee without its durable launch obligation.
-func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID, externalOriginator, expectedOriginator pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
+func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, bool, error) {
 	if trigger.AssigneeType != "agent" && trigger.AssigneeType != "squad" {
 		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
@@ -100,7 +100,7 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 			IssueID: issue.ID, AgentID: trigger.AgentID,
 		})
 		if err == nil {
-			if pending.OriginatorUserID != expectedOriginator {
+			if invocation != nil && pending.OriginatorUserID != invocation.UserID {
 				return db.AgentTaskQueue{}, attribution.Result{}, false, errAssignmentOriginatorConflict
 			}
 			if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturnIDs...); err != nil {
@@ -121,12 +121,10 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 		var attr attribution.Result
 		switch trigger.AssigneeType {
 		case "agent":
-			// The member who performed this assign/promote is the accountable
-			// human for the run. External authority is passed separately so an
-			// agent dispatch never becomes a direct human action.
-			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, externalOriginator)
+			// Explicit invocation distinguishes member action from delegated authority.
+			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, invocation)
 		case "squad":
-			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, externalOriginator)
+			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, invocation)
 		}
 		if err != nil {
 			_ = sp.Rollback(ctx)

@@ -2850,10 +2850,18 @@ func (q *Queries) CreateManualQuickCreateRetryTask(ctx context.Context, arg Crea
 }
 
 const createQuickCreateTask = `-- name: CreateQuickCreateTask :one
+WITH owner_fence AS MATERIALIZED (
+    SELECT lock_task_owner_rows($1, NULL, $2) AS allowed
+), invocation_source AS MATERIALIZED (
+    SELECT task.id, task.status, task.originator_user_id
+    FROM agent_task_queue task CROSS JOIN owner_fence
+    WHERE owner_fence.allowed AND task.id = $12::uuid
+    FOR SHARE OF task
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context, originator_user_id,
     accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
-    originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, delegated_from_task_id,
     id
 )
 SELECT
@@ -2865,8 +2873,15 @@ SELECT
     $9,
     $10,
     $11,
-    COALESCE($12::uuid, gen_random_uuid())
-WHERE lock_task_owner_rows($1, NULL, $2)
+    $12,
+    COALESCE($13::uuid, gen_random_uuid())
+FROM owner_fence
+WHERE owner_fence.allowed
+  AND ($12::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM invocation_source
+      WHERE status NOT IN ('completed', 'failed', 'cancelled')
+        AND originator_user_id IS NOT DISTINCT FROM $5::uuid
+  ))
 RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
 `
 
@@ -2882,6 +2897,7 @@ type CreateQuickCreateTaskParams struct {
 	OriginatorSource     pgtype.Text `json:"originator_source"`
 	TriggerEvidenceKind  pgtype.Text `json:"trigger_evidence_kind"`
 	TriggerEvidenceRefID pgtype.UUID `json:"trigger_evidence_ref_id"`
+	DelegatedFromTaskID  pgtype.UUID `json:"delegated_from_task_id"`
 	ID                   pgtype.UUID `json:"id"`
 }
 
@@ -2892,9 +2908,8 @@ type CreateQuickCreateTaskParams struct {
 // Quick-create tasks have no issue / chat / autopilot link; the entire job
 // description (prompt, requester, workspace) lives in context JSONB. The
 // daemon detects this variant via context.type == "quick_create".
-// The requester who opened the quick-create modal is a direct_human originator
-// and accountable; attribution provenance is stamped so this path is not a
-// NULL-source enqueue bypass (MUL-4302 §2).
+// Current invocation provenance is explicit. A managed source is locked after
+// workspace ownership and must remain live with the same authorization principal.
 func (q *Queries) CreateQuickCreateTask(ctx context.Context, arg CreateQuickCreateTaskParams) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, createQuickCreateTask,
 		arg.AgentID,
@@ -2908,6 +2923,7 @@ func (q *Queries) CreateQuickCreateTask(ctx context.Context, arg CreateQuickCrea
 		arg.OriginatorSource,
 		arg.TriggerEvidenceKind,
 		arg.TriggerEvidenceRefID,
+		arg.DelegatedFromTaskID,
 		arg.ID,
 	)
 	var i AgentTaskQueue
