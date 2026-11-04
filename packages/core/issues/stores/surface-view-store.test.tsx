@@ -9,7 +9,9 @@ import {
   getIssueSurfaceViewStateRegistrySnapshot,
   getIssueSurfaceViewStore,
   pruneIssueSurfaceViewStates,
+  seedIssueSurfaceViewState,
 } from "./surface-view-store";
+import { effectiveShowSubIssues } from "./view-store";
 
 const flush = async () => {
   await new Promise((resolve) => queueMicrotask(() => resolve(null)));
@@ -59,6 +61,65 @@ afterEach(async () => {
 });
 
 describe("issue surface view store registry", () => {
+  it("focuses a fresh workspace board on parents without narrowing other surfaces", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    const store = getIssueSurfaceViewStore("workspace:all");
+    expect(effectiveShowSubIssues(store.getState())).toBe(false);
+    expect(effectiveShowSubIssues(store.getState(), "child title")).toBe(true);
+    for (const key of ["workspace:agents", "my:assigned", "actor:agent-1", "project:p1", "view:saved"]) {
+      expect(effectiveShowSubIssues(getIssueSurfaceViewStore(key).getState())).toBe(true);
+    }
+    store.getState().toggleAssigneeFilter({ type: "agent", id: "worker" });
+    expect(effectiveShowSubIssues(store.getState())).toBe(true);
+    store.getState().clearFilters();
+    expect(effectiveShowSubIssues(store.getState())).toBe(false);
+    store.getState().setViewMode("list");
+    expect(effectiveShowSubIssues(store.getState())).toBe(true);
+  });
+
+  it("keeps an automatic default after unrelated edits and workspace rehydration", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    const store = getIssueSurfaceViewStore("workspace:all");
+    store.getState().setSortBy("title");
+    setCurrentWorkspace("other", "ws_b");
+    await flush();
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    expect(store.getState().showSubIssuesExplicit).toBe(false);
+    expect(effectiveShowSubIssues(store.getState())).toBe(false);
+    expect(effectiveShowSubIssues(store.getState(), "child")).toBe(true);
+    store.getState().setShowSubIssues(false);
+    expect(effectiveShowSubIssues(store.getState(), "child")).toBe(false);
+    setCurrentWorkspace("other", "ws_b");
+    await flush();
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    expect(effectiveShowSubIssues(store.getState(), "child")).toBe(false);
+    clearIssueSurfaceViewState("workspace:all");
+    expect(effectiveShowSubIssues(store.getState(), "child")).toBe(true);
+  });
+
+  it.each([true, false])("preserves legacy explicit child visibility %s", async (showSubIssues) => {
+    localStorage.setItem(`${ISSUE_SURFACE_VIEW_STORAGE_KEY}:acme`, JSON.stringify({
+      version: 1,
+      state: { surfaces: { "workspace:all": { state: { showSubIssues }, updatedAt: "2026-01-01" } } },
+    }));
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    const state = getIssueSurfaceViewStore("workspace:all").getState();
+    expect(state.showSubIssuesExplicit).toBe(true);
+    expect(effectiveShowSubIssues(state, "child")).toBe(showSubIssues);
+  });
+
+  it("treats saved view child visibility as an explicit setting", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    seedIssueSurfaceViewState("view:saved", { showSubIssues: false, showSubIssuesExplicit: false });
+    expect(effectiveShowSubIssues(getIssueSurfaceViewStore("view:saved").getState(), "child")).toBe(false);
+  });
+
   it("migrates legacy defaults without rewriting explicit preferences", async () => {
     localStorage.setItem(
       `${ISSUE_SURFACE_VIEW_STORAGE_KEY}:acme`,

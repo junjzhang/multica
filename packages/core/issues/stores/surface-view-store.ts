@@ -42,6 +42,9 @@ function defaultsForSurface(
   set: StoreApi<IssueViewState>["setState"],
 ): IssueViewState {
   const defaults = viewStoreSlice(set);
+  if (surfaceKey === "workspace:all") {
+    return { ...defaults, showSubIssues: false, showSubIssuesExplicit: false };
+  }
   if (!surfaceKey.startsWith("project:")) return defaults;
   return {
     ...defaults,
@@ -221,7 +224,7 @@ export function seedIssueSurfaceViewState(
   // subscription, so the seed becomes the surface's local state exactly
   // like a user-made change would.
   const defaults = viewStoreSlice(store.setState);
-  store.setState(mergeViewStatePersisted(definition, defaults), true);
+  store.setState({ ...mergeViewStatePersisted(definition, defaults), showSubIssuesExplicit: true }, true);
 }
 
 export function clearIssueSurfaceViewState(surfaceKey: string) {

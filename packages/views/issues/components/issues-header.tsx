@@ -67,7 +67,7 @@ import { projectListOptions } from "@multica/core/projects/queries";
 import { PROJECT_STATUS_CONFIG, PROJECT_STATUS_ORDER } from "@multica/core/projects/config";
 import { labelListOptions } from "@multica/core/labels/queries";
 import { propertyListOptions } from "@multica/core/properties";
-import { propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
+import { effectiveShowSubIssues, propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
 import type {
   Issue,
   IssueProperty,
@@ -1180,6 +1180,7 @@ export function ViewRefreshIndicator({ active }: { active: boolean }) {
 
 export function IssuesHeader({
   scopedIssues,
+  showSubIssues,
   workingAgents,
   allowGantt = false,
   dateFilter = null,
@@ -1191,6 +1192,7 @@ export function IssuesHeader({
   saveViewScope = { kind: "workspace" },
 }: {
   scopedIssues: Issue[];
+  showSubIssues?: boolean;
   /** See IssueSurfaceController.workingAgents — the surface-scoped projection
    *  behind the agents-working chip. */
   workingAgents: WorkingAgentSummary[] | undefined;
@@ -1370,6 +1372,7 @@ export function IssuesHeader({
           />
           <IssueDisplayControls
             scopedIssues={scopedIssues}
+            showSubIssues={showSubIssues}
             allowGantt={allowGantt}
             dateFilter={dateFilter}
             onDateFilterChange={onDateFilterChange}
@@ -1409,6 +1412,7 @@ export function IssuesHeader({
     {dialogScope && (
       <SaveViewDialog
         open={saveViewOpen}
+        showSubIssues={showSubIssues}
         onOpenChange={setSaveViewOpen}
         scope={dialogScope}
         editView={editTarget?.view ?? null}
@@ -1871,6 +1875,7 @@ export function IssueFilterMenu({
 
 export function IssueDisplayControls({
   scopedIssues,
+  showSubIssues: showSubIssuesOverride,
   hideViewToggle = false,
   allowGantt = false,
   dateFilter = null,
@@ -1881,6 +1886,7 @@ export function IssueDisplayControls({
   viewBaseline,
 }: {
   scopedIssues: Issue[];
+  showSubIssues?: boolean;
   hideViewToggle?: boolean;
   dateFilter?: IssueDateFilter | null;
   onDateFilterChange?: (filter: IssueDateFilter | null) => void;
@@ -1923,7 +1929,8 @@ export function IssueDisplayControls({
   const cardProperties = useViewStore((s) => s.cardProperties);
   const tableGrouping = useViewStore((s) => s.tableGrouping ?? "none");
   const tableHierarchy = useViewStore((s) => s.tableHierarchy ?? true);
-  const showSubIssues = useViewStore((s) => s.showSubIssues);
+  const defaultShowSubIssues = useViewStore(effectiveShowSubIssues);
+  const showSubIssues = showSubIssuesOverride ?? defaultShowSubIssues;
   const hiddenStatuses = useViewStore((s) => s.hiddenStatuses);
   const act = useViewStoreApi().getState();
   const headerWsId = useWorkspaceId();
@@ -2386,7 +2393,7 @@ export function IssueDisplayControls({
                 <Switch
                   size="sm"
                   checked={showSubIssues}
-                  onCheckedChange={() => act.toggleShowSubIssues()}
+                  onCheckedChange={(checked) => act.setShowSubIssues(checked)}
                 />
               </label>
               {availableCardPropertyOptions.length > 0 && (
