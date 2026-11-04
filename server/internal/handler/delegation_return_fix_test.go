@@ -51,7 +51,7 @@ func lockHolderPID(t *testing.T, tx pgx.Tx) int32 {
 // directly; they never read this helper.
 func returnsForAssignee(t *testing.T, issueID string, assigneeType, assigneeID string) []db.IssueDelegationReturn {
 	t.Helper()
-	rows, err := testHandler.Queries.ListIssueAssignmentDelegationReturnIDs(context.Background(), db.ListIssueAssignmentDelegationReturnIDsParams{
+	rows, err := testHandler.Queries.ListIssueAssignmentDelegationReturnIntents(context.Background(), db.ListIssueAssignmentDelegationReturnIntentsParams{
 		IssueID:      parseUUID(issueID),
 		AssigneeType: assigneeType,
 		AssigneeID:   parseUUID(assigneeID),
@@ -62,7 +62,7 @@ func returnsForAssignee(t *testing.T, issueID string, assigneeType, assigneeID s
 	out := make([]db.IssueDelegationReturn, 0, len(rows))
 	intentIDs := make(map[string]bool, len(rows))
 	for _, id := range rows {
-		intentIDs[uuidToString(id)] = true
+		intentIDs[uuidToString(id.DelegationReturnID)] = true
 	}
 	for _, row := range acceptedReturns(t, issueID) {
 		if intentIDs[uuidToString(row.ID)] {

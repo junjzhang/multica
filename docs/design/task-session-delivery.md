@@ -27,6 +27,22 @@ At acceptance, freeze the managed runtime, provider, provider session ID, and wo
 
 Reuse the existing managed task queue and provider resume path for a result-handling turn. Bind that turn to the recorded source task/session, rather than looking up the latest session for an Agent and issue. A new queue record or CLI process for a turn in the original provider session does not mean rerunning the delegated implementation.
 
+A result-handling continuation carries the accepted callers' upstream
+relationships. Each intent and covering run records the exact caller task set;
+the frozen address's original source task is only a conversation anchor. Callback
+authority follows the actual callers' consistent originator, while restoration
+keeps the original scope and address. It does not copy the completed downstream executor's recipients or
+collect recipients from other runs on the same issue. Repeated outcomes have
+distinct notification identities. A relationship already traversed by the
+same result-propagation chain is excluded from further automatic forwarding;
+explicit post-result takeovers remain one-off rather than continuing the
+selected recipient's unrelated upstream work. Claims and run reads expose the
+complete `accepted_returns` snapshot separately from outcome notifications.
+Missing or unreadable context is unknown, never a known-empty set. Legacy null
+caller sets permit single-hop frozen-session delivery without inferred authority
+or ancestor inheritance; verified result context explicitly reports unresolved
+upstream provenance independently of the actual `accepted_returns` snapshot.
+
 While the source turn is busy, the result-handling turn waits. If its fixed session or work directory is no longer recoverable, preserve the submitted result and expose delivery failure; do not silently select a newer session or use the normal fresh-session fallback. Other ordinary managed work retains its existing recovery policy.
 
 The first provider session pin can arrive after the Agent starts using tools. Until a reliable return identity is persisted, the delegation gate must return a specific not-ready outcome without creating executable child work. Do not fill that gap with an older session. Exercise this window along with session replacement, busy return, and missing-session failure in integration tests.

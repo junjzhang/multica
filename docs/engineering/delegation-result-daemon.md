@@ -6,6 +6,40 @@ runtime, provider, session, and working directory. The daemon verifies those
 fields against the claim and passes `RequireResume` to the provider. It does
 not look up a later source task or choose the latest session.
 
+The new turn carries the actual callers' accepted upstream returns. The frozen
+address's `source_task_id` identifies the original conversation, not the caller
+of every later delegation to that conversation. Comment, assignment and run
+return joins snapshot `caller_task_ids` when work is accepted. Coalescing unions
+these sets; retries, replay and reassignment preserve them. Editing a comment
+replaces its current intent without rewriting past runs' copied provenance.
+
+Creating the turn, recording its incoming notification and copying those
+callers' upstream relationships commit together. Callback authority comes from
+the callers' consistent originator, independently of the original address's
+scope and resume identity. A new incompatible source scope or conflicting
+pending caller authority is refused before accepting the delegation.
+A saved continuation outcome therefore returns to the actual dispatchers even
+after several downstream reviews, without changing their frozen destinations.
+
+A null caller snapshot means historical provenance is unknown; an empty set
+means a known external caller. Unknown managed provenance still permits delivery
+to the frozen session, but grants no inferred human authority and does not guess
+upstream returns. The verified result context sets `upstream_returns_unknown`;
+this diagnostic follows durable incoming edges across further result turns.
+`accepted_returns` continues to list actual outgoing obligations, so its empty
+array does not resolve an explicitly unknown ancestor. No context JSON flag is
+trusted as provenance or authorization evidence. Already materialized legacy
+turns with unproven nonempty authority are refused; migration does not silently
+retain that authority or rewrite the turn. Before upgrading, inspect and drain
+or explicitly resolve queued pre-upgrade callbacks. There is no automatic
+backfill of old caller authority.
+Each outcome has its own notification identity; it is not business acceptance.
+Reconciliation repairs relationships linked after the source turn finished,
+including links arriving through retries. A return already traversed by the
+same result-propagation chain is not copied again, so mutual delegation cannot
+produce an unbounded automatic response loop. Explicit post-result takeover
+notifications remain one-off and do not inherit the chosen recipient's work.
+
 A strict turn must reuse the accepted directory under its env-root lock. A
 missing directory, changed ownership, unsupported source environment, or
 provider refusal before input produces `delegation_result_unavailable`.

@@ -150,6 +150,7 @@ type AgentTaskDelegationReturn struct {
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 	TakeoverID             pgtype.UUID        `json:"takeover_id"`
+	CallerTaskIds          []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type AgentTaskQueue struct {
@@ -678,6 +679,7 @@ type CommentDelegationReturn struct {
 	CommentID          pgtype.UUID        `json:"comment_id"`
 	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CallerTaskIds      []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type CommentDispatchObligation struct {
@@ -1014,6 +1016,7 @@ type IssueAssignmentDelegationReturn struct {
 	AssigneeID         pgtype.UUID        `json:"assignee_id"`
 	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CallerTaskIds      []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type IssueChildEvent struct {

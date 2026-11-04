@@ -83,7 +83,7 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 // already covers the target; the assignment intent still commits. Any other
 // error rolls the whole assignment back, so a rejected or failed enqueue can
 // never leave an assignee without its durable launch obligation.
-func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, bool, error) {
+func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, bool, error) {
 	if trigger.AssigneeType != "agent" && trigger.AssigneeType != "squad" {
 		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
@@ -103,7 +103,7 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 			if invocation != nil && pending.OriginatorUserID != invocation.UserID {
 				return db.AgentTaskQueue{}, attribution.Result{}, false, errAssignmentOriginatorConflict
 			}
-			if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturnIDs...); err != nil {
+			if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturns...); err != nil {
 				return db.AgentTaskQueue{}, attribution.Result{}, false, err
 			}
 			return pending, attribution.Result{}, false, nil
@@ -122,9 +122,9 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 		switch trigger.AssigneeType {
 		case "agent":
 			// Explicit invocation distinguishes member action from delegated authority.
-			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, invocation)
+			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturns, invocation)
 		case "squad":
-			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, invocation)
+			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturns, invocation)
 		}
 		if err != nil {
 			_ = sp.Rollback(ctx)

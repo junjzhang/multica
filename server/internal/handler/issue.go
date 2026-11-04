@@ -4259,7 +4259,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID := pgtype.UUID{}
 		if prospectiveWillRun {
-			task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, actorType, actorID, req.HandoffNote, dispatch.returnIDs, invocation)
+			task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, actorType, actorID, req.HandoffNote, dispatch.returns, invocation)
 			if enqueueErr != nil {
 				return enqueueErr
 			}
@@ -5126,7 +5126,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 			taskID := pgtype.UUID{}
 			if prospectiveWillRun {
-				task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, callerType, callerActorID, req.Updates.HandoffNote, dispatch.returnIDs, invocation)
+				task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, callerType, callerActorID, req.Updates.HandoffNote, dispatch.returns, invocation)
 				if enqueueErr != nil {
 					return enqueueErr
 				}

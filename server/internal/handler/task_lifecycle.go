@@ -377,7 +377,7 @@ func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (p
 		}
 		return pgtype.UUID{}, err
 	}
-	inherited, err := delegation.RunReturnIDs(ctx, h.Queries, latest)
+	inherited, err := delegation.RunReturns(ctx, h.Queries, latest)
 	if err != nil {
 		return pgtype.UUID{}, err
 	}

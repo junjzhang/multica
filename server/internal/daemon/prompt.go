@@ -346,7 +346,11 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 
 func buildPromptBody(task Task, provider string) string {
 	if result := task.DelegationResult; result != nil {
-		return fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		body := fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		if result.UpstreamReturnsUnknown {
+			body += "The accepted caller provenance is incomplete. This result was delivered to its frozen session, but inherited upstream responsibility is unresolved. An empty accepted_returns snapshot does not resolve that gap; do not guess an ancestor or create a replacement notification.\n"
+		}
+		return body
 	}
 	if task.WakeupID != "" {
 		var b strings.Builder

@@ -171,8 +171,8 @@ func TestResultTakeoverExternalPreservesUnknownAndReusesTarget(t *testing.T) {
 	if string(resultBefore.Result) != string(resultAfter.Result) || countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2`, f.result.IssueID, f.result.AgentID) != 1 {
 		t.Fatal("takeover reran executor or changed result")
 	}
-	carried, err := delegation.RunReturnIDs(ctx, testHandler.Queries, f.result.ID)
-	if err != nil || len(carried) != 1 || carried[0] != f.address.ID {
+	carried, err := delegation.RunReturns(ctx, testHandler.Queries, f.result.ID)
+	if err != nil || len(carried) != 1 || carried[0].ID != f.address.ID {
 		t.Fatalf("takeover treated as carried input: %v %v", carried, err)
 	}
 }
@@ -345,7 +345,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := delegation.LinkRun(ctx, testHandler.Queries, f.result.ID, inherited.ID); err != nil {
+	if err := delegation.LinkRun(ctx, testHandler.Queries, f.result.ID, delegation.ReturnIntent{ID: inherited.ID}); err != nil {
 		t.Fatal(err)
 	}
 	bSession := takeoverExternalSession(t, f, "rerun-B")
@@ -400,7 +400,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 	}
 	// A late accepted input keeps the original address throughout automatic
 	// retries even though this actor now uses B for new explicit dispatches.
-	if err := delegation.LinkRun(ctx, testHandler.Queries, parseUUID(queryString(t, `SELECT retry_of_task_id::text FROM agent_task_queue WHERE id=$1`, retry.ID)), f.address.ID); err != nil {
+	if err := delegation.LinkRun(ctx, testHandler.Queries, parseUUID(queryString(t, `SELECT retry_of_task_id::text FROM agent_task_queue WHERE id=$1`, retry.ID)), delegation.ReturnIntent{ID: f.address.ID}); err != nil {
 		t.Fatal(err)
 	}
 	requireTaskReturns(t, uuidToString(retry.ID), f.address, inherited)

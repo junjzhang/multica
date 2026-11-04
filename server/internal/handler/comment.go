@@ -1868,11 +1868,11 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		writeDelegationReturnError(w, derr)
 		return
 	}
-	var commentReturnIDs []pgtype.UUID
+	var commentReturnIDs []delegation.ReturnIntent
 	recordCommentReturn := func(q *db.Queries) error {
 		accepted, recordErr := recordCommentDelegationReturn(r.Context(), q, issue, commentID, commentAddress, requestUserID(r))
-		if recordErr == nil && accepted.Valid {
-			commentReturnIDs = []pgtype.UUID{accepted}
+		if recordErr == nil && accepted.ID.Valid {
+			commentReturnIDs = []delegation.ReturnIntent{accepted}
 		}
 		return recordErr
 	}
@@ -1895,7 +1895,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		}
 		var acceptedReturnID pgtype.UUID
 		if len(commentReturnIDs) > 0 {
-			acceptedReturnID = commentReturnIDs[0]
+			acceptedReturnID = commentReturnIDs[0].ID
 		}
 		obligations, err := h.recordAcceptedCommentObligations(r.Context(), q, issue, commentID, triggerPlan.triggers, acceptedReturnID)
 		if err != nil {
@@ -2317,7 +2317,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 	// The comment is the dispatch intent. Every path — a fresh run, a fold, a
 	// completion replay, or an edit/cancel retrigger — reads the same durable
 	// relation instead of an in-memory set that a post-commit failure can drop.
-	returnIDs, err := delegation.CommentReturnIDs(ctx, h.Queries, triggerCommentID)
+	returnIDs, err := delegation.CommentReturns(ctx, h.Queries, triggerCommentID)
 	if err != nil {
 		slog.Warn("comment trigger returns unavailable",
 			"issue_id", uuidToString(issue.ID), "comment_id", uuidToString(triggerCommentID), "error", err)
@@ -2373,7 +2373,7 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 // A duplicate that cannot yet be resolved re-loops (bounded by maxAttempts); on
 // genuine non-convergence it returns a truthful internal_error, never a fabricated
 // deferred that would silently drop the comment.
-func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, commentReturnIDs []pgtype.UUID) (DispatchStatus, DispatchReasonCode) {
+func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, triggerCommentID pgtype.UUID, commentReturnIDs []delegation.ReturnIntent) (DispatchStatus, DispatchReasonCode) {
 	pending := trigger.AlreadyPending
 	lostRace := false
 	// Resolve the reviewed HEAD lazily and at most once — the common
@@ -2715,7 +2715,7 @@ func (h *Handler) mergeCommentIntoPendingTaskWithQueries(ctx context.Context, q 
 }
 
 func linkCommentRunReturns(ctx context.Context, q *db.Queries, taskID, commentID pgtype.UUID) error {
-	returnIDs, err := delegation.CommentReturnIDs(ctx, q, commentID)
+	returnIDs, err := delegation.CommentReturns(ctx, q, commentID)
 	if err != nil {
 		return err
 	}
@@ -2851,7 +2851,7 @@ func (h *Handler) propagateUncoveredCommentObligation(ctx context.Context, issue
 		if h.mergeCommentIntoPendingTask(ctx, issue, trigger, commentID, headSha) == commentMergeSucceeded {
 			return true
 		}
-		returnIDs, idsErr := delegation.CommentReturnIDs(ctx, h.Queries, commentID)
+		returnIDs, idsErr := delegation.CommentReturns(ctx, h.Queries, commentID)
 		if idsErr != nil {
 			return false
 		}
@@ -2888,11 +2888,11 @@ func logCommentEnqueueFailure(msg string, err error, attrs ...any) {
 // enqueueSingleCommentTrigger enqueues one resolved trigger and returns the
 // enqueue error (nil on success) so the caller can surface a
 // trigger_outcome (MUL-4525 §2).
-func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger, delegationReturnIDs []pgtype.UUID) error {
+func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger, delegationReturns []delegation.ReturnIntent) error {
 	switch trigger.Source {
 	case commentTriggerSourceIssueAssignee:
 		if trigger.Squad != nil {
-			if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginDerived, delegationReturnIDs...); err != nil {
+			if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginDerived, delegationReturns...); err != nil {
 				logCommentEnqueueFailure("enqueue squad leader task failed", err,
 					"issue_id", uuidToString(issue.ID),
 					"squad_id", uuidToString(trigger.Squad.ID),
@@ -2901,7 +2901,7 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 			}
 			return nil
 		}
-		if _, err := h.TaskService.EnqueueTaskForIssueWithTriggerAndReturns(ctx, issue, triggerCommentID, delegationReturnIDs); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForIssueWithTriggerAndReturns(ctx, issue, triggerCommentID, delegationReturns); err != nil {
 			// EnqueueTaskForIssue now returns ErrDuplicatePendingTask on the
 			// benign duplicate-pending-task race, so use the shared helper that
 			// downgrades that case to debug — matching the squad-leader and
@@ -2912,14 +2912,14 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 			return err
 		}
 	case commentTriggerSourceMentionSquadLeader:
-		if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturns...); err != nil {
 			logCommentEnqueueFailure("enqueue squad leader mention task failed", err,
 				"issue_id", uuidToString(issue.ID),
 				"agent_id", uuidToString(trigger.Agent.ID))
 			return err
 		}
 	case commentTriggerSourceMentionAgent:
-		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...); err != nil {
+		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, delegationReturns...); err != nil {
 			logCommentEnqueueFailure("enqueue mention agent task failed", err,
 				"issue_id", uuidToString(issue.ID),
 				"agent_id", uuidToString(trigger.Agent.ID))
@@ -2933,9 +2933,9 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 		// for the thread-parent path. Gating on the source as well would keep
 		// the thread-parent path demoted for no reason (MUL-7006).
 		if trigger.Squad != nil {
-			_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturnIDs...)
+			_, err = h.TaskService.EnqueueTaskForSquadLeader(ctx, issue, trigger.Agent.ID, trigger.Squad.ID, triggerCommentID, service.OriginNamed, delegationReturns...)
 		} else {
-			_, err = h.TaskService.EnqueueTaskForThreadParent(ctx, issue, trigger.Agent.ID, triggerCommentID, delegationReturnIDs...)
+			_, err = h.TaskService.EnqueueTaskForThreadParent(ctx, issue, trigger.Agent.ID, triggerCommentID, delegationReturns...)
 		}
 		if err != nil {
 			logCommentEnqueueFailure("enqueue routed comment agent task failed", err,
@@ -2955,22 +2955,22 @@ type commentTriggerTask struct {
 	attr attribution.Result
 }
 
-func (h *Handler) enqueueSingleCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
+func (h *Handler) enqueueSingleCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, trigger commentAgentTrigger, delegationReturns []delegation.ReturnIntent) (db.AgentTaskQueue, attribution.Result, error) {
 	switch trigger.Source {
 	case commentTriggerSourceIssueAssignee:
 		if trigger.Squad != nil {
-			return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginDerived, delegationReturnIDs)
+			return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginDerived, delegationReturns)
 		}
-		return h.TaskService.EnqueueIssueCommentTriggerInTx(ctx, q, issue, triggerCommentID, delegationReturnIDs)
+		return h.TaskService.EnqueueIssueCommentTriggerInTx(ctx, q, issue, triggerCommentID, delegationReturns)
 	case commentTriggerSourceMentionSquadLeader:
-		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginNamed, delegationReturnIDs)
+		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginNamed, delegationReturns)
 	case commentTriggerSourceMentionAgent:
-		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, false, pgtype.UUID{}, service.OriginNamed, delegationReturnIDs)
+		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, false, pgtype.UUID{}, service.OriginNamed, delegationReturns)
 	case commentTriggerSourceThreadParent, commentTriggerSourceConversation:
 		if trigger.Squad != nil {
-			return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginNamed, delegationReturnIDs)
+			return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginNamed, delegationReturns)
 		}
-		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, false, pgtype.UUID{}, service.OriginNamed, delegationReturnIDs)
+		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, false, pgtype.UUID{}, service.OriginNamed, delegationReturns)
 	default:
 		return db.AgentTaskQueue{}, attribution.Result{}, nil
 	}
@@ -3437,7 +3437,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	var triggerPlan commentTriggerPlan
 	var commentAddress *delegation.Address
 	var mailboxDelivered mailboxDeliveryResults
-	var commentReturnIDs []pgtype.UUID
+	var commentReturnIDs []delegation.ReturnIntent
 	var commentInTxResults map[string]commentEnqueueResult
 	var commentInTxTasks []commentTriggerTask
 	var commentMergedTasks []commentTriggerTask
@@ -3502,7 +3502,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		}
 		var acceptedReturnID pgtype.UUID
 		if len(commentReturnIDs) > 0 {
-			acceptedReturnID = commentReturnIDs[0]
+			acceptedReturnID = commentReturnIDs[0].ID
 		}
 		obligations, err := h.recordAcceptedCommentObligations(r.Context(), q, *triggerIssue, existing.ID, triggerPlan.triggers, acceptedReturnID)
 		if err != nil {
@@ -3554,11 +3554,14 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			comment = updated.Comment()
 			issueRevision = updated.IssueRevision
-			if commentAddress != nil && triggerIssue != nil {
-				var accepted pgtype.UUID
+			if oldContent != req.Content {
+				err = qtx.DeleteCommentDelegationReturns(r.Context(), existing.ID)
+			}
+			if err == nil && commentAddress != nil && triggerIssue != nil {
+				var accepted delegation.ReturnIntent
 				accepted, err = recordCommentDelegationReturn(r.Context(), qtx, *triggerIssue, existing.ID, commentAddress, requestUserID(r))
-				if err == nil && accepted.Valid {
-					commentReturnIDs = []pgtype.UUID{accepted}
+				if err == nil && accepted.ID.Valid {
+					commentReturnIDs = []delegation.ReturnIntent{accepted}
 				}
 			}
 		}
@@ -3609,8 +3612,8 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				if recordErr != nil {
 					return commentEditWriteResult{}, recordErr
 				}
-				if accepted.Valid {
-					commentReturnIDs = []pgtype.UUID{accepted}
+				if accepted.ID.Valid {
+					commentReturnIDs = []delegation.ReturnIntent{accepted}
 				}
 			}
 			var delivered mailboxDeliveryResults

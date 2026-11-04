@@ -1217,14 +1217,14 @@ func (s *TaskService) EnqueueTaskForIssue(ctx context.Context, issue db.Issue, t
 
 // EnqueueTaskForIssueWithTriggerAndReturns carries both the trigger comment and
 // the accepted relationships a comment-triggered run must persist atomically.
-func (s *TaskService) EnqueueTaskForIssueWithTriggerAndReturns(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueIssueTask(ctx, issue, triggerCommentID, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs...)
+func (s *TaskService) EnqueueTaskForIssueWithTriggerAndReturns(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, delegationReturns []delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTask(ctx, issue, triggerCommentID, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns...)
 }
 
 // EnqueueTaskForIssueWithReturns is EnqueueTaskForIssue for a dispatch that
 // already knows the accepted return relationships the run must carry.
-func (s *TaskService) EnqueueTaskForIssueWithReturns(ctx context.Context, issue db.Issue, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs...)
+func (s *TaskService) EnqueueTaskForIssueWithReturns(ctx context.Context, issue db.Issue, delegationReturns []delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns...)
 }
 
 // EnqueueDeferredChannelIssueTask persists the assigned task for a media-backed
@@ -1298,8 +1298,8 @@ func (s *TaskService) EnqueueTaskForIssueByActor(ctx context.Context, issue db.I
 // variant used when an installed client still sends handoff_note. The note is
 // persisted on the task so both old and current daemons can render it in the
 // run's opening prompt. Empty text behaves like EnqueueTaskForIssueByActor.
-func (s *TaskService) EnqueueTaskForIssueWithHandoff(ctx context.Context, issue db.Issue, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs...)
+func (s *TaskService) EnqueueTaskForIssueWithHandoff(ctx context.Context, issue db.Issue, handoffNote string, actorUserID pgtype.UUID, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns...)
 }
 
 // enqueueIssueTask is the shared implementation behind EnqueueTaskForIssue
@@ -1355,20 +1355,20 @@ func (s *TaskService) ResolveIssueReviewSHAParamWithQueries(ctx context.Context,
 	return headShaText(s.ResolveIssueReviewSHAWithQueries(ctx, q, issueID))
 }
 
-func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueIssueTaskWithCommentPlan(ctx, issue, triggerCommentID, nil, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, fireAt, origin, delegationReturnIDs...)
+func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueIssueTaskWithCommentPlan(ctx, issue, triggerCommentID, nil, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, fireAt, origin, delegationReturns...)
 }
 
-func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
+func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
 	var attr attribution.Result
 	write := func(q *db.Queries) error {
 		var err error
-		task, attr, err = s.insertIssueTask(ctx, q, issue, triggerCommentID, coalescedCommentIDs, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, fireAt, origin, delegationReturnIDs, nil)
+		task, attr, err = s.insertIssueTask(ctx, q, issue, triggerCommentID, coalescedCommentIDs, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, fireAt, origin, delegationReturns, nil)
 		return err
 	}
 	var err error
-	if len(delegationReturnIDs) > 0 {
+	if len(delegationReturns) > 0 {
 		// The run and every accepted return relationship it carries are one
 		// durable outcome. A crash between the two would leave executable work
 		// with nobody to return it to.
@@ -1392,36 +1392,36 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 // a query-only shell), so the task build and optional overlay follow the same
 // rules as every other enqueue. Publication and the post-commit overlay happen
 // only after the caller commits.
-func (s *TaskService) EnqueueAssignedTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs, invocation)
+func (s *TaskService) EnqueueAssignedTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns, invocation)
 }
 
 // EnqueueIssueAssignmentInTx inserts the run an explicit assignment starts
 // through the issue write's transaction. The run and every accepted return
 // relationship it carries commit with the assignment intent, so an enqueue
 // failure rolls the assignment back instead of leaving a half delegation.
-func (s *TaskService) EnqueueIssueAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs, invocation)
+func (s *TaskService) EnqueueIssueAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, handoffNote string, actorUserID pgtype.UUID, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertIssueTask(ctx, q, issue, pgtype.UUID{}, nil, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns, invocation)
 }
 
 // EnqueueSquadLeaderAssignmentInTx is the squad equivalent of
 // EnqueueIssueAssignmentInTx.
-func (s *TaskService) EnqueueSquadLeaderAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, leaderID, squadID pgtype.UUID, handoffNote string, actorUserID pgtype.UUID, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertMentionTask(ctx, q, issue, leaderID, pgtype.UUID{}, nil, true, squadID, false, handoffNote, actorUserID, pgtype.UUID{}, OriginDerived, delegationReturnIDs, invocation)
+func (s *TaskService) EnqueueSquadLeaderAssignmentInTx(ctx context.Context, q *db.Queries, issue db.Issue, leaderID, squadID pgtype.UUID, handoffNote string, actorUserID pgtype.UUID, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertMentionTask(ctx, q, issue, leaderID, pgtype.UUID{}, nil, true, squadID, false, handoffNote, actorUserID, pgtype.UUID{}, OriginDerived, delegationReturns, invocation)
 }
 
 // EnqueueIssueCommentTriggerInTx creates the assigned-agent run one comment
 // starts inside the comment transaction. The comment, its accepted return
 // relation, and this run therefore commit as one outcome.
-func (s *TaskService) EnqueueIssueCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertIssueTask(ctx, q, issue, triggerCommentID, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturnIDs, nil)
+func (s *TaskService) EnqueueIssueCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, delegationReturns []delegation.ReturnIntent) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertIssueTask(ctx, q, issue, triggerCommentID, nil, false, "", pgtype.UUID{}, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived, delegationReturns, nil)
 }
 
 // EnqueueMentionCommentTriggerInTx creates a mention, thread-parent, squad
 // leader, or conversation-hop run one comment starts inside the comment
 // transaction.
-func (s *TaskService) EnqueueMentionCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, agentID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, origin RunOrigin, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, nil, isLeader, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturnIDs, nil)
+func (s *TaskService) EnqueueMentionCommentTriggerInTx(ctx context.Context, q *db.Queries, issue db.Issue, agentID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, origin RunOrigin, delegationReturns []delegation.ReturnIntent) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, nil, isLeader, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturns, nil)
 }
 
 // PublishQueuedIssueTask broadcasts and wakes the runtime for a task inserted
@@ -1476,7 +1476,7 @@ func (s *TaskService) applyQueuedIssueTaskOverlay(ctx context.Context, q *db.Que
 	task.RuntimeConnectedApps = overlay.ConnectedApps
 }
 
-func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
 		return db.AgentTaskQueue{}, attribution.Result{}, fmt.Errorf("issue has no assignee")
@@ -1589,7 +1589,7 @@ func (s *TaskService) insertIssueTask(ctx context.Context, q *db.Queries, issue 
 		"agent_id", util.UUIDToString(issue.AssigneeID),
 		"force_fresh_session", forceFreshSession,
 	)
-	if err := delegation.LinkRun(ctx, q, task.ID, delegationReturnIDs...); err != nil {
+	if err := delegation.LinkRun(ctx, q, task.ID, delegationReturns...); err != nil {
 		return db.AgentTaskQueue{}, attribution.Result{}, err
 	}
 	return task, attr, nil
@@ -1616,15 +1616,15 @@ func (s *TaskService) publishQueuedIssueTask(ctx context.Context, task db.AgentT
 // EnqueueTaskForMention creates a queued task for a mentioned agent on an issue.
 // Unlike EnqueueTaskForIssue, this takes an explicit agent ID rather than
 // deriving it from the issue assignee.
-func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturnIDs...)
+func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturns...)
 }
 
 // EnqueueTaskForThreadParent creates a queued task for the agent who authored
 // the direct parent comment a member replied to.
-func (s *TaskService) EnqueueTaskForThreadParent(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
+func (s *TaskService) EnqueueTaskForThreadParent(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
 	// Always named: the only caller is a member replying to what this agent said.
-	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, OriginNamed, delegationReturnIDs...)
+	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, false, pgtype.UUID{}, false, "", pgtype.UUID{}, pgtype.UUID{}, OriginNamed, delegationReturns...)
 }
 
 // EnqueueTaskForSquadLeader is the leader-role variant of EnqueueTaskForMention.
@@ -1638,8 +1638,8 @@ func (s *TaskService) EnqueueTaskForThreadParent(ctx context.Context, issue db.I
 // handler can locate the squad and inject its briefing regardless of how the
 // leader task was triggered (comment @squad, issue assign, autopilot,
 // sub-issue done callback). See migration 127.
-func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, squadID pgtype.UUID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturnIDs...)
+func (s *TaskService) EnqueueTaskForSquadLeader(ctx context.Context, issue db.Issue, leaderID pgtype.UUID, squadID pgtype.UUID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTask(ctx, issue, leaderID, triggerCommentID, true, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturns...)
 }
 
 // EnqueueTaskForSquadLeaderByActor is the assign/promote variant of
@@ -1650,20 +1650,20 @@ func (s *TaskService) EnqueueTaskForSquadLeaderByActor(ctx context.Context, issu
 	return s.enqueueMentionTask(ctx, issue, leaderID, pgtype.UUID{}, true, squadID, false, "", actorUserID, pgtype.UUID{}, OriginDerived)
 }
 
-func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, delegationReturnIDs...)
+func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
+	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, delegationReturns...)
 }
 
-func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturnIDs ...pgtype.UUID) (db.AgentTaskQueue, error) {
+func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturns ...delegation.ReturnIntent) (db.AgentTaskQueue, error) {
 	var task db.AgentTaskQueue
 	var attr attribution.Result
 	write := func(q *db.Queries) error {
 		var err error
-		task, attr, err = s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, delegationReturnIDs, nil)
+		task, attr, err = s.insertMentionTask(ctx, q, issue, agentID, triggerCommentID, coalescedCommentIDs, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin, delegationReturns, nil)
 		return err
 	}
 	var err error
-	if len(delegationReturnIDs) > 0 {
+	if len(delegationReturns) > 0 {
 		// The run and every accepted return relationship it carries commit
 		// together; coalescing adds to that set instead of replacing it.
 		err = s.runInTx(ctx, write)
@@ -1682,11 +1682,11 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 // transaction, so an immediate squad delegation creates the issue, its accepted
 // return, and the leader's durable launch obligation in one outcome. The leader
 // task build, attribution, and overlay follow the shared mention path.
-func (s *TaskService) EnqueueSquadLeaderTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, leaderID, squadID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
-	return s.insertMentionTask(ctx, q, issue, leaderID, triggerCommentID, nil, true, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturnIDs, invocation)
+func (s *TaskService) EnqueueSquadLeaderTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, leaderID, squadID, triggerCommentID pgtype.UUID, origin RunOrigin, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+	return s.insertMentionTask(ctx, q, issue, leaderID, triggerCommentID, nil, true, squadID, false, "", pgtype.UUID{}, pgtype.UUID{}, origin, delegationReturns, invocation)
 }
 
-func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturnIDs []pgtype.UUID, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
+func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
 	if err := guardIssueNotInTriage(ctx, q, issue.ID, origin); err != nil {
 		return db.AgentTaskQueue{}, attribution.Result{}, err
 	}
@@ -1760,7 +1760,7 @@ func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issu
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
-	if err := delegation.LinkRun(ctx, q, task.ID, delegationReturnIDs...); err != nil {
+	if err := delegation.LinkRun(ctx, q, task.ID, delegationReturns...); err != nil {
 		return db.AgentTaskQueue{}, attribution.Result{}, err
 	}
 	return task, attr, nil
@@ -6349,8 +6349,8 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 // It never substitutes the target assignment's history or a worker's latest
 // run. It runs in the enqueue transaction, so a managed source that completed
 // since authentication is refused by delegation.Ensure and leaves no return.
-func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, dispatch RerunDelegation) ([]pgtype.UUID, error) {
-	var ids []pgtype.UUID
+func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Queries, issue db.Issue, dispatch RerunDelegation) ([]delegation.ReturnIntent, error) {
+	var intents []delegation.ReturnIntent
 	var explicit db.IssueDelegationReturn
 	if dispatch.Address != nil {
 		accepted, err := delegation.Ensure(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), *dispatch.Address, dispatch.CreatedBy)
@@ -6358,10 +6358,10 @@ func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Querie
 			return nil, err
 		}
 		explicit = accepted
-		ids = append(ids, accepted.ID)
+		intents = append(intents, delegation.IntentForAddress(accepted, *dispatch.Address))
 	}
 	if dispatch.InheritTaskID.Valid {
-		inherited, err := q.ListAgentTaskDelegationReturns(ctx, dispatch.InheritTaskID)
+		inherited, err := q.ListRunReturnIntents(ctx, dispatch.InheritTaskID)
 		if err != nil {
 			return nil, err
 		}
@@ -6371,10 +6371,10 @@ func (s *TaskService) rerunDelegationReturnIDs(ctx context.Context, q *db.Querie
 			if explicit.ID.Valid && prior.DispatcherAgentID == explicit.DispatcherAgentID {
 				continue
 			}
-			ids = append(ids, prior.ID)
+			intents = append(intents, delegation.ReturnIntent{ID: prior.DelegationReturnID, CallerTaskIDs: prior.CallerTaskIds})
 		}
 	}
-	return delegation.UnionReturnIDs(ids), nil
+	return delegation.UnionReturns(intents), nil
 }
 
 // The bulk terminal writes below are the sweeper, archive and daemon-recovery

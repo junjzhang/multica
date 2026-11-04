@@ -169,7 +169,7 @@ func TestManagedReturnSnapshotReusesSameAddressAfterSourceChanges(t *testing.T) 
 	accepted, _ := acceptedReturn(t, issueID)
 	pinManagedSnapshotSource(t, source, "ordinary-fallback-session", "/work/fallback")
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed', completed_at=now() WHERE id=$1`, source)
-	turn := dbfx.Task(t, dispatcher, testutil.Cols{"runtime_id": uuidToString(accepted.RuntimeID), "status": "running", "session_id": accepted.SessionID.String, "work_dir": accepted.WorkDir.String, "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
+	turn := dbfx.Task(t, dispatcher, testutil.Cols{"issue_id": queryString(t, `SELECT issue_id::text FROM agent_task_queue WHERE id=$1`, source), "runtime_id": uuidToString(accepted.RuntimeID), "status": "running", "session_id": accepted.SessionID.String, "work_dir": accepted.WorkDir.String, "resource_control_required": true, "session_pin_confirmed": true, "session_pin_generation": testutil.Raw("gen_random_uuid()")})
 	newToken := taskTokenFixture(t, dispatcher, turn)
 	code, _, body := intentComment(t, newToken, issueID, fmt.Sprintf("[@Y](mention://agent/%s) original physical address continued", y), "")
 	if code != http.StatusCreated {

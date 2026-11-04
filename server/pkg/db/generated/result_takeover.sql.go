@@ -145,7 +145,7 @@ func (q *Queries) CreateTakeoverResultObligation(ctx context.Context, arg Create
 }
 
 const getResultReturnObligation = `-- name: GetResultReturnObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id FROM agent_task_delegation_return
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids FROM agent_task_delegation_return
 WHERE task_id = $1 AND delegation_return_id = $2
 `
 
@@ -167,6 +167,7 @@ func (q *Queries) GetResultReturnObligation(ctx context.Context, arg GetResultRe
 		&i.MaterializedAt,
 		&i.LastAttemptAt,
 		&i.TakeoverID,
+		&i.CallerTaskIds,
 	)
 	return i, err
 }

@@ -12,10 +12,12 @@ import (
 )
 
 const copyRetryDelegationReturns = `-- name: CopyRetryDelegationReturns :execrows
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT $1, parent.delegation_return_id
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT $1, parent.delegation_return_id, parent.caller_task_ids
 FROM agent_task_delegation_return parent WHERE parent.task_id = $2 AND parent.takeover_id IS NULL
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END
 `
 
 type CopyRetryDelegationReturnsParams struct {
@@ -520,6 +522,44 @@ func (q *Queries) GetPendingAssignmentTaskForIssueAndAgent(ctx context.Context, 
 	return i, err
 }
 
+const hasConflictingPendingReturnCallers = `-- name: HasConflictingPendingReturnCallers :one
+WITH pending AS (
+    SELECT l.caller_task_ids FROM agent_task_delegation_return l
+    JOIN agent_task_queue task ON task.id = l.task_id
+    WHERE l.delegation_return_id = $2 AND l.takeover_id IS NULL
+      AND task.status NOT IN ('completed', 'failed', 'cancelled')
+    UNION ALL
+    SELECT l.caller_task_ids FROM issue_assignment_delegation_return l
+    JOIN issue_assignment_delegation assignment USING (issue_id, assignee_type, assignee_id)
+    WHERE l.delegation_return_id = $2 AND assignment.task_id IS NULL
+    UNION ALL
+    SELECT l.caller_task_ids FROM comment_delegation_return l
+    JOIN comment_dispatch_obligation obligation USING (comment_id)
+    WHERE l.delegation_return_id = $2 AND obligation.status = 'pending'
+)
+SELECT EXISTS (
+    SELECT 1 FROM pending
+    LEFT JOIN LATERAL unnest(pending.caller_task_ids) caller_id ON true
+    LEFT JOIN agent_task_queue caller ON caller.id = caller_id
+    WHERE pending.caller_task_ids IS NULL OR caller.id IS NULL
+       OR caller.originator_user_id IS DISTINCT FROM $1::uuid
+) AS conflict
+`
+
+type HasConflictingPendingReturnCallersParams struct {
+	OriginatorUserID pgtype.UUID `json:"originator_user_id"`
+	ReturnID         pgtype.UUID `json:"return_id"`
+}
+
+// The return row is locked by acceptance. Check work that could still fold
+// together, not completed historical generations of this physical address.
+func (q *Queries) HasConflictingPendingReturnCallers(ctx context.Context, arg HasConflictingPendingReturnCallersParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasConflictingPendingReturnCallers, arg.OriginatorUserID, arg.ReturnID)
+	var conflict bool
+	err := row.Scan(&conflict)
+	return conflict, err
+}
+
 const insertCommentDispatchObligation = `-- name: InsertCommentDispatchObligation :one
 INSERT INTO comment_dispatch_obligation (
     id, workspace_id, issue_id, comment_id, agent_id, squad_id,
@@ -588,26 +628,29 @@ func (q *Queries) InsertCommentDispatchObligation(ctx context.Context, arg Inser
 
 const linkAgentTaskDelegationReturn = `-- name: LinkAgentTaskDelegationReturn :execrows
 WITH RECURSIVE execution_chain AS (
-    SELECT $2::uuid AS id
+    SELECT $3::uuid AS id
     UNION
     SELECT child.id FROM agent_task_queue child
     JOIN execution_chain parent ON child.retry_of_task_id = parent.id
 )
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT id, $1 FROM execution_chain
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT id, $1, $2::uuid[] FROM execution_chain
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END
 `
 
 type LinkAgentTaskDelegationReturnParams struct {
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
-	TaskID             pgtype.UUID `json:"task_id"`
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
+	TaskID             pgtype.UUID   `json:"task_id"`
 }
 
 // Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
 // a folded comment, or a retry can link the same relationship again without
 // rewriting the run's existing set.
 func (q *Queries) LinkAgentTaskDelegationReturn(ctx context.Context, arg LinkAgentTaskDelegationReturnParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkAgentTaskDelegationReturn, arg.DelegationReturnID, arg.TaskID)
+	result, err := q.db.Exec(ctx, linkAgentTaskDelegationReturn, arg.DelegationReturnID, arg.CallerTaskIds, arg.TaskID)
 	if err != nil {
 		return 0, err
 	}
@@ -615,20 +658,21 @@ func (q *Queries) LinkAgentTaskDelegationReturn(ctx context.Context, arg LinkAge
 }
 
 const linkCommentDelegationReturn = `-- name: LinkCommentDelegationReturn :execrows
-INSERT INTO comment_delegation_return (comment_id, delegation_return_id)
-VALUES ($1, $2)
+INSERT INTO comment_delegation_return (comment_id, delegation_return_id, caller_task_ids)
+VALUES ($1, $2, $3::uuid[])
 ON CONFLICT (comment_id, delegation_return_id) DO NOTHING
 `
 
 type LinkCommentDelegationReturnParams struct {
-	CommentID          pgtype.UUID `json:"comment_id"`
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+	CommentID          pgtype.UUID   `json:"comment_id"`
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
 }
 
 // Records the accepted relation between one comment intent and one dispatcher's
 // address. The pair is idempotent so an edit or replay can add it again.
 func (q *Queries) LinkCommentDelegationReturn(ctx context.Context, arg LinkCommentDelegationReturnParams) (int64, error) {
-	result, err := q.db.Exec(ctx, linkCommentDelegationReturn, arg.CommentID, arg.DelegationReturnID)
+	result, err := q.db.Exec(ctx, linkCommentDelegationReturn, arg.CommentID, arg.DelegationReturnID, arg.CallerTaskIds)
 	if err != nil {
 		return 0, err
 	}
@@ -637,16 +681,17 @@ func (q *Queries) LinkCommentDelegationReturn(ctx context.Context, arg LinkComme
 
 const linkIssueAssignmentDelegationReturn = `-- name: LinkIssueAssignmentDelegationReturn :execrows
 INSERT INTO issue_assignment_delegation_return (
-    issue_id, assignee_type, assignee_id, delegation_return_id
-) VALUES ($1, $2, $3, $4)
+    issue_id, assignee_type, assignee_id, delegation_return_id, caller_task_ids
+) VALUES ($1, $2, $3, $4, $5::uuid[])
 ON CONFLICT (issue_id, assignee_type, assignee_id, delegation_return_id) DO NOTHING
 `
 
 type LinkIssueAssignmentDelegationReturnParams struct {
-	IssueID            pgtype.UUID `json:"issue_id"`
-	AssigneeType       string      `json:"assignee_type"`
-	AssigneeID         pgtype.UUID `json:"assignee_id"`
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+	IssueID            pgtype.UUID   `json:"issue_id"`
+	AssigneeType       string        `json:"assignee_type"`
+	AssigneeID         pgtype.UUID   `json:"assignee_id"`
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
 }
 
 func (q *Queries) LinkIssueAssignmentDelegationReturn(ctx context.Context, arg LinkIssueAssignmentDelegationReturnParams) (int64, error) {
@@ -655,6 +700,7 @@ func (q *Queries) LinkIssueAssignmentDelegationReturn(ctx context.Context, arg L
 		arg.AssigneeType,
 		arg.AssigneeID,
 		arg.DelegationReturnID,
+		arg.CallerTaskIds,
 	)
 	if err != nil {
 		return 0, err
@@ -707,27 +753,32 @@ func (q *Queries) ListAgentTaskDelegationReturns(ctx context.Context, taskID pgt
 	return items, nil
 }
 
-const listCommentDelegationReturnIDs = `-- name: ListCommentDelegationReturnIDs :many
-SELECT delegation_return_id FROM comment_delegation_return
+const listCommentDelegationReturnIntents = `-- name: ListCommentDelegationReturnIntents :many
+SELECT delegation_return_id, caller_task_ids FROM comment_delegation_return
 WHERE comment_id = $1
 ORDER BY created_at, delegation_return_id
 `
 
+type ListCommentDelegationReturnIntentsRow struct {
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
+}
+
 // The accepted relationships a comment carries. New runs, folds, completion
 // replay and edit/cancel retrigger read this instead of an in-memory set.
-func (q *Queries) ListCommentDelegationReturnIDs(ctx context.Context, commentID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, listCommentDelegationReturnIDs, commentID)
+func (q *Queries) ListCommentDelegationReturnIntents(ctx context.Context, commentID pgtype.UUID) ([]ListCommentDelegationReturnIntentsRow, error) {
+	rows, err := q.db.Query(ctx, listCommentDelegationReturnIntents, commentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []pgtype.UUID{}
+	items := []ListCommentDelegationReturnIntentsRow{}
 	for rows.Next() {
-		var delegation_return_id pgtype.UUID
-		if err := rows.Scan(&delegation_return_id); err != nil {
+		var i ListCommentDelegationReturnIntentsRow
+		if err := rows.Scan(&i.DelegationReturnID, &i.CallerTaskIds); err != nil {
 			return nil, err
 		}
-		items = append(items, delegation_return_id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -735,33 +786,38 @@ func (q *Queries) ListCommentDelegationReturnIDs(ctx context.Context, commentID 
 	return items, nil
 }
 
-const listIssueAssignmentDelegationReturnIDs = `-- name: ListIssueAssignmentDelegationReturnIDs :many
-SELECT delegation_return_id FROM issue_assignment_delegation_return
+const listIssueAssignmentDelegationReturnIntents = `-- name: ListIssueAssignmentDelegationReturnIntents :many
+SELECT delegation_return_id, caller_task_ids FROM issue_assignment_delegation_return
 WHERE issue_id = $1
   AND assignee_type = $2
   AND assignee_id = $3
 ORDER BY created_at, delegation_return_id
 `
 
-type ListIssueAssignmentDelegationReturnIDsParams struct {
+type ListIssueAssignmentDelegationReturnIntentsParams struct {
 	IssueID      pgtype.UUID `json:"issue_id"`
 	AssigneeType string      `json:"assignee_type"`
 	AssigneeID   pgtype.UUID `json:"assignee_id"`
 }
 
-func (q *Queries) ListIssueAssignmentDelegationReturnIDs(ctx context.Context, arg ListIssueAssignmentDelegationReturnIDsParams) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, listIssueAssignmentDelegationReturnIDs, arg.IssueID, arg.AssigneeType, arg.AssigneeID)
+type ListIssueAssignmentDelegationReturnIntentsRow struct {
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
+}
+
+func (q *Queries) ListIssueAssignmentDelegationReturnIntents(ctx context.Context, arg ListIssueAssignmentDelegationReturnIntentsParams) ([]ListIssueAssignmentDelegationReturnIntentsRow, error) {
+	rows, err := q.db.Query(ctx, listIssueAssignmentDelegationReturnIntents, arg.IssueID, arg.AssigneeType, arg.AssigneeID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []pgtype.UUID{}
+	items := []ListIssueAssignmentDelegationReturnIntentsRow{}
 	for rows.Next() {
-		var delegation_return_id pgtype.UUID
-		if err := rows.Scan(&delegation_return_id); err != nil {
+		var i ListIssueAssignmentDelegationReturnIntentsRow
+		if err := rows.Scan(&i.DelegationReturnID, &i.CallerTaskIds); err != nil {
 			return nil, err
 		}
-		items = append(items, delegation_return_id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -849,6 +905,40 @@ func (q *Queries) ListPendingCommentDispatchObligations(ctx context.Context, bat
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRunReturnIntents = `-- name: ListRunReturnIntents :many
+SELECT l.delegation_return_id, l.caller_task_ids, r.dispatcher_agent_id
+FROM agent_task_delegation_return l
+JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+WHERE l.task_id = $1 AND l.takeover_id IS NULL
+ORDER BY r.created_at, r.id
+`
+
+type ListRunReturnIntentsRow struct {
+	DelegationReturnID pgtype.UUID   `json:"delegation_return_id"`
+	CallerTaskIds      []pgtype.UUID `json:"caller_task_ids"`
+	DispatcherAgentID  pgtype.UUID   `json:"dispatcher_agent_id"`
+}
+
+func (q *Queries) ListRunReturnIntents(ctx context.Context, taskID pgtype.UUID) ([]ListRunReturnIntentsRow, error) {
+	rows, err := q.db.Query(ctx, listRunReturnIntents, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRunReturnIntentsRow{}
+	for rows.Next() {
+		var i ListRunReturnIntentsRow
+		if err := rows.Scan(&i.DelegationReturnID, &i.CallerTaskIds, &i.DispatcherAgentID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1101,25 +1191,32 @@ func (q *Queries) LockRuntimeForDelegation(ctx context.Context, arg LockRuntimeF
 
 const propagateRetryDelegationReturns = `-- name: PropagateRetryDelegationReturns :execrows
 WITH RECURSIVE missing AS (
-    SELECT child.id AS task_id, parent.delegation_return_id
+    SELECT child.id AS task_id, parent.delegation_return_id, parent.caller_task_ids
     FROM agent_task_delegation_return parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
     WHERE parent.takeover_id IS NULL AND NOT EXISTS (
         SELECT 1 FROM agent_task_delegation_return present
         WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
+          AND (present.caller_task_ids IS NULL OR (parent.caller_task_ids IS NOT NULL AND parent.caller_task_ids <@ present.caller_task_ids))
     )
     ORDER BY child.id, parent.delegation_return_id
     LIMIT $1
 ), descendants AS (
-    SELECT task_id, delegation_return_id FROM missing
+    SELECT task_id, delegation_return_id, caller_task_ids FROM missing
     UNION
-    SELECT child.id, parent.delegation_return_id
+    SELECT child.id, parent.delegation_return_id, parent.caller_task_ids
     FROM descendants parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
 )
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT task_id, delegation_return_id FROM descendants
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT task_id, delegation_return_id,
+       CASE WHEN bool_or(caller_task_ids IS NULL) THEN NULL
+            ELSE COALESCE(array_agg(DISTINCT caller) FILTER (WHERE caller IS NOT NULL), '{}') END
+FROM descendants LEFT JOIN LATERAL unnest(caller_task_ids) caller ON true
+GROUP BY task_id, delegation_return_id
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END
 `
 
 // Close a concurrent late-link/retry-creation race from the durable parent
