@@ -98,13 +98,13 @@ func sessionConnectRPCError(data []byte) error {
 			message := failure.Error.Message[marker+len(sessionConnectErrorPrefix):]
 			message = strings.TrimSuffix(message, " code=handler_error")
 			message = strings.TrimSuffix(message, " requestType=plugin.rpc.invoke.request")
-			message = sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]")
 			message = strings.Map(func(r rune) rune {
 				if r != '\n' && r != '\t' && unicode.IsControl(r) {
 					return -1
 				}
 				return r
 			}, message)
+			message = sessionConnectSecretPattern.ReplaceAllString(message, "[redacted]")
 			return errors.New(message)
 		}
 		// Warnings may contain complete JSON objects before the actual envelope.
