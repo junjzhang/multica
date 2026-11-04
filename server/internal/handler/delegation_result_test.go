@@ -892,7 +892,7 @@ func TestDelegationResultNotifiesOnlyActualCarriedRecipients(t *testing.T) {
 	if _, err := testHandler.TaskService.CancelTask(ctx, result.ID); err != nil {
 		t.Fatal(err)
 	}
-	firstRun, firstToken := extraManagedRun(t, uuidToString(source.AgentID), first.SessionID.String, first.WorkDir.String)
+	firstRun, firstToken := extraManagedRun(t, uuidToString(source.AgentID), uuidToString(source.IssueID), first.SessionID.String, first.WorkDir.String)
 	rootComment := dbfx.Comment(t, uuidToString(result.IssueID), "One shared dispatch thread")
 	code, _, body := intentComment(t, firstToken, uuidToString(result.IssueID), fmt.Sprintf("[@Executor](mention://agent/%s) first accepted input", uuidToString(result.AgentID)), rootComment)
 	if code != 201 {

@@ -445,13 +445,20 @@ WHERE id = @id
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The
 -- daemon detects this variant via context.type == "quick_create".
--- The requester who opened the quick-create modal is a direct_human originator
--- and accountable; attribution provenance is stamped so this path is not a
--- NULL-source enqueue bypass (MUL-4302 §2).
+-- Current invocation provenance is explicit. A managed source is locked after
+-- workspace ownership and must remain live with the same authorization principal.
+WITH owner_fence AS MATERIALIZED (
+    SELECT lock_task_owner_rows($1, NULL, $2) AS allowed
+), invocation_source AS MATERIALIZED (
+    SELECT task.id, task.status, task.originator_user_id
+    FROM agent_task_queue task CROSS JOIN owner_fence
+    WHERE owner_fence.allowed AND task.id = sqlc.narg(delegated_from_task_id)::uuid
+    FOR SHARE OF task
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context, originator_user_id,
     accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
-    originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, delegated_from_task_id,
     id
 )
 SELECT
@@ -463,8 +470,15 @@ SELECT
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
     sqlc.narg(trigger_evidence_ref_id),
+    sqlc.narg(delegated_from_task_id),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
-WHERE lock_task_owner_rows($1, NULL, $2)
+FROM owner_fence
+WHERE owner_fence.allowed
+  AND (sqlc.narg(delegated_from_task_id)::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM invocation_source
+      WHERE status NOT IN ('completed', 'failed', 'cancelled')
+        AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(originator_user_id)::uuid
+  ))
 RETURNING *;
 
 -- name: LinkTaskToIssue :exec

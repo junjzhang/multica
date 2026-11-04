@@ -369,7 +369,7 @@ func TestRerunInheritsSourceRunReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed inherited return: %v", err)
 	}
-	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(runTask), inherited.ID); err != nil {
+	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(runTask), delegation.ReturnIntent{ID: inherited.ID}); err != nil {
 		t.Fatalf("link source return: %v", err)
 	}
 

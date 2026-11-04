@@ -79,7 +79,7 @@ func (h *Handler) recordAcceptedCommentObligations(ctx context.Context, q *db.Qu
 // run. Every attempt is a savepoint so a transient failure leaves the comment
 // transaction healthy; a target that still cannot be covered stays pending for
 // the sweeper instead of being lost after commit.
-func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligations []acceptedCommentObligation, returnIDs []pgtype.UUID) (map[string]commentEnqueueResult, []commentTriggerTask, []commentTriggerTask, error) {
+func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligations []acceptedCommentObligation, returnIDs []delegation.ReturnIntent) (map[string]commentEnqueueResult, []commentTriggerTask, []commentTriggerTask, error) {
 	results := make(map[string]commentEnqueueResult, len(obligations))
 	var tasks []commentTriggerTask
 	var merged []commentTriggerTask
@@ -118,7 +118,7 @@ func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pg
 // comment; otherwise a fresh run is created. A duplicate-key loser re-observes
 // the occupant's current state and retries, so a sibling that completed or
 // started between two statements cannot produce a silent no-op.
-func (h *Handler) coverCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligation acceptedCommentObligation, returnIDs []pgtype.UUID) commentObligationCoverage {
+func (h *Handler) coverCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligation acceptedCommentObligation, returnIDs []delegation.ReturnIntent) commentObligationCoverage {
 	const maxAttempts = 4
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if coverage, settle := h.foldCommentObligationInTx(ctx, tx, issue, commentID, obligation); settle {
@@ -250,7 +250,7 @@ func (h *Handler) planCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *d
 	}, true
 }
 
-func (h *Handler) enqueueCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligation acceptedCommentObligation, returnIDs []pgtype.UUID) (commentObligationCoverage, bool) {
+func (h *Handler) enqueueCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, commentID pgtype.UUID, obligation acceptedCommentObligation, returnIDs []delegation.ReturnIntent) (commentObligationCoverage, bool) {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return commentObligationCoverage{}, false
@@ -403,9 +403,19 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 	if err != nil {
 		return empty, false, err
 	}
-	var returnIDs []pgtype.UUID
+	var returnIDs []delegation.ReturnIntent
 	if obligation.DelegationReturnID.Valid {
-		returnIDs = []pgtype.UUID{obligation.DelegationReturnID}
+		intents, loadErr := delegation.CommentReturns(ctx, q, comment.ID)
+		if loadErr != nil {
+			return empty, false, loadErr
+		}
+		intent := delegation.ReturnIntent{ID: obligation.DelegationReturnID}
+		for _, accepted := range intents {
+			if accepted.ID == intent.ID {
+				intent = accepted
+			}
+		}
+		returnIDs = []delegation.ReturnIntent{intent}
 	}
 	// Only this generation's covering run can prove delivery. In particular,
 	// a completed run with the same comment id from before an edit cannot.

@@ -150,6 +150,7 @@ type AgentTaskDelegationReturn struct {
 	MaterializedAt         pgtype.Timestamptz `json:"materialized_at"`
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 	TakeoverID             pgtype.UUID        `json:"takeover_id"`
+	CallerTaskIds          []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type AgentTaskQueue struct {
@@ -651,32 +652,34 @@ type CloudAgentConnection struct {
 }
 
 type Comment struct {
-	ID                 pgtype.UUID        `json:"id"`
-	IssueID            pgtype.UUID        `json:"issue_id"`
-	AuthorType         string             `json:"author_type"`
-	AuthorID           pgtype.UUID        `json:"author_id"`
-	Content            string             `json:"content"`
-	Type               string             `json:"type"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
-	ParentID           pgtype.UUID        `json:"parent_id"`
-	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
-	ResolvedAt         pgtype.Timestamptz `json:"resolved_at"`
-	ResolvedByType     pgtype.Text        `json:"resolved_by_type"`
-	ResolvedByID       pgtype.UUID        `json:"resolved_by_id"`
-	SourceTaskID       pgtype.UUID        `json:"source_task_id"`
-	QuickActionID      pgtype.UUID        `json:"quick_action_id"`
-	ViaPluginID        pgtype.UUID        `json:"via_plugin_id"`
-	Revision           int64              `json:"revision"`
-	RecoverySettledAt  pgtype.Timestamptz `json:"recovery_settled_at"`
-	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
-	SuppressedAgentIds []pgtype.UUID      `json:"suppressed_agent_ids"`
+	ID                       pgtype.UUID        `json:"id"`
+	IssueID                  pgtype.UUID        `json:"issue_id"`
+	AuthorType               string             `json:"author_type"`
+	AuthorID                 pgtype.UUID        `json:"author_id"`
+	Content                  string             `json:"content"`
+	Type                     string             `json:"type"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	ParentID                 pgtype.UUID        `json:"parent_id"`
+	WorkspaceID              pgtype.UUID        `json:"workspace_id"`
+	ResolvedAt               pgtype.Timestamptz `json:"resolved_at"`
+	ResolvedByType           pgtype.Text        `json:"resolved_by_type"`
+	ResolvedByID             pgtype.UUID        `json:"resolved_by_id"`
+	SourceTaskID             pgtype.UUID        `json:"source_task_id"`
+	QuickActionID            pgtype.UUID        `json:"quick_action_id"`
+	ViaPluginID              pgtype.UUID        `json:"via_plugin_id"`
+	Revision                 int64              `json:"revision"`
+	RecoverySettledAt        pgtype.Timestamptz `json:"recovery_settled_at"`
+	DeletedAt                pgtype.Timestamptz `json:"deleted_at"`
+	SuppressedAgentIds       []pgtype.UUID      `json:"suppressed_agent_ids"`
+	ExternalOriginatorUserID pgtype.UUID        `json:"external_originator_user_id"`
 }
 
 type CommentDelegationReturn struct {
 	CommentID          pgtype.UUID        `json:"comment_id"`
 	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CallerTaskIds      []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type CommentDispatchObligation struct {
@@ -1013,6 +1016,7 @@ type IssueAssignmentDelegationReturn struct {
 	AssigneeID         pgtype.UUID        `json:"assignee_id"`
 	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	CallerTaskIds      []pgtype.UUID      `json:"caller_task_ids"`
 }
 
 type IssueChildEvent struct {

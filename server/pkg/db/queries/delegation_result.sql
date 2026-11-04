@@ -95,11 +95,13 @@ WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
 INSERT INTO agent_task_queue (
     id, agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, context, session_id, work_dir, max_attempts,
-    originator_user_id, accountable_user_id, originator_source, trigger_summary
+    originator_user_id, accountable_user_id, originator_source, trigger_summary,
+    delegated_from_task_id, trigger_evidence_kind, trigger_evidence_ref_id
 )
 SELECT @id, @agent_id, @runtime_id, sqlc.narg(issue_id), sqlc.narg(chat_session_id), sqlc.narg(autopilot_run_id),
     'queued', 0, @context, @session_id, @work_dir, 1,
-    sqlc.narg(originator_user_id), sqlc.narg(accountable_user_id), 'delegation', @trigger_summary
+    sqlc.narg(originator_user_id), sqlc.narg(accountable_user_id), @originator_source, @trigger_summary,
+    sqlc.narg(delegated_from_task_id), @trigger_evidence_kind, @trigger_evidence_ref_id
 WHERE lock_task_owner_rows(@agent_id, sqlc.narg(issue_id), @runtime_id)
 ON CONFLICT DO NOTHING
 RETURNING *;
@@ -117,6 +119,55 @@ LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_deliver
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE l.task_id = @task_id AND r.workspace_id = @workspace_id
 ORDER BY r.created_at, r.id;
+
+-- name: PropagateResultSourceReturns :execrows
+-- A result turn continues the accepted callers' work. The frozen address's
+-- source task is only a conversation anchor, never caller provenance. A one-off takeover
+-- carries no continuation, and a return already traversed by this outcome may
+-- not be traversed again.
+WITH RECURSIVE proposed AS (
+    SELECT incoming.notification_task_id AS task_id, upstream.delegation_return_id,
+           CASE WHEN bool_or(upstream.caller_task_ids IS NULL) THEN NULL
+                ELSE COALESCE(array_agg(DISTINCT parent_caller) FILTER (WHERE parent_caller IS NOT NULL), '{}') END AS caller_task_ids
+    FROM agent_task_delegation_return incoming
+    JOIN LATERAL unnest(incoming.caller_task_ids) caller ON true
+    JOIN agent_task_delegation_return upstream ON upstream.task_id = caller
+    LEFT JOIN LATERAL unnest(upstream.caller_task_ids) parent_caller ON true
+    WHERE incoming.notification_task_id IS NOT NULL
+      AND incoming.takeover_id IS NULL AND upstream.takeover_id IS NULL
+      AND (sqlc.narg(task_id)::uuid IS NULL OR incoming.notification_task_id = sqlc.narg(task_id))
+    GROUP BY incoming.notification_task_id, upstream.delegation_return_id
+), candidates AS (
+    SELECT proposed.* FROM proposed
+    WHERE NOT EXISTS (
+          SELECT 1 FROM agent_task_delegation_return present
+          WHERE present.task_id = proposed.task_id
+            AND present.delegation_return_id = proposed.delegation_return_id
+            AND (present.caller_task_ids IS NULL OR (proposed.caller_task_ids IS NOT NULL AND proposed.caller_task_ids <@ present.caller_task_ids))
+      )
+), traversed AS (
+    SELECT candidate.task_id AS continuation_task_id, prior.task_id, prior.delegation_return_id
+    FROM candidates candidate
+    JOIN agent_task_delegation_return prior ON prior.notification_task_id = candidate.task_id
+    UNION
+    SELECT next.continuation_task_id, prior.task_id, prior.delegation_return_id
+    FROM agent_task_delegation_return prior
+    JOIN traversed next ON prior.notification_task_id = next.task_id
+), missing AS (
+    SELECT candidate.* FROM candidates candidate
+    WHERE NOT EXISTS (
+        SELECT 1 FROM traversed
+        WHERE continuation_task_id = candidate.task_id
+          AND delegation_return_id = candidate.delegation_return_id
+    )
+    ORDER BY candidate.task_id, candidate.delegation_return_id
+    LIMIT sqlc.narg(batch_size)
+)
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT task_id, delegation_return_id, caller_task_ids FROM missing
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END;
 
 -- name: ListDaemonResourceTasks :many
 SELECT t.id AS task_id, t.agent_id, t.runtime_id, t.issue_id, t.chat_session_id,

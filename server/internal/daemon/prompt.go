@@ -70,9 +70,35 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 	}
 	b.WriteString(execenv.BuildOnBehalfOfBlock(task.InitiatorName, task.InitiatorEmail))
 	b.WriteString(buildCoordinatorBlock(task))
+	b.WriteString(buildAcceptedReturnsBlock(task))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
 	b.WriteString(buildJoinedWakeupsBlock(task.WakeupJoined))
 	b.WriteString(buildProjectWorkflowBlock(task))
+	return b.String()
+}
+
+func buildAcceptedReturnsBlock(task Task) string {
+	const unavailable = "[Automatic result returns]\nThis server supplied no authoritative return context. Do not infer that there is no automatic return from missing or empty result_notifications. Verify the return relationship before sending another handoff.\n\n"
+	if task.AcceptedReturns == nil {
+		return unavailable
+	}
+	for _, accepted := range *task.AcceptedReturns {
+		if accepted.ReturnID == "" || accepted.RecipientAgentID == "" || (accepted.Kind != "managed_task" && accepted.Kind != "external_session") {
+			return unavailable
+		}
+	}
+	var b strings.Builder
+	b.WriteString("[Automatic result returns]\nThese accepted relationships are a snapshot for this run. Saving its result uses their frozen destinations; do not send an extra mention to return that same result. Run completion and result delivery do not establish business acceptance.\n")
+	if len(*task.AcceptedReturns) == 0 {
+		b.WriteString("No automatic return relationship was accepted at this snapshot.\n")
+	}
+	for _, accepted := range *task.AcceptedReturns {
+		fmt.Fprintf(&b, "- Return %s: recipient agent %s, kind %s.\n", accepted.ReturnID, accepted.RecipientAgentID, accepted.Kind)
+	}
+	if task.IssueID != "" {
+		fmt.Fprintf(&b, "Before an explicit final handoff, refresh this run's accepted_returns with `multica issue runs %s --output json`. Missing accepted_returns is unknown, not empty. Notification status is separate.\n", task.IssueID)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -320,7 +346,11 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 
 func buildPromptBody(task Task, provider string) string {
 	if result := task.DelegationResult; result != nil {
-		return fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		body := fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		if result.UpstreamReturnsUnknown {
+			body += "The accepted caller provenance is incomplete. This result was delivered to its frozen session, but inherited upstream responsibility is unresolved. An empty accepted_returns snapshot does not resolve that gap; do not guess an ancestor or create a replacement notification.\n"
+		}
+		return body
 	}
 	if task.WakeupID != "" {
 		var b strings.Builder

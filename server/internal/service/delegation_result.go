@@ -39,6 +39,9 @@ func (s *TaskService) ReconcileDelegationResults(ctx context.Context, limit int3
 	if _, err := s.Queries.PropagateRetryDelegationReturns(ctx, limit); err != nil {
 		return stats, err
 	}
+	if _, err := s.Queries.PropagateResultSourceReturns(ctx, db.PropagateResultSourceReturnsParams{BatchSize: pgtype.Int4{Int32: limit, Valid: true}}); err != nil {
+		return stats, err
+	}
 	failures, err := s.Queries.ListUnresolvedDelegationFailures(ctx, limit)
 	if err != nil {
 		return stats, err
@@ -183,7 +186,7 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 		}
 		return refuse(resultRefusal("source_task_missing"))
 	} else {
-		handling, err = materializeManagedResult(ctx, q, outcome, address, agent, source)
+		handling, err = materializeManagedResult(ctx, q, outcome, address, agent, source, obligation)
 	}
 	var unavailable resultRefusal
 	if errors.As(err, &unavailable) {
@@ -250,7 +253,7 @@ func StrictResultProviderSupported(provider string) bool {
 	}
 }
 
-func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, source db.AgentTaskQueue) (db.AgentTaskQueue, error) {
+func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, source db.AgentTaskQueue, incoming db.AgentTaskDelegationReturn) (db.AgentTaskQueue, error) {
 	var empty db.AgentTaskQueue
 	if agent.ExecutionKind != "managed" || agent.RuntimeID != address.RuntimeID || source.AgentID != agent.ID {
 		return empty, resultRefusal("managed_recipient_identity_changed")
@@ -281,8 +284,13 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if err != nil {
 		return empty, err
 	}
+	callerAuthority, upstreamKnown, err := resultCallerProvenance(ctx, q, incoming, address, source, agent)
+	if err != nil {
+		return empty, err
+	}
 	meta := protocol.DelegationResultTurn{
-		ResultTaskID: util.UUIDToString(outcome.ID), DelegationReturnID: util.UUIDToString(address.ID),
+		UpstreamReturnsUnknown: !upstreamKnown,
+		ResultTaskID:           util.UUIDToString(outcome.ID), DelegationReturnID: util.UUIDToString(address.ID),
 		SourceTaskID: util.UUIDToString(address.SourceTaskID), ScopeTaskID: scopeTaskID, DelegatedIssueID: util.UUIDToString(address.IssueID), Outcome: outcome.Status,
 		RuntimeID: util.UUIDToString(address.RuntimeID), Provider: address.Provider.String, SessionID: address.SessionID.String, WorkDir: address.WorkDir.String,
 	}
@@ -294,13 +302,19 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 		ID: dbid.NewV7(), AgentID: agent.ID, RuntimeID: address.RuntimeID,
 		IssueID: source.IssueID, ChatSessionID: source.ChatSessionID, AutopilotRunID: source.AutopilotRunID,
 		Context: contextJSON, SessionID: address.SessionID, WorkDir: address.WorkDir,
-		OriginatorUserID: source.OriginatorUserID, AccountableUserID: source.AccountableUserID,
+		OriginatorUserID: callerAuthority.UserID, AccountableUserID: callerAuthority.AccountableUserID,
+		OriginatorSource:    pgtype.Text{String: callerAuthority.Source.String(), Valid: true},
+		DelegatedFromTaskID: callerAuthority.DelegatedFromTaskID,
+		TriggerEvidenceKind: pgtype.Text{String: string(callerAuthority.EvidenceKind), Valid: true}, TriggerEvidenceRefID: callerAuthority.EvidenceRefID,
 		TriggerSummary: pgtype.Text{String: "Delegated outcome: " + meta.ResultTaskID, Valid: true},
 	})
 	if err != nil {
 		return empty, err
 	}
 	if err := q.SetDelegationResultTask(ctx, db.SetDelegationResultTaskParams{TaskID: outcome.ID, DelegationReturnID: address.ID, NotificationTaskID: task.ID}); err != nil {
+		return empty, err
+	}
+	if _, err := q.PropagateResultSourceReturns(ctx, db.PropagateResultSourceReturnsParams{TaskID: task.ID}); err != nil {
 		return empty, err
 	}
 	return task, nil
@@ -379,6 +393,7 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 		RuntimeID: util.UUIDToString(address.RuntimeID), Provider: address.Provider.String,
 		SessionID: address.SessionID.String, WorkDir: address.WorkDir.String,
 	}
+	projected.UpstreamReturnsUnknown = false
 	if task.ForceFreshSession || *projected != expected || address.ReturnKind != string(delegation.KindManagedTask) ||
 		task.AgentID != address.DispatcherAgentID || source.AgentID != task.AgentID ||
 		task.RuntimeID != address.RuntimeID || task.IssueID != source.IssueID ||
@@ -396,6 +411,14 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 	if agent.ExecutionKind != "managed" || agent.ArchivedAt.Valid || agent.RuntimeID != address.RuntimeID {
 		return nil, resultRefusal("recipient_unavailable")
 	}
+	callerAuthority, upstreamKnown, err := resultCallerProvenance(ctx, q, link, address, source, agent)
+	if err != nil {
+		return nil, err
+	}
+	if task.OriginatorUserID != callerAuthority.UserID {
+		return nil, resultRefusal("result_caller_authority_changed")
+	}
+	expected.UpstreamReturnsUnknown = !upstreamKnown
 	if _, err := q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{UserID: agent.OwnerID, WorkspaceID: address.WorkspaceID}); err != nil {
 		return nil, err
 	}

@@ -384,6 +384,7 @@ type TaskCancellationActor struct {
 }
 
 type AgentTaskResponse struct {
+	AcceptedReturns          *[]protocol.AcceptedReturn     `json:"accepted_returns,omitempty"`
 	SessionPinGeneration     string                         `json:"session_pin_generation,omitempty"`
 	ResultNotifications      *[]ResultNotificationResponse  `json:"result_notifications,omitempty"`
 	RequireResume            bool                           `json:"require_resume,omitempty"`

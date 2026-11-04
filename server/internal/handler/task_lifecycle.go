@@ -298,6 +298,7 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		inheritTaskID = resolved
 	}
 	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, service.RerunDelegation{
+		Attribution:   h.dispatchAttributionFromRequest(r, actorType, actorID),
 		Address:       dispatchReturn,
 		CreatedBy:     requestUserID(r),
 		InheritTaskID: inheritTaskID,
@@ -376,7 +377,7 @@ func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (p
 		}
 		return pgtype.UUID{}, err
 	}
-	inherited, err := delegation.RunReturnIDs(ctx, h.Queries, latest)
+	inherited, err := delegation.RunReturns(ctx, h.Queries, latest)
 	if err != nil {
 		return pgtype.UUID{}, err
 	}

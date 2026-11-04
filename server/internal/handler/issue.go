@@ -3017,7 +3017,8 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		parentIssueUUID = pid
 	}
 
-	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), wsUUID, requesterUUID, agentUUID, squadUUID, prompt, priority, dueDate, projectUUID, parentIssueUUID, attachmentIDs)
+	actorType, actorID := h.resolveActor(r, requesterID, workspaceID)
+	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), wsUUID, requesterUUID, agentUUID, squadUUID, prompt, priority, dueDate, projectUUID, parentIssueUUID, attachmentIDs, h.dispatchAttributionFromRequest(r, actorType, actorID))
 	if err != nil {
 		if writeIssueLimitReached(w, err) {
 			return
@@ -3606,6 +3607,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 		DelegationReturn:    delegationReturn,
 		DelegationCreatedBy: delegationCreatedBy,
+		DispatchAttribution: h.dispatchAttributionFromRequest(r, creatorType, actualCreatorID),
 	}, service.IssueCreateOpts{
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
@@ -4234,6 +4236,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		writeDelegationReturnError(w, derr)
 		return
 	}
+	invocation := h.dispatchAttributionFromRequest(r, actorType, actorID)
 	var assignmentTask db.AgentTaskQueue
 	var assignmentAttr attribution.Result
 	assignmentTaskInserted := false
@@ -4256,7 +4259,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		taskID := pgtype.UUID{}
 		if prospectiveWillRun {
-			task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, actorType, actorID, req.HandoffNote, dispatch.returnIDs)
+			task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, actorType, actorID, req.HandoffNote, dispatch.returns, invocation)
 			if enqueueErr != nil {
 				return enqueueErr
 			}
@@ -4294,6 +4297,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, params, afterIssueWrite)
 	}
 	if err != nil {
+		if errors.Is(err, errAssignmentOriginatorConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		if derr := asDelegationReturnError(err); derr != nil {
 			writeDelegationReturnError(w, derr)
 			return
@@ -5096,6 +5103,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
 			continue
 		}
+		invocation := h.dispatchAttributionFromRequest(r, callerType, callerActorID)
 		var assignmentTask db.AgentTaskQueue
 		var assignmentAttr attribution.Result
 		assignmentTaskInserted := false
@@ -5118,7 +5126,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			}
 			taskID := pgtype.UUID{}
 			if prospectiveWillRun {
-				task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, callerType, callerActorID, req.Updates.HandoffNote, dispatch.returnIDs)
+				task, attr, inserted, enqueueErr := h.enqueueAssignmentRunInTx(r.Context(), tx, q, issue, prospectiveTrigger, callerType, callerActorID, req.Updates.HandoffNote, dispatch.returns, invocation)
 				if enqueueErr != nil {
 					return enqueueErr
 				}

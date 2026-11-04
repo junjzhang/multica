@@ -242,18 +242,18 @@ archived statuses remain readable via an explicit status filter.
   deliverable — answering a question, consulting elsewhere — writes nothing;
   questions and acknowledgements never move the status. Research, design,
   planning, and review count as work exactly when the issue asks for them.
-  Squad leaders: dispatching members is not delivery — a dispatch turn leaves
-  the parent `in_progress`; only an explicit `@` mention or stage-barrier
-  wakeup starts the later turn that moves it to `in_review`.
+  Dispatching work leaves the parent `in_progress` until its own deliverable is ready.
+  Accepted returns, explicit requests and stage wakeups can start later turns; none alone establishes delivery.
 - **`in_review`** is the implementer's review handoff — delivered, awaiting
   acceptance; some workflows also use it while a PR is open. It is not `done`:
   it closes no stage barrier and wakes no parent.
 - **`done`** on a child issue can wake its parent's assignee (see Stages). Only
   a coordinator the task explicitly authorizes verifies the evidence, records
   acceptance, and closes the accepted sub-issue; an implementer never accepts
-  its own delivery. Acceptance does not deliver the parent, and merging needs
-  its own grant; a coordinator who is not the parent's assignee is reached by
-  the explicit `@` mention in the delivery comment.
+  its own delivery. Acceptance does not deliver the parent, and merging needs its own grant. Saved outcomes use this run's `accepted_returns`; continuations carry the actual callers' upstream returns.
+  Do not add a mention to duplicate that return. Before an explicit acceptance handoff, refresh `accepted_returns` and verify the receiver.
+  Missing means unknown, and `result_notifications=[]` does not prove no return is owed.
+  `upstream_returns_unknown` remains unresolved even with `accepted_returns=[]`. Never guess that recipient or create a replacement notification.
 - **`cancelled`** is a terminal, user-driven decision to close the issue. Like
   `done` it enqueues no new agent work, but it does **not** stop tasks already in
   flight — a run in progress keeps going. To stop a running task, cancel the

@@ -368,6 +368,14 @@ export interface ResultNotification {
   error?: string;
 }
 
+export interface AcceptedReturn {
+  return_id: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task";
+  source_task_id?: string;
+  external_session_id?: string;
+}
+
 export interface AgentTask {
   wakeup_id?: string;
   id: string;
@@ -399,6 +407,7 @@ export interface AgentTask {
   error: string | null;
   /** Undefined means unknown/unhydrated; [] means hydrated with no notifications. */
   result_notifications?: ResultNotification[];
+  accepted_returns?: AcceptedReturn[];
   // Empty string when the task is not in a failed state (the backend uses
   // `omitempty`, so the field may also be missing on non-failed tasks).
   // Open string on the wire, not a closed enum: the backend's classifier

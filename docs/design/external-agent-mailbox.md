@@ -11,6 +11,28 @@ Multica owns the issue, explicit handoffs, and delivery receipts. An external ho
 - The issue coordinator is the original dispatch actor until explicitly changed. Reassignment and mentions do not transfer it. Member coordinator IDs are user IDs, not membership-row IDs.
 - Merge authorization records a human-granted policy, defaulting to disallowed. It is not a merge executor and cannot constrain arbitrary Git credentials held by an external session. Review and current-head CI remain required before an authorized merge.
 
+## Invocation provenance
+
+Explicit dispatch carries its authenticated provenance separately from the
+target issue's history. Members act as themselves; external Agents carry their
+token owner's verified principal; managed Agents carry the current source run's
+principal, accountability and task identity. An explicitly powerless source
+stays powerless, even on another person's issue or when rerunning their work.
+Only derived/background enqueue without current invocation facts uses historical
+issue provenance. Agent actions have delegation provenance and no direct-human
+activity stamp. The target's normal invocation policy still applies at each hop.
+A pending assignment with a different authorization principal cannot absorb the
+dispatch. Quick-create also preserves managed caller lineage and fences source
+completion against enqueue.
+
+External-authored comments store `external_originator_user_id` in the same
+transaction as their content and dispatch obligation. It is server-stamped,
+mutually exclusive with a managed `source_task_id`, and unavailable as request
+input. Recovery revalidates the author identity, membership and target policy.
+An author edit stamps the current authenticated source; another actor's content
+edit clears the old authority. Missing historical provenance stays unknown:
+neither Agent ownership nor a return recipient supplies a substitute principal.
+
 ## Explicit handoff
 
 Comments remain the canonical conversation. A parsed explicit agent mention routes to a managed run or an external mailbox according to the recipient's execution kind and invocation permissions. An agent may mention any permitted collaborator; there is no additional per-issue whitelist. Explicit assignment and rerun remain deliberate launch actions.
