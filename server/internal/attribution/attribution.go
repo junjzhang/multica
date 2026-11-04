@@ -226,14 +226,17 @@ type CommentFacts struct {
 	// dropping the chain root to unattributed. Loaded by the caller alongside
 	// ParentOriginator; invalid when the parent has no accountable human either.
 	ParentAccountable pgtype.UUID
+	// ExternalOriginator is stamped by authenticated external-agent authoring,
+	// which has no managed source task. It is never inferred from the owner.
+	ExternalOriginator pgtype.UUID
 }
 
 // ClassifyComment resolves attribution for a comment-triggered run from
 // already-fetched comment facts. agentAuthoredSource selects the label used
 // when the trigger comment is agent-authored: SourceCommentSource for the
 // issue-assignee-reacting path, SourceDelegation for an explicit mention /
-// thread-parent / squad-leader path. The returned UserID is byte-identical to
-// the legacy originator resolution so authorization behavior is unchanged.
+// thread-parent / squad-leader path. External-agent comments use only their
+// server-stamped principal; missing historical provenance remains unattributed.
 func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 	switch f.AuthorType {
 	case "member":
@@ -247,6 +250,11 @@ func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 		})
 	case "agent":
 		r := Result{EvidenceKind: EvidenceComment, EvidenceRefID: f.CommentID}
+		if f.ExternalOriginator.Valid && !f.SourceTaskID.Valid {
+			r := AgentDelegation(f.ExternalOriginator, EvidenceComment, f.CommentID)
+			r.Source = agentAuthoredSource
+			return r
+		}
 		if !f.SourceTaskID.Valid {
 			// Agent comment with no source task: cannot walk the chain.
 			r.Source = SourceUnattributed
@@ -273,6 +281,18 @@ func ClassifyComment(f CommentFacts, agentAuthoredSource Source) Result {
 	default:
 		return finalizeAttribution(Result{Source: SourceUnattributed, EvidenceKind: EvidenceComment, EvidenceRefID: f.CommentID})
 	}
+}
+
+// AgentDelegation preserves a server-verified human principal without marking
+// an agent's action as the human's own action.
+func AgentDelegation(userID pgtype.UUID, evidenceKind EvidenceKind, evidenceRefID pgtype.UUID) Result {
+	if !userID.Valid {
+		return Unattributed(evidenceKind, evidenceRefID)
+	}
+	return finalizeAttribution(Result{
+		UserID: userID, Source: SourceDelegation,
+		EvidenceKind: evidenceKind, EvidenceRefID: evidenceRefID,
+	})
 }
 
 // DirectFacts are the facts for a run with no trigger comment: a direct issue

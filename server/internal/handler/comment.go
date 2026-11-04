@@ -1913,15 +1913,16 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	createParams := db.CreateCommentParams{
-		ID:           commentID,
-		IssueID:      issue.ID,
-		WorkspaceID:  issue.WorkspaceID,
-		AuthorType:   authorType,
-		AuthorID:     parseUUID(authorID),
-		Content:      req.Content,
-		Type:         req.Type,
-		ParentID:     parentID,
-		SourceTaskID: sourceTaskID,
+		ID:                       commentID,
+		IssueID:                  issue.ID,
+		WorkspaceID:              issue.WorkspaceID,
+		AuthorType:               authorType,
+		AuthorID:                 parseUUID(authorID),
+		Content:                  req.Content,
+		Type:                     req.Type,
+		ParentID:                 parentID,
+		SourceTaskID:             sourceTaskID,
+		ExternalOriginatorUserID: externalOriginatorUserID(r, authorType),
 		// The author's "don't start" choices outlive this call: completion
 		// replay skips the agents it names.
 		SuppressedAgentIds: suppressAgentIDs,
@@ -3427,6 +3428,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// lineage is re-derived from the EDIT action itself (MUL-4857), never carried
 	// over from the comment's original authoring run.
 	sourceTaskID := existing.SourceTaskID
+	externalOriginator := existing.ExternalOriginatorUserID
 	var triggerIssue *db.Issue
 	var cancelled []db.AgentTaskQueue
 	// triggerPlan is resolved before the write so an edit that adds a valid
@@ -3460,8 +3462,10 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 		// must-fix, round 3).
 		if actorType == "agent" && isAuthor {
 			sourceTaskID = h.commentSourceTaskID(r)
+			externalOriginator = externalOriginatorUserID(r, actorType)
 		} else {
 			sourceTaskID = pgtype.UUID{}
+			externalOriginator = pgtype.UUID{}
 		}
 		if !isNoteComment(req.Content) {
 			var parentComment *db.Comment
@@ -3516,9 +3520,10 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updateParams := db.UpdateCommentParams{
-		ID:           commentUUID,
-		Content:      req.Content,
-		SourceTaskID: sourceTaskID,
+		ID:                       commentUUID,
+		Content:                  req.Content,
+		SourceTaskID:             sourceTaskID,
+		ExternalOriginatorUserID: externalOriginator,
 		// New text replaces the "don't start" choices completion replay keeps.
 		SuppressedAgentIds: suppressAgentIDs,
 	}

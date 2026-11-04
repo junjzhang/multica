@@ -22,6 +22,8 @@ import (
 // selection cannot fan out into thousands of readiness probes.
 const maxPreviewTriggerIssues = 500
 
+var errAssignmentOriginatorConflict = errors.New("pending assignment has a different authorization originator")
+
 // issueTriggerWriteProbe builds the probe the write paths feed to
 // WillEnqueueRun. The private-agent gate is already enforced at the HTTP
 // boundary (validateAssigneePair on assign) and inside enqueueSquadLeaderTask
@@ -81,7 +83,7 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 // already covers the target; the assignment intent still commits. Any other
 // error rolls the whole assignment back, so a rejected or failed enqueue can
 // never leave an assignee without its durable launch obligation.
-func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
+func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturnIDs []pgtype.UUID, externalOriginator, expectedOriginator pgtype.UUID) (db.AgentTaskQueue, attribution.Result, bool, error) {
 	if trigger.AssigneeType != "agent" && trigger.AssigneeType != "squad" {
 		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
@@ -98,6 +100,9 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 			IssueID: issue.ID, AgentID: trigger.AgentID,
 		})
 		if err == nil {
+			if pending.OriginatorUserID != expectedOriginator {
+				return db.AgentTaskQueue{}, attribution.Result{}, false, errAssignmentOriginatorConflict
+			}
 			if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturnIDs...); err != nil {
 				return db.AgentTaskQueue{}, attribution.Result{}, false, err
 			}
@@ -117,12 +122,11 @@ func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db
 		switch trigger.AssigneeType {
 		case "agent":
 			// The member who performed this assign/promote is the accountable
-			// human for the run (MUL-4302 §4). An agent actor is not a human, so
-			// only a member actor is threaded; otherwise attribution falls back
-			// to the chain.
-			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs)
+			// human for the run. External authority is passed separately so an
+			// agent dispatch never becomes a direct human action.
+			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, externalOriginator)
 		case "squad":
-			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs)
+			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturnIDs, externalOriginator)
 		}
 		if err != nil {
 			_ = sp.Rollback(ctx)

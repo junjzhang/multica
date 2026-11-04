@@ -428,3 +428,12 @@ func (h *Handler) canEnqueueSquadLeader(ctx context.Context, leaderID pgtype.UUI
 	}
 	return h.canInvokeAgent(ctx, agent, actorType, actorID, originatorUserID, workspaceID)
 }
+
+// externalOriginatorUserID is authentication middleware evidence, never a request body field.
+func externalOriginatorUserID(r *http.Request, actorType string) pgtype.UUID {
+	if actorType != "agent" || r.Header.Get("X-Actor-Source") != "external_agent" {
+		return pgtype.UUID{}
+	}
+	userID, _ := util.ParseUUID(requestUserID(r))
+	return userID
+}

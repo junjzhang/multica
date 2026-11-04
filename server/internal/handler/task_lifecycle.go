@@ -298,9 +298,10 @@ func (h *Handler) RerunIssue(w http.ResponseWriter, r *http.Request) {
 		inheritTaskID = resolved
 	}
 	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, canInvoke, service.RerunDelegation{
-		Address:       dispatchReturn,
-		CreatedBy:     requestUserID(r),
-		InheritTaskID: inheritTaskID,
+		ExternalOriginatorUserID: externalOriginatorUserID(r, actorType),
+		Address:                  dispatchReturn,
+		CreatedBy:                requestUserID(r),
+		InheritTaskID:            inheritTaskID,
 	})
 	if errors.Is(err, service.ErrRerunInvokeNotAllowed) {
 		h.writeDispatchBlocked(w, http.StatusForbidden, ReasonInvocationNotAllowed)
