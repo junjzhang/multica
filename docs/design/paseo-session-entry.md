@@ -107,6 +107,41 @@ A session request carries the `mea_` token and the binding's workspace. It does
 not send `X-Agent-ID`/`X-Task-ID`: an external session is authorship, not a
 managed task, and no synthetic task id may enter attribution.
 
+## `multica session connect`
+
+An agent can explicitly connect with `multica session connect --output json`.
+The current `PASEO_AGENT_ID` is required. The CLI calls the installed Paseo
+`plugin rpc paseo-multica session.connect` command, which reuses Paseo's
+authenticated SDK connection and the plugin's existing connection transaction.
+Paseo must provide the `plugin rpc` CLI entry; no version-based fallback runs.
+
+Before RPC, connect rejects managed task identity and explicit profile, token,
+server or workspace overrides. The plugin settings select those values.
+An explicit context path must equal the current session's default path.
+Return-session overrides must match `PASEO_AGENT_ID`. The plugin owns host
+validation, conflict refusal, locking, credential reuse and cleanup.
+
+After RPC succeeds for the current session, connect runs the same inspection
+as status below. A successful plugin reply or file creation alone cannot
+produce a successful exit. Both commands use the same non-secret report.
+
+Connect failures authored by the plugin carry `[multica:session-connect]`
+after redaction. The CLI displays only that marked message from Paseo's JSON
+error envelope, retaining recovery instructions and non-secret token/agent IDs
+when saving the binding or revoking a new credential fails. Unmarked process
+output stays private. Runtime warnings, including embedded JSON objects, are
+skipped while looking for an actionable envelope. A daemon capability refusal
+reports that the selected host needs updating. Terminal controls are removed
+from displayed diagnostics, preserving newlines and tabs; RPC metadata is not
+part of the displayed message. Composer errors also omit the CLI marker.
+
+The same normalization and redaction apply to verification reports from both
+connect and status, including remote HTTP errors and display metadata in JSON
+and table output. Validation uses the original server values before rendering;
+normalization cannot turn an invalid binding into an authorized one. RPC
+diagnostics prefer the SDK's structured `userMessage` instead of reconstructing
+it from transport metadata.
+
 ## `multica session status`
 
 `multica session status --output json` reports inspection state without secrets:

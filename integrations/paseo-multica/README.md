@@ -13,6 +13,25 @@ settings screen.
 
 ## What it reuses
 
+Agents can explicitly connect their current conversation from a shell:
+
+```text
+multica session connect --output json
+multica session status --output json
+```
+
+This requires a Paseo CLI with `plugin rpc` and this plugin enabled on the
+selected host. The CLI uses `PASEO_AGENT_ID` and the existing Paseo daemon
+target, invokes `session.connect`, then verifies the credential's own agent
+and registered return address with Multica. A repeat connection reuses the
+plugin's existing transaction and credential. No provider restart is needed.
+
+The plugin settings select the Multica server and workspace. Remove explicit
+`--profile`, `--server-url`, `--workspace-id`, `MULTICA_TOKEN`,
+`MULTICA_SERVER_URL`, and `MULTICA_WORKSPACE_ID` overrides before connecting.
+Managed task processes cannot connect an external session. A custom
+`MULTICA_EXTERNAL_SESSION_FILE` must name this session's default binding path.
+
 - The Multica external-agent registration and token endpoints. Registration is
   keyed by `provider/host/session`, so a repeat connect returns the same
   identity instead of creating a second agent.
@@ -50,7 +69,8 @@ connect reuses a locally valid, host-compatible binding; it verifies that
 credential against the bound agent's own mailbox endpoint before trusting it.
 That endpoint authorizes the credential's subject rather than a merely visible
 agent, so another agent's credential cannot validate this binding. Expired or
-revoked credentials are repaired only by explicit `/multica connect`. A binding
+revoked credentials are repaired only by explicit `multica session connect`
+(or `/multica connect` in the composer). A binding
 for another server, workspace, host, or daemon is reported and left untouched
 rather than silently rebound.
 
@@ -105,6 +125,6 @@ with `paseo plugin install <absolute path>` on the daemon host.
   the credential. A credential revoked elsewhere therefore shows as needing
   attention. If that request cannot complete, the panel reports the binding as
   unverified instead of claiming a connection. `status` never repairs anything;
-  `/multica connect` does that explicitly.
+  `multica session connect` (or `/multica connect` in the composer) does that explicitly.
 - No automatic enrollment of existing sessions, no automatic model messages, no
   MCP server, and no provider reload.

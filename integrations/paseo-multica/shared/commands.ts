@@ -1,4 +1,5 @@
 import { connectSession, disconnectSession, statusSession, type StatusView } from "./contracts";
+import { SESSION_CONNECT_ERROR_PREFIX } from "./redaction";
 
 export type MulticaSubcommand = "connect" | "status" | "disconnect";
 export type SessionContract = typeof connectSession | typeof statusSession | typeof disconnectSession;
@@ -45,7 +46,17 @@ export async function runMulticaCommand(
   rawArgs: string,
 ): Promise<{ subcommand: MulticaSubcommand; view: StatusView }> {
   const subcommand = parseSubcommand(rawArgs);
-  const view = await host.rpc(CONTRACTS[subcommand], { agentId });
+  const view = await host.rpc(CONTRACTS[subcommand], { agentId }).catch((error: unknown) => {
+    if (error instanceof Error) {
+      const message = "userMessage" in error && typeof error.userMessage === "string"
+        ? error.userMessage : error.message;
+      const marker = message.indexOf(SESSION_CONNECT_ERROR_PREFIX);
+      if (marker >= 0) {
+        throw new Error(message.slice(marker + SESSION_CONNECT_ERROR_PREFIX.length));
+      }
+    }
+    throw error;
+  });
   host.openPanel(STATUS_PANEL_ID, { location: "explorer" });
   return { subcommand, view };
 }
