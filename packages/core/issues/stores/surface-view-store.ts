@@ -35,21 +35,29 @@ const basePersist = viewStorePersistOptions(ISSUE_SURFACE_VIEW_STORAGE_KEY);
 const surfaceStores = new Map<string, StoreApi<IssueViewState>>();
 const suppressSurfacePersist = new Set<string>();
 
-const SURFACE_DEFAULTS_VERSION = 1;
+const SURFACE_DEFAULTS_VERSION = 2;
+// v1 rewrote the legacy sort/card/hidden defaults. v2 only re-scopes built-in
+// project child visibility onto the root-only default, so a v1 snapshot must
+// not replay the v1 rewrite (that would reset the user's sort choice).
+const LEGACY_DEFAULTS_VERSION = 1;
 
 function defaultsForSurface(
   surfaceKey: string,
   set: StoreApi<IssueViewState>["setState"],
 ): IssueViewState {
   const defaults = viewStoreSlice(set);
+  if (surfaceKey.startsWith("project:")) {
+    return {
+      ...defaults,
+      showSubIssues: false,
+      showSubIssuesExplicit: false,
+      cardProperties: { ...defaults.cardProperties, project: false },
+    };
+  }
   if (surfaceKey === "workspace:all") {
     return { ...defaults, showSubIssues: false, showSubIssuesExplicit: false };
   }
-  if (!surfaceKey.startsWith("project:")) return defaults;
-  return {
-    ...defaults,
-    cardProperties: { ...defaults.cardProperties, project: false },
-  };
+  return defaults;
 }
 
 function isLegacyCardDefault(cardProperties: unknown): boolean {
@@ -92,6 +100,28 @@ function migrateLegacySurfaceState(
     next.hiddenStatuses = [...DEFAULT_HIDDEN_STATUSES];
   }
   return next;
+}
+
+/**
+ * v2: built-in project surfaces inherit the workspace board's root-only child
+ * default. The old project default was `true`/explicit, indistinguishable from
+ * a manual "show"; it becomes the automatic default once. A surface the user
+ * explicitly closed stays closed (and therefore explicit) instead of silently
+ * reopening when the project board is filtered or switched to a non-board mode.
+ * Saved views are user-authored and never rewritten here.
+ */
+function migrateProjectChildVisibility(
+  surfaceKey: string,
+  state: PersistedIssueViewState,
+): PersistedIssueViewState {
+  if (!surfaceKey.startsWith("project:")) return state;
+  const explicitlyClosed =
+    state.showSubIssues === false && state.showSubIssuesExplicit === true;
+  return {
+    ...state,
+    showSubIssues: false,
+    showSubIssuesExplicit: explicitlyClosed,
+  };
 }
 
 function persistedIssueViewState(state: IssueViewState): PersistedIssueViewState {
@@ -137,16 +167,19 @@ const issueSurfaceViewRegistryStore = createStore<IssueSurfaceViewRegistryState>
       migrate: (persisted, version) => {
         const current = (persisted ?? {}) as Partial<IssueSurfaceViewRegistryState>;
         if (version >= SURFACE_DEFAULTS_VERSION) return current;
+        const applyLegacyDefaults = version < LEGACY_DEFAULTS_VERSION;
         return {
           ...current,
           surfaces: Object.fromEntries(
-            Object.entries(current.surfaces ?? {}).map(([surfaceKey, entry]) => [
-              surfaceKey,
-              {
-                ...entry,
-                state: migrateLegacySurfaceState(surfaceKey, entry.state),
-              },
-            ]),
+            Object.entries(current.surfaces ?? {}).map(([surfaceKey, entry]) => {
+              const state = applyLegacyDefaults
+                ? migrateLegacySurfaceState(surfaceKey, entry.state)
+                : entry.state;
+              return [
+                surfaceKey,
+                { ...entry, state: migrateProjectChildVisibility(surfaceKey, state) },
+              ];
+            }),
           ),
         };
       },
