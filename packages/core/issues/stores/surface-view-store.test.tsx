@@ -97,6 +97,14 @@ describe("issue surface view store registry", () => {
     store.getState().setShowSubIssues(false);
     expect(effectiveShowSubIssues(store.getState())).toBe(false);
     expect(effectiveShowSubIssues(store.getState(), "child title")).toBe(false);
+
+    // The project's actor tabs keep the workspace actor-tab behavior.
+    for (const key of ["project:p1:agents", "project:p1:members"]) {
+      const tab = getIssueSurfaceViewStore(key).getState();
+      expect(tab.showSubIssues).toBe(true);
+      expect(tab.showSubIssuesExplicit).toBe(true);
+      expect(tab.cardProperties.project).toBe(false);
+    }
   });
 
   it("keeps an automatic default after unrelated edits and workspace rehydration", async () => {
@@ -161,6 +169,14 @@ describe("issue surface view store registry", () => {
             state: { showSubIssues: false, showSubIssuesExplicit: true },
             updatedAt: "2026-01-01",
           },
+          "project:early-closed": {
+            state: { showSubIssues: false },
+            updatedAt: "2026-01-01",
+          },
+          "project:tab:agents": {
+            state: { showSubIssues: true, showSubIssuesExplicit: true },
+            updatedAt: "2026-01-01",
+          },
           "workspace:all": {
             state: {
               sortBy: "position",
@@ -197,6 +213,19 @@ describe("issue surface view store registry", () => {
     expect(closed.showSubIssues).toBe(false);
     expect(closed.showSubIssuesExplicit).toBe(true);
     expect(effectiveShowSubIssues(closed, "child")).toBe(false);
+
+    // The explicit flag was added later; a bare `showSubIssues: false` from
+    // that era is equally a manual close and must not become the automatic rule.
+    const earlyClosed = getIssueSurfaceViewStore("project:early-closed").getState();
+    expect(earlyClosed.showSubIssues).toBe(false);
+    expect(earlyClosed.showSubIssuesExplicit).toBe(true);
+    expect(effectiveShowSubIssues(earlyClosed, "child")).toBe(false);
+
+    // The project actor tabs follow their workspace counterparts and keep
+    // showing sub-issues; only the project's own board changes.
+    const agentsTab = getIssueSurfaceViewStore("project:tab:agents").getState();
+    expect(agentsTab.showSubIssues).toBe(true);
+    expect(agentsTab.showSubIssuesExplicit).toBe(true);
 
     // Workspace boards and saved views keep their existing behavior.
     const workspace = getIssueSurfaceViewStore("workspace:all").getState();

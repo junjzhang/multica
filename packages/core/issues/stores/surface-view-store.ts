@@ -41,6 +41,16 @@ const SURFACE_DEFAULTS_VERSION = 2;
 // not replay the v1 rewrite (that would reset the user's sort choice).
 const LEGACY_DEFAULTS_VERSION = 1;
 
+/**
+ * The project's own board (`project:<id>`), not its actor tabs
+ * (`project:<id>:agents` / `project:<id>:members`). The actor tabs follow their
+ * workspace counterparts (`workspace:agents`), which keep showing sub-issues.
+ */
+function isProjectBoardSurface(surfaceKey: string): boolean {
+  if (!surfaceKey.startsWith("project:")) return false;
+  return !surfaceKey.slice("project:".length).includes(":");
+}
+
 function defaultsForSurface(
   surfaceKey: string,
   set: StoreApi<IssueViewState>["setState"],
@@ -49,8 +59,9 @@ function defaultsForSurface(
   if (surfaceKey.startsWith("project:")) {
     return {
       ...defaults,
-      showSubIssues: false,
-      showSubIssuesExplicit: false,
+      ...(isProjectBoardSurface(surfaceKey)
+        ? { showSubIssues: false, showSubIssuesExplicit: false }
+        : {}),
       cardProperties: { ...defaults.cardProperties, project: false },
     };
   }
@@ -103,7 +114,7 @@ function migrateLegacySurfaceState(
 }
 
 /**
- * v2: built-in project surfaces inherit the workspace board's root-only child
+ * v2: a project's own board inherits the workspace board's root-only child
  * default. The old project default was `true`/explicit, indistinguishable from
  * a manual "show"; it becomes the automatic default once. A surface the user
  * explicitly closed stays closed (and therefore explicit) instead of silently
@@ -114,9 +125,12 @@ function migrateProjectChildVisibility(
   surfaceKey: string,
   state: PersistedIssueViewState,
 ): PersistedIssueViewState {
-  if (!surfaceKey.startsWith("project:")) return state;
+  if (!isProjectBoardSurface(surfaceKey)) return state;
+  // `showSubIssuesExplicit` was added after the first child-visibility
+  // preference shipped, so a bare `showSubIssues: false` is a manual close too —
+  // only an exactly-true `showSubIssues` is the indistinguishable old default.
   const explicitlyClosed =
-    state.showSubIssues === false && state.showSubIssuesExplicit === true;
+    state.showSubIssues === false && state.showSubIssuesExplicit !== false;
   return {
     ...state,
     showSubIssues: false,
