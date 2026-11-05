@@ -29,7 +29,7 @@ func TestManagedMailboxMigrationPreservesInflightAndRejectsOldWriter(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := runOptions{Direction: "up", Files: realMigrationFiles(t, []string{"646_managed_result_mailbox", "647_mailbox_result_consumer", "648_mailbox_result_delivery_index"}, "up"), SchemaMigrationsTable: schema + ".schema_migrations", AdvisoryLockKey: int64(rand.Uint64()&0x7fffffffffffffff) | 1, Hooks: hooksForDirection("up")}
+	opts := runOptions{Direction: "up", Files: realMigrationFiles(t, []string{"646_managed_result_mailbox", "647_mailbox_result_consumer", "648_mailbox_result_delivery_index", "649_mailbox_result_consumer_index"}, "up"), SchemaMigrationsTable: schema + ".schema_migrations", AdvisoryLockKey: int64(rand.Uint64()&0x7fffffffffffffff) | 1, Hooks: hooksForDirection("up")}
 	for range 2 {
 		if err := runMigrations(ctx, pool, opts); err != nil {
 			t.Fatal(err)

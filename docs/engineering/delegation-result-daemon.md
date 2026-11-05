@@ -234,8 +234,8 @@ sessions sharing that credential.
 
 ## Mailbox migration boundary
 
-Migrations 646–648 backfill mailbox records for historical managed wakeups and
-add consumer provenance and the result-to-message index. Existing external
+Migrations 646–649 backfill mailbox records for historical managed wakeups and
+add consumer provenance and indexes for result and consumer lookups. Existing external
 message IDs, destinations, receipts and unknown states are preserved. Backfill
 does not infer `handled` from a completed run. Inspect historical notifications
 and arrange explicit consumption from an authorized pinned task when required.
