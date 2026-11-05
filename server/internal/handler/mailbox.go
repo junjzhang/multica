@@ -164,8 +164,14 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var caller db.AgentTaskQueue
-	if r.Header.Get("X-Actor-Source") == "task_token" {
-		caller, _ = h.Queries.GetAgentTask(r.Context(), parseUUID(r.Header.Get("X-Task-ID")))
+	managedActor := r.Header.Get("X-Actor-Source") == "task_token"
+	if managedActor {
+		var err error
+		caller, err = h.Queries.GetAgentTask(r.Context(), parseUUID(r.Header.Get("X-Task-ID")))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to verify mailbox consumer")
+			return
+		}
 	}
 	limit := mailboxLimitDefault
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -201,7 +207,7 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
 	messages := make([]MailboxMessageResponse, 0, len(rows))
 	for _, row := range rows {
-		if caller.ID.Valid {
+		if managedActor {
 			visible, err := service.ManagedMailboxResultVisible(r.Context(), h.Queries, row, caller)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to verify mailbox scope")
