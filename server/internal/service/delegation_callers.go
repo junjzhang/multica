@@ -78,23 +78,36 @@ func inheritedUpstreamKnown(ctx context.Context, q *db.Queries, taskID pgtype.UU
 	visiting[taskID] = true
 	defer delete(visiting, taskID)
 	incoming, err := q.GetDelegationResultObligationForTask(ctx, taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	edges, loadErr := q.ListConsumedResultObligations(ctx, taskID)
+	if loadErr != nil {
+		return false, loadErr
+	}
+	if err == nil {
+		edges = append(edges, incoming)
+	}
+	if len(edges) == 0 {
 		task, taskErr := q.GetAgentTask(ctx, taskID)
 		return taskErr == nil && !delegation.IsResultTask(task), taskErr
 	}
-	if err != nil {
-		return false, err
-	}
-	if incoming.TakeoverID.Valid {
-		return true, nil
-	}
-	if incoming.CallerTaskIds == nil {
-		return false, nil
-	}
-	for _, caller := range incoming.CallerTaskIds {
-		known, err := inheritedUpstreamKnown(ctx, q, caller, visiting)
-		if err != nil || !known {
-			return false, err
+	for _, edge := range edges {
+		if edge.TakeoverID.Valid {
+			continue
+		}
+		if edge.CallerTaskIds == nil {
+			return false, nil
+		}
+		for _, caller := range edge.CallerTaskIds {
+			// An ordinary caller consuming its own delegated result adds no ancestor.
+			if caller == taskID {
+				continue
+			}
+			known, err := inheritedUpstreamKnown(ctx, q, caller, visiting)
+			if err != nil || !known {
+				return known, err
+			}
 		}
 	}
 	return true, nil

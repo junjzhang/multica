@@ -39,7 +39,7 @@ func (h *Handler) hydrateResultNotifications(ctx context.Context, workspace, iss
 		switch {
 		case row.NotificationError.Valid:
 			note.Status, note.Error = "refused", row.NotificationError.String
-		case row.NotificationDeliveryID.Valid:
+		case row.NotificationDeliveryID.Valid && !row.NotificationTaskID.Valid:
 			note.Status, note.Error = row.DeliveryStatus.String, row.DeliveryError.String
 			if note.Status == "" {
 				note.Status = "unknown"

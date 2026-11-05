@@ -301,6 +301,14 @@ func TestDelegationResourceRetentionAndReleaseReceipt(t *testing.T) {
 		t.Fatal("unknown result delivery released frozen resources")
 	}
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, turnID)
+	if out := check(); out.ReleaseAllowed || out.Reason != "result_consumption_pending" {
+		t.Fatalf("unacknowledged result released: %+v", out)
+	}
+	var messageID string
+	dbfx.QueryRow(t, `SELECT notification_delivery_id FROM agent_task_delegation_return WHERE task_id=$1`, result.ID).Scan(&messageID)
+	if _, err := testHandler.TaskService.AckMailbox(ctx, db.AckAgentMailboxProcessingParams{ID: parseUUID(messageID), WorkspaceID: parseUUID(testWorkspaceID), RecipientAgentID: source.AgentID, State: "handled"}, pgtype.UUID{}); err != nil {
+		t.Fatal(err)
+	}
 	if out := check(); !out.ReleaseAllowed || !out.AdmissionClosed {
 		t.Fatalf("received and accepted still retained: %+v", out)
 	}

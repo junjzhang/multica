@@ -14,8 +14,8 @@ import (
 )
 
 type committedResultNotification struct {
-	managed, external, refused bool
-	err                        error
+	managed, mailbox, refused bool
+	err                       error
 }
 
 func observeCommittedResultNotifications(t *testing.T, result db.AgentTaskQueue, address db.IssueDelegationReturn) <-chan committedResultNotification {
@@ -34,7 +34,7 @@ func observeCommittedResultNotifications(t *testing.T, result db.AgentTaskQueue,
 		  EXISTS(SELECT 1 FROM agent_mailbox_message delivery WHERE delivery.id=link.notification_delivery_id),
 		  link.notification_error IS NOT NULL
 		  FROM agent_task_delegation_return link WHERE task_id=$1 AND delegation_return_id=$2`, result.ID, address.ID).
-			Scan(&state.managed, &state.external, &state.refused)
+			Scan(&state.managed, &state.mailbox, &state.refused)
 		observed <- state
 	})
 	return observed
@@ -112,7 +112,7 @@ func TestDelegationResultRefreshFollowsCommit(t *testing.T) {
 				t.Fatalf("committed notification refreshes=%d, want 1", len(observed))
 			}
 			state := <-observed
-			if state.err != nil || state.managed != (kind == "managed") || state.external != (kind == "external") || state.refused != (kind == "refused") {
+			if state.err != nil || state.managed != (kind == "managed") || state.mailbox != (kind != "refused") || state.refused != (kind == "refused") {
 				t.Fatalf("subscriber could not read the committed notification: %+v", state)
 			}
 			if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {

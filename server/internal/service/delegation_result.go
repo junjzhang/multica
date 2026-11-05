@@ -311,7 +311,19 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if err != nil {
 		return empty, err
 	}
-	if err := q.SetDelegationResultTask(ctx, db.SetDelegationResultTaskParams{TaskID: outcome.ID, DelegationReturnID: address.ID, NotificationTaskID: task.ID}); err != nil {
+	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(address.ID))
+	payload, err := json.Marshal(map[string]string{"result_task_id": util.UUIDToString(outcome.ID), "delegation_return_id": util.UUIDToString(address.ID), "issue_id": util.UUIDToString(address.IssueID), "outcome": outcome.Status})
+	if err != nil {
+		return empty, err
+	}
+	message, err := q.CreateManagedResultMailbox(ctx, db.CreateManagedResultMailboxParams{
+		ID: dbid.NewV7(), WorkspaceID: address.WorkspaceID, IssueID: address.IssueID,
+		RecipientAgentID: agent.ID, NotificationKey: pgtype.Text{String: key, Valid: true}, Payload: payload,
+	})
+	if err != nil {
+		return empty, err
+	}
+	if err := q.SetDelegationResultTask(ctx, db.SetDelegationResultTaskParams{TaskID: outcome.ID, DelegationReturnID: address.ID, NotificationTaskID: task.ID, NotificationDeliveryID: message.ID}); err != nil {
 		return empty, err
 	}
 	if _, err := q.PropagateResultSourceReturns(ctx, db.PropagateResultSourceReturnsParams{TaskID: task.ID}); err != nil {

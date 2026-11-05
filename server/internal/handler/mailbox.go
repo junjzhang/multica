@@ -15,8 +15,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -29,6 +31,8 @@ import (
 // never means the external agent started or finished it.
 type MailboxMessageResponse struct {
 	ID               string                   `json:"id"`
+	HandledByTaskID  string                   `json:"handled_by_task_id,omitempty"`
+	Payload          json.RawMessage          `json:"payload,omitempty"`
 	IssueID          string                   `json:"issue_id"`
 	CommentID        string                   `json:"comment_id"`
 	RecipientAgentID string                   `json:"recipient_agent_id"`
@@ -46,6 +50,8 @@ type MailboxMessageResponse struct {
 func mailboxMessageToResponse(m db.AgentMailboxMessage, source, target *ExternalSessionResponse) MailboxMessageResponse {
 	return MailboxMessageResponse{
 		ID:               uuidToString(m.ID),
+		Payload:          m.Payload,
+		HandledByTaskID:  uuidToString(m.HandledByTaskID),
 		IssueID:          uuidToString(m.IssueID),
 		CommentID:        uuidToString(m.CommentID),
 		RecipientAgentID: uuidToString(m.RecipientAgentID),
@@ -95,9 +101,8 @@ func decodeMailboxCursor(cursor string) (pgtype.Timestamptz, pgtype.UUID, error)
 	return pgtype.Timestamptz{Time: createdAt, Valid: true}, id, nil
 }
 
-// loadMailboxAgentForActor resolves {id} to an external agent the caller may
-// inspect: the agent itself presenting its own external credential, or a human
-// owner/admin. Anyone else is refused.
+// loadMailboxAgentForActor resolves the authenticated recipient or human manager.
+// Managed credentials additionally require a live pinned execution.
 func (h *Handler) loadMailboxAgentForActor(w http.ResponseWriter, r *http.Request) (db.Agent, bool) {
 	workspaceID := h.resolveWorkspaceID(r)
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
@@ -112,9 +117,20 @@ func (h *Handler) loadMailboxAgentForActor(w http.ResponseWriter, r *http.Reques
 		ID:          agentID,
 		WorkspaceID: wsUUID,
 	})
-	if err != nil || agent.ExecutionKind != "external" {
-		writeError(w, http.StatusNotFound, "external agent not found")
+	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
 		return db.Agent{}, false
+	}
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		if r.Header.Get("X-Agent-ID") != uuidToString(agent.ID) || agent.ExecutionKind != "managed" {
+			writeError(w, http.StatusForbidden, "task credentials may only access their own mailbox")
+			return db.Agent{}, false
+		}
+		if _, err := delegation.ResolveManaged(r.Context(), h.Queries, workspaceID, uuidToString(agent.ID), r.Header.Get("X-Task-ID")); err != nil {
+			writeError(w, http.StatusForbidden, "mailbox requires a live pinned task")
+			return db.Agent{}, false
+		}
+		return agent, true
 	}
 	if r.Header.Get("X-Actor-Source") == "external_agent" {
 		if r.Header.Get("X-Agent-ID") != uuidToString(agent.ID) {
@@ -135,6 +151,27 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	agent, ok := h.loadMailboxAgentForActor(w, r)
 	if !ok {
 		return
+	}
+	sourceType := r.URL.Query().Get("kind")
+	if sourceType == "" {
+		sourceType = "comment"
+		if agent.ExecutionKind == "managed" {
+			sourceType = delegation.ResultTaskType
+		}
+	}
+	if sourceType != "comment" && sourceType != delegation.ResultTaskType {
+		writeError(w, http.StatusBadRequest, "kind must be comment or delegation_result")
+		return
+	}
+	var caller db.AgentTaskQueue
+	managedActor := r.Header.Get("X-Actor-Source") == "task_token"
+	if managedActor {
+		var err error
+		caller, err = h.Queries.GetAgentTask(r.Context(), parseUUID(r.Header.Get("X-Task-ID")))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to verify mailbox consumer")
+			return
+		}
 	}
 	limit := mailboxLimitDefault
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -157,6 +194,7 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := h.Queries.ListAgentMailboxMessages(r.Context(), db.ListAgentMailboxMessagesParams{
 		RecipientAgentID: agent.ID,
+		SourceType:       sourceType,
 		WorkspaceID:      agent.WorkspaceID,
 		AfterCreatedAt:   afterCreated,
 		AfterID:          afterID,
@@ -169,6 +207,16 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
 	messages := make([]MailboxMessageResponse, 0, len(rows))
 	for _, row := range rows {
+		if managedActor {
+			visible, err := service.ManagedMailboxResultVisible(r.Context(), h.Queries, row, caller)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to verify mailbox scope")
+				return
+			}
+			if !visible {
+				continue
+			}
+		}
 		messages = append(messages, mailboxMessageToResponse(
 			row,
 			sessions[uuidToString(row.SourceSessionID)],
@@ -234,6 +282,10 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if agent.ExecutionKind == "managed" && r.Header.Get("X-Actor-Source") != "task_token" {
+		writeError(w, http.StatusForbidden, "managed result consumption requires the receiving task credential")
+		return
+	}
 	var req ackMailboxProcessingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -247,12 +299,16 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	updated, err := h.Queries.AckAgentMailboxProcessing(r.Context(), db.AckAgentMailboxProcessingParams{
+	var callerID pgtype.UUID
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		callerID = parseUUID(r.Header.Get("X-Task-ID"))
+	}
+	updated, err := h.TaskService.AckMailbox(r.Context(), db.AckAgentMailboxProcessingParams{
 		ID:               messageID,
 		WorkspaceID:      agent.WorkspaceID,
 		RecipientAgentID: agent.ID,
 		State:            req.State,
-	})
+	}, callerID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "mailbox message not found")

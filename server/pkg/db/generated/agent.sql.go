@@ -1645,6 +1645,7 @@ WHERE id = (
     WHERE atq.agent_id = $2
       AND atq.runtime_id = $3
       AND atq.status = 'queued'
+      AND NOT EXISTS (SELECT 1 FROM agent_task_delegation_return l JOIN agent_mailbox_message m ON m.id = l.notification_delivery_id WHERE l.notification_task_id = atq.id AND m.processing_status = 'handled')
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
       AND EXISTS (
           SELECT 1

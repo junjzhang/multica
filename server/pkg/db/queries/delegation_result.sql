@@ -82,7 +82,7 @@ WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
 
 -- name: SetDelegationResultTask :exec
 UPDATE agent_task_delegation_return
-SET notification_task_id = @notification_task_id, materialized_at = now()
+SET notification_task_id = @notification_task_id, notification_delivery_id = @notification_delivery_id, materialized_at = now()
 WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
 
@@ -125,18 +125,25 @@ ORDER BY r.created_at, r.id;
 -- source task is only a conversation anchor, never caller provenance. A one-off takeover
 -- carries no continuation, and a return already traversed by this outcome may
 -- not be traversed again.
-WITH RECURSIVE proposed AS (
-    SELECT incoming.notification_task_id AS task_id, upstream.delegation_return_id,
+WITH RECURSIVE recipients AS (
+ SELECT incoming.*, CASE WHEN handling.status = 'cancelled' AND mailbox.processing_status = 'handled'
+                              AND mailbox.handled_by_task_id IS NOT NULL
+                         THEN mailbox.handled_by_task_id ELSE incoming.notification_task_id END AS consumer_task_id
+ FROM agent_task_delegation_return incoming
+ JOIN agent_task_queue handling ON handling.id = incoming.notification_task_id
+ LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = incoming.notification_delivery_id
+), proposed AS (
+    SELECT incoming.consumer_task_id AS task_id, upstream.delegation_return_id,
            CASE WHEN bool_or(upstream.caller_task_ids IS NULL) THEN NULL
                 ELSE COALESCE(array_agg(DISTINCT parent_caller) FILTER (WHERE parent_caller IS NOT NULL), '{}') END AS caller_task_ids
-    FROM agent_task_delegation_return incoming
+    FROM recipients incoming
     JOIN LATERAL unnest(incoming.caller_task_ids) caller ON true
     JOIN agent_task_delegation_return upstream ON upstream.task_id = caller
     LEFT JOIN LATERAL unnest(upstream.caller_task_ids) parent_caller ON true
     WHERE incoming.notification_task_id IS NOT NULL
       AND incoming.takeover_id IS NULL AND upstream.takeover_id IS NULL
-      AND (sqlc.narg(task_id)::uuid IS NULL OR incoming.notification_task_id = sqlc.narg(task_id))
-    GROUP BY incoming.notification_task_id, upstream.delegation_return_id
+      AND (sqlc.narg(task_id)::uuid IS NULL OR incoming.consumer_task_id = sqlc.narg(task_id))
+    GROUP BY incoming.consumer_task_id, upstream.delegation_return_id
 ), candidates AS (
     SELECT proposed.* FROM proposed
     WHERE NOT EXISTS (
@@ -148,11 +155,11 @@ WITH RECURSIVE proposed AS (
 ), traversed AS (
     SELECT candidate.task_id AS continuation_task_id, prior.task_id, prior.delegation_return_id
     FROM candidates candidate
-    JOIN agent_task_delegation_return prior ON prior.notification_task_id = candidate.task_id
+    JOIN recipients prior ON prior.consumer_task_id = candidate.task_id
     UNION
     SELECT next.continuation_task_id, prior.task_id, prior.delegation_return_id
-    FROM agent_task_delegation_return prior
-    JOIN traversed next ON prior.notification_task_id = next.task_id
+    FROM recipients prior
+    JOIN traversed next ON prior.consumer_task_id = next.task_id
 ), missing AS (
     SELECT candidate.* FROM candidates candidate
     WHERE NOT EXISTS (
@@ -192,10 +199,12 @@ SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
        handling.terminal_reported_at AS handling_terminal_reported_at,
-       handling.resource_control_required AS handling_resource_control_required
+       handling.resource_control_required AS handling_resource_control_required,
+       mailbox.processing_status AS mailbox_processing_status
 FROM agent_task_delegation_return l
 LEFT JOIN agent_task_queue t ON t.id = l.task_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
+LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
 WHERE l.delegation_return_id = @return_id;
 
 -- name: ConfirmTaskSessionPin :execrows

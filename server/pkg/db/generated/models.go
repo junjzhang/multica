@@ -103,6 +103,7 @@ type AgentMailboxMessage struct {
 	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
 	NotificationKey  pgtype.Text        `json:"notification_key"`
 	WithdrawnAt      pgtype.Timestamptz `json:"withdrawn_at"`
+	HandledByTaskID  pgtype.UUID        `json:"handled_by_task_id"`
 }
 
 type AgentMcpServer struct {
