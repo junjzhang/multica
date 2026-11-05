@@ -55,6 +55,8 @@ func requireUpstreamReturns(t *testing.T, turn db.AgentTaskQueue, wanted ...db.I
 func completeContinuation(t *testing.T, turn db.AgentTaskQueue, claim AgentTaskResponse, output string) {
 	t.Helper()
 	address := claim.DelegationResult
+	message := queryString(t, `SELECT notification_delivery_id::text FROM agent_task_delegation_return WHERE notification_task_id=$1`, turn.ID)
+	ackManagedResult(t, turn, message, "handled", http.StatusOK)
 	testutil.Call(t, testHandler.CompleteTask, withURLParam(newOwnerDaemonRequest("POST", "/complete", map[string]string{
 		"output": output, "session_id": address.SessionID, "work_dir": address.WorkDir,
 	}), "taskId", uuidToString(turn.ID))).Want(http.StatusOK)

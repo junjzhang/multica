@@ -15,6 +15,8 @@ func completeResultHandlingTurn(t *testing.T, result db.AgentTaskQueue) {
 	t.Helper()
 	task, claim := startResultHandlingTurn(t, result)
 	address := claim.DelegationResult
+	message := queryString(t, `SELECT notification_delivery_id::text FROM agent_task_delegation_return WHERE notification_task_id=$1`, task.ID)
+	ackManagedResult(t, task, message, "handled", http.StatusOK)
 	testutil.Call(t, testHandler.CompleteTask, withURLParam(newOwnerDaemonRequest("POST", "/complete", map[string]string{"output": "Processed the exact delegated outcome", "session_id": address.SessionID, "work_dir": address.WorkDir}), "taskId", uuidToString(task.ID))).Want(200)
 }
 
