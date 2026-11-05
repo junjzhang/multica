@@ -199,6 +199,8 @@ export type MailboxProcessingStatus = "unread" | "read" | "handled" | "unknown";
 
 /** One mailbox delivery of a native comment to an external agent session. */
 export interface MailboxMessage {
+  payload?: Record<string, unknown>;
+  handled_by_task_id?: string;
   id: string;
   issue_id: string;
   /**

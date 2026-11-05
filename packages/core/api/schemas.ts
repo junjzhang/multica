@@ -1339,6 +1339,8 @@ const IssueMergeAuthorizationSchema = z.object({
 }).loose();
 
 export const MailboxMessageSchema = z.object({
+  payload: z.record(z.string(), z.unknown()).optional().catch(undefined),
+  handled_by_task_id: z.string().min(1).optional().catch(undefined),
   id: z.string(),
   issue_id: z.string().default(""),
   comment_id: z.string().nullish().transform((value) => value ?? "").catch(""),

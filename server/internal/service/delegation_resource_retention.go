@@ -138,14 +138,20 @@ func resultDependencyRetention(ctx context.Context, q *db.Queries, dep db.ListRe
 	if !dep.HandlingStatus.Valid || !terminalResourceTask(dep.HandlingStatus.String) {
 		return "result_delivery_pending", nil
 	}
+	if dep.HandlingResourceControlRequired.Bool && !dep.HandlingTerminalReportedAt.Valid {
+		return "result_execution_exit_unknown", nil
+	}
+	if dep.MailboxProcessingStatus.String == "handled" {
+		return "", nil
+	}
 	if dep.HandlingStatus.String == "failed" && dep.HandlingFailureReason.String != protocol.DelegationResultUnavailable {
 		return "result_delivery_unknown", nil
 	}
 	if dep.HandlingStatus.String == "cancelled" && dep.HandlingStartedAt.Valid {
 		return "result_delivery_unknown", nil
 	}
-	if dep.HandlingResourceControlRequired.Bool && !dep.HandlingTerminalReportedAt.Valid {
-		return "result_execution_exit_unknown", nil
+	if dep.HandlingStatus.String == "completed" {
+		return "result_consumption_pending", nil
 	}
 	return "", nil
 }

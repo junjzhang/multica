@@ -175,6 +175,80 @@ OS lock. This exception does not cover user artifact patterns, workdirs,
 provider transcripts, or result evidence. Empty task-root index entries are
 metadata only; pruning them does not delete an execution directory.
 
+## Mailbox consumption and wakeups
+
+Every delegated outcome has one `agent_mailbox_message`, including managed
+results. Its stable notification key is `result:<outcome-task>:return:<return>`.
+The delegation link records the result, frozen return, mailbox ID and optional
+managed wakeup task. It does not own a second processing state. Managed mailbox
+rows have no external target session and cannot enter the external delivery
+worker; their wakeup status is the associated task's status.
+
+A live managed task reads its addressed results with:
+
+```sh
+multica agent mailbox list "<recipient-agent-id>" --kind delegation_result --output json
+multica agent mailbox ack "<recipient-agent-id>" "$MESSAGE_ID" --state handled
+```
+
+Follow `next_cursor` using `--after` until the page has no cursor. The payload
+contains saved result and return references; reading never acknowledges them.
+`read` and `handled` are explicit, monotonic receipts. ACK is not issue
+acceptance, a new business result, or authority to merge a pull request.
+
+Managed reads and ACKs require the receiving task credential, workspace, pinned
+runtime/session/workdir, business scope, and actual callers' originator
+authority. Another scope or authority of the same agent cannot consume the
+result. Human owners may inspect managed mailbox records, but cannot consume
+on behalf of a task. The first managed consumer is recorded as
+`handled_by_task_id` on the mailbox.
+
+ACK locks the consumer and wakeup tasks in ID order, then changes the mailbox
+receipt and cancels only unstarted wakeups in the same transaction. Queue claim
+also excludes handled messages. Start and ACK serialize on the task row: a
+started task continues; a cancellation that wins makes start refuse. The
+consumer inherits the cancelled wakeup's real upstream obligations. Later
+reconciliation follows that consumer for late caller links, and provenance
+checks follow all consumed incoming results so unknown ancestry stays unknown.
+No ACK itself produces a completed task or delegated outcome.
+
+A daemon whose exact claim was cancelled during preparation receives
+`cancelled_claim: true` from `/start`. After its runner exits, it sends a
+cancel-ack fenced by the original runtime and dispatch timestamp. A stale
+claim cannot prove another owner's exit. Older servers do not emit that marker;
+new daemons keep their old stale-claim behavior against them. Lost exit receipts
+retain resources until the receipt is recovered; ACK never fabricates exit.
+
+A handled result no longer pins resources after its executions have exited.
+Active tasks and missing resource-control exit receipts still retain them.
+Completed but unacknowledged result tasks remain pending consumption; business
+acceptance and execution exit remain separate release requirements.
+
+External results use the same processing receipt. A handled pending result is
+withdrawn before host acceptance. Leased or unknown transport states retain
+their exact lease and receipt and are verified using the existing delivery ID;
+withdrawal prevents a known no-effect response from returning to the send queue.
+The existing external credential remains agent/workspace scoped. This change
+does not create per-session external credentials or claim isolation between
+sessions sharing that credential.
+
+## Mailbox migration boundary
+
+Migrations 646–648 backfill mailbox records for historical managed wakeups and
+add consumer provenance and the result-to-message index. Existing external
+message IDs, destinations, receipts and unknown states are preserved. Backfill
+does not infer `handled` from a completed run. Inspect historical notifications
+and arrange explicit consumption from an authorized pinned task when required.
+
+Quiesce result writers and drain in-flight daemon preparation before applying
+these migrations. Upgrade all API/result-reconciliation writers together, and
+upgrade daemons before enabling managed consumption: an old daemon cannot
+report the new cancelled-before-start receipt. This is a coordinated upgrade,
+not a mixed old/new writer rollout. The database constraint rejects old writers
+that create a managed notification without its mailbox record. Rollback refuses
+to discard existing managed mailbox/consumer facts; recover forward rather than
+running old consumers against acknowledged notifications.
+
 ## User directory ownership and upgrades
 
 A project `local_directory` cannot point into daemon-owned workspaces or a

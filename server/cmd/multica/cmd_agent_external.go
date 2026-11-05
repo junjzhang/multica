@@ -61,7 +61,7 @@ var agentMailboxCmd = &cobra.Command{
 
 var agentMailboxListCmd = &cobra.Command{
 	Use:   "list <agent-id>",
-	Short: "List mailbox messages for an external agent",
+	Short: "List messages addressed to an agent",
 	Args:  exactArgs(1),
 	RunE:  runAgentMailboxList,
 }
@@ -125,6 +125,7 @@ func registerAgentTokenRevokeFlags(cmd *cobra.Command) {
 }
 
 func registerAgentMailboxListFlags(cmd *cobra.Command) {
+	cmd.Flags().String("kind", "", "Message kind: comment or delegation_result")
 	cmd.Flags().String("after", "", "Opaque cursor from the previous page")
 	cmd.Flags().Int("limit", 50, "Maximum messages to return (1-100)")
 	cmd.Flags().String("output", "table", "Output format: table or json")
@@ -416,6 +417,9 @@ func runAgentMailboxList(cmd *cobra.Command, args []string) error {
 
 	params := url.Values{}
 	params.Set("limit", fmt.Sprint(limit))
+	if kind := flagString(cmd, "kind"); kind != "" {
+		params.Set("kind", kind)
+	}
 	if after := strings.TrimSpace(flagString(cmd, "after")); after != "" {
 		params.Set("after", after)
 	}

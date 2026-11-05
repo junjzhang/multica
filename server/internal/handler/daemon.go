@@ -4628,6 +4628,7 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	}
 	enableTaskSupplement := slices.Contains(req.Capabilities, protocol.DaemonCapabilityTaskSupplementV1)
 	var task *db.AgentTaskQueue
+	var claim db.LockAgentTaskStartClaimParams
 	var err error
 	legacy := req.RuntimeID == "" && req.DispatchedAt == ""
 	if legacy {
@@ -4644,14 +4645,23 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "dispatched_at must be a PostgreSQL claim timestamp")
 			return
 		}
-		task, err = h.TaskService.StartTaskForClaim(r.Context(), db.LockAgentTaskStartClaimParams{
+		claim = db.LockAgentTaskStartClaimParams{
 			ID: parseUUID(taskID), RuntimeID: runtimeID,
 			DispatchedAt: pgtype.Timestamptz{Time: generation, Valid: true},
-		}, enableTaskSupplement)
+		}
+		task, err = h.TaskService.StartTaskForClaim(r.Context(), claim, enableTaskSupplement)
 	}
 	if err != nil {
 		slog.Warn("start task failed", "task_id", taskID, "error", err)
 		if errors.Is(err, pgx.ErrNoRows) {
+			if !legacy {
+				current, readErr := h.Queries.GetAgentTask(r.Context(), claim.ID)
+				if readErr == nil && current.Status == "cancelled" && !current.StartedAt.Valid && current.RuntimeID == claim.RuntimeID && current.DispatchedAt.Valid && current.DispatchedAt.Time.Equal(claim.DispatchedAt.Time) {
+					writeJSON(w, http.StatusConflict, map[string]any{"error": "this claim was cancelled before execution", "cancelled_claim": true})
+					return
+				}
+			}
+
 			status := http.StatusConflict
 			if legacy {
 				status = http.StatusBadRequest
@@ -5801,6 +5811,8 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 // transcript (#5219); idempotent when nothing was deferred.
 // TaskCancelAckRequest is the body of the daemon's cancel acknowledgement.
 type TaskCancelAckRequest struct {
+	RuntimeID    string `json:"runtime_id,omitempty"`
+	DispatchedAt string `json:"dispatched_at,omitempty"`
 	// BranchName: a cancelled worktree task has already committed whatever the
 	// agent produced — the worktree is finalized before the daemon learns of
 	// the cancellation. The rest of the result is discarded on this path, so
@@ -5831,6 +5843,29 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 	// break the cancellation contract this endpoint exists for.
 	var req TaskCancelAckRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.RuntimeID != "" || req.DispatchedAt != "" {
+		runtimeID, ok := parseUUIDOrBadRequest(w, req.RuntimeID, "runtime_id")
+		if !ok {
+			return
+		}
+		generation, err := time.Parse(time.RFC3339Nano, req.DispatchedAt)
+		if err != nil || generation.Nanosecond()%1000 != 0 {
+			writeError(w, http.StatusBadRequest, "invalid dispatched_at")
+			return
+		}
+		exited, err := h.Queries.RecordCancelledClaimExit(r.Context(), db.RecordCancelledClaimExitParams{TaskID: task.ID, RuntimeID: runtimeID, DispatchedAt: pgtype.Timestamptz{Time: generation, Valid: true}})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "cancelled claim no longer matches")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record claim exit")
+			return
+		}
+		h.TaskService.NotifyTaskFinished(exited)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	// Same persistence hazard as /fail and /complete: these strings go straight
 	// into TEXT columns, and this endpoint fails LOUD on write errors, so an
 	// unsanitized NUL here turns a cancelled task's only pointer to its work

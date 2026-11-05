@@ -5826,6 +5826,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		}
 	}()
 	if errors.Is(err, errStartClaimRejected) {
+
+		if errors.Is(err, errStartClaimCancelled) {
+			if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{RuntimeID: task.RuntimeID, DispatchedAt: task.DispatchedAt}); ackErr != nil {
+				taskLog.Warn("cancelled start claim exit acknowledgement failed", "error", ackErr)
+			} else {
+				terminalConfirmed = true
+			}
+		}
 		// The row belongs to another claim (or is terminal). A task-id-only
 		// failure callback from this stale delivery could kill its new owner.
 		taskLog.Info("discarding rejected start claim", "error", err)

@@ -75,14 +75,12 @@ WHERE recipient_agent_id = @recipient_agent_id AND comment_id = @comment_id;
 -- client; both halves are bound, so a page boundary can never repeat or skip a
 -- message created in the same millisecond.
 --
--- Only comment projections are listed: the frozen DTO carries issue_id and
--- comment_id, and a generic delivery has neither. Old clients keep their exact
--- view; generic deliveries are read through the delivery core until a separate
--- projection exists.
+-- External clients retain the default comment projection. Delegation results
+-- are selected explicitly; managed consumers are additionally scope-filtered.
 SELECT * FROM agent_mailbox_message
 WHERE recipient_agent_id = @recipient_agent_id
   AND workspace_id = @workspace_id
-  AND source_type = 'comment'
+  AND source_type = @source_type
   AND (
     sqlc.narg('after_created_at')::timestamptz IS NULL
     OR created_at > sqlc.narg('after_created_at')::timestamptz
@@ -300,14 +298,20 @@ WHERE recipient_agent_id = ANY(@agent_ids::uuid[])
 
 -- name: AckAgentMailboxProcessing :one
 -- Monotonic processing state: read can never undo handled, and handled is
--- terminal. Delivery state is deliberately untouched — receiving a message is
--- not executing it.
+-- terminal. Handled external results withdraw an unaccepted wakeup while leased
+-- and unknown rows preserve transport state for receipt verification.
 UPDATE agent_mailbox_message
 SET processing_status = CASE
         WHEN processing_status = 'handled' THEN 'handled'
         WHEN @state::text = 'handled' THEN 'handled'
         ELSE 'read'
     END,
+    handled_by_task_id = CASE WHEN processing_status <> 'handled' AND @state::text = 'handled'
+        THEN sqlc.narg(handled_by_task_id)::uuid ELSE handled_by_task_id END,
+    delivery_status = CASE WHEN @state::text = 'handled' AND kind = 'delegation_result'
+        AND target_session_id IS NOT NULL AND delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = CASE WHEN @state::text = 'handled' AND kind = 'delegation_result'
+        AND target_session_id IS NOT NULL THEN COALESCE(withdrawn_at, now()) ELSE withdrawn_at END,
     updated_at = now()
 WHERE id = @id
   AND workspace_id = @workspace_id
@@ -366,3 +370,47 @@ WHERE a.workspace_id = @workspace_id
     )
   )
 ORDER BY a.created_at ASC, a.id ASC;
+
+-- name: CreateManagedResultMailbox :one
+INSERT INTO agent_mailbox_message (
+ id, workspace_id, issue_id, recipient_agent_id, source_type, source_key,
+ kind, notification_key, payload
+) VALUES (@id, @workspace_id, @issue_id, @recipient_agent_id, 'delegation_result',
+ @notification_key, 'delegation_result', @notification_key, @payload)
+RETURNING *;
+
+-- name: GetMailboxResultReturn :one
+SELECT r.* FROM issue_delegation_return r
+JOIN agent_task_delegation_return l ON l.delegation_return_id=r.id
+WHERE l.notification_delivery_id= @message_id AND r.workspace_id= @workspace_id;
+
+-- name: LockMailboxConsumptionTasks :many
+SELECT sqlc.embed(t), EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.notification_delivery_id = @message_id AND l.notification_task_id = t.id) AS is_wakeup
+FROM agent_task_queue t
+WHERE t.id = sqlc.narg(caller_task_id) OR t.id IN (
+ SELECT l.notification_task_id FROM agent_task_delegation_return l WHERE l.notification_delivery_id = @message_id
+)
+ORDER BY t.id FOR UPDATE OF t;
+
+-- name: CancelHandledMailboxResultTask :one
+UPDATE agent_task_queue SET status='cancelled', completed_at=now(),
+ error='Mailbox result handled before execution'
+WHERE id= @task_id AND status IN ('queued','deferred','dispatched','waiting_local_directory')
+ AND started_at IS NULL
+RETURNING *;
+
+-- name: RecordCancelledClaimExit :one
+UPDATE agent_task_queue SET terminal_reported_at = COALESCE(terminal_reported_at, now())
+WHERE id = @task_id AND runtime_id = @runtime_id AND dispatched_at = @dispatched_at
+ AND status = 'cancelled' AND started_at IS NULL
+RETURNING *;
+
+-- name: GetMailboxResultObligation :one
+SELECT * FROM agent_task_delegation_return WHERE notification_delivery_id = @message_id;
+
+-- name: ListConsumedResultObligations :many
+SELECT l.* FROM agent_task_delegation_return l
+JOIN agent_mailbox_message m ON m.id = l.notification_delivery_id
+JOIN agent_task_queue handling ON handling.id = l.notification_task_id
+WHERE m.handled_by_task_id = @task_id AND m.processing_status = 'handled'
+ AND handling.status = 'cancelled';

@@ -332,6 +332,10 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 		apply(&opts)
 	}
 	body := buildPromptBody(task, provider)
+	if task.AgentID != "" && task.SessionPinGeneration != "" {
+		body += fmt.Sprintf("\nDelegated results use Mailbox processing receipts. Query `multica agent mailbox list %s --kind delegation_result --output json` while waiting or handling results. Follow next_cursor with --after. Reading does not acknowledge processing. After processing a message, run `multica agent mailbox ack %s <message-id> --state handled`; this cancels its unstarted wakeup, not accepted upstream responsibilities or issue acceptance.\n", task.AgentID, task.AgentID)
+	}
+
 	// Run-scoped context is appended, never prepended: everything ahead of it
 	// is stable across runs of a resumed session, and appending keeps it after
 	// the cached prefix (MUL-5377).

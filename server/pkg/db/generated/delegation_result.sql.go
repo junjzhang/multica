@@ -1002,10 +1002,12 @@ SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
        handling.terminal_reported_at AS handling_terminal_reported_at,
-       handling.resource_control_required AS handling_resource_control_required
+       handling.resource_control_required AS handling_resource_control_required,
+       mailbox.processing_status AS mailbox_processing_status
 FROM agent_task_delegation_return l
 LEFT JOIN agent_task_queue t ON t.id = l.task_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
+LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
 WHERE l.delegation_return_id = $1
 `
 
@@ -1020,6 +1022,7 @@ type ListReturnResultDependenciesRow struct {
 	HandlingFailureReason           pgtype.Text               `json:"handling_failure_reason"`
 	HandlingTerminalReportedAt      pgtype.Timestamptz        `json:"handling_terminal_reported_at"`
 	HandlingResourceControlRequired pgtype.Bool               `json:"handling_resource_control_required"`
+	MailboxProcessingStatus         pgtype.Text               `json:"mailbox_processing_status"`
 }
 
 func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgtype.UUID) ([]ListReturnResultDependenciesRow, error) {
@@ -1051,6 +1054,7 @@ func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgt
 			&i.HandlingFailureReason,
 			&i.HandlingTerminalReportedAt,
 			&i.HandlingResourceControlRequired,
+			&i.MailboxProcessingStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -1557,18 +1561,25 @@ func (q *Queries) MarkTaskResourceControlRequired(ctx context.Context, arg MarkT
 }
 
 const propagateResultSourceReturns = `-- name: PropagateResultSourceReturns :execrows
-WITH RECURSIVE proposed AS (
-    SELECT incoming.notification_task_id AS task_id, upstream.delegation_return_id,
+WITH RECURSIVE recipients AS (
+ SELECT incoming.task_id, incoming.delegation_return_id, incoming.created_at, incoming.notification_delivery_id, incoming.notification_task_id, incoming.notification_error, incoming.materialized_at, incoming.last_attempt_at, incoming.takeover_id, incoming.caller_task_ids, CASE WHEN handling.status = 'cancelled' AND mailbox.processing_status = 'handled'
+                              AND mailbox.handled_by_task_id IS NOT NULL
+                         THEN mailbox.handled_by_task_id ELSE incoming.notification_task_id END AS consumer_task_id
+ FROM agent_task_delegation_return incoming
+ JOIN agent_task_queue handling ON handling.id = incoming.notification_task_id
+ LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = incoming.notification_delivery_id
+), proposed AS (
+    SELECT incoming.consumer_task_id AS task_id, upstream.delegation_return_id,
            CASE WHEN bool_or(upstream.caller_task_ids IS NULL) THEN NULL
                 ELSE COALESCE(array_agg(DISTINCT parent_caller) FILTER (WHERE parent_caller IS NOT NULL), '{}') END AS caller_task_ids
-    FROM agent_task_delegation_return incoming
+    FROM recipients incoming
     JOIN LATERAL unnest(incoming.caller_task_ids) caller ON true
     JOIN agent_task_delegation_return upstream ON upstream.task_id = caller
     LEFT JOIN LATERAL unnest(upstream.caller_task_ids) parent_caller ON true
     WHERE incoming.notification_task_id IS NOT NULL
       AND incoming.takeover_id IS NULL AND upstream.takeover_id IS NULL
-      AND ($1::uuid IS NULL OR incoming.notification_task_id = $1)
-    GROUP BY incoming.notification_task_id, upstream.delegation_return_id
+      AND ($1::uuid IS NULL OR incoming.consumer_task_id = $1)
+    GROUP BY incoming.consumer_task_id, upstream.delegation_return_id
 ), candidates AS (
     SELECT proposed.task_id, proposed.delegation_return_id, proposed.caller_task_ids FROM proposed
     WHERE NOT EXISTS (
@@ -1580,11 +1591,11 @@ WITH RECURSIVE proposed AS (
 ), traversed AS (
     SELECT candidate.task_id AS continuation_task_id, prior.task_id, prior.delegation_return_id
     FROM candidates candidate
-    JOIN agent_task_delegation_return prior ON prior.notification_task_id = candidate.task_id
+    JOIN recipients prior ON prior.consumer_task_id = candidate.task_id
     UNION
     SELECT next.continuation_task_id, prior.task_id, prior.delegation_return_id
-    FROM agent_task_delegation_return prior
-    JOIN traversed next ON prior.notification_task_id = next.task_id
+    FROM recipients prior
+    JOIN traversed next ON prior.consumer_task_id = next.task_id
 ), missing AS (
     SELECT candidate.task_id, candidate.delegation_return_id, candidate.caller_task_ids FROM candidates candidate
     WHERE NOT EXISTS (
@@ -1766,19 +1777,25 @@ func (q *Queries) SetDelegationResultDelivery(ctx context.Context, arg SetDelega
 
 const setDelegationResultTask = `-- name: SetDelegationResultTask :exec
 UPDATE agent_task_delegation_return
-SET notification_task_id = $1, materialized_at = now()
-WHERE task_id = $2 AND delegation_return_id = $3
+SET notification_task_id = $1, notification_delivery_id = $2, materialized_at = now()
+WHERE task_id = $3 AND delegation_return_id = $4
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL
 `
 
 type SetDelegationResultTaskParams struct {
-	NotificationTaskID pgtype.UUID `json:"notification_task_id"`
-	TaskID             pgtype.UUID `json:"task_id"`
-	DelegationReturnID pgtype.UUID `json:"delegation_return_id"`
+	NotificationTaskID     pgtype.UUID `json:"notification_task_id"`
+	NotificationDeliveryID pgtype.UUID `json:"notification_delivery_id"`
+	TaskID                 pgtype.UUID `json:"task_id"`
+	DelegationReturnID     pgtype.UUID `json:"delegation_return_id"`
 }
 
 func (q *Queries) SetDelegationResultTask(ctx context.Context, arg SetDelegationResultTaskParams) error {
-	_, err := q.db.Exec(ctx, setDelegationResultTask, arg.NotificationTaskID, arg.TaskID, arg.DelegationReturnID)
+	_, err := q.db.Exec(ctx, setDelegationResultTask,
+		arg.NotificationTaskID,
+		arg.NotificationDeliveryID,
+		arg.TaskID,
+		arg.DelegationReturnID,
+	)
 	return err
 }
 

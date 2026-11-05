@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 )
 
@@ -22,7 +23,10 @@ type ExternalSession struct {
 // processing are deliberately separate: a delivered message is not a completed
 // run. Claiming for delivery is the delivery worker's contract, not this DTO.
 type MailboxMessage struct {
+	HandledByTaskID  string           `json:"handled_by_task_id,omitempty"`
 	ID               string           `json:"id"`
+	Kind             string           `json:"kind"`
+	Payload          json.RawMessage  `json:"payload,omitempty"`
 	IssueID          string           `json:"issue_id"`
 	CommentID        string           `json:"comment_id"`
 	RecipientAgentID string           `json:"recipient_agent_id"`

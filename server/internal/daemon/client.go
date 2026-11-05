@@ -478,6 +478,7 @@ const (
 )
 
 var errStartClaimRejected = errors.New("task start claim rejected")
+var errStartClaimCancelled = errors.New("task start claim cancelled")
 
 func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...string) (bool, error) {
 	var negotiated bool
@@ -520,6 +521,13 @@ func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...strin
 	}, decodeResponse, startTaskRetrySchedule)
 	var reqErr *requestError
 	if errors.As(err, &reqErr) && reqErr.StatusCode == http.StatusConflict {
+		var rejection struct {
+			CancelledClaim bool `json:"cancelled_claim"`
+		}
+		if json.Unmarshal([]byte(reqErr.Body), &rejection) == nil && rejection.CancelledClaim {
+			return false, fmt.Errorf("%w: %w: %w", errStartClaimRejected, errStartClaimCancelled, err)
+		}
+
 		return false, fmt.Errorf("%w: %w", errStartClaimRejected, err)
 	}
 	return err == nil && negotiated, err
@@ -542,6 +550,8 @@ func (c *Client) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID, reas
 
 // TaskCancelAck is the payload of the daemon's cancel acknowledgement.
 type TaskCancelAck struct {
+	RuntimeID    string
+	DispatchedAt string
 	// BranchName: a cancelled worktree task has already finalized — its
 	// partial work is committed to a branch in the user's repo. The cancel
 	// path discards the rest of the result, so this ack is the only channel
@@ -575,6 +585,10 @@ type TaskCancelAck struct {
 // The server never overwrites already-recorded values, so replays are safe.
 func (c *Client) AckTaskCancelled(ctx context.Context, taskID string, ack TaskCancelAck) error {
 	body := map[string]any{}
+	if ack.RuntimeID != "" || ack.DispatchedAt != "" {
+		body["runtime_id"], body["dispatched_at"] = ack.RuntimeID, ack.DispatchedAt
+	}
+
 	if ack.BranchName != "" {
 		body["branch_name"] = ack.BranchName
 	}

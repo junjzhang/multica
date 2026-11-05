@@ -175,11 +175,15 @@ describe("IssueSchema external collaboration projection", () => {
 
   it("keeps a delivered-but-unread message distinct, including unknown states", () => {
     const parsed = MailboxMessageListSchema.parse([
-      { id: "msg-1", delivery_status: "delivered", processing_status: "unread" },
-      { id: "msg-2", delivery_status: "future_delivery", processing_status: "future_processing" },
+      { id: "msg-1", delivery_status: "delivered", processing_status: "unread", payload: { result_task_id: "result-1" }, handled_by_task_id: "consumer-1" },
+      { id: "msg-2", delivery_status: "future_delivery", processing_status: "future_processing", payload: 42, handled_by_task_id: [] },
       { id: "msg-3", delivery_status: "failed", processing_status: "handled", last_error: "host offline" },
       { delivery_status: "delivered" },
     ]);
+    expect(parsed[0]?.payload).toEqual({ result_task_id: "result-1" });
+    expect(parsed[0]?.handled_by_task_id).toBe("consumer-1");
+    expect(parsed[1]?.payload).toBeUndefined();
+    expect(parsed[1]?.handled_by_task_id).toBeUndefined();
     expect(parsed.map((message) => [message.id, message.delivery_status, message.processing_status])).toEqual([
       ["msg-1", "delivered", "unread"],
       ["msg-2", "unknown", "unknown"],
