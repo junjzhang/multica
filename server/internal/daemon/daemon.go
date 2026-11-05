@@ -2672,7 +2672,8 @@ probeLoop:
 			// daemon may be the stale side of the skew. A probe that merely
 			// failed is transient, on the same rule every other provider's
 			// version probe gets.
-			switch probeDshMulticaProfile(ctx, resolved.Path) {
+			profileVerdict, diagnostic := probeDshMulticaProfile(ctx, resolved.Path)
+			switch profileVerdict {
 			case dshProbeOK:
 			case dshProbeMissingProfile:
 				d.logger.Warn("skip registering runtime: DSH Multica runtime profile is not installed",
@@ -2692,8 +2693,11 @@ probeLoop:
 				// is. The labelled break matters: a bare one would leave only
 				// the switch and fall through to registering a runtime whose
 				// profile answered nothing.
-				lastErr = errors.New(dshProbeFailedReason)
 				transientReason = dshProbeFailedReason
+				if diagnostic != "" {
+					transientReason += ": " + diagnostic
+				}
+				lastErr = errors.New(transientReason)
 				if time.Since(startedAt) >= runtimeVersionProbeRetryWindow {
 					break probeLoop
 				}
