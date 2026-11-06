@@ -1032,6 +1032,12 @@ type IssueChildEvent struct {
 	ProcessedAt  pgtype.Timestamptz `json:"processed_at"`
 }
 
+type IssueContract struct {
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Data        []byte      `json:"data"`
+}
+
 type IssueDelegationReturn struct {
 	ID                pgtype.UUID        `json:"id"`
 	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
