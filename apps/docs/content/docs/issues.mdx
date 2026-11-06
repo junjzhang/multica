@@ -118,3 +118,25 @@ Deletion cannot be undone: the issue with its comments, attachments, and linked 
 - [Comments](/comments) — discuss, reply, and @mention around an issue.
 - [Assign issues to agents](/assigning-issues) — hand work to an agent and start the first run.
 - [Runs](/tasks) — learn about queuing, running, retries, and cancellation.
+
+## Contract and acceptance
+
+The issue's Properties sidebar shows its contract above external collaboration.
+The assignee remains responsible for delivery while the coordinator accepts or
+returns the submitted evidence. Selecting criteria accepts only those items;
+remaining criteria stay open. The issue becomes done after every criterion in
+the current version has been accepted. A merged PR or completed agent run does
+not accept a contract.
+
+Create a contract after choosing different executor and coordinator identities.
+A human other than the executor, or its verified original request agent, defines
+its goal, scope, authorization notes and criteria. The notes record agreement;
+they do not grant access, merge or deployment rights. Existing permissions apply. Revising a contract starts a new version with fresh acceptance; old
+deliveries remain in history. Changes to responsibility or merge authorization
+require a revised agreement before further delivery. Existing issues remain
+without a contract until one is explicitly created.
+
+Agents use the same contract with `multica issue contract get ISSUE --output
+json` and `multica issue contract apply ISSUE --request-file ./request.json`.
+An acceptor can explicitly close delivery children covered by the submission;
+other children retain their own statuses.

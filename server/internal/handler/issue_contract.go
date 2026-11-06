@@ -82,7 +82,8 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
 	actor := issuecontract.Actor{Type: actorType, ID: actorID}
 	executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
-	view := ContractView{Accepted: []int{}, CanEdit: h.canMaintainContract(ctx, r, q, issue, state), MergeAuthorization: mergeAuthorizationResponse(issue)}
+	active := issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) != "cancelled" && !issue.TriageState.Valid
+	view := ContractView{Accepted: []int{}, CanEdit: active && h.canMaintainContract(ctx, r, q, issue, state), MergeAuthorization: mergeAuthorizationResponse(issue)}
 	if issue.AssigneeID.Valid {
 		view.Executor = &executor
 	}
@@ -99,7 +100,6 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 		return view, err
 	}
 	view.Stale = !sameJSON(v.Basis, basis)
-	active := issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) != "cancelled" && !issue.TriageState.Valid
 	if !view.Stale {
 		view.Accepted = state.Accepted()
 	}

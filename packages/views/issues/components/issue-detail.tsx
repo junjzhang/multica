@@ -15,6 +15,7 @@ import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { AppLink, useBackOrReplace } from "../../navigation";
 import { IssueDuplicateBanner, IssueDuplicatesSection, isDuplicateIssue } from "./issue-duplicates";
 import { IssueExternalCollaboration } from "./issue-external-collaboration";
+import { IssueContract } from "./issue-contract";
 import {
   Archive,
   Calendar,
@@ -338,6 +339,14 @@ function formatActivity(
 ): string {
   const details = (entry.details ?? {}) as Record<string, string>;
   switch (entry.action) {
+    case "issue_contract_revise":
+      return t(($) => $.contract.activity_revise);
+    case "issue_contract_submit":
+      return t(($) => $.contract.activity_submit);
+    case "issue_contract_accept":
+      return t(($) => $.contract.activity_accept);
+    case "issue_contract_return":
+      return t(($) => $.contract.activity_return);
     case "created":
       return t(($) => $.activity.created);
     case "status_changed":
@@ -3014,6 +3023,8 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       )}
 
       <IssueDuplicatesSection issueId={issue.id} />
+
+      <IssueContract issueId={issue.id} />
 
       <IssueExternalCollaboration issue={issue} agents={agents} />
 

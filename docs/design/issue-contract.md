@@ -55,19 +55,51 @@ version. The response is the refreshed contract view; 409 means the agreement,
 delivery, identity or sequence changed, and 403 means the actor lacks authority.
 
 ```json
-{"action":"revise","client_request_id":"01900000-0000-7000-8000-000000000001","expected_sequence":0,"goal":"Ship the change","scope":"Shared issue details","authorization_note":"Implement and test; no merge","requirements":["API tests pass","Browser evidence reviewed"]}
+{
+  "action": "revise",
+  "client_request_id": "01900000-0000-7000-8000-000000000001",
+  "expected_sequence": 0,
+  "goal": "Ship the change",
+  "scope": "Shared issue details",
+  "authorization_note": "Implement and test; no merge",
+  "requirements": ["API tests pass", "Browser evidence reviewed"]
+}
 ```
 
 ```json
-{"action":"submit","client_request_id":"01900000-0000-7000-8000-000000000002","expected_sequence":1,"version":1,"criteria":[0,1],"evidence":"PR and test report URLs","child_ids":[]}
+{
+  "action": "submit",
+  "client_request_id": "01900000-0000-7000-8000-000000000002",
+  "expected_sequence": 1,
+  "version": 1,
+  "criteria": [0, 1],
+  "evidence": "PR and test report URLs",
+  "child_ids": []
+}
 ```
 
 ```json
-{"action":"accept","client_request_id":"01900000-0000-7000-8000-000000000003","expected_sequence":2,"version":1,"delivery_id":"01900000-0000-7000-8000-000000000002","criteria":[0],"reason":"API verified","child_ids":[]}
+{
+  "action": "accept",
+  "client_request_id": "01900000-0000-7000-8000-000000000003",
+  "expected_sequence": 2,
+  "version": 1,
+  "delivery_id": "01900000-0000-7000-8000-000000000002",
+  "criteria": [0],
+  "reason": "API verified",
+  "child_ids": []
+}
 ```
 
 ```json
-{"action":"return","client_request_id":"01900000-0000-7000-8000-000000000004","expected_sequence":4,"version":1,"delivery_id":"01900000-0000-7000-8000-000000000005","reason":"Include refreshed screenshots"}
+{
+  "action": "return",
+  "client_request_id": "01900000-0000-7000-8000-000000000004",
+  "expected_sequence": 4,
+  "version": 1,
+  "delivery_id": "01900000-0000-7000-8000-000000000005",
+  "reason": "Include refreshed screenshots"
+}
 ```
 
 The CLI reads with `multica issue contract get ISSUE --output json` and applies
