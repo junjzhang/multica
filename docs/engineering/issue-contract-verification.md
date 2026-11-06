@@ -6,6 +6,8 @@ review fixes; the evidence commit adds this report, screenshots and the isolated
 migration round-trip test. WORK-178 and PR12 record subsequent review and CI gates.
 UI revision `20e424ec3` additionally separates conflict recovery from unknown-result
 retry and wraps long structured permission targets.
+Revision `d5156663e` applies the same lock to the revision dialog, preventing a
+member acceptor from rebinding an older review selection through that entry.
 
 ## Behavior and evidence
 
@@ -26,7 +28,7 @@ retry and wraps long structured permission targets.
 | Lint | Root `pnpm lint` | Passed with existing warnings |
 | Frontend tests | Node22 full suite had one complete pass; a later full repeat hit an unchanged workflow-editor test timeout; its isolated rerun plus locale parity passed 216 tests | Full repeat limitation retained |
 | Browser and CLI | Three Playwright scenarios described below | Passed |
-| Conflict recovery | Submit/review discard old selections and restart at the current version; unknown results retry the original UUID | Three component regressions passed |
+| Conflict recovery | Submit/review restart explicitly, the revision entry shares the lock, and unknown results retry the original UUID | Four component regressions passed |
 | Long merge target | Actual 390px browser, long repository and legal 220-character branch, local sidebar overflow check | Passed |
 
 Go validation used Go 1.26.9, the checkout's managed database, and the agent CLI
