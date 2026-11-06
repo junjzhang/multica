@@ -34,7 +34,7 @@ Chaque tâche porte un numéro, par exemple `MUL-123`. Les chiffres s'incrément
 | **Agent** | Une exécution est créée pour cet agent. |
 | **Squad** | Le chef du squad la reçoit et décide qui la traite. |
 
-Lorsqu'elle est assignée à un agent ou à un squad, la tâche est immédiatement mise en file d'attente, sauf si elle est en `backlog` ; si le runtime est hors ligne, l'exécution attend dans la file. Les agents et les squads archivés ne peuvent pas être assignés.
+Lorsqu'elle est assignée à un agent ou à un squad, la tâche est immédiatement mise en file d'attente, sauf si elle est en `backlog` ; si le runtime est hors ligne, l'exécution attend dans la file. Un changement de statut ultérieur ne la démarre pas : @mentionnez explicitement l'assigné ou relancez la tâche. Les agents et les squads archivés ne peuvent pas être assignés.
 
 L'assignation ne contourne pas l'**Accès** d'un agent ; lors d'une assignation à un squad, c'est l'Accès du chef qui est vérifié. Voir [Assigner des tâches aux agents](/assigning-issues).
 
@@ -53,7 +53,7 @@ Les catégories simplifient le raisonnement sur le cycle de vie. Les tableaux, l
 
 | Statut | Signification |
 |---|---|
-| `backlog` (À planifier) | Pas encore à démarrer. Une tâche assignée à un agent ne crée une exécution qu'après avoir quitté `backlog`. |
+| `backlog` (À planifier) | Pas encore à démarrer. L'assignation enregistre le responsable ; @mentionnez explicitement l'assigné ou relancez la tâche pour démarrer. |
 | `todo` (À faire) | Cadrée et en attente de démarrage. |
 | `in_progress` (En cours) | En cours de traitement. |
 | `in_review` (En relecture) | Un résultat attend une relecture. |
@@ -61,9 +61,9 @@ Les catégories simplifient le raisonnement sur le cycle de vie. Les tableaux, l
 | `blocked` (Bloqué) | Ne peut pas continuer pour l'instant. |
 | `cancelled` (Annulé) | Abandonnée ; l'historique est conservé. |
 
-Les membres et les agents peuvent modifier directement les statuts. Dans un projet avec un [workflow](/workflows), choisissez parmi ses étapes. Entrer dans une étape avec passage de relais peut aussi changer le responsable et demander à un agent de commencer.
+Les membres et les agents peuvent modifier directement les statuts. Dans un projet avec un [workflow](/workflows), choisissez parmi ses étapes. Entrer dans une étape avec passage de relais peut aussi changer le responsable, mais ne démarre pas d'exécution ; @mentionnez le responsable ou relancez la tâche pour commencer.
 
-Les agents mettent à jour le statut au fil du travail. Par défaut, ils indiquent le travail en cours au démarrage et la relecture à la livraison. Si le projet utilise un workflow, ils suivent ses étapes et ses consignes. La fin d’une exécution ne termine pas la tâche à elle seule ; répondre à une question ne signifie pas que tout le travail est livré.
+Les agents mettent à jour le statut au fil du travail. Par défaut, ils indiquent le travail en cours au démarrage et la relecture à la livraison. Si le projet utilise un workflow, ils suivent ses étapes et @mentionnent explicitement le prochain responsable pour transmettre le travail. La fin d’une exécution ne termine pas la tâche à elle seule ; répondre à une question ne signifie pas que tout le travail est livré.
 
 <Callout type="info">
 Deux changements sont effectués par le système :
@@ -94,7 +94,7 @@ Une tâche appartient à un [projet](/projects) au plus ; le projet fournit des 
 
 Un travail plus important peut être découpé en sous-tâches : la tâche parente conserve l'objectif global tandis que les sous-tâches avancent indépendamment. Les statuts de la tâche parente et des sous-tâches ne s'influencent pas.
 
-Les sous-tâches peuvent recevoir une **Étape** pour avancer par lots — 1, 2, 3. Lorsque toutes les sous-tâches de la première étape non terminée atteignent `done` ou `cancelled`, la tâche parente reçoit une notification « sous-tâches terminées » ; si l'assigné de la tâche parente est un agent, celui-ci se réveille et décide s'il lance l'étape suivante. Les sous-tâches sans étape forment un seul lot et ne déclenchent qu'une notification, lorsqu'elles sont toutes terminées.
+Les sous-tâches peuvent recevoir une **Étape** pour avancer par lots — 1, 2, 3. Lorsque toutes les sous-tâches de la première étape non terminée atteignent `done` ou `cancelled`, la tâche parente reçoit une notification « sous-tâches terminées » ; si l'assigné de la tâche parente est un agent, celui-ci se réveille et décide s'il lance l'étape suivante. Démarrer l'agent de l'étape suivante demande toujours une @ explicite ou une relance ; un changement de statut seul ne le lance pas. Les sous-tâches sans étape forment un seul lot et ne déclenchent qu'une notification, lorsqu'elles sont toutes terminées.
 
 ## Changer de vue
 

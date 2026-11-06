@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY IF EXISTS idx_comment_dispatch_obligation_pending;

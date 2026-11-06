@@ -197,11 +197,15 @@ func concurrentWriteAfterPointerCleared(t *testing.T, deleteOriginal bool) {
 	waited := false
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
 		var blocked bool
+		// A status write takes the issue row lock before updating, while an
+		// ordinary field edit blocks inside UpdateIssue itself. Either wait is
+		// the same row lock this test needs.
 		if err := testPool.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND wait_event_type = 'Lock'
-			  AND query LIKE '-- name: UpdateIssue :one%')`).Scan(&blocked); err != nil {
+			  AND (query LIKE '-- name: UpdateIssue :one%'
+			       OR query LIKE '-- name: LockIssueForDescriptionUpdate :one%'))`).Scan(&blocked); err != nil {
 			t.Fatal(err)
 		}
 		if blocked {

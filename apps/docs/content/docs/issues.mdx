@@ -34,7 +34,7 @@ Each issue has a number, such as `MUL-123`. The digits increment within the work
 | **Agent** | A run is created for that agent. |
 | **Squad** | The squad leader receives it and decides who handles it. |
 
-When assigned to an agent or a squad, the issue enqueues immediately unless it is in `backlog`; if the runtime is offline, the run waits in the queue. Archived agents and squads cannot be assigned.
+When assigned to an agent or a squad, the issue enqueues immediately unless it is in `backlog`; if the runtime is offline, the run waits in the queue. A later status change does not launch it — explicitly @-mention the assignee or rerun the issue. Archived agents and squads cannot be assigned.
 
 Assignment does not bypass an agent's Access; when assigning to a squad, the leader's Access is what gets checked. See [Assign issues to agents](/assigning-issues).
 
@@ -53,7 +53,7 @@ Categories keep lifecycle reasoning simple. Boards, lists, filters, and sorting 
 
 | Status | Meaning |
 |---|---|
-| `backlog` | Not starting yet. An issue assigned to an agent only creates a run after it leaves `backlog`. |
+| `backlog` | Not starting yet. Assignment records the owner; explicitly @-mention the assignee or rerun the issue to start it. |
 | `todo` | Scoped and waiting to start. |
 | `in_progress` | Being worked on. |
 | `in_review` | Has a result waiting for review. |
@@ -61,9 +61,9 @@ Categories keep lifecycle reasoning simple. Boards, lists, filters, and sorting 
 | `blocked` | Cannot continue for now. |
 | `cancelled` | No longer pursued; the record stays. |
 
-Members and agents can change statuses directly. In a project with a [workflow](/workflows), choose from that workflow’s steps. Moving into a step with a handoff can also change the assignee and ask an agent to start work.
+Members and agents can change statuses directly. In a project with a [workflow](/workflows), choose from that workflow’s steps. Moving into a step with a handoff can also change the assignee. It does not start a run; explicitly @-mention the handler or rerun the issue when the step should begin.
 
-Agents update the issue’s status as work progresses. By default, they mark work in progress when they begin and ready for review when they deliver. When a project has a workflow, they follow its steps and handoff instructions instead. A run ending does not complete the issue by itself; answering a question does not mean the issue’s work is finished.
+Agents update the issue’s status as work progresses. By default, they mark work in progress when they begin and ready for review when they deliver. When a project has a workflow, they follow its steps and explicitly @-mention the next handler to pass work on. A run ending does not complete the issue by itself; answering a question does not mean the issue’s work is finished.
 
 <Callout type="info">
 Two changes are made by the system:
@@ -94,11 +94,15 @@ An issue belongs to at most one [project](/projects); the project provides share
 
 Larger work can be split into sub-issues: the parent issue keeps the overall goal while sub-issues progress independently. Parent and child statuses do not affect each other.
 
-Sub-issues can be given a **stage** to advance in batches — 1, 2, 3. When every sub-issue in the earliest unfinished stage reaches `done` or `cancelled`, the parent issue receives a "sub-issues completed" notification; when the parent's assignee is an agent, it wakes up and decides whether to start the next stage. Sub-issues without a stage count as one batch and notify once when they all finish.
+Sub-issues can be given a **stage** to advance in batches — 1, 2, 3. When every sub-issue in the earliest unfinished stage reaches `done` or `cancelled`, the parent issue receives a "sub-issues completed" notification; when the parent's assignee is an agent, it wakes up and decides whether to start the next stage. Starting a next-stage agent still needs an explicit @-mention or rerun; a status move alone does not launch it. Sub-issues without a stage count as one batch and notify once when they all finish.
 
 ## Switch views
 
-The Issues page offers five views — list, board, table, Gantt, and swimlane — filterable and sortable by status, assignee, project, and other properties. They all show the same issues.
+The Issues page offers five views — list, board, table, Gantt, and swimlane — filterable and sortable by status, assignee, project, and other properties.
+
+A fresh board — the workspace **All** board or a project board — focuses on top-level issues. Searching or applying filters includes matching sub-issues, and a project's fixed scope alone does not count as a filter. Choosing **Display → Show sub-issues** makes that choice explicit and keeps it across searches and view changes; saved preferences are respected.
+
+Click a card's sub-issue count to open its children in the side preview. Parent and child links inside the preview keep you on the board. Use **Open full page** or a modified link click to open a separate destination.
 
 ## Delete an issue
 

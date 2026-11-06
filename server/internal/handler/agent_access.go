@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/attribution"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -47,7 +48,11 @@ import (
 // agent/system principals, but member/team targets fail closed without a
 // matching human.
 func (h *Handler) canInvokeAgent(ctx context.Context, agent db.Agent, actorType, actorID, originatorUserID, workspaceID string) bool {
-	allowed := h.invokeAgentDecision(ctx, agent, actorType, actorID, originatorUserID, workspaceID)
+	return h.canInvokeAgentWithQueries(ctx, h.Queries, agent, actorType, actorID, originatorUserID, workspaceID)
+}
+
+func (h *Handler) canInvokeAgentWithQueries(ctx context.Context, q *db.Queries, agent db.Agent, actorType, actorID, originatorUserID, workspaceID string) bool {
+	allowed := h.invokeAgentDecisionWithQueries(ctx, q, agent, actorType, actorID, originatorUserID, workspaceID)
 	if !allowed && actorType != "member" && originatorUserID == "" {
 		// MUL-6490: the wire reason stays the deliberately generic
 		// invocation_not_allowed (dispatch/reason.go — it must not reveal whether a
@@ -71,6 +76,10 @@ func (h *Handler) canInvokeAgent(ctx context.Context, agent db.Agent, actorType,
 // invokeAgentDecision is canInvokeAgent's pure verdict, split out so the gate has
 // exactly one place to observe a denial from.
 func (h *Handler) invokeAgentDecision(ctx context.Context, agent db.Agent, actorType, actorID, originatorUserID, workspaceID string) bool {
+	return h.invokeAgentDecisionWithQueries(ctx, h.Queries, agent, actorType, actorID, originatorUserID, workspaceID)
+}
+
+func (h *Handler) invokeAgentDecisionWithQueries(ctx context.Context, q *db.Queries, agent db.Agent, actorType, actorID, originatorUserID, workspaceID string) bool {
 	effectiveUser := actorID
 	if actorType != "member" {
 		// agent / system: never trust the immediate principal, only the
@@ -89,7 +98,7 @@ func (h *Handler) invokeAgentDecision(ctx context.Context, agent db.Agent, actor
 		return false
 	}
 
-	targets, err := h.Queries.ListAgentInvocationTargets(ctx, agent.ID)
+	targets, err := q.ListAgentInvocationTargets(ctx, agent.ID)
 	if err != nil {
 		return false
 	}
@@ -107,7 +116,7 @@ func (h *Handler) invokeAgentDecision(ctx context.Context, agent db.Agent, actor
 	workspaceBroad := actorType == "agent" || actorType == "system"
 	isWorkspaceMember := false
 	if effectiveUser != "" {
-		if _, err := h.getWorkspaceMember(ctx, effectiveUser, workspaceID); err == nil {
+		if _, err := h.getWorkspaceMemberWithQueries(ctx, q, effectiveUser, workspaceID); err == nil {
 			isWorkspaceMember = true
 		}
 	}
@@ -224,6 +233,12 @@ func (h *Handler) invokeOriginatorFromRequest(r *http.Request, actorType, actorI
 		return actorID
 	}
 	if actorType == "agent" {
+		// An external agent token has no task. Its authority is the token
+		// owner's verified workspace membership, re-checked by the auth
+		// middleware on every request, so the owner is the originator.
+		if r.Header.Get("X-Actor-Source") == "external_agent" {
+			return requestUserID(r)
+		}
 		if taskIDHeader := r.Header.Get("X-Task-ID"); taskIDHeader != "" {
 			if taskUUID, err := util.ParseUUID(taskIDHeader); err == nil {
 				if task, err := h.Queries.GetAgentTask(r.Context(), taskUUID); err == nil {
@@ -413,4 +428,43 @@ func (h *Handler) canEnqueueSquadLeader(ctx context.Context, leaderID pgtype.UUI
 		return false
 	}
 	return h.canInvokeAgent(ctx, agent, actorType, actorID, originatorUserID, workspaceID)
+}
+
+// externalOriginatorUserID is authentication middleware evidence, never a request body field.
+func externalOriginatorUserID(r *http.Request, actorType string) pgtype.UUID {
+	if actorType != "agent" || r.Header.Get("X-Actor-Source") != "external_agent" {
+		return pgtype.UUID{}
+	}
+	userID, _ := util.ParseUUID(requestUserID(r))
+	return userID
+}
+
+// A non-nil result records an explicit invocation, even when its verified
+// source has no human authority. Only derived/background work may fall back
+// to the target issue's historical provenance.
+func (h *Handler) dispatchAttributionFromRequest(r *http.Request, actorType, actorID string) *attribution.Result {
+	result := attribution.Unattributed(attribution.EvidenceIssueAssignment, pgtype.UUID{})
+	if actorType == "member" {
+		result = attribution.DirectHumanRun(memberActorUserID(actorType, actorID), attribution.EvidenceIssueAssignment, pgtype.UUID{})
+		return &result
+	}
+	if actorType != "agent" {
+		return &result
+	}
+	if r.Header.Get("X-Actor-Source") == "external_agent" {
+		userID := externalOriginatorUserID(r, actorType)
+		result = attribution.AgentDelegation(userID, userID, pgtype.UUID{}, attribution.EvidenceIssueAssignment, pgtype.UUID{})
+		return &result
+	}
+	sourceID := h.commentSourceTaskID(r)
+	if !sourceID.Valid {
+		return &result
+	}
+	result.DelegatedFromTaskID = sourceID
+	source, err := h.Queries.GetAgentTask(r.Context(), sourceID)
+	if err != nil || uuidToString(source.AgentID) != actorID || isTerminalTaskStatus(source.Status) {
+		return &result
+	}
+	result = attribution.AgentDelegation(source.OriginatorUserID, source.AccountableUserID, source.ID, attribution.EvidenceIssueAssignment, pgtype.UUID{})
+	return &result
 }

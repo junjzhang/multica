@@ -37,7 +37,7 @@ func TestCompleteTask_CancelledCommentDoesNotReplayQueuedInput(t *testing.T) {
 			triggerCommentID := dbfx.Comment(t, issueID, "initial request", testutil.Cols{
 				"created_at": testutil.Raw("now() - interval '10 minutes'"),
 			})
-			queuedContent := "reviewer request during run"
+			queuedContent := "[@owner](mention://agent/" + agentID + ") reviewer request during run"
 			queuedCols := testutil.Cols{
 				"created_at": testutil.Raw("now() - interval '1 minute'"),
 				"parent_id":  triggerCommentID,
@@ -90,7 +90,7 @@ func TestCompleteTask_CancelledCommentDoesNotReplayQueuedInput(t *testing.T) {
 			// A genuinely newer input remains eligible after the cancellation.
 			testutil.Call(t, testHandler.CreateComment, withURLParam(
 				newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{
-					"content":   "new input after cancel",
+					"content":   "[@owner](mention://agent/" + agentID + ") new input after cancel",
 					"parent_id": triggerCommentID,
 				}), "id", issueID)).Want(http.StatusCreated)
 			if n := pendingTaskCountForAgentIssue(t, issueID, agentID); n != 1 {
@@ -123,7 +123,7 @@ func TestCompleteTask_CancelledCommentFromAutomaticCancellationReconciles(t *tes
 	triggerCommentID := dbfx.Comment(t, issueID, "automatic recovery input", testutil.Cols{
 		"created_at": testutil.Raw("now() - interval '10 minutes'"),
 	})
-	queuedCommentID := dbfx.Comment(t, issueID, "automatic recovery input during run", testutil.Cols{
+	queuedCommentID := dbfx.Comment(t, issueID, "[@owner](mention://agent/"+agentID+") automatic recovery input during run", testutil.Cols{
 		"created_at": testutil.Raw("now() - interval '1 minute'"),
 		"parent_id":  triggerCommentID,
 	})
@@ -169,7 +169,7 @@ func TestCompleteTask_CancelledCommentEditStillReconciles(t *testing.T) {
 	rootID := dbfx.Comment(t, issueID, "initial request", testutil.Cols{
 		"created_at": testutil.Raw("now() - interval '10 minutes'"),
 	})
-	commentID := dbfx.Comment(t, issueID, "reviewer request during run", testutil.Cols{
+	commentID := dbfx.Comment(t, issueID, "[@owner](mention://agent/"+agentID+") reviewer request during run", testutil.Cols{
 		"created_at": testutil.Raw("now() - interval '1 minute'"),
 		"parent_id":  rootID,
 	})
@@ -191,7 +191,7 @@ func TestCompleteTask_CancelledCommentEditStillReconciles(t *testing.T) {
 	edit := httptest.NewRecorder()
 	testHandler.UpdateComment(edit, withURLParam(
 		newRequest(http.MethodPut, "/api/comments/"+commentID, map[string]any{
-			"content": "edited reviewer request",
+			"content": "[@owner](mention://agent/" + agentID + ") edited reviewer request",
 		}), "commentId", commentID))
 	if edit.Code != http.StatusOK {
 		t.Fatalf("UpdateComment: expected 200, got %d: %s", edit.Code, edit.Body.String())

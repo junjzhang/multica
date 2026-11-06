@@ -1,12 +1,12 @@
 /**
- * Token-based Git provider integration types (Forgejo, Gitea, GitLab). Unlike
+ * Token-based Git provider integration types (Forgejo, Gitea, GitLab, TGit). Unlike
  * GitHub there is no App/installation model: each workspace stores a
  * token-based connection to a provider instance. Pull requests mirrored from any
  * of these providers surface through the shared GitHubPullRequest shape, tagged
  * with the matching `provider`.
  */
 
-export type VCSProvider = "forgejo" | "gitea" | "gitlab";
+export type VCSProvider = "forgejo" | "gitea" | "gitlab" | "tgit";
 
 export interface VCSConnection {
   id: string;
@@ -46,7 +46,7 @@ export interface ConnectVCSRequest {
 
 export interface ConnectVCSResponse extends VCSConnection {
   /** One-time plaintext webhook secret to paste into the provider (HMAC secret
-   * for Forgejo/Gitea, X-Gitlab-Token value for GitLab). Not retrievable
+   * for Forgejo/Gitea, X-Gitlab-Token for GitLab, X-Token for TGit). Not retrievable
    * afterwards (stored encrypted); reconnecting rotates it. */
   webhook_secret: string;
 }

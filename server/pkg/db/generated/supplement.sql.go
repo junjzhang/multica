@@ -278,7 +278,7 @@ WITH locked_task AS MATERIALIZED (
     SELECT i.id, i.workspace_id, 'member', $4, $5, 'comment', t.trigger_comment_id
     FROM touched_issue i
     JOIN locked_task t ON t.issue_id = i.id
-    RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, resolved_at, resolved_by_type, resolved_by_id, source_task_id, quick_action_id, via_plugin_id, revision, recovery_settled_at, deleted_at, suppressed_agent_ids
+    RETURNING id, issue_id, author_type, author_id, content, type, created_at, updated_at, parent_id, workspace_id, resolved_at, resolved_by_type, resolved_by_id, source_task_id, quick_action_id, via_plugin_id, revision, recovery_settled_at, deleted_at, suppressed_agent_ids, external_originator_user_id
 ), inserted_supplement AS (
     INSERT INTO task_supplement (
         task_id, workspace_id, issue_id, comment_id, author_id,
@@ -292,7 +292,7 @@ WITH locked_task AS MATERIALIZED (
     JOIN inserted_comment c ON c.issue_id = i.id
     RETURNING task_id, workspace_id, issue_id, comment_id, author_id, client_request_id, status, failure_reason, attempt_count, created_at, updated_at, delivered_at
 )
-SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type, c.created_at, c.updated_at, c.parent_id, c.workspace_id, c.resolved_at, c.resolved_by_type, c.resolved_by_id, c.source_task_id, c.quick_action_id, c.via_plugin_id, c.revision, c.recovery_settled_at, c.deleted_at, c.suppressed_agent_ids, i.revision AS issue_revision,
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type, c.created_at, c.updated_at, c.parent_id, c.workspace_id, c.resolved_at, c.resolved_by_type, c.resolved_by_id, c.source_task_id, c.quick_action_id, c.via_plugin_id, c.revision, c.recovery_settled_at, c.deleted_at, c.suppressed_agent_ids, c.external_originator_user_id, i.revision AS issue_revision,
        s.task_id AS supplement_task_id, s.status AS supplement_status,
        s.failure_reason AS supplement_failure_reason,
        s.delivered_at AS supplement_delivered_at
@@ -311,31 +311,32 @@ type CreateTaskSupplementParams struct {
 }
 
 type CreateTaskSupplementRow struct {
-	ID                      pgtype.UUID        `json:"id"`
-	IssueID                 pgtype.UUID        `json:"issue_id"`
-	AuthorType              string             `json:"author_type"`
-	AuthorID                pgtype.UUID        `json:"author_id"`
-	Content                 string             `json:"content"`
-	Type                    string             `json:"type"`
-	CreatedAt               pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
-	ParentID                pgtype.UUID        `json:"parent_id"`
-	WorkspaceID             pgtype.UUID        `json:"workspace_id"`
-	ResolvedAt              pgtype.Timestamptz `json:"resolved_at"`
-	ResolvedByType          pgtype.Text        `json:"resolved_by_type"`
-	ResolvedByID            pgtype.UUID        `json:"resolved_by_id"`
-	SourceTaskID            pgtype.UUID        `json:"source_task_id"`
-	QuickActionID           pgtype.UUID        `json:"quick_action_id"`
-	ViaPluginID             pgtype.UUID        `json:"via_plugin_id"`
-	Revision                int64              `json:"revision"`
-	RecoverySettledAt       pgtype.Timestamptz `json:"recovery_settled_at"`
-	DeletedAt               pgtype.Timestamptz `json:"deleted_at"`
-	SuppressedAgentIds      []pgtype.UUID      `json:"suppressed_agent_ids"`
-	IssueRevision           int64              `json:"issue_revision"`
-	SupplementTaskID        pgtype.UUID        `json:"supplement_task_id"`
-	SupplementStatus        string             `json:"supplement_status"`
-	SupplementFailureReason pgtype.Text        `json:"supplement_failure_reason"`
-	SupplementDeliveredAt   pgtype.Timestamptz `json:"supplement_delivered_at"`
+	ID                       pgtype.UUID        `json:"id"`
+	IssueID                  pgtype.UUID        `json:"issue_id"`
+	AuthorType               string             `json:"author_type"`
+	AuthorID                 pgtype.UUID        `json:"author_id"`
+	Content                  string             `json:"content"`
+	Type                     string             `json:"type"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	ParentID                 pgtype.UUID        `json:"parent_id"`
+	WorkspaceID              pgtype.UUID        `json:"workspace_id"`
+	ResolvedAt               pgtype.Timestamptz `json:"resolved_at"`
+	ResolvedByType           pgtype.Text        `json:"resolved_by_type"`
+	ResolvedByID             pgtype.UUID        `json:"resolved_by_id"`
+	SourceTaskID             pgtype.UUID        `json:"source_task_id"`
+	QuickActionID            pgtype.UUID        `json:"quick_action_id"`
+	ViaPluginID              pgtype.UUID        `json:"via_plugin_id"`
+	Revision                 int64              `json:"revision"`
+	RecoverySettledAt        pgtype.Timestamptz `json:"recovery_settled_at"`
+	DeletedAt                pgtype.Timestamptz `json:"deleted_at"`
+	SuppressedAgentIds       []pgtype.UUID      `json:"suppressed_agent_ids"`
+	ExternalOriginatorUserID pgtype.UUID        `json:"external_originator_user_id"`
+	IssueRevision            int64              `json:"issue_revision"`
+	SupplementTaskID         pgtype.UUID        `json:"supplement_task_id"`
+	SupplementStatus         string             `json:"supplement_status"`
+	SupplementFailureReason  pgtype.Text        `json:"supplement_failure_reason"`
+	SupplementDeliveredAt    pgtype.Timestamptz `json:"supplement_delivered_at"`
 }
 
 // Locking the exact task serializes against terminal transitions.
@@ -372,6 +373,7 @@ func (q *Queries) CreateTaskSupplement(ctx context.Context, arg CreateTaskSupple
 		&i.RecoverySettledAt,
 		&i.DeletedAt,
 		&i.SuppressedAgentIds,
+		&i.ExternalOriginatorUserID,
 		&i.IssueRevision,
 		&i.SupplementTaskID,
 		&i.SupplementStatus,
@@ -751,7 +753,7 @@ WHERE t.id = candidate.id
   -- Reference the data-modifying CTE explicitly: capability persistence and
   -- the returned running row are one indivisible statement.
   AND (SELECT count(*) FROM capability) >= 0
-RETURNING t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step
+RETURNING t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation
 `
 
 type StartAgentTaskWithSupplementParams struct {
@@ -826,6 +828,11 @@ func (q *Queries) StartAgentTaskWithSupplement(ctx context.Context, arg StartAge
 		&i.CancelledByName,
 		&i.IssueSnapshot,
 		&i.WorkflowStep,
+		&i.DelegationOutcomeFinal,
+		&i.ResourceControlRequired,
+		&i.TerminalReportedAt,
+		&i.SessionPinConfirmed,
+		&i.SessionPinGeneration,
 	)
 	return i, err
 }

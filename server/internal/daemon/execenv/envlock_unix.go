@@ -30,6 +30,17 @@ func lockFileExclusiveNonBlocking(f *os.File) (ok bool, err error) {
 	return false, err
 }
 
+func lockFileSharedNonBlocking(f *os.File) (ok bool, err error) {
+	err = unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if err == nil {
+		return true, nil
+	}
+	if err == unix.EWOULDBLOCK {
+		return false, nil
+	}
+	return false, err
+}
+
 // unlockFile drops the advisory lock. Closing the file would do it too; this
 // makes the release explicit at the call site.
 func unlockFile(f *os.File) error {

@@ -136,7 +136,7 @@ func runRuntimeProfileList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	workspaceID, err := requireWorkspaceID(cmd)
+	workspaceID, err := commandWorkspaceID(cmd, client)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func runRuntimeProfileCreate(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	workspaceID, err := requireWorkspaceID(cmd)
+	workspaceID, err := commandWorkspaceID(cmd, client)
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func runRuntimeProfileUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	workspaceID, err := requireWorkspaceID(cmd)
+	workspaceID, err := commandWorkspaceID(cmd, client)
 	if err != nil {
 		return err
 	}
@@ -274,7 +274,7 @@ func runRuntimeProfileDelete(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	workspaceID, err := requireWorkspaceID(cmd)
+	workspaceID, err := commandWorkspaceID(cmd, client)
 	if err != nil {
 		return err
 	}

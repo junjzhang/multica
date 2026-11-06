@@ -3823,6 +3823,107 @@ func TestShouldRetryWithFreshSession(t *testing.T) {
 // can detect has already said "not a rejection" by leaving ResumeRejected
 // false, and must be taken at its word rather than second-guessed by
 // exclusion.
+// TestShouldRetryWithFreshSession_StrictResumeUnmetVetoesLegacySignals pins
+// the failure-signal contract for strict resume (WORK89). A strict run that
+// could not prove it continued the requested session must never be retried
+// from a fresh session, even though it reports ResumeRejected and even when
+// the other legacy fresh-retry triggers (unresumable history, unresolved auth
+// method, the undetectable-backend compatibility path) would say yes on their
+// own. The marker is checked before every one of them so callers cannot
+// re-enable the forbidden fallback by forgetting a guard.
+func TestShouldRetryWithFreshSession_StrictResumeUnmetVetoesLegacySignals(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		result         agent.Result
+		priorSessionID string
+		tools          int32
+		provider       string
+		want           bool
+	}{
+		{
+			name: "strict marker vetoes ResumeRejected",
+			result: agent.Result{
+				Status:            "failed",
+				Error:             "agent: strict resume requirement not met: codex thread/resume failed",
+				ResumeRejected:    true,
+				StrictResumeUnmet: true,
+			},
+			priorSessionID: "thr_requested",
+			provider:       "codex",
+			want:           false,
+		},
+		{
+			name: "strict marker vetoes transient rejection",
+			result: agent.Result{
+				Status:                  "failed",
+				Error:                   "agent: strict resume requirement not met: session is in use",
+				ResumeRejectedTransient: true,
+				StrictResumeUnmet:       true,
+			},
+			priorSessionID: "ses_requested",
+			provider:       "reasonix",
+			want:           false,
+		},
+		{
+			name: "strict marker vetoes unresumable history",
+			result: agent.Result{
+				Status:            "failed",
+				Error:             "invalid conversation history received",
+				StrictResumeUnmet: true,
+			},
+			priorSessionID: "ses_requested",
+			provider:       "kiro",
+			want:           false,
+		},
+		{
+			name: "strict marker vetoes unresolved auth method",
+			result: agent.Result{
+				Status:            "failed",
+				Error:             "hermes session/resume failed: Could not resolve authentication method",
+				StrictResumeUnmet: true,
+			},
+			priorSessionID: "ses_requested",
+			provider:       "hermes",
+			want:           false,
+		},
+		{
+			name: "strict marker vetoes undetectable compat path",
+			result: agent.Result{
+				Status:            "failed",
+				Error:             "agent exited before dispatching",
+				StrictResumeUnmet: true,
+			},
+			priorSessionID: "ses_requested",
+			provider:       "copilot",
+			want:           false,
+		},
+		{
+			name:           "ordinary rejected resume still retries",
+			result:         agent.Result{Status: "failed", Error: "no conversation found", ResumeRejected: true},
+			priorSessionID: "stale-id",
+			provider:       "claude",
+			want:           true,
+		},
+		{
+			name:           "ordinary undetectable empty session still retries",
+			result:         agent.Result{Status: "failed", Error: "agent exited before dispatching"},
+			priorSessionID: "stale-id",
+			provider:       "cursor",
+			want:           true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldRetryWithFreshSession(tc.result, tc.priorSessionID, tc.tools, tc.provider); got != tc.want {
+				t.Fatalf("shouldRetryWithFreshSession() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestShouldRetryWithFreshSession_CompatPathIsBackendScoped(t *testing.T) {
 	t.Parallel()
 

@@ -602,11 +602,11 @@ func writeWorkflowIssue(b *strings.Builder, ctx TaskContextForEnv) {
 
 	b.WriteString("**Issue status — write the state the issue is in, whenever it changes** (skip any status call your Agent Identity forbids)\n\n")
 	b.WriteString("Status reflects the state the ISSUE is in, not your run's lifecycle — keep it true at every point in the turn, not only at checkpoints: write the new value the moment your work changes it, mid-turn included. Write only when the new value differs from the current one, whoever the assignee is:\n\n")
-	b.WriteString("- You delivered what the issue itself asks for and it awaits acceptance → `in_review`. Delivering an issue assigned to you — including a sub-issue in a chain or stage — always lands here; stage barriers and parent notifications depend on that signal. `done` stays human.\n")
+	b.WriteString("- You delivered what the issue itself asks for and it awaits acceptance → `in_review`. Delivering an issue assigned to you — including a sub-issue in a chain or stage — always lands here; acceptance begins with that signal. `in_review` is not `done`: it closes no stage barrier and wakes no parent. An implementer never accepts its own delivery — the task's explicitly authorized coordinator verifies the review evidence, records acceptance, and closes the accepted sub-issue; without that authorization, stop at `in_review`. Acceptance is not merge authorization; merging needs its own grant.\n")
 	b.WriteString("- The issue's work continues beyond this turn — you dispatched sub-issues, or delivered one part with more underway → `in_progress`.\n")
 	b.WriteString("- You cannot proceed without something you are missing → `blocked`, and post a comment explaining the blocker unless your Agent Identity forbids issue comments.\n")
 	if ctx.IsSquadLeader {
-		b.WriteString("- Squad leader: dispatching members is not delivery — a dispatch turn leaves the parent `in_progress`, and it moves to `in_review` only on the later turn (a member update or stage-barrier re-trigger) where you confirm the overall goal is met.\n")
+		b.WriteString("- Squad leader: dispatching members is not delivery — a dispatch turn leaves the parent `in_progress`, and it moves to `in_review` only on a later turn where you confirm the overall goal is met. An ordinary member reply does not wake you: that later turn needs an explicit @mention of you, or the separate sub-issue/stage-barrier wakeup.\n")
 	}
 	// A custom catalog needs one reminder that workflow updates use exact keys.
 	if len(ctx.IssueStatuses) > 0 {
@@ -717,7 +717,7 @@ func writeMentions(b *strings.Builder) {
 	// client unfurls into the same chip) a project reference stays dead text.
 	b.WriteString("- `[Project Name](mention://project/<project-id>)` — clickable link (no side effect)\n")
 	b.WriteString("- `[@Name](mention://member/<user-id>)` — **notifies a human**\n")
-	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**\n\n")
+	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**; an external agent bound to a host session gets one mailbox request instead, delivered by its host adapter\n\n")
 	// No prescriptive default here (MUL-6417): the mention syntax hides its
 	// semantics — it reads like a free social gesture but is a spawn/notify
 	// operation — so what this paragraph must supply is the facts that
@@ -731,9 +731,11 @@ func writeMentions(b *strings.Builder) {
 	// The notify caveat is scoped to FOLLOWERS on
 	// purpose — for a human who does not follow the issue, a mention is
 	// exactly how they find out, and that escalation must stay available
-	// (Elon's review catch on #7245). The cost asymmetry line is what breaks
-	// the ambiguous middle.
-	b.WriteString("A mention pulls someone into work they are not doing yet: escalate to a human owner, hand another agent a concrete new sub-task, loop someone in because the user asked. It is not needed merely to notify — followers of the issue already see your comment, and completion notifications are platform-owned. Nor is it how a name is written — crediting a decision or citing someone's earlier point is prose about them, not work for them; the link form dispatches whoever it names, so a reference stays plain text. A thank-you / sign-off / FYI mention of another agent enqueues a paid run whose only possible reply is another courtesy; a missed mention costs one follow-up ask, a stray one costs a run. Silence ends conversations.\n\n")
+	// (Elon's review catch on #7245). Routine child activity can be visible in
+	// the GUI without creating a human Inbox row. Human mentions are reserved
+	// for actionable requests, not routine subagent results.
+	b.WriteString("A mention pulls someone into work they are not doing yet: escalate to a human owner, hand another agent a concrete new sub-task, loop someone in because the user asked. It is not needed merely to notify — followers of the issue already see your comment in the GUI, and completion notifications are platform-owned, but routine sub-issue activity may create no human Inbox notification; mention a human only when their decision, approval, intervention, or explicitly requested notification is needed. Routine child progress, delivery, and internal coordinator review are not reasons to mention the human. Nor is it how a name is written — crediting a decision or citing someone's earlier point is prose about them, not work for them; the link form dispatches whoever it names, so a reference stays plain text. A thank-you / sign-off / FYI mention of another agent enqueues a paid run whose only possible reply is another courtesy; a missed mention costs one follow-up ask, a stray one costs a run. Silence ends conversations.\n\n")
+	b.WriteString("Only an explicit @ is a handoff. An ordinary comment, a reply, or a read receipt starts no run, and a status change is display state rather than a request. When your result needs the leader, coordinator, or next executor to act, @-mention that agent in the result comment. Address a next-action handoff to the registered recipient: a managed agent gets a dispatched run, an external session gets one mailbox request. A coordinator with no registered identity is not woken, and a child's `done` wakes its parent's assignee by stage — reach any other coordinator with an explicit mention.\n\n")
 }
 
 // writeAttachments emits the Attachments pointer.
@@ -793,6 +795,9 @@ func writeInlineBlocksPolicy(b *strings.Builder) {
 func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 	b.WriteString("## Output\n\n")
 	switch kind {
+	case kindTaskResult:
+		b.WriteString("Your response is saved as this task's result in the original conversation. This turn has no assigned issue. Do not create an issue solely to receive or deliver this result.\n\n")
+		b.WriteString("**Delivering files here:** this task result is text-only. Describe saved artifacts and their owning business scope without presenting a local path as a delivered file.\n")
 	case kindAutopilotRunOnly:
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n\n")
 		b.WriteString("**Delivering files here:** this surface is text-only — the run result carries no attachments. Describe what you produced; do not link its path.\n")
@@ -846,26 +851,9 @@ func writeOutput(b *strings.Builder, kind taskKind, ctx TaskContextForEnv) {
 // Called from buildMetaSkillContent (runtime_config.go). The
 // `runtime_brief_slim` flag that once gated it was retired in MUL-4297.
 //
-// The Section × Kind matrix encoded below (skip = elide section, keep
-// = always emit, △ = data-driven inside the helper):
-//
-//	Section               | comment | assign | autopilot | quick_create | chat
-//	----------------------+---------+--------+-----------+--------------+------
-//	Available Commands    |   full  |  full  |   full    |   minimal    | full
-//	Issue Body Formatting |    ✓    |   ✓    |     ✓     |      ✓       |  ✓
-//	Comment Formatting    |    ✓    |   ✓    |     —     |      —       |  —
-//	Repositories          |    △    |   △    |     △     |      —       |  △
-//	Project Context       |    △    |   △    |     △     |      △       |  △
-//	Instruction Precedence|    —    |   ✓    |     —     |      —       |  —
-//	Sub-issue Creation    |    ✓    |   ✓    |     —     |      —       |  —
-//	Skills                |    ✓    |   ✓    |     ✓    |      ✓       |  ✓
-//	Mentions              |    ✓    |   ✓    |     —     |      —       |  —
-//	Attachments           |    ✓    |   ✓    |     —     |      —       |  —
-//
-// Always-on rows — Header, Background Task Safety, Agent Identity,
-// Requesting User, Workspace Context, Connected Apps,
-// Workflow, Always Use CLI, Output — are shared by every kind and emitted
-// unconditionally (or gated by their own data preconditions).
+// Identity and permission guidance is shared across kinds. Task-scoped result
+// turns keep their own workflow and output channel instead of inheriting the
+// source's quick-create action or an issue-comment obligation.
 func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 	var b strings.Builder
 	kind := classifyTask(ctx)
@@ -905,6 +893,8 @@ func buildMetaSkillContentSlim(provider string, ctx TaskContextForEnv) string {
 
 	writeWorkflowHeader(&b)
 	switch kind {
+	case kindTaskResult:
+		fmt.Fprintf(&b, "Process the saved result referenced by this turn in original task scope `%s`. Continue the original conversation as needed, using this turn's task identity. There is no automatic issue creation or issue status update for this turn.\n\n", ctx.ScopeTaskID)
 	case kindChat:
 		writeWorkflowChat(&b)
 	case kindQuickCreate:
