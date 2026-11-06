@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -12,10 +13,81 @@ import (
 
 func contractFixture(t *testing.T) (string, string) {
 	t.Helper()
-	executor := dbfx.Agent(t, "Contract executor", "")
+	executor := dbfx.Agent(t, "Contract executor "+uuidToString(dbid.NewV7()), "")
 	issue := dbfx.Issue(t, "Contract lifecycle", testutil.Cols{"assignee_type": "agent", "assignee_id": executor, "coordinator_type": "member", "coordinator_id": testUserID})
 	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
 	return issue, executor
+}
+
+func TestContractAgentAcceptorAndAtomicChildValidation(t *testing.T) {
+	issue, executor := contractFixture(t)
+	acceptor := dbfx.Agent(t, "Contract acceptor", "")
+	dbfx.Exec(t, "UPDATE issue SET coordinator_type='agent',coordinator_id=$2 WHERE id=$1", issue, acceptor)
+	contractCall(t, issue, definition(0), "").Want(200)
+	child := dbfx.Issue(t, "Review child", testutil.Cols{"parent_issue_id": issue, "status": "in_review", "coordinator_type": "agent", "coordinator_id": acceptor})
+	independent := dbfx.Issue(t, "Not a delivery", testutil.Cols{"status": "in_review"})
+	submit := contractRequest{Action: "submit", Version: 1, ExpectedSequence: 1, ClientRequestID: uuidToString(dbid.NewV7()), Criteria: []int{0, 1}, Evidence: "Agent delivery", ChildIDs: []string{child, independent}}
+	contractCall(t, issue, submit, executor).Want(200)
+	accept := contractRequest{Action: "accept", Version: 1, ExpectedSequence: 2, ClientRequestID: uuidToString(dbid.NewV7()), DeliveryID: submit.ClientRequestID, Criteria: []int{0, 1}, ChildIDs: []string{child, independent}}
+	contractCall(t, issue, accept, "").Want(403)
+	contractCall(t, issue, accept, acceptor).Want(409)
+	var status string
+	dbfx.QueryRow(t, "SELECT status FROM issue WHERE id=$1", child).Scan(&status)
+	if status != "in_review" {
+		t.Fatalf("failed acceptance partially closed child: %s", status)
+	}
+	accept.ChildIDs = []string{child}
+	contractCall(t, issue, accept, acceptor).Want(200)
+	dbfx.QueryRow(t, "SELECT status FROM issue WHERE id=$1", issue).Scan(&status)
+	if status != "done" {
+		t.Fatalf("agent acceptance failed to complete issue: %s", status)
+	}
+	// A new agreement after completion reopens the issue and clears acceptance.
+	var view ContractView
+	contractCall(t, issue, definition(3), "").Want(200).JSON(&view)
+	if view.Contract.Current().Number != 2 || len(view.Accepted) != 0 {
+		t.Fatalf("new agreement reused acceptance: %+v", view)
+	}
+}
+
+func TestContractWorkflowAndAutomationCannotBypassAcceptance(t *testing.T) {
+	issue, _ := contractFixture(t)
+	contractCall(t, issue, definition(0), "").Want(200)
+	ctx := context.Background()
+	_, err := testPool.Exec(ctx, "UPDATE issue SET status='done' WHERE id=$1", issue)
+	if err == nil {
+		t.Fatal("raw status writer bypassed acceptance")
+	}
+	lean := createTestWorkflow(t, "Contract workflow membership", "in_review")
+	project := dbfx.Project(t, "Lean workflow", testutil.Cols{"workflow_id": lean.ID})
+	other, _ := contractFixture(t)
+	dbfx.Exec(t, "UPDATE issue SET project_id=$2 WHERE id=$1", other, project)
+	contractCall(t, other, definition(0), "").Want(409)
+	if dbfx.Count(t, "SELECT count(*) FROM issue_contract WHERE issue_id=$1", other) != 0 {
+		t.Fatal("invalid workflow left a contract behind")
+	}
+}
+
+func TestContractMergedPRRequiresAcceptanceAndLegacyStillCloses(t *testing.T) {
+	const installation int64 = 9178178
+	const secret = "contract-pr-fixture"
+	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
+	issue := prAutoCompleteTestIssue(t, "Contracted PR", installation)
+	executor := dbfx.Agent(t, "PR contract executor", "")
+	dbfx.Exec(t, "UPDATE issue SET assignee_type='agent',assignee_id=$2 WHERE id=$1", issue.ID, executor)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue.ID)
+	contractCall(t, issue.ID, definition(0), "").Want(200)
+	firePRWebhook(t, secret, installation, 1, "Closes "+issue.Identifier, "", "fix/contract", "opened")
+	firePRWebhook(t, secret, installation, 1, "Closes "+issue.Identifier, "", "fix/contract", "merged")
+	if linkedPRCountForTest(t, issue.ID) != 1 || issueStatusForTest(t, issue.ID) != "in_progress" {
+		t.Fatal("merge incorrectly accepted the contract")
+	}
+	legacy := prAutoCompleteTestIssue(t, "Legacy PR", 0)
+	firePRWebhook(t, secret, installation, 2, "Closes "+legacy.Identifier, "", "fix/legacy", "opened")
+	firePRWebhook(t, secret, installation, 2, "Closes "+legacy.Identifier, "", "fix/legacy", "merged")
+	if issueStatusForTest(t, legacy.ID) != "done" {
+		t.Fatal("legacy PR completion changed")
+	}
 }
 
 func contractCall(t *testing.T, issue string, body any, agent string) *testutil.Response {
@@ -29,7 +101,7 @@ func contractCall(t *testing.T, issue string, body any, agent string) *testutil.
 }
 
 func definition(sequence int) contractRequest {
-	return contractRequest{Action: "revise", ExpectedSequence: sequence, ClientRequestID: uuidToString(dbid.NewV7()), Goal: "Ship the agreement", Scope: "Issue details", Authorization: "Implement and test only; no merge", Requirements: []string{"API behavior", "Browser evidence"}}
+	return contractRequest{Action: "revise", ExpectedSequence: sequence, ClientRequestID: uuidToString(dbid.NewV7()), Goal: "Ship the agreement", Scope: "Issue details", AuthorizationNote: "Implement and test only; no merge", Requirements: []string{"API behavior", "Browser evidence"}}
 }
 
 func TestContractLifecyclePartialReturnAndChildClosure(t *testing.T) {

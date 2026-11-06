@@ -14,16 +14,16 @@ type Actor struct {
 }
 
 type Version struct {
-	Number        int             `json:"number"`
-	Goal          string          `json:"goal"`
-	Scope         string          `json:"scope"`
-	Authorization string          `json:"authorization"`
-	Criteria      []string        `json:"criteria"`
-	Executor      Actor           `json:"executor"`
-	Acceptor      Actor           `json:"acceptor"`
-	Basis         json.RawMessage `json:"basis"`
-	Author        Actor           `json:"author"`
-	CreatedAt     time.Time       `json:"created_at"`
+	Number            int             `json:"number"`
+	Goal              string          `json:"goal"`
+	Scope             string          `json:"scope"`
+	AuthorizationNote string          `json:"authorization_note"`
+	Criteria          []string        `json:"criteria"`
+	Executor          Actor           `json:"executor"`
+	Acceptor          Actor           `json:"acceptor"`
+	Basis             json.RawMessage `json:"basis"`
+	Author            Actor           `json:"author"`
+	CreatedAt         time.Time       `json:"created_at"`
 }
 
 type Delivery struct {

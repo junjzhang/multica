@@ -19,35 +19,40 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
+	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 type ContractView struct {
-	Contract     *issuecontract.State `json:"contract"`
-	Stale        bool                 `json:"stale"`
-	Accepted     []int                `json:"accepted"`
-	PendingActor *issuecontract.Actor `json:"pending_actor"`
-	CanEdit      bool                 `json:"can_edit"`
-	CanSubmit    bool                 `json:"can_submit"`
-	CanReview    bool                 `json:"can_review"`
+	Contract           *issuecontract.State            `json:"contract"`
+	Stale              bool                            `json:"stale"`
+	Accepted           []int                           `json:"accepted"`
+	PendingActor       *issuecontract.Actor            `json:"pending_actor"`
+	Executor           *issuecontract.Actor            `json:"executor"`
+	Acceptor           *issuecontract.Actor            `json:"acceptor"`
+	CanEdit            bool                            `json:"can_edit"`
+	CanSubmit          bool                            `json:"can_submit"`
+	CanReview          bool                            `json:"can_review"`
+	MergeAuthorization IssueMergeAuthorizationResponse `json:"merge_authorization"`
 }
 
 type contractRequest struct {
-	Action           string   `json:"action"`
-	ClientRequestID  string   `json:"client_request_id"`
-	ExpectedSequence int      `json:"expected_sequence"`
-	Version          int      `json:"version"`
-	Goal             string   `json:"goal,omitempty"`
-	Scope            string   `json:"scope,omitempty"`
-	Authorization    string   `json:"authorization,omitempty"`
-	Requirements     []string `json:"requirements,omitempty"`
-	Criteria         []int    `json:"criteria,omitempty"`
-	Evidence         string   `json:"evidence,omitempty"`
-	DeliveryID       string   `json:"delivery_id,omitempty"`
-	Reason           string   `json:"reason,omitempty"`
-	ChildIDs         []string `json:"child_ids,omitempty"`
+	Action            string   `json:"action"`
+	ClientRequestID   string   `json:"client_request_id"`
+	ExpectedSequence  int      `json:"expected_sequence"`
+	Version           int      `json:"version"`
+	Goal              string   `json:"goal,omitempty"`
+	Scope             string   `json:"scope,omitempty"`
+	AuthorizationNote string   `json:"authorization_note,omitempty"`
+	Requirements      []string `json:"requirements,omitempty"`
+	Criteria          []int    `json:"criteria,omitempty"`
+	Evidence          string   `json:"evidence,omitempty"`
+	DeliveryID        string   `json:"delivery_id,omitempty"`
+	Reason            string   `json:"reason,omitempty"`
+	ChildIDs          []string `json:"child_ids,omitempty"`
 }
 
 func readContract(ctx context.Context, q *db.Queries, issue db.Issue) (issuecontract.State, error) {
@@ -77,7 +82,13 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
 	actor := issuecontract.Actor{Type: actorType, ID: actorID}
 	executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
-	view := ContractView{Accepted: []int{}, CanEdit: !isMachineCredentialActor(r) && actor != executor}
+	view := ContractView{Accepted: []int{}, CanEdit: h.canMaintainContract(ctx, r, q, issue, state), MergeAuthorization: mergeAuthorizationResponse(issue)}
+	if issue.AssigneeID.Valid {
+		view.Executor = &executor
+	}
+	if issue.CoordinatorID.Valid {
+		view.Acceptor = &issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
+	}
 	v := state.Current()
 	if v == nil {
 		return view, nil
@@ -183,6 +194,18 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 	q := h.Queries.WithTx(tx)
+	// Completion also locks a task before its issue; keep that order here.
+	if req.Action == "revise" && r.Header.Get("X-Actor-Source") == "task_token" {
+		taskID, err := util.ParseUUID(r.Header.Get("X-Task-ID"))
+		if err != nil {
+			writeError(w, 403, "a verified source run is required")
+			return
+		}
+		if _, err := q.LockAgentTaskForDelegation(ctx, taskID); err != nil {
+			writeError(w, 403, "a verified source run is required")
+			return
+		}
+	}
 	issue, err = q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
 	if err != nil {
 		writeError(w, 409, "issue changed; reload")
@@ -218,6 +241,9 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, err := h.applyContractRequest(ctx, r, q, issue, &state, req, actor)
+	if err == nil {
+		err = contractStatusAllowed(ctx, q, issue, status)
+	}
 	if err != nil {
 		var problem contractProblem
 		if errors.As(err, &problem) {
@@ -275,12 +301,12 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	now := time.Now().UTC()
 	v := state.Current()
 	if req.Action == "revise" {
-		if isMachineCredentialActor(r) || actor.Type != "member" {
-			return "", contractFail(403, "contract definitions and authorization require a human actor")
+		if !h.canMaintainContract(ctx, r, q, issue, *state) {
+			return "", contractFail(403, "contract maintenance requires a verified original requester in scope; the executor cannot change its agreement")
 		}
 		executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
 		if actor == executor {
-			return "", contractFail(403, "the executor cannot grant or revise its own authorization")
+			return "", contractFail(403, "the executor cannot revise its own agreement")
 		}
 		acceptor := issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
 		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent") || executor == acceptor {
@@ -292,8 +318,8 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		if _, _, msg := h.validateCoordinator(ctx, uuidToString(issue.WorkspaceID), IssueCoordinatorInput{Type: acceptor.Type, ID: acceptor.ID}); msg != "" {
 			return "", contractFail(400, msg)
 		}
-		if strings.TrimSpace(req.Goal) == "" || strings.TrimSpace(req.Authorization) == "" || len(req.Requirements) == 0 || len(req.Requirements) > 50 {
-			return "", contractFail(400, "goal, explicit authorization and 1–50 criteria are required")
+		if strings.TrimSpace(req.Goal) == "" || strings.TrimSpace(req.AuthorizationNote) == "" || len(req.Requirements) == 0 || len(req.Requirements) > 50 {
+			return "", contractFail(400, "goal, authorization note and 1–50 criteria are required")
 		}
 		for _, c := range req.Requirements {
 			if strings.TrimSpace(c) == "" || len(c) > 2000 {
@@ -308,7 +334,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		if err != nil {
 			return "", err
 		}
-		state.Versions = append(state.Versions, issuecontract.Version{Number: len(state.Versions) + 1, Goal: req.Goal, Scope: req.Scope, Authorization: req.Authorization, Criteria: req.Requirements, Executor: executor, Acceptor: acceptor, Basis: basis, Author: actor, CreatedAt: now})
+		state.Versions = append(state.Versions, issuecontract.Version{Number: len(state.Versions) + 1, Goal: req.Goal, Scope: req.Scope, AuthorizationNote: req.AuthorizationNote, Criteria: req.Requirements, Executor: executor, Acceptor: acceptor, Basis: basis, Author: actor, CreatedAt: now})
 		return "in_progress", nil
 	}
 	if v == nil || req.Version != v.Number {
@@ -371,6 +397,9 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 				if childContract.Current() != nil {
 					return "", contractFail(409, "accept the child's own contract separately")
 				}
+				if err := contractStatusAllowed(ctx, q, child, "done"); err != nil {
+					return "", err
+				}
 				updated, err := q.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: child.ID, WorkspaceID: issue.WorkspaceID, Status: "done", SourceTaskID: h.wakeupSourceTaskID(r)})
 				if err != nil {
 					return "", err
@@ -388,6 +417,17 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	default:
 		return "", contractFail(400, fmt.Sprintf("unknown contract action %q", req.Action))
 	}
+}
+
+func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, status string) error {
+	def, _, err := issueworkflow.ForProject(ctx, q, issue.WorkspaceID, issue.ProjectID)
+	if err != nil {
+		return err
+	}
+	if err := issueworkflow.CheckStatus(def, status); err != nil {
+		return contractFail(409, "the project workflow must include contract status "+status)
+	}
+	return nil
 }
 
 func (h *Handler) publishContractIssue(ctx context.Context, issue db.Issue, previous string, actor issuecontract.Actor) {

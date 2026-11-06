@@ -139,7 +139,7 @@ func validateManagedSource(ctx context.Context, q *db.Queries, ws, agentID pgtyp
 	if task.AgentID != agentID {
 		return fmt.Errorf("%w: source run belongs to another agent", ErrReturnInvalid)
 	}
-	if err := requireTaskScope(ctx, q, ws, task); err != nil {
+	if err := ValidateTaskScope(ctx, q, ws, task); err != nil {
 		return err
 	}
 	if actor.ExecutionKind != "managed" || actor.ArchivedAt.Valid {
@@ -165,10 +165,10 @@ func validateManagedSource(ctx context.Context, q *db.Queries, ws, agentID pgtyp
 	return nil
 }
 
-// requireTaskScope proves the source run belongs to this workspace through its
+// ValidateTaskScope proves the source run belongs to this workspace through its
 // original business scope. The delegated issue is deliberately not a substitute
 // scope: a run on a parent issue or chat still returns there.
-func requireTaskScope(ctx context.Context, q *db.Queries, ws pgtype.UUID, task db.AgentTaskQueue) error {
+func ValidateTaskScope(ctx context.Context, q *db.Queries, ws pgtype.UUID, task db.AgentTaskQueue) error {
 	switch {
 	case task.IssueID.Valid:
 		if _, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: task.IssueID, WorkspaceID: ws}); err != nil {
