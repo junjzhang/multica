@@ -441,12 +441,50 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 		}
 	}
 	store := delivery.NewPostgres(q)
+	byAgent := make(map[string]commentMentionTarget, len(recipients))
+	var order []string
 	for _, target := range recipients {
+		if target.MailboxAgent == nil {
+			continue
+		}
+		id := uuidToString(target.MailboxAgent.ID)
+		existing, seen := byAgent[id]
+		if !seen {
+			order = append(order, id)
+		}
+		// A squad role takes precedence over a direct mention, just as it
+		// does for managed triggers. Multiple squads retain the first role.
+		if !seen || (existing.TargetType != "squad" && target.TargetType == "squad") {
+			byAgent[id] = target
+		}
+	}
+	for _, id := range order {
+		target := byAgent[id]
 		if target.MailboxAgent == nil {
 			continue
 		}
 		agent := *target.MailboxAgent
 		agentID := uuidToString(agent.ID)
+		notificationKey := "comment:" + uuidToString(commentID) + ":agent:" + agentID
+		existing, loadErr := q.GetAgentMailboxMessageByComment(ctx, db.GetAgentMailboxMessageByCommentParams{RecipientAgentID: agent.ID, CommentID: commentID})
+		if loadErr == nil && len(existing.Payload) > 0 && existing.TargetSessionID.Valid {
+			_, replayErr := store.Enqueue(ctx, delivery.EnqueueRequest{
+				Scope:           delivery.Scope{WorkspaceID: workspaceID},
+				Source:          delivery.Source{Type: "comment", Key: uuidToString(commentID), ActorType: actorType, ActorID: actorID, SessionID: sourceSessionID},
+				Target:          delivery.Target{SessionID: uuidToString(existing.TargetSessionID)},
+				Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+				NotificationKey: notificationKey, Kind: "comment_mention", Payload: existing.Payload,
+				Refs: delivery.Refs{IssueID: issueID, CommentID: uuidToString(commentID)},
+			})
+			if replayErr != nil {
+				return out, replayErr
+			}
+			out[agentID] = ReasonQueued
+			continue
+		}
+		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+			return out, loadErr
+		}
 		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID)}
 		if target.TargetType == "squad" {
 			squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: parseUUID(target.TargetID), WorkspaceID: issue.WorkspaceID})
@@ -483,7 +521,7 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			},
 			Target:          delivery.Target{SessionID: binding.SessionID},
 			Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
-			NotificationKey: "comment:" + uuidToString(commentID) + ":agent:" + agentID,
+			NotificationKey: notificationKey,
 			Kind:            "comment_mention",
 			Payload:         body,
 			Refs: delivery.Refs{

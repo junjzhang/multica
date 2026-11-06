@@ -170,6 +170,7 @@ export function BatchActionToolbar({
           mode: "assign",
           assigneeType: updates.assignee_type,
           assigneeId: updates.assignee_id,
+          recipientSessionId: updates.recipient_session_id,
           onApplied: clearSelectionOnApply ? clear : undefined,
         });
         return;

@@ -4246,7 +4246,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// is a delegation; a status-only workflow handoff is not.
 	prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.SuppressRun &&
 		params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
-	dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, actorType, actorID, prospectiveAssignment, params.AssigneeType)
+	_, derr := h.prepareDelegationReturn(r, prevIssue, actorType, actorID, prospectiveAssignment, params.AssigneeType)
 	if derr != nil {
 		writeDelegationReturnError(w, derr)
 		return
@@ -4260,6 +4260,12 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			prevIssue = previous
 			prospectiveExplicitAssigneeChanged = (touchedType || touchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
 			prospectiveAssignment = prospectiveExplicitAssigneeChanged && !req.SuppressRun && issue.AssigneeID.Valid && (issue.AssigneeType.String == "agent" || issue.AssigneeType.String == "squad")
+		}
+		lockedHandler := *h
+		lockedHandler.Queries = q
+		dispatchReturn, returnErr := lockedHandler.prepareDelegationReturn(r, issue, actorType, actorID, prospectiveAssignment, issue.AssigneeType)
+		if returnErr != nil {
+			return returnErr
 		}
 		if prospectiveExplicitAssigneeChanged || req.RecipientSessionID != nil {
 			if err := h.externalAssignmentInTx(r, q, issue, req.RecipientSessionID, prospectiveExplicitAssigneeChanged && !req.SuppressRun, actorType, actorID); err != nil {
@@ -5135,7 +5141,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		prospectiveWillRun = prospectiveWillRun && !req.Updates.SuppressRun
 		prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun &&
 			params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
-		dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, callerType, callerActorID, prospectiveAssignment, params.AssigneeType)
+		_, derr := h.prepareDelegationReturn(r, prevIssue, callerType, callerActorID, prospectiveAssignment, params.AssigneeType)
 		if derr != nil {
 			slog.Warn("batch dispatch refused: delegation return unavailable",
 				append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
@@ -5150,6 +5156,12 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				prevIssue = previous
 				prospectiveExplicitAssigneeChanged = (batchTouchedType || batchTouchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
 				prospectiveAssignment = prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun && issue.AssigneeID.Valid && (issue.AssigneeType.String == "agent" || issue.AssigneeType.String == "squad")
+			}
+			lockedHandler := *h
+			lockedHandler.Queries = q
+			dispatchReturn, returnErr := lockedHandler.prepareDelegationReturn(r, issue, callerType, callerActorID, prospectiveAssignment, issue.AssigneeType)
+			if returnErr != nil {
+				return returnErr
 			}
 			if prospectiveExplicitAssigneeChanged || req.Updates.RecipientSessionID != nil {
 				if err := h.externalAssignmentInTx(r, q, issue, req.Updates.RecipientSessionID, prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun, callerType, callerActorID); err != nil {

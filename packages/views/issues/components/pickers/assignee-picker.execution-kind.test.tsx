@@ -69,9 +69,15 @@ vi.mock("@tanstack/react-query", () => ({
     if (queryKey[0] === "members") return { data: MEMBERS };
     if (queryKey[0] === "agents")
       return { data: [MANAGED_BOUND, MANAGED_UNBOUND, EXTERNAL, UNKNOWN] };
+    if (queryKey.includes("sessions")) return { data: [
+      { id: "session-a", display_name: "Session A", session_id: "paseo-a", host_id: "host-a", provider: "paseo", deliverable: true },
+      { id: "session-b", display_name: "Session B", session_id: "paseo-b", host_id: "host-b", provider: "paseo", deliverable: true },
+    ] };
     return { data: [] };
   },
 }));
+
+vi.mock("@multica/core/agents/session-bindings", () => ({ agentSessionsOptions: (_ws: string, agentId: string) => ({ queryKey: ["sessions", agentId] }) }));
 
 vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "workspace-1" }));
 vi.mock("@multica/core/auth", () => ({
@@ -121,9 +127,16 @@ describe("AssigneePicker execution identity", () => {
     expect(external).not.toBeDisabled();
 
     await user.click(external);
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Save session" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /Session A/ })).not.toBeChecked();
+    expect(screen.getByRole("radio", { name: /Session B/ })).not.toBeChecked();
+    await user.click(screen.getByRole("radio", { name: /Session B/ }));
+    await user.click(screen.getByRole("button", { name: "Save session" }));
     expect(onUpdate).toHaveBeenCalledWith({
       assignee_type: "agent",
       assignee_id: "agent-external",
+      recipient_session_id: "session-b",
     });
   });
 

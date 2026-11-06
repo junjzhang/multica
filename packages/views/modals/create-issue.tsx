@@ -406,9 +406,11 @@ export function ManualCreatePanel({
   const updateTitle = (v: string) => { setTitle(v); setManual({ title: v }); };
   const updateStatus = (v: IssueStatus) => { setStatus(v); setManual({ status: v }); };
   const updatePriority = (v: IssuePriority) => { setPriority(v); setShared({ priority: v }); };
-  const updateAssignee = (type?: IssueAssigneeType, id?: string) => {
+  const [recipientSessionId, setRecipientSessionId] = useState<string | undefined>(() => data && "assignee_id" in data ? undefined : draft.manual.recipientSessionId);
+  const updateAssignee = (type?: IssueAssigneeType, id?: string, sessionId?: string) => {
+    setRecipientSessionId(sessionId);
     setAssigneeType(type); setAssigneeId(id);
-    setManual({ assigneeType: type, assigneeId: id });
+    setManual({ assigneeType: type, assigneeId: id, recipientSessionId: sessionId });
   };
   const updateProject = (id?: string) => { setProjectId(id); setShared({ projectId: id }); };
   const updateParent = (id?: string) => {
@@ -553,6 +555,7 @@ export function ManualCreatePanel({
               priority,
               assignee_type: assigneeType,
               assignee_id: assigneeId,
+          recipient_session_id: recipientSessionId,
               start_date: startDate || undefined,
               due_date: dueDate || undefined,
               attachment_ids: activeAttachmentIds.length > 0 ? activeAttachmentIds : undefined,
@@ -571,6 +574,7 @@ export function ManualCreatePanel({
           priority,
           assignee_type: assigneeType,
           assignee_id: assigneeId,
+          recipient_session_id: recipientSessionId,
           start_date: startDate || undefined,
           due_date: dueDate || undefined,
           attachment_ids: activeAttachmentIds.length > 0 ? activeAttachmentIds : undefined,
@@ -1089,6 +1093,7 @@ export function ManualCreatePanel({
                   onUpdate={(u) => updateAssignee(
                     u.assignee_type ?? undefined,
                     u.assignee_id ?? undefined,
+                    u.recipient_session_id,
                   )}
                   triggerRender={<PillButton />}
                   tooltip={tIssues(($) => $.detail.prop_assignee)}

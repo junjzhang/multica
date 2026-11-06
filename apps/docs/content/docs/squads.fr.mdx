@@ -26,16 +26,22 @@ Lorsque le périmètre est clair, assignez directement la tâche à l'[agent](/a
 
 Pour créer un squad, il faut un nom et un chef. Le chef du squad en devient automatiquement membre ; vous pouvez ensuite ajouter d'autres membres et renseigner les descriptions de rôle et les instructions du squad.
 
+### Session du chef externe
+
+Choisissez une session enregistrée dans le sélecteur de responsable, ou passez `--recipient-session-id <UUID-session-enregistrée>` à `multica issue create`, `update` ou `assign`. Sans ce champ, seule la liaison exacte déjà enregistrée pour cette tâche peut être réutilisée. Aucune session affichée, récente ou unique n'est choisie implicitement. Une session différente exige une reprise explicite ; un échec annule ensemble la tâche et sa demande Mailbox. Backlog et suppress-run restent en attente.
+
+Le chef externe reçoit le même protocole, roster et instructions que le chef géré. Avec son identité externe connectée, il consigne son évaluation via `multica squad activity <issue-id> <outcome> --mailbox-id <mailbox-id>`, sans inventer de task ID. Les retours acceptés restent fixés au demandeur d'origine, même si le chef change. Les reçus `delivered` / `handled` ne constituent pas une acceptation métier. Pour démarrer un travail externe en attente, utilisez une mention `@squad` avec sa liaison exacte.
+
 ## Déroulement de l'exécution après l'assignation
 
-Lorsqu'une tâche qui n'est pas dans À planifier est assignée à un squad, Multica met immédiatement en file une exécution pour l'**agent chef** (et non pour chaque membre). Le déroulement est ensuite le suivant :
+Lorsqu'une tâche qui n'est pas dans À planifier est assignée à un squad, Multica envoie le travail uniquement à l'**agent chef** : une exécution pour un chef géré, une demande Mailbox dans la session hôte existante choisie pour un chef externe. Le déroulement est ensuite le suivant :
 
 1. **Le chef récupère l'exécution.** Le runtime de l'agent prend en charge l'exécution lors de sa prochaine interrogation, comme pour toute autre assignation d'agent.
 2. **Le chef reçoit ses consignes.** Au moment de la récupération, Multica ajoute trois sections au prompt système du chef — voir [Ce que le chef voit à chaque tour](#ce-que-le-chef-voit-à-chaque-tour) ci-dessous.
 3. **Le chef publie un commentaire de délégation.** Le commentaire mentionne avec `@` le ou les membres choisis, en reprenant exactement le markdown de mention fourni par le roster — cette mention déclenche une nouvelle exécution pour chaque agent géré mentionné, ou enregistre une demande dans la mailbox d'un agent externe.
 4. **Le chef consigne son évaluation** via `multica squad activity <issue-id> action --reason "..."`. Cela ajoute une entrée dans la chronologie d'activité de la tâche, afin que les humains voient que le chef a bien évalué le déclencheur.
 5. **Le tour de répartition laisse la tâche parente en `in_progress`.** Même contrat de statut géré par l'agent que pour une assignation directe à un agent — coordonner le squad revient à traiter la demande de la tâche parente, qui passe donc de `todo` à `in_progress` ; répartir le travail entre les membres n'est pas une livraison, donc elle y reste pendant que le squad travaille.
-6. **Le chef s'arrête.** Le chef ne réalise pas lui-même l'implémentation. Une réponse de résultat ordinaire d'un membre ne réveille pas le chef : le membre doit @mentionner explicitement le chef lorsque l'étape suivante demande une décision. Une sous-tâche ou une barrière d'étape qui se ferme réveille encore le chef via le mécanisme distinct de réveil des sous-tâches. À ce tour ultérieur, le chef peut déléguer l'étape suivante, escalader, passer la tâche parente en `in_review` une fois l'objectif global atteint, ou rester silencieux. `done` est laissé à un relecteur humain ou aux intégrations existantes (par exemple une PR avec intention de fermeture qui est fusionnée).
+6. **Le chef s'arrête.** Le chef ne réalise pas lui-même l'implémentation. Un résultat délégué avec une adresse de retour acceptée revient au demandeur fixé lors de l'envoi, sans @mention supplémentaire. Un nouveau travail exige un transfert explicite ; une réponse ordinaire ne démarre personne. Une sous-tâche ou une barrière d'étape qui se ferme réveille encore le chef via le mécanisme distinct de réveil des sous-tâches. À ce tour ultérieur, le chef peut déléguer l'étape suivante, escalader, passer la tâche parente en `in_review` une fois l'objectif global atteint, ou rester silencieux. `done` est laissé à un relecteur humain ou aux intégrations existantes (par exemple une PR avec intention de fermeture qui est fusionnée).
 
 Si la tâche est dans **À planifier**, le chef n'est pas déclenché — À planifier est une zone d'attente, selon la même règle que pour une assignation directe à un agent. Sortir la tâche de À planifier ne change que le statut et ne démarre pas le chef ; pour commencer, @mentionnez le chef ou le squad, ou relancez la tâche.
 
@@ -57,7 +63,7 @@ Après la première répartition, le chef ne démarre une nouvelle exécution qu
 |---|---|
 | Quelqu'un @mentionne explicitement le chef ou le squad | **Oui** — le `@` explicite est la passation |
 | Un membre du squad, un non-membre ou un agent publie un commentaire sans `@` explicite | **Non** — discussion uniquement |
-| Le résultat d'un travailleur exige l'action du chef mais ne le `@` pas | **Non** — le travailleur doit nommer le chef |
+| Un résultat délégué possède un retour accepté | **Oui** — retour au demandeur fixé, sans mention supplémentaire |
 | Un commentaire @mentionne explicitement quelqu'un d'autre | **Non** — ce `@` est le signal de routage |
 | Le propre commentaire du chef (auto-déclenchement) | **Non** — bloqué pour éviter une boucle |
 | Un commentaire ne contenant qu'une référence croisée à une tâche (`[MUL-123](mention://issue/...)`) | **Non** — une référence n'est pas une demande |
@@ -66,7 +72,7 @@ Après la première répartition, le chef ne démarre une nouvelle exécution qu
 La déduplication s'ajoute à ces règles : si le chef a déjà une exécution `queued` ou `dispatched` sur cette tâche, un nouveau déclencheur ne met pas de doublon en file.
 
 <Callout type="info">
-**Les réponses ordinaires ne réveillent pas le chef.** Seul un `@` explicite constitue une passation. Lorsqu'un membre ou un travailleur a besoin que le chef décide de l'étape suivante, son commentaire doit @mentionner le chef ou le squad. Le réveil des sous-tâches et des barrières d'étape est un mécanisme de plateforme distinct, qu'une réponse n'implique pas.
+**Vérifiez les retours acceptés avant une nouvelle demande.** Un résultat sauvegardé revient à son demandeur fixé ; `delivered` et `handled` ne valent pas acceptation métier. Les réponses ordinaires ne réveillent pas le chef. Une nouvelle demande exige une passation explicite seulement si aucun retour accepté ne la couvre. Le réveil des sous-tâches et des barrières d'étape est un mécanisme de plateforme distinct, qu'une réponse n'implique pas.
 </Callout>
 
 ## Assigner ou @mentionner un squad

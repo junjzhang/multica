@@ -15,6 +15,7 @@ export type RunConfirmIntent =
       mode: "assign";
       assigneeType: "agent" | "squad";
       assigneeId: string;
+      recipientSessionId?: string;
     }
   | {
       issueIds: [string];
@@ -87,6 +88,7 @@ export function runConfirmIntent(
       mode: "assign",
       assigneeType: updates.assignee_type,
       assigneeId: updates.assignee_id,
+      ...(updates.recipient_session_id ? { recipientSessionId: updates.recipient_session_id } : {}),
     };
   }
 

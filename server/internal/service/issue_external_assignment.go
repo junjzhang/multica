@@ -61,6 +61,14 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 		}
 		return nil
 	}
+	if sessionID != nil {
+		parsed, err := util.ParseUUID(*sessionID)
+		if err != nil {
+			return &RecipientSessionError{Message: "recipient_session_id must be a registered session UUID"}
+		}
+		normalized := util.UUIDToString(parsed)
+		sessionID = &normalized
+	}
 	if !dispatch && sessionID == nil {
 		return nil
 	}

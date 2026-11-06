@@ -33,6 +33,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	create["recipient_session_id"] = session
 	var issue IssueResponse
 	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", create)).Want(http.StatusCreated).JSON(&issue)
+	cleanupDelegatedIssue(t, issue.ID)
 	var storedTarget, mailboxID string
 	var payload []byte
 	if err := testPool.QueryRow(t.Context(), `SELECT id, target_session_id, payload FROM agent_mailbox_message WHERE issue_id=$1`, issue.ID).Scan(&mailboxID, &storedTarget, &payload); err != nil {

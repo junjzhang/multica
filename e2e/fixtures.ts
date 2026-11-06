@@ -53,6 +53,7 @@ export class TestApiClient {
   private createdIssueIds: string[] = [];
   private createdProjectIds: string[] = [];
   private seededIssueIds: string[] = [];
+  private externalSquadFixtures: { squadId: string; agentId: string; runtimeId: string }[] = [];
 
   async login(email: string, name: string) {
     const client = new pg.Client(DATABASE_URL);
@@ -363,6 +364,34 @@ export class TestApiClient {
     }
   }
 
+  /** Isolated host fixture; it never starts a real agent or a daemon. */
+  async seedExternalSquad(name: string) {
+    if (!this.workspaceId || !this.email) throw new Error("Select a workspace before seeding a squad");
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      await client.query("BEGIN");
+      const owner = await client.query('SELECT id FROM "user" WHERE email=$1', [this.email]);
+      const ownerId = owner.rows[0].id;
+      const daemonId = `isolated-${crypto.randomUUID()}`;
+      const runtime = await client.query(`INSERT INTO agent_runtime (workspace_id, name, runtime_mode, provider, status, owner_id, daemon_id, last_seen_at)
+        VALUES ($1,$2,'local','handler_test_runtime','online',$3,$4,now()) RETURNING id`, [this.workspaceId, name, ownerId, daemonId]);
+      const agent = await client.query(`INSERT INTO agent (workspace_id,name,runtime_mode,execution_kind,owner_id) VALUES ($1,$2,'cloud','external',$3) RETURNING id`, [this.workspaceId, name+" leader", ownerId]);
+      const agentId = agent.rows[0].id as string;
+      const session = await client.query(`INSERT INTO external_agent_session (workspace_id,agent_id,owner_user_id,provider,host_id,session_id,display_name,daemon_id)
+        VALUES ($1,$2,$3,'paseo','isolated-host','chosen-host-session','Chosen receipt session',$4),
+               ($1,$2,$3,'paseo','another-host','never-select-this-session','Other session','other-daemon') RETURNING id`, [this.workspaceId, agentId, ownerId, daemonId]);
+      const squad = await client.query(`INSERT INTO squad (workspace_id,name,leader_id,creator_id,instructions) VALUES ($1,$2,$3,$4,'Browser integration squad instruction') RETURNING id`, [this.workspaceId, name, agentId, ownerId]);
+      const squadId = squad.rows[0].id as string;
+      await client.query("COMMIT");
+      this.externalSquadFixtures.push({ squadId, agentId, runtimeId: runtime.rows[0].id });
+      return { squadId, agentId, sessionId: session.rows[0].id as string, daemonId, workspaceId: this.workspaceId };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { await client.end(); }
+  }
+
   /** Adds an existing user to this client's workspace and returns the member id. */
   async addMemberByEmail(email: string, role: "admin" | "member" = "member"): Promise<string> {
     if (!this.workspaceId) throw new Error("Cannot add a member before a workspace is selected");
@@ -442,6 +471,20 @@ export class TestApiClient {
       }
     }
     this.createdIssueIds = [];
+    if (this.externalSquadFixtures.length > 0) {
+      const client = new pg.Client(DATABASE_URL);
+      await client.connect();
+      try {
+        for (const fixture of this.externalSquadFixtures) {
+          await client.query("DELETE FROM squad WHERE id=$1", [fixture.squadId]);
+          await client.query("DELETE FROM external_agent_session_binding WHERE agent_id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM external_agent_session WHERE agent_id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM agent WHERE id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM agent_runtime WHERE id=$1", [fixture.runtimeId]);
+        }
+      } finally { await client.end(); }
+      this.externalSquadFixtures = [];
+    }
     // Projects last: an issue delete leaves no project reference behind, and
     // dropping the project first would strand the issues in the list.
     for (const id of this.createdProjectIds) {

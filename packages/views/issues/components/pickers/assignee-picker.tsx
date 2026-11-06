@@ -23,6 +23,8 @@ import {
   PICKER_TRIGGER_CLASS,
 } from "./property-picker";
 import { useT } from "../../../i18n";
+import { AgentSessionChoices } from "../agent-session-choices";
+import { Button } from "@multica/ui/components/ui/button";
 import { matchesPinyin } from "../../../editor/extensions/pinyin-match";
 
 /**
@@ -112,6 +114,8 @@ function AssigneePickerImpl({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
+  const [recipient, setRecipient] = useState<{ type: "agent" | "squad"; id: string; agentId: string } | null>(null);
+  const [sessionId, setSessionId] = useState("");
   const user = useAuthStore((s) => s.user);
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
@@ -158,6 +162,17 @@ function AssigneePickerImpl({
     return agentNeedsRuntime(agent) ? ("needs-runtime" as const) : ("ready" as const);
   };
 
+  const chooseAssignee = (type: "agent" | "squad", id: string, agent: Agent) => {
+    if (agentExecutionKind(agent) === "external") {
+      setFilter("");
+      setSessionId("");
+      setRecipient({ type, id, agentId: agent.id });
+      return;
+    }
+    onUpdate({ assignee_type: type, assignee_id: id });
+    setOpen(false);
+  };
+
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
 
@@ -171,11 +186,11 @@ function AssigneePickerImpl({
       open={open}
       onOpenChange={(v: boolean) => {
         setOpen(v);
-        if (!v) setFilter("");
+        if (!v) { setFilter(""); setRecipient(null); setSessionId(""); }
       }}
       width="w-64"
       align={align}
-      searchable
+      searchable={!recipient}
       searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
       onSearchChange={setFilter}
       triggerRender={triggerRender}
@@ -191,6 +206,20 @@ function AssigneePickerImpl({
         )
       }
     >
+      {recipient ? (
+        <div className="space-y-2 p-2">
+          <p className="text-caption font-medium">{t(($) => $.detail.external_binding_choose_title)}</p>
+          <AgentSessionChoices agentId={recipient.agentId} selected={sessionId} onSelect={setSessionId} />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => setRecipient(null)}>{t(($) => $.detail.external_binding_cancel)}</Button>
+            <Button type="button" size="sm" disabled={!sessionId} onClick={() => {
+              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, recipient_session_id: sessionId });
+              setRecipient(null);
+              setOpen(false);
+            }}>{t(($) => $.detail.external_binding_save)}</Button>
+          </div>
+        </div>
+      ) : <>
       {/* Unassigned — always the first row, search active or not. Every
           picker in the app puts the empty value there, so "clear this field"
           never moves. */}
@@ -260,11 +289,7 @@ function AssigneePickerImpl({
                 }
                 onClick={() => {
                   if (!allowed) return;
-                  onUpdate({
-                    assignee_type: "agent",
-                    assignee_id: a.id,
-                  });
-                  setOpen(false);
+                  chooseAssignee("agent", a.id, a);
                 }}
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
@@ -307,11 +332,7 @@ function AssigneePickerImpl({
                 }
                 onClick={() => {
                   if (!squadAllowed) return;
-                  onUpdate({
-                    assignee_type: "squad",
-                    assignee_id: s.id,
-                  });
-                  setOpen(false);
+                  chooseAssignee("squad", s.id, leader!);
                 }}
               >
                 <ActorAvatar actorType="squad" actorId={s.id} size="sm" />
@@ -326,6 +347,7 @@ function AssigneePickerImpl({
         filteredAgents.length === 0 &&
         filteredSquads.length === 0 &&
         filter && <PickerEmpty />}
+      </>}
     </PropertyPicker>
   );
 }
