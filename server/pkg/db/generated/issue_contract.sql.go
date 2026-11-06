@@ -11,6 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const captureIssueContractWakeup = `-- name: CaptureIssueContractWakeup :exec
+SELECT capture_issue_wakeup($1::uuid, 'issue.updated', $2::text,
+    NULL, $3::uuid,
+    jsonb_build_object('changed_fields', jsonb_build_array('contract')))
+`
+
+type CaptureIssueContractWakeupParams struct {
+	IssueID      pgtype.UUID `json:"issue_id"`
+	EventKey     string      `json:"event_key"`
+	SourceTaskID pgtype.UUID `json:"source_task_id"`
+}
+
+func (q *Queries) CaptureIssueContractWakeup(ctx context.Context, arg CaptureIssueContractWakeupParams) error {
+	_, err := q.db.Exec(ctx, captureIssueContractWakeup, arg.IssueID, arg.EventKey, arg.SourceTaskID)
+	return err
+}
+
 const getIssueContract = `-- name: GetIssueContract :one
 SELECT data FROM issue_contract WHERE issue_id = $1 AND workspace_id = $2
 `
@@ -44,6 +61,22 @@ func (q *Queries) GetIssueContractBasis(ctx context.Context, arg GetIssueContrac
 	return basis, err
 }
 
+const issueHasContract = `-- name: IssueHasContract :one
+SELECT EXISTS (SELECT 1 FROM issue_contract WHERE issue_id=$1 AND workspace_id=$2)::boolean
+`
+
+type IssueHasContractParams struct {
+	IssueID     pgtype.UUID `json:"issue_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) IssueHasContract(ctx context.Context, arg IssueHasContractParams) (bool, error) {
+	row := q.db.QueryRow(ctx, issueHasContract, arg.IssueID, arg.WorkspaceID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const saveIssueContract = `-- name: SaveIssueContract :exec
 INSERT INTO issue_contract (issue_id, workspace_id, data) VALUES ($1, $2, $3)
 ON CONFLICT (issue_id) DO UPDATE SET data = EXCLUDED.data
@@ -58,20 +91,5 @@ type SaveIssueContractParams struct {
 
 func (q *Queries) SaveIssueContract(ctx context.Context, arg SaveIssueContractParams) error {
 	_, err := q.db.Exec(ctx, saveIssueContract, arg.IssueID, arg.WorkspaceID, arg.Data)
-	return err
-}
-
-const setIssueContractCriteria = `-- name: SetIssueContractCriteria :exec
-UPDATE issue SET acceptance_criteria = $3, status = 'in_progress' WHERE id = $1 AND workspace_id = $2
-`
-
-type SetIssueContractCriteriaParams struct {
-	ID                 pgtype.UUID `json:"id"`
-	WorkspaceID        pgtype.UUID `json:"workspace_id"`
-	AcceptanceCriteria []byte      `json:"acceptance_criteria"`
-}
-
-func (q *Queries) SetIssueContractCriteria(ctx context.Context, arg SetIssueContractCriteriaParams) error {
-	_, err := q.db.Exec(ctx, setIssueContractCriteria, arg.ID, arg.WorkspaceID, arg.AcceptanceCriteria)
 	return err
 }

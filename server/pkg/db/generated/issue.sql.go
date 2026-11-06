@@ -2221,13 +2221,14 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
         COALESCE($5::text, i.description) AS next_description,
         COALESCE($6::text, i.status) AS next_status,
         COALESCE($7::text, i.priority) AS next_priority,
-        $8::text AS next_assignee_type,
-        $9::uuid AS next_assignee_id,
+        COALESCE($8::jsonb, i.acceptance_criteria) AS next_acceptance_criteria,
+        $9::text AS next_assignee_type,
+        $10::uuid AS next_assignee_id,
         CASE
             -- An explicit position wins. Cross-column drag-and-drop sends
             -- status and position together and means the slot it dropped on.
-            WHEN $10::double precision IS NOT NULL
-                THEN $10::double precision
+            WHEN $11::double precision IS NOT NULL
+                THEN $11::double precision
             -- position ranks an issue *within* its (workspace, status)
             -- column, so it stops meaning anything the moment the column
             -- changes: the value that put the issue on top of Todo lands it
@@ -2251,19 +2252,19 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
                 )
             ELSE i.position
         END AS next_position,
-        $11::date AS next_start_date,
-        $12::date AS next_due_date,
-        $13::uuid AS next_parent_issue_id,
-        $14::uuid AS next_project_id,
-        $15::integer AS next_stage,
+        $12::date AS next_start_date,
+        $13::date AS next_due_date,
+        $14::uuid AS next_parent_issue_id,
+        $15::uuid AS next_project_id,
+        $16::integer AS next_stage,
         -- A supplied pointer marks the issue (the handler also sets cancelled).
         -- Otherwise a mark only survives a write that leaves an already
         -- cancelled issue cancelled. Every other write drops it: reopening is
         -- how a mark is removed, and re-entering cancelled does not revive a
         -- pointer that a server predating this rule left on a reopened issue.
         CASE
-            WHEN $16::uuid IS NOT NULL
-                THEN $16::uuid
+            WHEN $17::uuid IS NOT NULL
+                THEN $17::uuid
             WHEN i.status = 'cancelled' AND COALESCE($6::text, i.status) = 'cancelled'
                 THEN i.duplicate_of_issue_id
             ELSE NULL
@@ -2271,28 +2272,28 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
         -- Coordinator changes are explicit: absent inputs preserve the stored
         -- value, and the new value participates in did_change so it bumps the
         -- native revision like every other issue field.
-        COALESCE($17::text, i.coordinator_type) AS next_coordinator_type,
-        COALESCE($18::uuid, i.coordinator_id) AS next_coordinator_id,
+        COALESCE($18::text, i.coordinator_type) AS next_coordinator_type,
+        COALESCE($19::uuid, i.coordinator_id) AS next_coordinator_id,
         -- Merge policy is written only when the caller supplied it. The flag
         -- distinguishes "leave untouched" from an explicit disallow.
-        CASE WHEN $19::boolean
-            THEN $20::boolean
+        CASE WHEN $20::boolean
+            THEN $21::boolean
             ELSE i.merge_allowed
         END AS next_merge_allowed,
-        CASE WHEN $19::boolean
-            THEN $21::text
+        CASE WHEN $20::boolean
+            THEN $22::text
             ELSE i.merge_repository_url
         END AS next_merge_repository_url,
-        CASE WHEN $19::boolean
-            THEN $22::text
+        CASE WHEN $20::boolean
+            THEN $23::text
             ELSE i.merge_target_branch
         END AS next_merge_target_branch,
-        CASE WHEN $19::boolean
-            THEN $23::uuid
+        CASE WHEN $20::boolean
+            THEN $24::uuid
             ELSE i.merge_granted_by
         END AS next_merge_granted_by,
-        CASE WHEN $19::boolean
-            THEN $24::timestamptz
+        CASE WHEN $20::boolean
+            THEN $25::timestamptz
             ELSE i.merge_granted_at
         END AS next_merge_granted_at
     FROM issue AS i
@@ -2301,35 +2302,35 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
     FOR UPDATE
 ), changed AS (
     SELECT
-        candidate.id, candidate.workspace_id, candidate.title, candidate.description, candidate.status, candidate.priority, candidate.assignee_type, candidate.assignee_id, candidate.creator_type, candidate.creator_id, candidate.parent_issue_id, candidate.acceptance_criteria, candidate.context_refs, candidate.position, candidate.due_date, candidate.created_at, candidate.updated_at, candidate.number, candidate.project_id, candidate.origin_type, candidate.origin_id, candidate.first_executed_at, candidate.start_date, candidate.metadata, candidate.stage, candidate.properties, candidate.revision, candidate.last_activity_at, candidate.triage_state, candidate.duplicate_of_issue_id, candidate.coordinator_type, candidate.coordinator_id, candidate.merge_allowed, candidate.merge_repository_url, candidate.merge_target_branch, candidate.merge_granted_by, candidate.merge_granted_at, candidate.next_title, candidate.next_description, candidate.next_status, candidate.next_priority, candidate.next_assignee_type, candidate.next_assignee_id, candidate.next_position, candidate.next_start_date, candidate.next_due_date, candidate.next_parent_issue_id, candidate.next_project_id, candidate.next_stage, candidate.next_duplicate_of_issue_id, candidate.next_coordinator_type, candidate.next_coordinator_id, candidate.next_merge_allowed, candidate.next_merge_repository_url, candidate.next_merge_target_branch, candidate.next_merge_granted_by, candidate.next_merge_granted_at,
+        candidate.id, candidate.workspace_id, candidate.title, candidate.description, candidate.status, candidate.priority, candidate.assignee_type, candidate.assignee_id, candidate.creator_type, candidate.creator_id, candidate.parent_issue_id, candidate.acceptance_criteria, candidate.context_refs, candidate.position, candidate.due_date, candidate.created_at, candidate.updated_at, candidate.number, candidate.project_id, candidate.origin_type, candidate.origin_id, candidate.first_executed_at, candidate.start_date, candidate.metadata, candidate.stage, candidate.properties, candidate.revision, candidate.last_activity_at, candidate.triage_state, candidate.duplicate_of_issue_id, candidate.coordinator_type, candidate.coordinator_id, candidate.merge_allowed, candidate.merge_repository_url, candidate.merge_target_branch, candidate.merge_granted_by, candidate.merge_granted_at, candidate.next_title, candidate.next_description, candidate.next_status, candidate.next_priority, candidate.next_acceptance_criteria, candidate.next_assignee_type, candidate.next_assignee_id, candidate.next_position, candidate.next_start_date, candidate.next_due_date, candidate.next_parent_issue_id, candidate.next_project_id, candidate.next_stage, candidate.next_duplicate_of_issue_id, candidate.next_coordinator_type, candidate.next_coordinator_id, candidate.next_merge_allowed, candidate.next_merge_repository_url, candidate.next_merge_target_branch, candidate.next_merge_granted_by, candidate.next_merge_granted_at,
         ROW(
-            title, description, status, priority, assignee_type, assignee_id,
+            title, description, status, priority, acceptance_criteria, assignee_type, assignee_id,
             position, start_date, due_date, parent_issue_id, project_id, stage,
             duplicate_of_issue_id, coordinator_type, coordinator_id,
             merge_allowed, merge_repository_url, merge_target_branch,
             merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
-            next_title, next_description, next_status, next_priority,
+            next_title, next_description, next_status, next_priority, next_acceptance_criteria,
             next_assignee_type, next_assignee_id, next_position, next_start_date,
             next_due_date, next_parent_issue_id, next_project_id, next_stage,
             next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
             next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
             next_merge_granted_by, next_merge_granted_at
-        ) AS did_change,
+        ) OR $26::boolean AS did_change,
         ROW(
-            title, description, status, priority, assignee_type, assignee_id,
+            title, description, status, priority, acceptance_criteria, assignee_type, assignee_id,
             start_date, due_date, parent_issue_id, project_id, stage,
             duplicate_of_issue_id, coordinator_type, coordinator_id,
             merge_allowed, merge_repository_url, merge_target_branch,
             merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
-            next_title, next_description, next_status, next_priority,
+            next_title, next_description, next_status, next_priority, next_acceptance_criteria,
             next_assignee_type, next_assignee_id, next_start_date, next_due_date,
             next_parent_issue_id, next_project_id, next_stage,
             next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
             next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
             next_merge_granted_by, next_merge_granted_at
-        ) AS did_activity
+        ) OR $26::boolean AS did_activity
     FROM candidate
 )
 UPDATE issue AS i SET
@@ -2337,6 +2338,7 @@ UPDATE issue AS i SET
     description = changed.next_description,
     status = changed.next_status,
     priority = changed.next_priority,
+    acceptance_criteria = changed.next_acceptance_criteria,
     assignee_type = changed.next_assignee_type,
     assignee_id = changed.next_assignee_id,
     position = changed.next_position,
@@ -2377,6 +2379,7 @@ type UpdateIssueParams struct {
 	Description           pgtype.Text        `json:"description"`
 	Status                pgtype.Text        `json:"status"`
 	Priority              pgtype.Text        `json:"priority"`
+	AcceptanceCriteria    []byte             `json:"acceptance_criteria"`
 	AssigneeType          pgtype.Text        `json:"assignee_type"`
 	AssigneeID            pgtype.UUID        `json:"assignee_id"`
 	Position              pgtype.Float8      `json:"position"`
@@ -2394,6 +2397,7 @@ type UpdateIssueParams struct {
 	MergeTargetBranch     pgtype.Text        `json:"merge_target_branch"`
 	MergeGrantedBy        pgtype.UUID        `json:"merge_granted_by"`
 	MergeGrantedAt        pgtype.Timestamptz `json:"merge_granted_at"`
+	ContractChanged       bool               `json:"contract_changed"`
 }
 
 func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue, error) {
@@ -2405,6 +2409,7 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 		arg.Description,
 		arg.Status,
 		arg.Priority,
+		arg.AcceptanceCriteria,
 		arg.AssigneeType,
 		arg.AssigneeID,
 		arg.Position,
@@ -2422,6 +2427,7 @@ func (q *Queries) UpdateIssue(ctx context.Context, arg UpdateIssueParams) (Issue
 		arg.MergeTargetBranch,
 		arg.MergeGrantedBy,
 		arg.MergeGrantedAt,
+		arg.ContractChanged,
 	)
 	var i Issue
 	err := row.Scan(

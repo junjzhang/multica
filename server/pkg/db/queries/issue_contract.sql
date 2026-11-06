@@ -10,5 +10,10 @@ WHERE issue_contract.workspace_id = EXCLUDED.workspace_id;
 SELECT issue_contract_basis(issue)::jsonb AS basis
 FROM issue WHERE id = $1 AND workspace_id = $2;
 
--- name: SetIssueContractCriteria :exec
-UPDATE issue SET acceptance_criteria = $3, status = 'in_progress' WHERE id = $1 AND workspace_id = $2;
+-- name: IssueHasContract :one
+SELECT EXISTS (SELECT 1 FROM issue_contract WHERE issue_id=$1 AND workspace_id=$2)::boolean;
+
+-- name: CaptureIssueContractWakeup :exec
+SELECT capture_issue_wakeup(@issue_id::uuid, 'issue.updated', @event_key::text,
+    NULL, sqlc.narg('source_task_id')::uuid,
+    jsonb_build_object('changed_fields', jsonb_build_array('contract')));

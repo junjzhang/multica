@@ -3147,6 +3147,15 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		// was actually handed. Building it here, from the issue row already
 		// loaded, is what makes the snapshot mean "the issue as of this claim".
 		currentSnapshot := buildIssueStateSnapshot(issue)
+		// Contracts are separate records, but every semantic contract write
+		// advances the native owner revision. Including that revision only for
+		// contracted issues also detects permission/responsibility changes.
+		hasContract, contractErr := h.Queries.IssueHasContract(r.Context(), db.IssueHasContractParams{IssueID: issue.ID, WorkspaceID: issue.WorkspaceID})
+		if contractErr != nil {
+			currentSnapshot.Version = 0
+		} else if hasContract {
+			currentSnapshot.ContractIssueRevision = issue.Revision
+		}
 		if encoded, err := json.Marshal(currentSnapshot); err != nil {
 			// A snapshot that cannot be encoded is simply not recorded; the
 			// next run reports "not compared" and reads the issue, which is
@@ -3537,7 +3546,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		// prompt reached the session. A non-nil anchor here is a completed run.
 		if resumeAnchor != nil {
 			if prev, ok := decodeIssueStateSnapshot(resumeAnchor.IssueSnapshot); ok {
-				resp.IssueStateDeltaKnown = true
+				resp.IssueStateDeltaKnown = contractErr == nil
 				resp.IssueChangedFields = currentSnapshot.changedFieldsSince(prev)
 			}
 			// Comments that arrived issue-wide since the resumed run started

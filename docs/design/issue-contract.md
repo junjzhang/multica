@@ -119,6 +119,20 @@ in_progress and in_review statuses used by this slice; its normal membership
 validation still applies. Done/closed behavior continues through the existing
 issue status and wakeup mechanisms. Definitions do not modify workflow routing.
 
+Dedicated permission revocation remains available on a completed issue. Such
+administrative edits preserve its historical done status and make the agreement
+stale. No further delivery or acceptance is allowed until an authorized requester
+revises it; that revision reopens the native issue. The current structured merge
+policy takes effect immediately, including while an agreement is stale.
+
+Every semantic contract mutation uses the native issue writer and advances its
+owner revision once, including note-only revisions. Resumed claims compare that
+revision for contracted issues and require a fresh compact issue read when it
+changes. Older comparison snapshots become unknown once, rather than waiving a
+read of fields they never captured. Neither history nor a second lifecycle is
+injected into resumed runs. Wakeup events use the authenticated actor and source
+task, including note-only updates and suppression of the source's own wakeup.
+
 Managed creator maintenance verifies an active authenticated run and the same
 originator and business scope as the creation run in issue.origin_id. A scopeless
 quick-create requires that exact run. External creator maintenance uses the mea

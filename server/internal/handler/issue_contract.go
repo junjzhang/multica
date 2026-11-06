@@ -143,10 +143,16 @@ type contractProblem struct {
 	message string
 }
 
+type contractEffects struct {
+	children  []db.Issue
+	cancelled []db.AgentTaskQueue
+}
+
 func (e contractProblem) Error() string             { return e.message }
 func contractFail(status int, message string) error { return contractProblem{status, message} }
 
 func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
+	r = h.withWakeupActor(r)
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
 	if !ok {
 		return
@@ -187,7 +193,7 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
 	ctx := r.Context()
-	tx, err := h.TxStarter.Begin(ctx)
+	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
 		writeError(w, 500, "begin contract update failed")
 		return
@@ -240,7 +246,8 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "reopen or accept triage before changing the contract")
 		return
 	}
-	status, err := h.applyContractRequest(ctx, r, q, issue, &state, req, actor)
+	effects := contractEffects{}
+	status, err := h.applyContractRequest(ctx, r, q, issue, &state, req, actor, &effects)
 	if err == nil {
 		err = contractStatusAllowed(ctx, q, issue, status)
 	}
@@ -264,10 +271,25 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "save contract failed")
 		return
 	}
-	updated, err := q.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, Status: status, SourceTaskID: h.wakeupSourceTaskID(r)})
+	criteria, _ := json.Marshal(state.Current().Criteria)
+	updated, err := q.UpdateIssue(ctx, db.UpdateIssueParams{
+		ID: issue.ID, Status: strToText(status), SourceTaskID: h.wakeupSourceTaskID(r),
+		AssigneeType: issue.AssigneeType, AssigneeID: issue.AssigneeID,
+		StartDate: issue.StartDate, DueDate: issue.DueDate, ParentIssueID: issue.ParentIssueID,
+		ProjectID: issue.ProjectID, Stage: issue.Stage,
+		AcceptanceCriteria: criteria, ContractChanged: true,
+	})
 	if err != nil {
 		writeError(w, 409, "status change conflicts with the contract")
 		return
+	}
+	// Native field changes already emit issue.updated. A note-only revision
+	// needs the same actor-aware event even when no native field changed.
+	if issue.Status == updated.Status && sameJSON(issue.AcceptanceCriteria, criteria) {
+		if err := q.CaptureIssueContractWakeup(ctx, db.CaptureIssueContractWakeupParams{IssueID: issue.ID, EventKey: "contract:" + req.ClientRequestID, SourceTaskID: h.wakeupSourceTaskID(r)}); err != nil {
+			writeError(w, 500, "capture contract update failed")
+			return
+		}
 	}
 	cancelled, err := service.StopClosedIssueWakeups(ctx, q, updated)
 	if err != nil {
@@ -278,16 +300,11 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "commit contract failed")
 		return
 	}
-	h.broadcastCancelledWakeups(ctx, issue.WorkspaceID, cancelled)
+	h.broadcastCancelledWakeups(ctx, issue.WorkspaceID, append(cancelled, effects.cancelled...))
 	h.recordIssueActivity(ctx, updated, actor.Type, actor.ID, "issue_contract_"+req.Action, map[string]any{"sequence": state.Sequence, "version": state.Current().Number})
 	h.publishContractIssue(ctx, updated, issue.Status, actor)
-	if len(req.ChildIDs) > 0 && req.Action == "accept" {
-		for _, id := range req.ChildIDs {
-			child, err := h.Queries.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: parseUUID(id), WorkspaceID: issue.WorkspaceID})
-			if err == nil {
-				h.publishContractIssue(ctx, child, "in_review", actor)
-			}
-		}
+	for _, child := range effects.children {
+		h.publishContractIssue(ctx, child, "in_review", actor)
 	}
 	view, err := h.contractView(ctx, r, h.Queries, updated, state)
 	if err != nil {
@@ -297,7 +314,7 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, view)
 }
 
-func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state *issuecontract.State, req contractRequest, actor issuecontract.Actor) (string, error) {
+func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state *issuecontract.State, req contractRequest, actor issuecontract.Actor, effects *contractEffects) (string, error) {
 	now := time.Now().UTC()
 	v := state.Current()
 	if req.Action == "revise" {
@@ -327,10 +344,16 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 			}
 		}
 		criteria, _ := json.Marshal(req.Requirements)
-		if err := q.SetIssueContractCriteria(ctx, db.SetIssueContractCriteriaParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, AcceptanceCriteria: criteria}); err != nil {
+		basis, err := contractBasis(ctx, q, issue)
+		if err != nil {
 			return "", err
 		}
-		basis, err := contractBasis(ctx, q, issue)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(basis, &fields); err != nil {
+			return "", err
+		}
+		fields["criteria"] = criteria
+		basis, err = json.Marshal(fields)
 		if err != nil {
 			return "", err
 		}
@@ -404,9 +427,12 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 				if err != nil {
 					return "", err
 				}
-				if _, err := service.StopClosedIssueWakeups(ctx, q, updated); err != nil {
+				cancelled, err := service.StopClosedIssueWakeups(ctx, q, updated)
+				if err != nil {
 					return "", err
 				}
+				effects.children = append(effects.children, updated)
+				effects.cancelled = append(effects.cancelled, cancelled...)
 			}
 		}
 		state.Decisions = append(state.Decisions, issuecontract.Decision{DeliveryID: pending.ID, Version: v.Number, Outcome: req.Action, Criteria: append([]int{}, req.Criteria...), Reason: req.Reason, ChildIDs: append([]string{}, req.ChildIDs...), Author: actor, CreatedAt: now})
