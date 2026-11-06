@@ -652,6 +652,7 @@ func init() {
 	issueCreateCmd.Flags().String("start-date", "", "Start date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().String("due-date", "", "Due date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().Bool("allow-duplicate", false, "Allow creating an issue even when an active duplicate exists")
+	issueCreateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueCreateCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCreateCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times). Each file is uploaded and its markdown reference is appended to the description, which is what makes it render on the issue page")
 	issueCreateCmd.Flags().StringSlice("attachment-id", nil, "Existing attachment UUID(s) to bind to the created issue (can be specified multiple times)")
@@ -681,6 +682,7 @@ func init() {
 	issueUpdateCmd.Flags().Float64("position", 0, "Ordering position within the board column (lower sorts first); prefer `issue reorder` for relative moves")
 	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run (only an assignee change in the update would start one)")
 	issueUpdateCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID) and cancel it; --status, if given, must be cancelled, and description/attachment changes must go in a separate update")
+	issueUpdateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue status
@@ -696,6 +698,7 @@ func init() {
 	issueAssignCmd.Flags().String("to-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --to)")
 	issueAssignCmd.Flags().Bool("unassign", false, "Remove current assignee")
 	issueAssignCmd.Flags().Bool("no-start", false, "Assign ownership without starting an agent run")
+	issueAssignCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueAssignCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue comment list
@@ -1547,6 +1550,10 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		body["assignee_type"] = aType
 		body["assignee_id"] = aID
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
 		return err
 	}
@@ -1774,6 +1781,10 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 			body["assignee_id"] = aID
 		}
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
 		return err
 	}
@@ -1933,6 +1944,10 @@ func runIssueAssign(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	var result map[string]any
 	if err := client.PutJSON(ctx, "/api/issues/"+issueRef.ID, body, &result); err != nil {
 		return fmt.Errorf("assign issue: %w", err)

@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/delivery"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // commentDeliveryKind is the producer-owned kind for an issue/comment
@@ -53,7 +55,8 @@ func renderCommentDelivery(d delivery.Delivery) string {
 	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
 		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n"+
 		"Read: multica issue get %[3]s --output json\n"+
-		"Read comments: multica issue comment list %[3]s --output json\n"+
+		"Scan threads: multica issue comment list %[3]s --roots-only --summary --compact --output json\n"+
+		"Expand relevant threads: multica issue comment list %[3]s --thread <thread-id> --tail 30 --compact --output json\n"+
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
 		d.ID, d.Scope.WorkspaceID, d.Refs.IssueID, d.Refs.CommentID, d.Recipient.ID)
 }
@@ -64,8 +67,13 @@ func renderCommentDelivery(d delivery.Delivery) string {
 // payload semantics; this layer only guarantees stable references and that no
 // extra permission is implied.
 func renderDeliveryNotification(d delivery.Delivery) string {
-	if d.Kind == commentDeliveryKind {
-		return renderCommentDelivery(d)
+	if d.Kind == commentDeliveryKind || d.Kind == "issue_assignment" {
+		body := renderCommentDelivery(d)
+		var request protocol.ExternalIssueRequest
+		if json.Unmarshal(d.Payload, &request) == nil && request.SquadID != "" && request.Briefing != "" {
+			body += fmt.Sprintf("\n\nSquad ID: %s\nFor this external turn, append --mailbox-id %s to multica squad activity. Use the connected external identity; do not set X-Task-ID or fabricate a managed run.\n\n%s", request.SquadID, d.ID, request.Briefing)
+		}
+		return body
 	}
 	var refs strings.Builder
 	if d.Refs.IssueID != "" {

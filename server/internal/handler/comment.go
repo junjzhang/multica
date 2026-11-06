@@ -3194,6 +3194,10 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 				blockTarget("squad", m.ID, ReasonTargetUnavailable)
 				continue
 			}
+			if squad.ArchivedAt.Valid {
+				blockTarget("squad", m.ID, ReasonTargetUnavailable)
+				continue
+			}
 			leaderID := squad.LeaderID
 			// A2A self-suppression: the author IS this squad's leader and its
 			// most recent task on this issue was a leader/generic role (NOT a
