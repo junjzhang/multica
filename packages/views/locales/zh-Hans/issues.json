@@ -978,6 +978,7 @@
       "agent_runtime_required": "请先为该智能体绑定运行时，再分配工作",
       "agent_execution_unsupported": "不支持的执行类型",
       "agent_external_session": "外部会话",
+      "assign_without_starting": "仅分配，暂不启动",
       "squad_runtime_required": "请先为该小队的负责人绑定运行时，再分配工作",
       "squad_execution_unsupported": "小队负责人的执行类型不受支持"
     },

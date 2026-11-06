@@ -75,6 +75,7 @@ export function runConfirmIntent(
   updates: Partial<UpdateIssueRequest>,
   catalog: Pick<IssueStatusCatalog, "entryOf">,
 ): RunConfirmIntent | null {
+  if (updates.suppress_run) return null;
   const issueCategory = resolveStatusCategory(issue.status, issue.status_category, catalog);
   const parked = issue.status === "backlog";
 

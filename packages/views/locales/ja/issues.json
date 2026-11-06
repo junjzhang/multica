@@ -978,6 +978,7 @@
       "agent_runtime_required": "作業を割り当てる前に、このエージェントにランタイムをバインドしてください",
       "agent_execution_unsupported": "未対応の実行タイプ",
       "agent_external_session": "外部セッション",
+      "assign_without_starting": "開始せずに割り当てる",
       "squad_runtime_required": "作業を割り当てる前に、このスクワッドのリーダーにランタイムをバインドしてください",
       "squad_execution_unsupported": "このスクワッドのリーダーの実行タイプは未対応です"
     },

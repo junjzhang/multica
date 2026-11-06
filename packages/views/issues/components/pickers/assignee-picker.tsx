@@ -217,6 +217,11 @@ function AssigneePickerImpl({
               setRecipient(null);
               setOpen(false);
             }}>{t(($) => $.detail.external_binding_save)}</Button>
+            <Button type="button" size="sm" variant="ghost" className="w-full" onClick={() => {
+              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, suppress_run: true });
+              setRecipient(null);
+              setOpen(false);
+            }}>{t(($) => $.pickers.assignee.assign_without_starting)}</Button>
           </div>
         </div>
       ) : <>

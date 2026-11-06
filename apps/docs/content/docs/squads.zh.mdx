@@ -30,7 +30,7 @@ import { Callout } from "fumadocs-ui/components/callout";
 
 在负责人选择器中选择已登记的接收会话，或在 `multica issue create`、`update`、`assign` 中传入 `--recipient-session-id <注册会话 UUID>`。省略时可复用该任务已有的精确绑定；不会隐选展示会话、最新会话或唯一会话。显式会话与已有绑定不同时报冲突，请先走会话接管流程。无效目标会使任务写入和 Mailbox 入队一起回滚。
 
-`backlog` 和 `suppress-run` 分配保持停放，不要求接收目标；显式提供时仍校验。外部信封携带同源 briefing 和 Mailbox ID，使用已连接的外部身份执行 `multica squad activity <issue-id> <outcome> --mailbox-id <mailbox-id>`，不能伪造 task ID。外部重新运行和托管系统唤醒是不同能力；停放的外部任务使用已有精确绑定的 `@小队` 显式启动。
+`backlog` 和 `suppress-run` 分配保持停放，不要求接收目标；显式提供时仍校验。选择器中的"仅分配，暂不启动"允许无会话停放；创建任务时会把草稿状态设为 `backlog`。外部信封携带同源 briefing 和 Mailbox ID，使用已连接的外部身份执行 `multica squad activity <issue-id> <outcome> --mailbox-id <mailbox-id>`，不能伪造 task ID。外部重新运行和托管系统唤醒是不同能力；停放的外部任务使用已有精确绑定的 `@小队` 显式启动。
 
 ## 分配后的执行流程
 

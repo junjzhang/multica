@@ -1090,11 +1090,10 @@ export function ManualCreatePanel({
                 <AssigneePicker
                   assigneeType={assigneeType ?? null}
                   assigneeId={assigneeId ?? null}
-                  onUpdate={(u) => updateAssignee(
-                    u.assignee_type ?? undefined,
-                    u.assignee_id ?? undefined,
-                    u.recipient_session_id,
-                  )}
+                  onUpdate={(u) => {
+                    updateAssignee(u.assignee_type ?? undefined, u.assignee_id ?? undefined, u.recipient_session_id);
+                    if (u.suppress_run) updateStatus("backlog");
+                  }}
                   triggerRender={<PillButton />}
                   tooltip={tIssues(($) => $.detail.prop_assignee)}
                   align="start"

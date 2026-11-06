@@ -67,6 +67,7 @@ vi.mock("./pickers", () => ({
         data-testid="assign-agent"
         onClick={() => onUpdate({ assignee_type: "agent", assignee_id: "agent-1" })}
       />
+      <button data-testid="park-external" onClick={() => onUpdate({ assignee_type: "squad", assignee_id: "external-squad", suppress_run: true })} />
       <button
         data-testid="assign-member"
         onClick={() => onUpdate({ assignee_type: "member", assignee_id: "user-1" })}
@@ -145,6 +146,14 @@ describe("BatchActionToolbar status routing (MUL-4155)", () => {
       expect.objectContaining({ issueIds: ["a"], mode: "assign", assigneeType: "agent", assigneeId: "agent-1" }),
     );
     expect(batchUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(["todo", "backlog"] as const)("parks external assignment from %s directly for the complete batch", async (status) => {
+    selection.selectedIds = new Set(["a", "b"]);
+    render(<BatchActionToolbar issues={[makeIssue({ id: "a", status }), makeIssue({ id: "b", status })]} />);
+    fireEvent.click(screen.getByTestId("park-external"));
+    expect(openModal).not.toHaveBeenCalled();
+    await waitFor(() => expect(batchUpdate).toHaveBeenCalledWith({ ids: ["a", "b"], updates: { assignee_type: "squad", assignee_id: "external-squad", suppress_run: true } }));
   });
 
   it("applies member assignment directly (never starts a run)", () => {

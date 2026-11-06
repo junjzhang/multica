@@ -30,7 +30,7 @@ Creating a squad requires a name and a leader. The squad leader automatically be
 
 Choose a registered recipient session in the assignee picker, or pass `--recipient-session-id <registered-session-uuid>` to `multica issue create`, `update` or `assign`. An exact existing issue binding can be reused when the field is omitted. Multica never chooses an agent's display, newest, or only session implicitly. A different explicit session conflicts with an existing binding; use the session takeover flow first. An invalid target rolls back the issue write and Mailbox request together.
 
-Backlog and suppress-run assignments stay parked and do not require a target. A supplied target is still validated. The external envelope carries the shared briefing and the Mailbox ID; use `multica squad activity <issue-id> <outcome> --mailbox-id <mailbox-id>` with the connected external identity. Do not invent a task ID. External reruns and managed system wakeups are separate capabilities; use an explicitly bound `@squad` request to start parked external work.
+Backlog and suppress-run assignments stay parked and do not require a target. A supplied target is still validated. In the picker, "Assign without starting" parks work without a session; when creating an issue, it sets the draft status to Backlog. The external envelope carries the shared briefing and the Mailbox ID; use `multica squad activity <issue-id> <outcome> --mailbox-id <mailbox-id>` with the connected external identity. Do not invent a task ID. External reruns and managed system wakeups are separate capabilities; use an explicitly bound `@squad` request to start parked external work.
 
 ## Execution flow after assignment
 
@@ -43,7 +43,7 @@ When an issue outside Backlog is created for or reassigned to a squad, Multica d
 5. **The dispatch turn leaves the parent `in_progress`.** Same agent-managed status contract as a direct agent assignment — coordinating the squad is working the parent's ask, so the parent moves from `todo` to `in_progress`, and dispatching members is not delivery, so it stays there while the squad works.
 6. **Leader stops.** The leader does not do the implementation itself. A delegation with an accepted return delivers its saved result to the fixed dispatcher. Do not add a duplicate mention for that return. Otherwise, a new action needs an explicit handoff. Ordinary comments do not wake the leader. Managed sub-issue and stage wakeups remain separate. On that later turn the leader can delegate the next step, escalate, move the parent to `in_review` once the overall goal is met, or stay silent. `done` is left to a human reviewer or existing integrations (for example a PR with close intent that merges).
 
-If the issue is in **Backlog**, the leader is not triggered — Backlog is a parking lot, same rule as for direct agent assignment. Moving the issue out of Backlog alone still does not start the leader; to begin, `@`-mention the leader or the squad, or rerun the issue.
+If the issue is in **Backlog**, the leader is not triggered — Backlog is a parking lot, same rule as for direct agent assignment. Moving the issue out of Backlog alone still does not start the leader; to begin, `@`-mention the leader or the squad, for a managed leader, rerunning is also available.
 
 ### What the leader sees on every turn
 

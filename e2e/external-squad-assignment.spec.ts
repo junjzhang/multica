@@ -56,3 +56,32 @@ test("explicit external squad recipient reaches the original isolated host", asy
     await api.cleanup();
   }
 });
+
+
+test("external squad without a session can be assigned without starting", async ({ page }, testInfo) => {
+  page.setDefaultTimeout(15_000);
+  const api = await createTestApi();
+  const squadName = `Parked external ${Date.now()}`;
+  const fixture = await api.seedExternalSquad(squadName, { sessions: false });
+  const issue = await api.createIssue("Backlog external parking", { status: "backlog" });
+  const db = new pg.Client(process.env.DATABASE_URL);
+  await db.connect();
+  try {
+    const slug = await loginAsDefault(page);
+    await page.goto(`/${slug}/issues/${issue.identifier}`);
+    await page.getByRole("button", { name: "Unassigned", exact: true }).click();
+    await page.getByRole("button", { name: squadName, exact: true }).click();
+    await expect(page.getByRole("button", { name: "Save session", exact: true })).toBeDisabled();
+    const assigned = page.waitForResponse((response) => response.request().method() === "PUT" && response.url().endsWith(`/api/issues/${issue.id}`));
+    await page.getByRole("button", { name: "Assign without starting", exact: true }).click();
+    const response = await assigned;
+    expect(response.ok(), await response.text()).toBeTruthy();
+    expect(response.request().postDataJSON()).toMatchObject({ assignee_type: "squad", assignee_id: fixture.squadId, suppress_run: true });
+    expect(response.request().postDataJSON()).not.toHaveProperty("recipient_session_id");
+    const persisted = await db.query(`SELECT status, assignee_id FROM issue WHERE id=$1`, [issue.id]);
+    expect(persisted.rows[0]).toMatchObject({ status: "backlog", assignee_id: fixture.squadId });
+    expect((await db.query(`SELECT count(*)::int AS n FROM agent_mailbox_message WHERE issue_id=$1`, [issue.id])).rows[0].n).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS n FROM agent_task_queue WHERE issue_id=$1`, [issue.id])).rows[0].n).toBe(0);
+    await page.screenshot({ path: testInfo.outputPath("parked-without-session.png") });
+  } finally { await db.end(); await api.cleanup(); }
+});

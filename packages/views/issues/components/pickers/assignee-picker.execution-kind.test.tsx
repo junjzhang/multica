@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multica/core/i18n/react";
@@ -64,15 +64,22 @@ const UNKNOWN = agent({
   execution_kind: "future_kind",
 });
 
+const SESSION_CHOICES = [
+  { id: "session-a", display_name: "Session A", session_id: "paseo-a", host_id: "host-a", provider: "paseo", deliverable: true },
+  { id: "session-b", display_name: "Session B", session_id: "paseo-b", host_id: "host-b", provider: "paseo", deliverable: true },
+];
+let sessionChoices = SESSION_CHOICES;
+let sessionError = false;
+let squads: { id: string; name: string; leader_id: string }[] = [];
+beforeEach(() => { sessionChoices = SESSION_CHOICES; sessionError = false; squads = []; });
+
 vi.mock("@tanstack/react-query", () => ({
   useQuery: ({ queryKey }: { queryKey: string[] }) => {
     if (queryKey[0] === "members") return { data: MEMBERS };
     if (queryKey[0] === "agents")
       return { data: [MANAGED_BOUND, MANAGED_UNBOUND, EXTERNAL, UNKNOWN] };
-    if (queryKey.includes("sessions")) return { data: [
-      { id: "session-a", display_name: "Session A", session_id: "paseo-a", host_id: "host-a", provider: "paseo", deliverable: true },
-      { id: "session-b", display_name: "Session B", session_id: "paseo-b", host_id: "host-b", provider: "paseo", deliverable: true },
-    ] };
+    if (queryKey[0] === "squads") return { data: squads };
+    if (queryKey.includes("sessions")) return { data: sessionChoices, isError: sessionError };
     return { data: [] };
   },
 }));
@@ -138,6 +145,30 @@ describe("AssigneePicker execution identity", () => {
       assignee_id: "agent-external",
       recipient_session_id: "session-b",
     });
+  });
+
+  it.each(["empty", "unavailable", "failed"])("allows parking without a target when sessions are %s", async (state) => {
+    sessionChoices = state === "unavailable" ? SESSION_CHOICES.map((choice) => ({ ...choice, deliverable: false })) : [];
+    sessionError = state === "failed";
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    renderPicker(onUpdate);
+    await user.click(screen.getByRole("button", { name: /External Reviewer/ }));
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Save session" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Assign without starting" }));
+    expect(onUpdate).toHaveBeenCalledWith({ assignee_type: "agent", assignee_id: EXTERNAL.id, suppress_run: true });
+  });
+
+  it("allows an external squad to be parked without selecting a session", async () => {
+    sessionChoices = [];
+    squads = [{ id: "squad-external", name: "External squad", leader_id: EXTERNAL.id }];
+    const user = userEvent.setup();
+    const onUpdate = vi.fn();
+    renderPicker(onUpdate);
+    await user.click(screen.getByRole("button", { name: "External squad" }));
+    await user.click(screen.getByRole("button", { name: "Assign without starting" }));
+    expect(onUpdate).toHaveBeenCalledWith({ assignee_type: "squad", assignee_id: "squad-external", suppress_run: true });
   });
 
   it("keeps managed missing-runtime and unknown execution rows disabled", async () => {

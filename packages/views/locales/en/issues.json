@@ -1020,6 +1020,7 @@
       "agent_runtime_required": "Bind a runtime before assigning work to this agent",
       "agent_execution_unsupported": "Unsupported execution type",
       "agent_external_session": "External session",
+      "assign_without_starting": "Assign without starting",
       "squad_runtime_required": "Bind a runtime to this squad's leader before assigning work",
       "squad_execution_unsupported": "This squad's leader has an unsupported execution type"
     },

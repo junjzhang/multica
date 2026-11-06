@@ -365,7 +365,7 @@ export class TestApiClient {
   }
 
   /** Isolated host fixture; it never starts a real agent or a daemon. */
-  async seedExternalSquad(name: string) {
+  async seedExternalSquad(name: string, options: { sessions?: boolean } = {}) {
     if (!this.workspaceId || !this.email) throw new Error("Select a workspace before seeding a squad");
     const client = new pg.Client(DATABASE_URL);
     await client.connect();
@@ -378,14 +378,18 @@ export class TestApiClient {
         VALUES ($1,$2,'local','handler_test_runtime','online',$3,$4,now()) RETURNING id`, [this.workspaceId, name, ownerId, daemonId]);
       const agent = await client.query(`INSERT INTO agent (workspace_id,name,runtime_mode,execution_kind,owner_id) VALUES ($1,$2,'cloud','external',$3) RETURNING id`, [this.workspaceId, name+" leader", ownerId]);
       const agentId = agent.rows[0].id as string;
-      const session = await client.query(`INSERT INTO external_agent_session (workspace_id,agent_id,owner_user_id,provider,host_id,session_id,display_name,daemon_id)
+      let sessionId: string | undefined;
+      if (options.sessions !== false) {
+        const session = await client.query(`INSERT INTO external_agent_session (workspace_id,agent_id,owner_user_id,provider,host_id,session_id,display_name,daemon_id)
         VALUES ($1,$2,$3,'paseo','isolated-host','chosen-host-session','Chosen receipt session',$4),
                ($1,$2,$3,'paseo','another-host','never-select-this-session','Other session','other-daemon') RETURNING id`, [this.workspaceId, agentId, ownerId, daemonId]);
+        sessionId = session.rows[0].id as string;
+      }
       const squad = await client.query(`INSERT INTO squad (workspace_id,name,leader_id,creator_id,instructions) VALUES ($1,$2,$3,$4,'Browser integration squad instruction') RETURNING id`, [this.workspaceId, name, agentId, ownerId]);
       const squadId = squad.rows[0].id as string;
       await client.query("COMMIT");
       this.externalSquadFixtures.push({ squadId, agentId, runtimeId: runtime.rows[0].id });
-      return { squadId, agentId, sessionId: session.rows[0].id as string, daemonId, workspaceId: this.workspaceId };
+      return { squadId, agentId, sessionId, daemonId, workspaceId: this.workspaceId };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
