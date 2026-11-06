@@ -3,6 +3,7 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, FileCheck2 } from "lucide-react";
+import { ApiError } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import {
   issueContractOptions,
@@ -33,7 +34,7 @@ export function IssueContract({ issueId }: { issueId: string }) {
   const { t } = useT("issues");
   const query = useQuery(issueContractOptions(wsId, issueId));
   if (query.isPending) return null;
-  if (query.isError)
+  if (query.isError && !query.data)
     return (
       <div className="space-y-2 px-2 text-caption">
         <p>{t(($) => $.contract.load_error)}</p>
@@ -42,15 +43,28 @@ export function IssueContract({ issueId }: { issueId: string }) {
         </Button>
       </div>
     );
-  return <ContractSection key={issueId} issueId={issueId} view={query.data} />;
+  if (!query.data) return null;
+  return (
+    <ContractSection
+      key={issueId}
+      issueId={issueId}
+      view={query.data}
+      refreshing={query.isFetching}
+      refresh={() => query.refetch({ throwOnError: true })}
+    />
+  );
 }
 
 function ContractSection({
   issueId,
   view,
+  refresh,
+  refreshing,
 }: {
   issueId: string;
   view: ContractView;
+  refresh: () => Promise<unknown>;
+  refreshing: boolean;
 }) {
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
@@ -64,6 +78,7 @@ function ContractSection({
   const [reason, setReason] = useState("");
   const [children, setChildren] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [conflict, setConflict] = useState(false);
   const [retry, setRetry] = useState<ContractRequest | null>(null);
   const [draftBasis, setDraftBasis] = useState<{
     sequence: number;
@@ -86,6 +101,30 @@ function ContractSection({
         view.accepted.includes(i) ? [] : [i],
       ) ?? []);
 
+  const draftCurrent =
+    !draftBasis ||
+    (draftBasis.sequence === (state?.sequence ?? 0) &&
+      draftBasis.version === (version?.number ?? 0));
+  const needsRestart = conflict || (!retry && !draftCurrent);
+  const locked = mutation.isPending || needsRestart || !!retry;
+  async function discardDraft() {
+    try {
+      await refresh();
+      setRetry(null);
+      setConflict(false);
+      setDraftBasis(null);
+      setSelected([]);
+      setChildren([]);
+      setEvidence("");
+      setReason("");
+      setError("");
+      setEditOpen(false);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : t(($) => $.contract.load_error),
+      );
+    }
+  }
   const beginDraft = () =>
     setDraftBasis(
       (basis) =>
@@ -132,6 +171,7 @@ function ContractSection({
     try {
       await mutation.mutateAsync(request);
       setRetry(null);
+      setConflict(false);
       setDraftBasis(null);
       setEditOpen(false);
       setSelected([]);
@@ -139,11 +179,47 @@ function ContractSection({
       setEvidence("");
       setReason("");
     } catch (err) {
+      const rejected =
+        err instanceof ApiError && err.status >= 400 && err.status < 500;
+      setConflict(rejected && err.status === 409);
+      if (rejected) setRetry(null);
       setError(
         err instanceof Error ? err.message : t(($) => $.contract.save_error),
       );
     }
   }
+
+  const recovery = (error || needsRestart) && (
+    <div role="alert" className="space-y-2 text-caption text-destructive">
+      <p className="break-words">
+        {error || t(($) => $.contract.draft_changed)}
+      </p>
+      {needsRestart ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="outline"
+          disabled={refreshing || mutation.isPending}
+          aria-busy={refreshing}
+          onClick={discardDraft}
+        >
+          {t(($) => $.contract.restart_draft)}
+        </Button>
+      ) : (
+        retry && (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={mutation.isPending}
+            onClick={() => send(retry)}
+          >
+            {t(($) => $.contract.retry)}
+          </Button>
+        )
+      )}
+    </div>
+  );
 
   return (
     <section
@@ -229,10 +305,11 @@ function ContractSection({
                       type="checkbox"
                       className="mt-0.5 shrink-0"
                       checked={
-                        view.accepted.includes(i) || selected.includes(i)
+                        view.accepted.includes(i) ||
+                        (draftCurrent && selected.includes(i))
                       }
                       disabled={
-                        mutation.isPending ||
+                        locked ||
                         !allowed.includes(i) ||
                         (!view.can_submit && !view.can_review)
                       }
@@ -258,7 +335,7 @@ function ContractSection({
                 <p className="pt-2 text-muted-foreground">
                   {t(($) => $.contract.authorization_note_help)}
                 </p>
-                <p className="pt-2">
+                <p className="pt-2 [overflow-wrap:anywhere]">
                   {view.merge_authorization.allowed
                     ? t(($) => $.contract.merge_allowed, {
                         repository:
@@ -285,6 +362,7 @@ function ContractSection({
                       {t(($) => $.contract.evidence)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-evidence`}
                       value={evidence}
                       onChange={(event) => {
@@ -305,6 +383,7 @@ function ContractSection({
                       <label key={child.id} className="flex items-start gap-2">
                         <input
                           type="checkbox"
+                          disabled={locked}
                           checked={children.includes(child.id)}
                           onChange={(event) =>
                             toggleChild(child.id, event.target.checked)
@@ -319,9 +398,7 @@ function ContractSection({
                     ))}
                   <Button
                     size="sm"
-                    disabled={
-                      mutation.isPending || !selected.length || !evidence.trim()
-                    }
+                    disabled={locked || !selected.length || !evidence.trim()}
                     aria-busy={mutation.isPending}
                     onClick={() =>
                       apply({
@@ -342,6 +419,7 @@ function ContractSection({
                     <label className="flex items-start gap-2" key={id}>
                       <input
                         type="checkbox"
+                        disabled={locked}
                         checked={children.includes(id)}
                         onChange={(event) =>
                           toggleChild(id, event.target.checked)
@@ -357,6 +435,7 @@ function ContractSection({
                       {t(($) => $.contract.review_note)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-review`}
                       value={reason}
                       onChange={(event) => {
@@ -369,7 +448,7 @@ function ContractSection({
                   <div className="flex flex-wrap gap-2">
                     <Button
                       size="sm"
-                      disabled={mutation.isPending || !selected.length}
+                      disabled={locked || !selected.length}
                       aria-busy={mutation.isPending}
                       onClick={() =>
                         apply({
@@ -386,7 +465,7 @@ function ContractSection({
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={mutation.isPending || !reason.trim()}
+                      disabled={locked || !reason.trim()}
                       onClick={() =>
                         apply({
                           action: "return",
@@ -518,6 +597,7 @@ function ContractSection({
                       {t(($) => $.contract.goal)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-goal`}
                       name="goal"
                       required
@@ -529,6 +609,7 @@ function ContractSection({
                       {t(($) => $.contract.scope)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-scope`}
                       name="scope"
                       defaultValue={version?.scope}
@@ -539,6 +620,7 @@ function ContractSection({
                       {t(($) => $.contract.criteria_lines)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-requirements`}
                       name="requirements"
                       required
@@ -550,6 +632,7 @@ function ContractSection({
                       {t(($) => $.contract.authorization)}
                     </label>
                     <Textarea
+                      disabled={locked}
                       id={`${fieldId}-authorization`}
                       name="authorization"
                       required
@@ -559,14 +642,10 @@ function ContractSection({
                   <p className="text-caption text-muted-foreground">
                     {t(($) => $.contract.identities_help)}
                   </p>
-                  {error && (
-                    <p role="alert" className="text-caption text-destructive">
-                      {error}
-                    </p>
-                  )}
+                  {recovery}
                   <Button
                     type="submit"
-                    disabled={mutation.isPending}
+                    disabled={locked}
                     aria-busy={mutation.isPending}
                   >
                     {t(($) => $.contract.save_version)}
@@ -575,21 +654,7 @@ function ContractSection({
               </DialogContent>
             </Dialog>
           )}
-          {error && !editOpen && (
-            <div role="alert" className="space-y-2 text-destructive">
-              <p className="break-words">{error}</p>
-              {retry && (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={mutation.isPending}
-                  onClick={() => send(retry)}
-                >
-                  {t(($) => $.contract.retry)}
-                </Button>
-              )}
-            </div>
-          )}
+          {!editOpen && recovery}
         </div>
       )}
     </section>

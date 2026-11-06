@@ -8,7 +8,61 @@ test.describe("Issue contract", () => {
   let api: TestApiClient;
   let executorContext: BrowserContext | undefined;
   test.beforeEach(async () => {
+    executorContext = undefined;
     api = await createTestApi();
+  });
+
+  test("long structured merge targets wrap inside the responsive sidebar", async ({
+    page,
+  }, info) => {
+    const member = await api.contractMember(
+      `contract-long-${Date.now()}@multica.ai`,
+      "Delivery Owner",
+    );
+    const issue = await api.createIssue("Long merge authorization", {
+      assignee_type: "member",
+      assignee_id: member.userId,
+    });
+    const repository = `https://github.com/${"o".repeat(32)}/${"r".repeat(80)}`;
+    const branch = `feature/${"b".repeat(212)}`;
+    await api.updateIssue(issue.id, {
+      merge_authorization: {
+        allowed: true,
+        repository_url: repository,
+        target_branch: branch,
+      },
+    });
+    await api.applyContract(issue.id, {
+      action: "revise",
+      client_request_id: randomUUID(),
+      expected_sequence: 0,
+      goal: "Review the full permission target",
+      scope: "Responsive sidebar",
+      authorization_note: "Existing permission scope",
+      requirements: ["Full merge target is readable"],
+    });
+    const slug = await loginAsDefault(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/${slug}/issues/${issue.identifier}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.getByRole("button", { name: "Toggle right sidebar" }).click();
+    const section = page.locator("[data-issue-contract]");
+    await expect(
+      section.getByText(`Merge authorized: ${repository} → ${branch}`, {
+        exact: true,
+      }),
+    ).toBeVisible();
+    expect(
+      await section.evaluate(
+        (element) => element.scrollWidth <= element.clientWidth + 1,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: info.outputPath("mobile-long-authorization.png"),
+      fullPage: true,
+      animations: "disabled",
+    });
   });
   test.afterEach(async () => {
     await executorContext?.close();

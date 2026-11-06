@@ -1920,6 +1920,8 @@
     "activity_submit": "submitted delivery evidence",
     "activity_accept": "accepted delivery criteria",
     "activity_return": "returned the delivery",
-    "authorization_note_help": "Notes do not grant access. Existing permissions apply."
+    "authorization_note_help": "Notes do not grant access. Existing permissions apply.",
+    "restart_draft": "Discard draft and reload",
+    "draft_changed": "The agreement changed. Start a new draft from the latest version."
   }
 }

@@ -1854,6 +1854,8 @@
     "activity_submit": "提交了交付证据",
     "activity_accept": "接受了交付条件",
     "activity_return": "退回了交付",
-    "authorization_note_help": "说明不授予操作权限，实际权限以现有授权为准。"
+    "authorization_note_help": "说明不授予操作权限，实际权限以现有授权为准。",
+    "restart_draft": "丢弃草稿并重新读取",
+    "draft_changed": "约定已变更，请基于最新版本重新填写。"
   }
 }

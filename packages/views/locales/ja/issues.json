@@ -1854,6 +1854,8 @@
     "activity_submit": "納品の証拠を提出しました",
     "activity_accept": "納品条件を承認しました",
     "activity_return": "納品を差し戻しました",
-    "authorization_note_help": "この説明は権限を付与しません。既存の権限が適用されます。"
+    "authorization_note_help": "この説明は権限を付与しません。既存の権限が適用されます。",
+    "restart_draft": "下書きを破棄して再読込",
+    "draft_changed": "合意が変更されました。最新バージョンから下書きを作成してください。"
   }
 }

@@ -1920,6 +1920,8 @@
     "activity_submit": "a soumis les preuves de livraison",
     "activity_accept": "a accepté les critères de livraison",
     "activity_return": "a retourné la livraison",
-    "authorization_note_help": "Ces notes n’accordent aucun accès. Les permissions existantes s’appliquent."
+    "authorization_note_help": "Ces notes n’accordent aucun accès. Les permissions existantes s’appliquent.",
+    "restart_draft": "Abandonner le brouillon et recharger",
+    "draft_changed": "L’accord a changé. Recommencez avec la dernière version."
   }
 }
