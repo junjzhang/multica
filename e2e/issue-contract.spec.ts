@@ -15,6 +15,7 @@ test.describe("Issue contract", () => {
   test("long structured merge targets wrap inside the responsive sidebar", async ({
     page,
   }, info) => {
+    test.setTimeout(180_000);
     const member = await api.contractMember(
       `contract-long-${Date.now()}@multica.ai`,
       "Delivery Owner",
@@ -46,6 +47,7 @@ test.describe("Issue contract", () => {
     await page.goto(`/${slug}/issues/${issue.identifier}`, {
       waitUntil: "domcontentloaded",
     });
+    await waitForPageText(page, "Long merge authorization");
     await page.getByRole("button", { name: "Toggle right sidebar" }).click();
     const section = page.locator("[data-issue-contract]");
     await expect(

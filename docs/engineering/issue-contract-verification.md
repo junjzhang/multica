@@ -4,6 +4,8 @@ The implementation extends `feat/task-session-delivery@1a017f993`.
 Production revision `20c6a357e` contains the API, CLI, shared UI and independent
 review fixes; the evidence commit adds this report, screenshots and the isolated
 migration round-trip test. WORK-178 and PR12 record subsequent review and CI gates.
+UI revision `20e424ec3` additionally separates conflict recovery from unknown-result
+retry and wraps long structured permission targets.
 
 ## Behavior and evidence
 
@@ -24,6 +26,8 @@ migration round-trip test. WORK-178 and PR12 record subsequent review and CI gat
 | Lint | Root `pnpm lint` | Passed with existing warnings |
 | Frontend tests | Node22 full suite had one complete pass; a later full repeat hit an unchanged workflow-editor test timeout; its isolated rerun plus locale parity passed 216 tests | Full repeat limitation retained |
 | Browser and CLI | Three Playwright scenarios described below | Passed |
+| Conflict recovery | Submit/review discard old selections and restart at the current version; unknown results retry the original UUID | Three component regressions passed |
+| Long merge target | Actual 390px browser, long repository and legal 220-character branch, local sidebar overflow check | Passed |
 
 Go validation used Go 1.26.9, the checkout's managed database, and the agent CLI
 guard for the expanded handler suite. Race tests used the system GCC. The local
@@ -57,6 +61,12 @@ accepts through the same API. The fixture run is never executed by an agent daem
 `e2e/issue-sidebar-containment.spec.ts` verifies that overflowing sidebar content
 does not stretch the surrounding panels.
 
+The long-target scenario first exceeded the cold navigation budget before the
+page header appeared; after adding an explicit page-readiness check, the same
+browser scenario passed in 8.2s. The main three browser scenarios also passed
+against the UI recovery revision. Permission values remain visible and wrap
+inside the sidebar rather than being hidden or truncated.
+
 ## Screenshots
 
 Before explicit contract creation:
@@ -82,6 +92,10 @@ Accepted history after refresh:
 390px responsive Properties sheet:
 
 ![Responsive properties](../assets/issue-contract/mobile-web.png)
+
+Long structured merge target at 390px:
+
+![Long permission target](../assets/issue-contract/mobile-long-authorization.png)
 
 ## Delivery limits
 
