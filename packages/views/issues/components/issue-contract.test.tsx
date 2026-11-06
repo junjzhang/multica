@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "@multica/core/api";
 import type { ContractView } from "@multica/core/api/issue-contract-schema";
 import { renderWithI18n } from "../../test/i18n";
+import { issueContractOptions } from "@multica/core/issues/contract";
 
 const apiMock = vi.hoisted(() => ({
   getIssueContract: vi.fn(),
@@ -91,6 +92,64 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("contract draft recovery", () => {
+  it("keeps the revision dialog inside the same lock as a review draft", async () => {
+    let current = { ...view("review"), can_edit: true };
+    apiMock.getIssueContract.mockImplementation(async () => current);
+    apiMock.updateIssueContract.mockResolvedValue({
+      ...current,
+      can_review: false,
+    });
+    const client = renderContract();
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("checkbox", { name: "Criterion 1" }),
+    );
+    current = { ...view("review", 2), can_edit: true };
+    current.contract!.sequence = 4;
+    act(() =>
+      client.setQueryData(
+        issueContractOptions("ws-1", "issue-1").queryKey,
+        current,
+      ),
+    );
+    await screen.findByRole("checkbox", { name: "Criterion 2" });
+    expect(
+      screen.getByRole("button", { name: "Revise contract" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("checkbox", { name: "Criterion 2" }),
+    ).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Revise contract" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Accept selected" }));
+    expect(apiMock.updateIssueContract).not.toHaveBeenCalled();
+    await user.click(
+      screen.getByRole("button", { name: "Discard draft and reload" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Revise contract" }),
+      ).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "Revise contract" }));
+    await user.keyboard("{Escape}");
+    expect(
+      screen.getByRole("checkbox", { name: "Criterion 2" }),
+    ).not.toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: "Criterion 2" }));
+    await user.click(screen.getByRole("button", { name: "Accept selected" }));
+    await waitFor(() =>
+      expect(apiMock.updateIssueContract).toHaveBeenCalledTimes(1),
+    );
+    expect(apiMock.updateIssueContract.mock.calls[0]![1]).toMatchObject({
+      action: "accept",
+      version: 2,
+      expected_sequence: 4,
+      delivery_id: "delivery-2",
+      criteria: [0],
+    });
+    client.clear();
+  });
   for (const role of ["submit", "review"] as const)
     it(`restarts a ${role} draft explicitly after a conflict`, async () => {
       let current = view(role);

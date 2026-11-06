@@ -551,6 +551,7 @@ function ContractSection({
             <Dialog
               open={editOpen}
               onOpenChange={(next) => {
+                if (next && locked) return;
                 setEditOpen(next);
                 if (next)
                   setDraftBasis({
@@ -559,7 +560,10 @@ function ContractSection({
                   });
               }}
             >
-              <DialogTrigger render={<Button variant="outline" size="xs" />}>
+              <DialogTrigger
+                disabled={locked}
+                render={<Button variant="outline" size="xs" />}
+              >
                 {version
                   ? t(($) => $.contract.revise)
                   : t(($) => $.contract.create)}
