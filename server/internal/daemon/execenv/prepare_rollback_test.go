@@ -22,7 +22,8 @@ import (
 // needs no agent CLI on the machine, and it lands after the marker is written.
 func TestPrepareRollsBackSidecarsWhenPrepareFailsInPlace(t *testing.T) {
 	workspacesRoot := t.TempDir()
-	userDir := t.TempDir()
+	repo := newCursorMcpTestRepo(t)
+	userDir := repo.RepoRoot
 
 	// The user's own content: the file that makes Prepare fail, plus a plain
 	// file that must survive the rollback untouched.

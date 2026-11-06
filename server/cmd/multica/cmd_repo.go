@@ -150,11 +150,11 @@ func patchWorkspaceRepos(ctx context.Context, client *cli.APIClient, workspaceID
 }
 
 func repoCommandClient(cmd *cobra.Command) (*cli.APIClient, string, error) {
-	workspaceID, err := requireWorkspaceID(cmd)
+	client, err := newAPIClient(cmd)
 	if err != nil {
 		return nil, "", err
 	}
-	client, err := newAPIClient(cmd)
+	workspaceID, err := commandWorkspaceID(cmd, client)
 	if err != nil {
 		return nil, "", err
 	}

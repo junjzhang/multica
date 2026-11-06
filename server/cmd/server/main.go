@@ -757,6 +757,8 @@ func main() {
 		go telemetryWorker.Run(sweepCtx)
 	}
 	go runDelegatedFailureRecoverySweeper(sweepCtx, taskSvc)
+	go runCommentDispatchObligationSweeper(sweepCtx, h)
+	go runDelegationResultSweeper(sweepCtx, h)
 	// Seven-day runtime retention does not share the 30-second liveness tick:
 	// its bounded transactions run independently once per hour, so a slow GC
 	// round cannot delay offline detection or task recovery.
@@ -785,6 +787,7 @@ func main() {
 	// GitHub PR-card API snapshot pipeline (MUL-5265): worker pool + TTL sweeper.
 	// No-op when unconfigured (no App private key).
 	h.PRRefresh.Start(sweepCtx)
+	h.TGitSnapshots.Start(sweepCtx)
 
 	// Channel inbound supervisor (MUL-3620): holds the §4.4 WS lease per
 	// installation and drives each channel.Channel. It is channel-agnostic,

@@ -1,0 +1,28 @@
+{
+  "name": "@multica/paseo-multica",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private Paseo directory plugin that binds the current session to Multica.",
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.13.0-beta.1",
+    "@getpaseo/plugin": "0.13.0-beta.1",
+    "@getpaseo/protocol": "0.13.0-beta.1",
+    "@types/node": "25.5.0",
+    "@types/react": "19.2.14",
+    "react": "19.2.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  }
+}

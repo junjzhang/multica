@@ -244,7 +244,7 @@ func TestTaskSupplementCompletionDoesNotReplayBoundComments(t *testing.T) {
 
 					var ordinaryID, queuedID string
 					if ordinary != "none" {
-						ordinaryID = dbfx.Comment(t, fixture.issueID, "Handle this ordinary reply next.", testutil.Cols{
+						ordinaryID = dbfx.Comment(t, fixture.issueID, "[@Supplement](mention://agent/"+fixture.agentID+") Handle this ordinary reply next.", testutil.Cols{
 							"parent_id": fixture.triggerID,
 						})
 					}

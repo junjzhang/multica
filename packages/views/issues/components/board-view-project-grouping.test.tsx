@@ -69,6 +69,7 @@ vi.mock("../../navigation", () => ({
   }),
   resolveClickIntent: () => "push",
   useIntentNavigate: () => () => {},
+  useRowLink: () => () => ({ onClick: vi.fn(), onAuxClick: vi.fn() }),
 }));
 
 const ACME_ID = "11111111-1111-4111-8111-111111111111";

@@ -18,7 +18,10 @@ import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { workspaceKeys } from "@multica/core/workspace/queries";
 import { useAuthStore } from "@multica/core/auth";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
-import { isAgentRuntimeBound } from "@multica/core/agents";
+import {
+  agentExecutionKind,
+  agentNeedsRuntime,
+} from "@multica/core/agents/execution-kind";
 import { searchIssues, searchProjects } from "@multica/core/search-index";
 import {
   isIssueDirectHit,
@@ -90,7 +93,7 @@ export interface MentionItem {
   /** Project status snapshot for recent/current project rendering */
   projectStatus?: ProjectStatus;
   /** Present when the target should remain discoverable but cannot be selected. */
-  disabledReason?: "agent_runtime_required";
+  disabledReason?: "agent_runtime_required" | "agent_execution_unsupported";
 }
 
 interface MentionListProps {
@@ -772,6 +775,16 @@ export function createMentionSuggestion(
         type: "member" as const,
       }));
 
+    // External identities are mentionable: the backend delivers the comment to
+    // their mailbox instead of starting a native run. Only a managed agent
+    // missing its runtime keeps the repair signal, and an unknown execution
+    // kind stays discoverable but unselectable.
+    const agentMentionState = (agent: (typeof agents)[number]) => {
+      const kind = agentExecutionKind(agent);
+      if (kind === "unknown") return "unsupported" as const;
+      if (kind === "external") return "ready" as const;
+      return agentNeedsRuntime(agent) ? ("runtime-required" as const) : ("ready" as const);
+    };
     const agentItems: MentionItem[] = agents
       .filter(
         (a) =>
@@ -779,18 +792,24 @@ export function createMentionSuggestion(
           (a.name.toLowerCase().includes(q) || matchesPinyin(a.name, q)) &&
           canAssignAgentToIssue(a, { userId, role: myRole }).allowed,
       )
-      .map((a) => ({
-        id: a.id,
-        label: a.name,
-        type: "agent" as const,
-        disabledReason: isAgentRuntimeBound(a)
-          ? undefined
-          : ("agent_runtime_required" as const),
-      }));
-    const activeAgentRuntimeBinding = new Map(
+      .map((a) => {
+        const state = agentMentionState(a);
+        return {
+          id: a.id,
+          label: a.name,
+          type: "agent" as const,
+          disabledReason:
+            state === "unsupported"
+              ? ("agent_execution_unsupported" as const)
+              : state === "runtime-required"
+                ? ("agent_runtime_required" as const)
+                : undefined,
+        };
+      });
+    const activeAgentMentionState = new Map(
       agents
         .filter((agent) => !agent.archived_at)
-        .map((agent) => [agent.id, isAgentRuntimeBound(agent)]),
+        .map((agent) => [agent.id, agentMentionState(agent)]),
     );
 
     const squadItems: MentionItem[] = squads
@@ -804,9 +823,11 @@ export function createMentionSuggestion(
         label: s.name,
         type: "squad" as const,
         disabledReason:
-          activeAgentRuntimeBinding.get(s.leader_id) === false
-            ? ("agent_runtime_required" as const)
-            : undefined,
+          activeAgentMentionState.get(s.leader_id) === "unsupported"
+            ? ("agent_execution_unsupported" as const)
+            : activeAgentMentionState.get(s.leader_id) === "runtime-required"
+              ? ("agent_runtime_required" as const)
+              : undefined,
       }));
 
     // Members and agents share a single ranked list — recently mentioned

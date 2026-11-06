@@ -29,6 +29,7 @@ vi.mock("@multica/core/hooks", () => ({
 function renderDisplay(
   columns: IssueStatus[] | null,
   setup: (store: StoreApi<IssueViewState>) => void = () => {},
+  showSubIssues?: boolean,
 ) {
   setApiInstance(
     new Proxy({}, { get: () => async () => ({}) }) as unknown as ApiClient,
@@ -38,7 +39,7 @@ function renderDisplay(
   });
   const store = createStore<IssueViewState>()(viewStoreSlice);
   setup(store);
-  const controls = <IssueDisplayControls scopedIssues={[]} hideViewToggle />;
+  const controls = <IssueDisplayControls scopedIssues={[]} hideViewToggle showSubIssues={showSubIssues} />;
   renderWithI18n(
     <QueryClientProvider client={qc}>
       <ViewStoreProvider store={store}>
@@ -60,6 +61,15 @@ afterEach(() => {
 });
 
 describe("Display columns", () => {
+  it("lets an automatically expanded search become an explicit hide choice", async () => {
+    const store = renderDisplay(null, (s) => s.setState({ showSubIssues: false, showSubIssuesExplicit: false }), true);
+    const toggle = await screen.findByRole("switch", { name: "Show sub-issues" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    expect(store.getState().showSubIssues).toBe(false);
+    expect(store.getState().showSubIssuesExplicit).toBe(true);
+  });
+
   it("lists the surface's columns in order and reflects hidden ones", async () => {
     renderDisplay(["todo", "in_progress", "done", "cancelled"], (store) =>
       store.getState().setViewMode("board"),
