@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext } from "@playwright/test";
 import { createTestApi, loginAsDefault, waitForPageText } from "./helpers";
 import type { TestApiClient } from "./fixtures";
+import { randomUUID } from "node:crypto";
 
 test.describe("Issue contract", () => {
   test.use({ actionTimeout: 15_000 });
@@ -130,6 +131,9 @@ test.describe("Issue contract", () => {
       ).toBeVisible();
     };
     await submit(["API and child delivery"], "Initial API evidence", true);
+    await expect(
+      section.getByText("Waiting for acceptance", { exact: true }),
+    ).toBeVisible();
     await page.reload({ waitUntil: "domcontentloaded" });
     await section
       .getByRole("checkbox", { name: "API and child delivery", exact: true })
@@ -201,6 +205,27 @@ test.describe("Issue contract", () => {
     await page.screenshot({
       path: info.outputPath("mobile-web-contract.png"),
       fullPage: true,
+      animations: "disabled",
     });
+    await page.keyboard.press("Escape");
+    await expect(section).not.toBeVisible();
+    await expect(
+      executor.getByRole("button", { name: "Done", exact: true }),
+    ).toBeVisible();
+    await api.applyContract(issue.id, {
+      action: "revise",
+      client_request_id: randomUUID(),
+      expected_sequence: 7,
+      goal: "Revised after completed delivery",
+      scope: "Same shared issue details",
+      authorization_note: "Implement and test only; no merge",
+      requirements: ["API and child delivery", "Refresh and browser evidence"],
+    });
+    await expect(
+      execution.getByText("0/2 accepted", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      executor.getByRole("button", { name: "In Progress", exact: true }),
+    ).toBeVisible();
   });
 });
