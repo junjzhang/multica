@@ -65,6 +65,7 @@ interface RunConfirmData {
   status?: IssueStatus;
   assigneeType?: IssueAssigneeType;
   assigneeId?: string;
+  recipientSessionId?: string;
   assigneeName?: string;
   issueRevision?: number;
   /** Runs after every write applies; never on dismiss, failure, or a partial batch. */
@@ -128,6 +129,7 @@ export function RunConfirmModal({
       : {
           assignee_type: d.assigneeType ?? null,
           assignee_id: d.assigneeId ?? null,
+          ...(d.recipientSessionId ? { recipient_session_id: d.recipientSessionId } : {}),
         };
     return { ...base, ...extra };
   };

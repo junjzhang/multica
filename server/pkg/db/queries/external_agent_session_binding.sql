@@ -8,6 +8,7 @@ INSERT INTO external_agent_session_binding (
 ) VALUES (
     @workspace_id, @agent_id, @issue_id, @session_id, sqlc.narg('created_by')
 )
+ON CONFLICT (workspace_id, agent_id, issue_id) WHERE revoked_at IS NULL DO NOTHING
 RETURNING *;
 
 -- name: GetActiveAgentSessionBinding :one

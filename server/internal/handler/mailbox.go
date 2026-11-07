@@ -20,6 +20,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -399,16 +400,6 @@ func validRetryClass(class string) bool {
 	}
 }
 
-// commentMentionDeliveryPayload is the immutable snapshot stored with a
-// comment handoff. It deliberately contains stable references only: the
-// discussion body stays in the native comment and is never copied into a
-// second mutable message.
-type commentMentionDeliveryPayload struct {
-	Schema    string `json:"schema"`
-	IssueID   string `json:"issue_id"`
-	CommentID string `json:"comment_id"`
-}
-
 // mailboxDeliveryResults is the per-agent outcome of persisting a comment
 // handoff. A queued entry means the delivery row committed; any other reason
 // means the target was not addressed (for example no active session binding)
@@ -450,20 +441,64 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 		}
 	}
 	store := delivery.NewPostgres(q)
-	payload, err := json.Marshal(commentMentionDeliveryPayload{
-		Schema:    "comment_mention.v1",
-		IssueID:   issueID,
-		CommentID: uuidToString(commentID),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal comment delivery payload: %w", err)
-	}
+	byAgent := make(map[string]commentMentionTarget, len(recipients))
+	var order []string
 	for _, target := range recipients {
+		if target.MailboxAgent == nil {
+			continue
+		}
+		id := uuidToString(target.MailboxAgent.ID)
+		existing, seen := byAgent[id]
+		if !seen {
+			order = append(order, id)
+		}
+		// A squad role takes precedence over a direct mention, just as it
+		// does for managed triggers. Multiple squads retain the first role.
+		if !seen || (existing.TargetType != "squad" && target.TargetType == "squad") {
+			byAgent[id] = target
+		}
+	}
+	for _, id := range order {
+		target := byAgent[id]
 		if target.MailboxAgent == nil {
 			continue
 		}
 		agent := *target.MailboxAgent
 		agentID := uuidToString(agent.ID)
+		notificationKey := "comment:" + uuidToString(commentID) + ":agent:" + agentID
+		existing, loadErr := q.GetAgentMailboxMessageByComment(ctx, db.GetAgentMailboxMessageByCommentParams{RecipientAgentID: agent.ID, CommentID: commentID})
+		if loadErr == nil && len(existing.Payload) > 0 && existing.TargetSessionID.Valid {
+			_, replayErr := store.Enqueue(ctx, delivery.EnqueueRequest{
+				Scope:           delivery.Scope{WorkspaceID: workspaceID},
+				Source:          delivery.Source{Type: "comment", Key: uuidToString(commentID), ActorType: actorType, ActorID: actorID, SessionID: sourceSessionID},
+				Target:          delivery.Target{SessionID: uuidToString(existing.TargetSessionID)},
+				Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+				NotificationKey: notificationKey, Kind: "comment_mention", Payload: existing.Payload,
+				Refs: delivery.Refs{IssueID: issueID, CommentID: uuidToString(commentID)},
+			})
+			if replayErr != nil {
+				return out, replayErr
+			}
+			out[agentID] = ReasonQueued
+			continue
+		}
+		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+			return out, loadErr
+		}
+		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID)}
+		if target.TargetType == "squad" {
+			squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: parseUUID(target.TargetID), WorkspaceID: issue.WorkspaceID})
+			if err != nil || squad.ArchivedAt.Valid || squad.LeaderID != agent.ID {
+				out[agentID] = ReasonTargetUnavailable
+				continue
+			}
+			payload.SquadID = uuidToString(squad.ID)
+			payload.Briefing = squadbriefing.Build(ctx, q, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID)
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return out, err
+		}
 		binding, err := sessionroute.Resolve(ctx, q, workspaceID, agentID, issueID)
 		if errors.Is(err, sessionroute.ErrNotBound) {
 			// The mention names an identity with no explicit target on this
@@ -486,9 +521,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			},
 			Target:          delivery.Target{SessionID: binding.SessionID},
 			Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
-			NotificationKey: "comment:" + uuidToString(commentID) + ":agent:" + agentID,
+			NotificationKey: notificationKey,
 			Kind:            "comment_mention",
-			Payload:         payload,
+			Payload:         body,
 			Refs: delivery.Refs{
 				IssueID:   issueID,
 				CommentID: uuidToString(commentID),

@@ -63,22 +63,23 @@ func NewIssueService(q *db.Queries, tx TxStarter, bus *events.Bus, ac analytics.
 // to IssueService.Create. The handler owns the parsing step that turns its
 // request payload into this struct; the service stays transport-agnostic.
 type IssueCreateParams struct {
-	WorkspaceID   pgtype.UUID
-	Title         string
-	Description   pgtype.Text
-	Status        string
-	Priority      string
-	AssigneeType  pgtype.Text
-	AssigneeID    pgtype.UUID
-	CreatorType   string // "agent" or "member"
-	CreatorID     pgtype.UUID
-	ParentIssueID pgtype.UUID
-	ProjectID     pgtype.UUID
-	StartDate     pgtype.Date
-	DueDate       pgtype.Date
-	OriginType    pgtype.Text
-	OriginID      pgtype.UUID
-	AttachmentIDs []pgtype.UUID
+	WorkspaceID        pgtype.UUID
+	Title              string
+	Description        pgtype.Text
+	Status             string
+	Priority           string
+	AssigneeType       pgtype.Text
+	AssigneeID         pgtype.UUID
+	RecipientSessionID *string
+	CreatorType        string // "agent" or "member"
+	CreatorID          pgtype.UUID
+	ParentIssueID      pgtype.UUID
+	ProjectID          pgtype.UUID
+	StartDate          pgtype.Date
+	DueDate            pgtype.Date
+	OriginType         pgtype.Text
+	OriginID           pgtype.UUID
+	AttachmentIDs      []pgtype.UUID
 	// LabelIDs are the issue-scoped labels to attach to the new issue. They
 	// are validated and written inside the create transaction (see Create),
 	// so the issue is never committed with a partial or wrong label set. An
@@ -119,6 +120,7 @@ type IssueCreateParams struct {
 // IssueCreateOpts groups optional knobs for IssueService.Create. Most
 // callers leave it zero-valued.
 type IssueCreateOpts struct {
+	CanInvokeTarget func(context.Context, db.Agent) bool
 	// BroadcastPayload, if non-nil, is invoked after the issue row is
 	// created and attachments are linked. Its return value is sent as
 	// the EventIssueCreated payload via the event bus. The HTTP handler
@@ -251,6 +253,9 @@ type IssueCreateResult struct {
 // Caller-owned validation is limited to transport-shaped checks: title
 // required, RFC3339 date format, assignee pair sanity.
 func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts IssueCreateOpts) (IssueCreateResult, error) {
+	if err := ValidateRecipientSessionID(p.RecipientSessionID); err != nil {
+		return IssueCreateResult{}, err
+	}
 	issueCountPolicy := ResolveIssueCountPolicy(ctx, s.Entitlements, p.WorkspaceID)
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
@@ -563,6 +568,18 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	if actorID == "" {
 		actorID = util.UUIDToString(issue.CreatorID)
 	}
+	target, err := ResolveAssignmentTarget(ctx, qtx, issue)
+	if err != nil {
+		return IssueCreateResult{}, err
+	}
+	if target.Agent.ID.Valid && opts.CanInvokeTarget != nil && !opts.CanInvokeTarget(ctx, target.Agent) {
+		return IssueCreateResult{}, &RecipientSessionError{Message: "you do not have permission to assign work to this executor", Forbidden: true}
+	}
+	external := target.Agent.ExecutionKind == "external"
+	dispatchExternal := opts.AssignedAgentRunFireAt.IsZero() && issue.Status != "backlog" && !issue.TriageState.Valid
+	if err := ExternalAssignment(ctx, qtx, issue, target, p.RecipientSessionID, dispatchExternal, p.CreatorType, actorID, p.DelegationCreatedBy); err != nil {
+		return IssueCreateResult{}, err
+	}
 	delegatedTaskInserted := false
 	var delegatedTask db.AgentTaskQueue
 	var acceptedTaskAttr attribution.Result
@@ -685,7 +702,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		assignedTaskID = delegatedTask.ID
 		s.TaskService.ApplyQueuedIssueTaskOverlay(ctx, delegatedTask)
 		s.TaskService.PublishQueuedIssueTask(ctx, delegatedTask, acceptedTaskAttr)
-	} else if opts.AssignedAgentRunFireAt.IsZero() && !delegationRecorded {
+	} else if opts.AssignedAgentRunFireAt.IsZero() && !delegationRecorded && !external {
 		// A delegated create already made its enqueue decision inside the
 		// transaction, together with the issue and its accepted return. A
 		// post-commit fallback here would reintroduce the half-delegation

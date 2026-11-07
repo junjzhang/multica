@@ -1,4 +1,4 @@
-package handler
+package squadbriefing
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 // prepended to every squad-leader claim. It explains the leader's coordinator
 // role, the @mention dispatch mechanism, and the stop-after-dispatch contract.
 // Responsibility 6 (parent issue status) is appended separately by
-// squadOperatingProtocolFor — it is the only part that varies by whether this
+// ProtocolFor — it is the only part that varies by whether this
 // squad actually owns the issue.
 //
 // Keep this text English-only (matches existing agent-harness conventions)
@@ -48,9 +48,8 @@ Your responsibilities, in order:
    Roster below — prefer the member whose skills cover the work.
 2. **Delegate by @mention.** Post a single comment on this issue that
    @mentions the chosen member(s) and tells them what to do.
-   - **Be terse.** Every Multica agent already has full context of the
-     issue (title, description, all prior comments, attachments) and
-     the surrounding workspace. Do NOT restate or summarise the
+   - **Be terse.** Recipients can read the issue and relevant comment threads through
+     the CLI using their own connected identity. Do NOT restate or summarise the
      issue body, prior discussion, or known facts in your delegation
      comment — they read it themselves.
    - Say only what cannot be inferred from the issue: who you're
@@ -77,10 +76,11 @@ Your responsibilities, in order:
 4. **Stop after dispatching.** Once your delegation comment is posted
    and evaluation recorded, end your turn. Do not continue working,
    do not write code, do not open files. You will be re-triggered
-   automatically when:
-   - a delegated member posts an update or asks you a question;
-   - a delegated member finishes and the issue moves forward;
-   - someone @mentions you again on this issue.
+   through the fixed return accepted for a delegation, an explicit
+   @mention, or a supported system wakeup. Ordinary replies do not start
+   anyone. Check accepted_returns for this turn: existing fixed returns
+   use platform delivery and need no duplicate @mention. A coordinator
+   field, a delivered receipt, or Mailbox handled is not acceptance.
 5. **Re-evaluate on each trigger.** When you wake up again, read the new
    activity and decide whether to delegate the next step, escalate to
    the human reporter, or close the loop. If no action is needed
@@ -165,9 +165,9 @@ const squadOperatingProtocolHardRules = `Hard rules:
   @mention on this issue, or create a ` + "`" + `todo` + "`" + ` child issue assigned to
   them. Never both for the same work.`
 
-// squadOperatingProtocolFor assembles the protocol, selecting the parent-status
+// ProtocolFor assembles the protocol, selecting the parent-status
 // responsibility that matches this leader's actual authority over the issue.
-func squadOperatingProtocolFor(ownsIssueStatus bool) string {
+func ProtocolFor(ownsIssueStatus bool) string {
 	status := squadParentStatusNotOwned
 	if ownsIssueStatus {
 		status = squadParentStatusOwned
@@ -175,7 +175,7 @@ func squadOperatingProtocolFor(ownsIssueStatus bool) string {
 	return squadOperatingProtocolHeader + "\n" + status + "\n\n" + squadOperatingProtocolHardRules
 }
 
-// buildSquadLeaderBriefing composes the full system briefing appended to a
+// Build composes the full system briefing appended to a
 // squad leader's Instructions when it claims a task on a squad-assigned
 // issue. The returned string contains three sections:
 //
@@ -193,9 +193,9 @@ func squadOperatingProtocolFor(ownsIssueStatus bool) string {
 // Archived agent members are skipped — there's no point asking the leader
 // to delegate to a retired agent. Members whose underlying record can't be
 // loaded (deleted user/agent races, FK weirdness) are also skipped silently.
-func buildSquadLeaderBriefing(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool) string {
+func Build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool) string {
 	var sb strings.Builder
-	sb.WriteString(squadOperatingProtocolFor(ownsIssueStatus))
+	sb.WriteString(ProtocolFor(ownsIssueStatus))
 	sb.WriteString("\n\n")
 	sb.WriteString(buildSquadRoster(ctx, q, squad))
 

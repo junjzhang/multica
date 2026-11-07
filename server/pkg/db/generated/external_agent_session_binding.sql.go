@@ -17,6 +17,7 @@ INSERT INTO external_agent_session_binding (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
+ON CONFLICT (workspace_id, agent_id, issue_id) WHERE revoked_at IS NULL DO NOTHING
 RETURNING id, workspace_id, agent_id, issue_id, session_id, created_by, created_at, revoked_at
 `
 

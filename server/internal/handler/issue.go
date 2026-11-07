@@ -342,7 +342,7 @@ func closeStatusNeedsTransaction(statusKey string) bool {
 // writer can reopen it (and queue a new notification) in between; deciding
 // "same status, skip the close rule" from that snapshot would swallow a real
 // todo->cancelled transition.
-func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams, afterWrite func(pgx.Tx, *db.Queries, db.Issue) error) (db.Issue, error) {
+func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pgtype.UUID, statusKey string, params db.UpdateIssueParams, afterWrite func(pgx.Tx, *db.Queries, db.Issue, db.Issue) error) (db.Issue, error) {
 	var issue db.Issue
 	var cancelledWakeups []db.AgentTaskQueue
 	err := h.runWithIssueStatusGuard(ctx, workspaceID, statusKey, func(tx pgx.Tx, q *db.Queries) error {
@@ -356,7 +356,8 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 		// row lock, so previousStatus is the row's committed state under this
 		// transaction rather than the request's earlier read.
 		previousStatus := ""
-		if tx != nil && params.Status.Valid {
+		var previous db.Issue
+		if tx != nil && (params.Status.Valid || afterWrite != nil) {
 			current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
 				ID:          params.ID,
 				WorkspaceID: workspaceID,
@@ -365,6 +366,7 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 				return fmt.Errorf("lock issue for status write: %w", err)
 			}
 			previousStatus = current.Status
+			previous = current
 		}
 		var innerErr error
 		issue, cancelledWakeups, innerErr = updateIssueStoppingWakeups(ctx, q, params, previousStatus)
@@ -372,7 +374,7 @@ func (h *Handler) updateIssueWithStatusGuard(ctx context.Context, workspaceID pg
 			return innerErr
 		}
 		if afterWrite != nil {
-			return afterWrite(tx, q, issue)
+			return afterWrite(tx, q, previous, issue)
 		}
 		return nil
 	})
@@ -3165,18 +3167,19 @@ func readRuntimeCLIVersion(metadata []byte) string {
 }
 
 type CreateIssueRequest struct {
-	Title         string   `json:"title"`
-	Description   *string  `json:"description"`
-	Status        string   `json:"status"`
-	Priority      string   `json:"priority"`
-	AssigneeType  *string  `json:"assignee_type"`
-	AssigneeID    *string  `json:"assignee_id"`
-	ParentIssueID *string  `json:"parent_issue_id"`
-	ProjectID     *string  `json:"project_id"`
-	Stage         *int32   `json:"stage,omitempty"`
-	StartDate     *string  `json:"start_date"`
-	DueDate       *string  `json:"due_date"`
-	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	RecipientSessionID *string  `json:"recipient_session_id,omitempty"`
+	Title              string   `json:"title"`
+	Description        *string  `json:"description"`
+	Status             string   `json:"status"`
+	Priority           string   `json:"priority"`
+	AssigneeType       *string  `json:"assignee_type"`
+	AssigneeID         *string  `json:"assignee_id"`
+	ParentIssueID      *string  `json:"parent_issue_id"`
+	ProjectID          *string  `json:"project_id"`
+	Stage              *int32   `json:"stage,omitempty"`
+	StartDate          *string  `json:"start_date"`
+	DueDate            *string  `json:"due_date"`
+	AttachmentIDs      []string `json:"attachment_ids,omitempty"`
 	// LabelIDs are issue-scoped labels to attach to the new issue in the same
 	// transaction as the create. Unknown or non-issue ids are rejected with
 	// 400 (service.ErrIssueLabelNotFound) rather than silently dropped.
@@ -3600,7 +3603,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	// immediate run in the same transaction; a missing or invalid address is
 	// refused here, so no half-created delegation can commit.
 	var delegationReturn *delegation.Address
-	delegationCreatedBy := ""
+	delegationCreatedBy := requestUserID(r)
 	if delegationReturnRequired(creatorType, assigneeType) {
 		address, derr := h.resolveDelegationAddress(r, workspaceID, creatorType, actualCreatorID)
 		if derr != nil {
@@ -3612,33 +3615,37 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
-		WorkspaceID:     wsUUID,
-		Title:           req.Title,
-		Description:     ptrToText(req.Description),
-		Status:          status,
-		Priority:        priority,
-		AssigneeType:    assigneeType,
-		AssigneeID:      assigneeID,
-		CreatorType:     creatorType,
-		CreatorID:       parseUUID(actualCreatorID),
-		ParentIssueID:   parentIssueID,
-		ProjectID:       projectID,
-		StartDate:       startDate,
-		DueDate:         dueDate,
-		OriginType:      originType,
-		OriginID:        originID,
-		Stage:           ptrToInt4(req.Stage),
-		AttachmentIDs:   attachmentIDs,
-		LabelIDs:        labelIDs,
-		Properties:      properties,
-		AllowDuplicate:  req.AllowDuplicate,
-		CoordinatorType: coordinatorType,
-		CoordinatorID:   coordinatorID,
+		WorkspaceID:        wsUUID,
+		Title:              req.Title,
+		Description:        ptrToText(req.Description),
+		Status:             status,
+		Priority:           priority,
+		AssigneeType:       assigneeType,
+		AssigneeID:         assigneeID,
+		RecipientSessionID: req.RecipientSessionID,
+		CreatorType:        creatorType,
+		CreatorID:          parseUUID(actualCreatorID),
+		ParentIssueID:      parentIssueID,
+		ProjectID:          projectID,
+		StartDate:          startDate,
+		DueDate:            dueDate,
+		OriginType:         originType,
+		OriginID:           originID,
+		Stage:              ptrToInt4(req.Stage),
+		AttachmentIDs:      attachmentIDs,
+		LabelIDs:           labelIDs,
+		Properties:         properties,
+		AllowDuplicate:     req.AllowDuplicate,
+		CoordinatorType:    coordinatorType,
+		CoordinatorID:      coordinatorID,
 
 		DelegationReturn:    delegationReturn,
 		DelegationCreatedBy: delegationCreatedBy,
 		DispatchAttribution: h.dispatchAttributionFromRequest(r, creatorType, actualCreatorID),
 	}, service.IssueCreateOpts{
+		CanInvokeTarget: func(ctx context.Context, agent db.Agent) bool {
+			return h.canInvokeAgent(ctx, agent, creatorType, actualCreatorID, h.invokeOriginatorFromRequest(r, creatorType, actualCreatorID), workspaceID)
+		},
 		ActorID:          actualCreatorID,
 		AnalyticsAgentID: analyticsAgentID,
 		Platform:         func() string { p, _, _ := middleware.ClientMetadataFromContext(r.Context()); return p }(),
@@ -3662,6 +3669,9 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	if writeRecipientSessionError(w, err) {
+		return
+	}
 	if errors.Is(err, service.ErrActiveDuplicate) {
 		dup := *res.DuplicateIssue
 		existing := issueToResponse(dup, h.getIssuePrefix(r.Context(), dup.WorkspaceID))
@@ -3722,8 +3732,9 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateIssueRequest struct {
-	ExpectedRevision *int64  `json:"expected_revision,omitempty"`
-	Title            *string `json:"title"`
+	RecipientSessionID *string `json:"recipient_session_id,omitempty"`
+	ExpectedRevision   *int64  `json:"expected_revision,omitempty"`
+	Title              *string `json:"title"`
 	// TitleBase is the title adopted by the editor before producing Title. It
 	// protects title edits without coupling them to unrelated issue mutations.
 	TitleBase   *string `json:"title_base,omitempty"`
@@ -3863,7 +3874,7 @@ func refreshUntouchedNullableIssueParams(params *db.UpdateIssueParams, current d
 
 var errIssueFieldConflict = errors.New("issue text field conflict")
 
-func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.UUID, params db.UpdateIssueParams, rawFields map[string]json.RawMessage, titleBase, descriptionBase *string, attachmentIDs []pgtype.UUID, statusKey string, afterWrite func(pgx.Tx, *db.Queries, db.Issue) error) (db.Issue, db.Issue, bool, error) {
+func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.UUID, params db.UpdateIssueParams, rawFields map[string]json.RawMessage, titleBase, descriptionBase *string, attachmentIDs []pgtype.UUID, statusKey string, afterWrite func(pgx.Tx, *db.Queries, db.Issue, db.Issue) error) (db.Issue, db.Issue, bool, error) {
 	if h.TxStarter == nil {
 		return db.Issue{}, db.Issue{}, false, errors.New("atomic issue update requires transaction starter")
 	}
@@ -3963,7 +3974,7 @@ func (h *Handler) updateIssueAtomically(ctx context.Context, workspaceID pgtype.
 		}
 	}
 	if afterWrite != nil {
-		if err := afterWrite(tx, qtx, issue); err != nil {
+		if err := afterWrite(tx, qtx, current, issue); err != nil {
 			return db.Issue{}, current, false, err
 		}
 	}
@@ -4247,6 +4258,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	prospectiveExplicitAssigneeChanged := (touchedType || touchedID) &&
 		(prevIssue.AssigneeType.String != params.AssigneeType.String ||
 			uuidToString(prevIssue.AssigneeID) != uuidToString(params.AssigneeID))
+	if err := validateRecipientSessionInput(req.RecipientSessionID, touchedType || touchedID); err != nil {
+		writeRecipientSessionError(w, err)
+		return
+	}
 	prospectiveTrigger, prospectiveWillRun := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:              prospectiveIssue,
@@ -4261,7 +4276,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// is a delegation; a status-only workflow handoff is not.
 	prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.SuppressRun &&
 		params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
-	dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, actorType, actorID, prospectiveAssignment, params.AssigneeType)
+	_, derr := h.prepareDelegationReturn(r, prevIssue, actorType, actorID, prospectiveAssignment, params.AssigneeType)
 	if derr != nil {
 		writeDelegationReturnError(w, derr)
 		return
@@ -4270,7 +4285,27 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	var assignmentTask db.AgentTaskQueue
 	var assignmentAttr attribution.Result
 	assignmentTaskInserted := false
-	afterIssueWrite := func(tx pgx.Tx, q *db.Queries, issue db.Issue) error {
+	afterIssueWrite := func(tx pgx.Tx, q *db.Queries, previous, issue db.Issue) error {
+		if previous.ID.Valid {
+			prevIssue = previous
+			prospectiveExplicitAssigneeChanged = (touchedType || touchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
+			prospectiveAssignment = prospectiveExplicitAssigneeChanged && !req.SuppressRun && issue.AssigneeID.Valid && (issue.AssigneeType.String == "agent" || issue.AssigneeType.String == "squad")
+		}
+		lockedHandler := *h
+		lockedHandler.Queries = q
+		dispatchReturn, returnErr := lockedHandler.prepareDelegationReturn(r, issue, actorType, actorID, prospectiveAssignment, issue.AssigneeType)
+		if returnErr != nil {
+			return returnErr
+		}
+		if prospectiveExplicitAssigneeChanged || req.RecipientSessionID != nil {
+			if err := h.externalAssignmentInTx(r, q, issue, req.RecipientSessionID, prospectiveExplicitAssigneeChanged && !req.SuppressRun, actorType, actorID); err != nil {
+				return err
+			}
+		}
+		issueService := *h.IssueService
+		issueService.Queries = q
+		prospectiveTrigger, prospectiveWillRun = issueService.WillEnqueueRun(r.Context(), service.IssueTriggerInput{Issue: issue, AssigneeChanged: prospectiveExplicitAssigneeChanged}, h.issueTriggerWriteProbe(r, actorType, actorID, issue))
+		prospectiveWillRun = prospectiveWillRun && !req.SuppressRun
 		if !prospectiveAssignment {
 			return nil
 		}
@@ -4327,6 +4362,9 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		issue, err = h.updateIssueWithStatusGuard(writeCtx, prevIssue.WorkspaceID, statusKeyForGuard, params, afterIssueWrite)
 	}
 	if err != nil {
+		if writeRecipientSessionError(w, err) {
+			return
+		}
 		if errors.Is(err, errAssignmentOriginatorConflict) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
@@ -4845,6 +4883,12 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 	if raw, exists := rawTop["updates"]; exists {
 		json.Unmarshal(raw, &rawUpdates)
 	}
+	_, recipientTouchedType := rawUpdates["assignee_type"]
+	_, recipientTouchedID := rawUpdates["assignee_id"]
+	if err := validateRecipientSessionInput(req.Updates.RecipientSessionID, recipientTouchedType || recipientTouchedID); err != nil {
+		writeRecipientSessionError(w, err)
+		return
+	}
 	if _, ok := rawUpdates["duplicate_of_issue_id"]; ok {
 		writeError(w, http.StatusBadRequest, "duplicate_of_issue_id is not supported in batch updates")
 		return
@@ -5127,7 +5171,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		prospectiveWillRun = prospectiveWillRun && !req.Updates.SuppressRun
 		prospectiveAssignment := prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun &&
 			params.AssigneeID.Valid && (params.AssigneeType.String == "agent" || params.AssigneeType.String == "squad")
-		dispatchReturn, derr := h.prepareDelegationReturn(r, prevIssue, callerType, callerActorID, prospectiveAssignment, params.AssigneeType)
+		_, derr := h.prepareDelegationReturn(r, prevIssue, callerType, callerActorID, prospectiveAssignment, params.AssigneeType)
 		if derr != nil {
 			slog.Warn("batch dispatch refused: delegation return unavailable",
 				append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
@@ -5137,7 +5181,27 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		var assignmentTask db.AgentTaskQueue
 		var assignmentAttr attribution.Result
 		assignmentTaskInserted := false
-		afterIssueWrite := func(tx pgx.Tx, q *db.Queries, issue db.Issue) error {
+		afterIssueWrite := func(tx pgx.Tx, q *db.Queries, previous, issue db.Issue) error {
+			if previous.ID.Valid {
+				prevIssue = previous
+				prospectiveExplicitAssigneeChanged = (batchTouchedType || batchTouchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
+				prospectiveAssignment = prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun && issue.AssigneeID.Valid && (issue.AssigneeType.String == "agent" || issue.AssigneeType.String == "squad")
+			}
+			lockedHandler := *h
+			lockedHandler.Queries = q
+			dispatchReturn, returnErr := lockedHandler.prepareDelegationReturn(r, issue, callerType, callerActorID, prospectiveAssignment, issue.AssigneeType)
+			if returnErr != nil {
+				return returnErr
+			}
+			if prospectiveExplicitAssigneeChanged || req.Updates.RecipientSessionID != nil {
+				if err := h.externalAssignmentInTx(r, q, issue, req.Updates.RecipientSessionID, prospectiveExplicitAssigneeChanged && !req.Updates.SuppressRun, callerType, callerActorID); err != nil {
+					return err
+				}
+			}
+			issueService := *h.IssueService
+			issueService.Queries = q
+			prospectiveTrigger, prospectiveWillRun = issueService.WillEnqueueRun(r.Context(), service.IssueTriggerInput{Issue: issue, AssigneeChanged: prospectiveExplicitAssigneeChanged}, h.issueTriggerWriteProbe(r, callerType, callerActorID, issue))
+			prospectiveWillRun = prospectiveWillRun && !req.Updates.SuppressRun
 			if !prospectiveAssignment {
 				return nil
 			}
@@ -5189,6 +5253,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			issue, err = h.updateIssueWithStatusGuard(writeCtx, wsUUID, issueStatusGuard, params, afterIssueWrite)
 		}
 		if err != nil {
+			if writeRecipientSessionError(w, err) {
+				return
+			}
 			if derr := asDelegationReturnError(err); derr != nil {
 				slog.Warn("batch dispatch refused: delegation return unavailable",
 					append(logger.RequestAttrs(r), "issue_id", issueID, "error", derr)...)
