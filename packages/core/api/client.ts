@@ -261,6 +261,7 @@ import { type Logger, noopLogger } from "../logger";
 import { createRequestId, createSafeId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
+import { ContractViewSchema, type ContractView, type ContractRequest } from "./issue-contract-schema";
 import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
@@ -1413,6 +1414,20 @@ export class ApiClient {
 
   async disableIssueWakeup(issueId: string, wakeupId: string): Promise<void> {
     await this.fetch(`/api/issues/${encodeURIComponent(issueId)}/wakeups/${encodeURIComponent(wakeupId)}/disable`, { method: "POST" });
+  }
+
+  async getIssueContract(id: string): Promise<ContractView> {
+    const raw = await this.fetch<unknown>(`/api/issues/${encodeURIComponent(id)}/contract`);
+    const value = parseWithFallback<ContractView | null>(raw, ContractViewSchema, null, { endpoint: "GET /api/issues/:id/contract" });
+    if (!value) throw new Error("Unable to read the contract response");
+    return value;
+  }
+
+  async updateIssueContract(id: string, request: ContractRequest): Promise<ContractView> {
+    const raw = await this.fetch<unknown>(`/api/issues/${encodeURIComponent(id)}/contract`, { method: "POST", body: JSON.stringify(request) });
+    const value = parseWithFallback<ContractView | null>(raw, ContractViewSchema, null, { endpoint: "POST /api/issues/:id/contract" });
+    if (!value) throw new Error("Unable to read the saved contract response; refresh before retrying");
+    return value;
   }
 
   async getIssue(id: string, options?: { signal?: AbortSignal }): Promise<Issue> {

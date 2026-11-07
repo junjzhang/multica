@@ -156,6 +156,7 @@ UPDATE issue AS i SET
     updated_at = now()
 WHERE i.id = $1
   AND i.workspace_id = $2
+  AND NOT EXISTS (SELECT 1 FROM issue_contract c WHERE c.issue_id = i.id AND c.workspace_id = i.workspace_id)
   AND i.status = $4::text
   AND i.status <> $3::text
   AND EXISTS (

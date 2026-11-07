@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ContractViewSchema } from "./issue-contract-schema";
 import { normalizeIssueStatusCategory } from "../issues/config/status";
 import type {
   WorkflowHandoffPreview,
@@ -1694,6 +1695,7 @@ export const IssueSchema = z.object({
   // Detail-only and potentially large. A malformed additive field must not
   // erase an otherwise usable issue returned by a mixed-version server.
   source_context: IssueSourceContextSchema.optional().catch(undefined),
+  contract: ContractViewSchema.optional().catch(undefined),
   // WORK-9 additive collaboration fields. Each degrades independently so one
   // malformed projection never blanks the issue/list.
   coordinator: IssueCoordinatorSchema.nullable().optional().catch(undefined),

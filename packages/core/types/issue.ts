@@ -1,6 +1,7 @@
 import type { Label } from "./label";
 import type { IssuePropertyValues } from "./property";
 import type { Agent, ExternalSession } from "./agent";
+import type { ContractView } from "../api/issue-contract-schema";
 
 /** Four lifecycle classifications. User-facing columns group by status key. */
 export type IssueStatusCategory =
@@ -245,6 +246,7 @@ export interface IssueSessionBinding {
 }
 
 export interface Issue {
+  contract?: ContractView;
   id: string;
   workspace_id: string;
   number: number;

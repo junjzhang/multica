@@ -19,11 +19,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/attribution"
 	"github.com/multica-ai/multica/server/internal/channelmedia"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/dispatch"
+	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issueguard"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
@@ -109,6 +111,7 @@ type IssueResponse struct {
 	// SourceContext is detail-only. List, board, search, and children responses
 	// deliberately omit the potentially large immutable snapshot.
 	SourceContext *sourceContextDetailResponse `json:"source_context,omitempty"`
+	Contract      *ContractView                `json:"contract,omitempty"`
 	// Unloaded collaboration fields are omitted so partial snapshots preserve
 	// detail caches. Coordinator's outer pointer distinguishes omission from
 	// an authoritative null; non-nil collection pointers may clear to [].
@@ -412,6 +415,11 @@ func (h *Handler) broadcastCancelledWakeups(ctx context.Context, workspaceID pgt
 // writeIssueStatusRaceError renders errIssueStatusArchivedRace as a 409 and
 // reports whether it handled the error.
 func writeIssueStatusRaceError(w http.ResponseWriter, err error) bool {
+	var constraint *pgconn.PgError
+	if errors.As(err, &constraint) && constraint.ConstraintName == "issue_contract_acceptance_required" {
+		writeError(w, http.StatusConflict, "accept the current contract before completing this issue")
+		return true
+	}
 	if errors.Is(err, errIssueStatusArchivedRace) {
 		writeError(w, http.StatusConflict,
 			"the target status was archived while this request was in flight; reload the status list and retry")
@@ -2584,6 +2592,28 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	resp := issueToResponse(issue, prefix)
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
 	h.projectIssueExternalState(r.Context(), issue, &resp)
+	state, contractErr := readContract(r.Context(), h.Queries, issue)
+	if contractErr != nil {
+		writeError(w, 500, "load contract failed")
+		return
+	}
+	if state.Current() != nil {
+		view, err := h.contractView(r.Context(), r, h.Queries, issue, state)
+		if err != nil {
+			writeError(w, 500, "load contract basis failed")
+			return
+		}
+		resp.Contract = &view
+		compact := state
+		compact.Versions = []issuecontract.Version{*state.Current()}
+		compact.Deliveries = []issuecontract.Delivery{}
+		if pending := state.Pending(); pending != nil {
+			compact.Deliveries = append(compact.Deliveries, *pending)
+		}
+		compact.Decisions = []issuecontract.Decision{}
+		compact.Requests = []issuecontract.RequestRecord{}
+		resp.Contract.Contract = &compact
+	}
 	detailLabels := h.labelsByIssue(r.Context(), issue.WorkspaceID, []pgtype.UUID{issue.ID})[uuidToString(issue.ID)]
 	if detailLabels == nil {
 		detailLabels = []LabelResponse{}

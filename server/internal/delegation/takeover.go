@@ -98,7 +98,7 @@ func validateTakeoverScopeReuse(ctx context.Context, q *db.Queries, prior, candi
 	if candidate.ScopeTaskID.Valid || original.IssueID != source.IssueID || original.ChatSessionID != source.ChatSessionID || original.AutopilotRunID != source.AutopilotRunID {
 		return fmt.Errorf("%w: original scope differs", ErrReturnConflict)
 	}
-	return requireTaskScope(ctx, q, prior.WorkspaceID, original)
+	return ValidateTaskScope(ctx, q, prior.WorkspaceID, original)
 }
 
 // TakeoverSelectionVersion is a compare-and-swap value, not authorization.
