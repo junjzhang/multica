@@ -1,13 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import { Link2 } from "lucide-react";
 import type { Agent, IssueSessionBinding } from "@multica/core/types";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useAgentPermissions } from "@multica/core/permissions";
 import {
-  agentSessionsOptions,
   useBindAgentSession,
 } from "@multica/core/agents/session-bindings";
 import { Button } from "@multica/ui/components/ui/button";
@@ -24,20 +22,7 @@ import {
 import { Spinner } from "@multica/ui/components/ui/spinner";
 import { useT } from "../../i18n";
 import { ExternalSessionLink } from "./external-session-link";
-import { SessionChoice } from "./session-choice";
-
-type IssuesT = ReturnType<typeof useT<"issues">>["t"];
-
-function unavailableLabel(reason: string | undefined, t: IssuesT): string | null {
-  switch (reason) {
-    case "agent_archived":
-      return t(($) => $.detail.external_binding_agent_archived);
-    case "owner_not_member":
-      return t(($) => $.detail.external_binding_owner_not_member);
-    default:
-      return reason ? t(($) => $.detail.external_binding_unavailable) : null;
-  }
-}
+import { AgentSessionChoices, unavailableLabel } from "./agent-session-choices";
 
 function SessionPicker({
   agent,
@@ -53,7 +38,6 @@ function SessionPicker({
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
   const [selected, setSelected] = useState(currentSessionId ?? "");
-  const sessions = useQuery(agentSessionsOptions(wsId, agent.id));
   const bind = useBindAgentSession(wsId);
   const changed = selected !== "" && selected !== currentSessionId;
 
@@ -70,45 +54,7 @@ function SessionPicker({
 
   return (
     <>
-      <div className="max-h-80 space-y-1.5 overflow-y-auto pr-1">
-        {sessions.isPending && (
-          <div className="flex items-center gap-1.5 text-micro text-muted-foreground">
-            <Spinner aria-hidden className="size-3" />
-            {t(($) => $.detail.external_binding_loading_sessions)}
-          </div>
-        )}
-        {sessions.isError && (
-          <p className="text-caption text-destructive">
-            {t(($) => $.detail.external_binding_sessions_failed)}
-          </p>
-        )}
-        {sessions.data && sessions.data.length === 0 && (
-          <p className="text-caption text-muted-foreground">
-            {t(($) => $.detail.external_binding_no_sessions)}
-          </p>
-        )}
-        {sessions.data && sessions.data.length > 0 && (
-          <div role="radiogroup" aria-label={t(($) => $.detail.external_binding_choose_title)} className="space-y-1.5">
-            {sessions.data.map((session) => (
-              <SessionChoice
-                key={session.id}
-                value={session.id}
-                title={session.display_name || session.session_id}
-                available={session.deliverable}
-                reason={unavailableLabel(session.unavailable_reason, t)}
-                details={<>
-                  {t(($) => $.detail.external_session_meta, { provider: session.provider || "external", host: session.host_id })}
-                  <br />
-                  {t(($) => $.detail.external_session_id, { id: session.session_id })}
-                </>}
-                name={`agent-session-${agent.id}`}
-                selected={session.id === selected}
-                onSelect={() => setSelected(session.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <AgentSessionChoices agentId={agent.id} selected={selected} onSelect={setSelected} />
 
       {bind.isError && (
         <p role="alert" className="mt-2 text-caption text-destructive">

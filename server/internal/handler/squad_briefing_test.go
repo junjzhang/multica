@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,7 @@ import (
 // ownership must not ride along — a guest leader gets an explicit prohibition
 // instead of the grant, so the model never has to infer the boundary.
 func TestSquadOperatingProtocolScopesParentStatusOwnership(t *testing.T) {
-	guest := squadOperatingProtocolFor(false)
+	guest := squadbriefing.ProtocolFor(false)
 	compactGuest := strings.Join(strings.Fields(guest), " ")
 
 	for _, want := range []string{
@@ -43,7 +44,7 @@ func TestSquadOperatingProtocolScopesParentStatusOwnership(t *testing.T) {
 
 	// Everything that is not the status responsibility is identical, so a
 	// guest leader still coordinates, delegates, and records activity.
-	owner := squadOperatingProtocolFor(true)
+	owner := squadbriefing.ProtocolFor(true)
 	for _, shared := range []string{
 		"## Squad Operating Protocol",
 		"Delegate by @mention",
@@ -153,7 +154,7 @@ func seededHumanMember(t *testing.T) (memberID, userID, userName string) {
 // the prohibition, its exact scope, and the failure fallback.
 func TestSquadOperatingProtocolOwnsNoActionRule(t *testing.T) {
 	for _, ownsParentStatus := range []bool{true, false} {
-		protocol := squadOperatingProtocolFor(ownsParentStatus)
+		protocol := squadbriefing.ProtocolFor(ownsParentStatus)
 		compact := strings.Join(strings.Fields(protocol), " ")
 
 		for _, want := range []string{
@@ -195,7 +196,7 @@ func TestBuildSquadLeaderBriefing_FullSquad(t *testing.T) {
 	_ = memberRowID
 	addHumanMember(t, squad.ID, userID, "reviewer")
 
-	out := buildSquadLeaderBriefing(ctx, testHandler.Queries, squad, true)
+	out := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
 
 	for _, want := range []string{
 		"## Squad Operating Protocol",
@@ -271,7 +272,7 @@ func TestBuildSquadLeaderBriefing_MemberSkillsInRoster(t *testing.T) {
 	_ = memberRowID
 	addHumanMember(t, squad.ID, userID, "reviewer")
 
-	out := buildSquadLeaderBriefing(ctx, testHandler.Queries, squad, true)
+	out := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
 
 	if !strings.Contains(out, "skills: polars, statistical-analysis") {
 		t.Errorf("expected skilled member skills in roster, got:\n%s", out)
@@ -290,7 +291,7 @@ func TestBuildSquadLeaderBriefing_OnlyLeader(t *testing.T) {
 	leaderID, _ := seededLeaderAgent(t)
 	squad := seedSquadForBriefing(t, leaderID, "Solo Squad", "")
 
-	out := buildSquadLeaderBriefing(ctx, testHandler.Queries, squad, true)
+	out := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
 	if !strings.Contains(out, "Members: (none — you are the only member of this squad)") {
 		t.Errorf("expected lone-leader fallback line, got:\n%s", out)
 	}
@@ -314,7 +315,7 @@ func TestBuildSquadLeaderBriefing_SkipsArchivedAgent(t *testing.T) {
 		t.Fatalf("archive agent: %v", err)
 	}
 
-	out := buildSquadLeaderBriefing(ctx, testHandler.Queries, squad, true)
+	out := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
 	if strings.Contains(out, "Retired Bot") {
 		t.Errorf("archived agent should not appear in roster:\n%s", out)
 	}
@@ -339,7 +340,7 @@ func TestBuildSquadLeaderBriefing_MentionsRoundTrip(t *testing.T) {
 	_ = memberRowID
 	addHumanMember(t, squad.ID, userID, "")
 
-	out := buildSquadLeaderBriefing(ctx, testHandler.Queries, squad, true)
+	out := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
 	mentions := util.ParseMentions(out)
 
 	wantIDs := map[string]string{

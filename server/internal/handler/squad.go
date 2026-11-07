@@ -980,8 +980,9 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		Outcome string `json:"outcome"` // action | no_action | failed
-		Reason  string `json:"reason"`  // short explanation from leader
+		MailboxID string `json:"mailbox_id,omitempty"`
+		Outcome   string `json:"outcome"` // action | no_action | failed
+		Reason    string `json:"reason"`  // short explanation from leader
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -990,6 +991,11 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 
 	if req.Outcome != "action" && req.Outcome != "no_action" && req.Outcome != "failed" {
 		writeError(w, http.StatusBadRequest, "outcome must be 'action', 'no_action', or 'failed'")
+		return
+	}
+
+	if req.MailboxID != "" || r.Header.Get("X-Actor-Source") == "external_agent" {
+		h.recordExternalSquadEvaluation(w, r, issue, req.MailboxID, req.Outcome, req.Reason)
 		return
 	}
 
@@ -1092,12 +1098,14 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	details, _ := json.Marshal(map[string]string{
-		"squad_id": uuidToString(squad.ID),
-		"task_id":  util.UUIDToString(taskUUID),
-		"outcome":  req.Outcome,
-		"reason":   req.Reason,
+	h.recordSquadEvaluation(w, r, issue, task.AgentID, map[string]string{
+		"squad_id": uuidToString(squad.ID), "task_id": uuidToString(taskUUID), "outcome": req.Outcome, "reason": req.Reason,
 	})
+}
+
+func (h *Handler) recordSquadEvaluation(w http.ResponseWriter, r *http.Request, issue db.Issue, agentID pgtype.UUID, proof map[string]string) {
+	actorID := uuidToString(agentID)
+	details, _ := json.Marshal(proof)
 
 	activity, err := h.Queries.CreateActivity(r.Context(), db.CreateActivityParams{
 		ID:          dbid.NewV7(),
@@ -1108,7 +1116,7 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 		// lookup matches actor_id against task.agent_id
 		// (service.HasSquadLeaderNoActionEvaluationForTask), so this column has
 		// to carry the task's agent for suppression to find the row at all.
-		ActorID: task.AgentID,
+		ActorID: agentID,
 		Action:  "squad_leader_evaluated",
 		Details: details,
 	})

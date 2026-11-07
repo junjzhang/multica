@@ -1020,6 +1020,7 @@
       "agent_runtime_required": "Associez un runtime avant d'assigner du travail à cet agent",
       "agent_execution_unsupported": "Type d'exécution non pris en charge",
       "agent_external_session": "Session externe",
+      "assign_without_starting": "Assigner sans démarrer",
       "squad_runtime_required": "Associez un runtime au chef de ce squad avant d'assigner du travail",
       "squad_execution_unsupported": "Le type d'exécution du chef de ce squad n'est pas pris en charge"
     },

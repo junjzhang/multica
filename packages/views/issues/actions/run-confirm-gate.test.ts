@@ -66,6 +66,15 @@ describe("resolveStatusCategory", () => {
 });
 
 describe("runConfirmIntent — assign", () => {
+  it("applies an explicit parked assignment directly without a start confirmation", () => {
+    expect(runConfirmIntent(issue({ status: "todo" }), { assignee_type: "squad", assignee_id: "external-squad", suppress_run: true }, CATALOG)).toBeNull();
+  });
+  it("carries the explicit external recipient to the confirmation", () => {
+    expect(runConfirmIntent(issue({ status: "todo" }), { assignee_type: "squad", assignee_id: "s-1", recipient_session_id: "session-picked" }, CATALOG)).toEqual({
+      issueIds: ["issue-1"], mode: "assign", assigneeType: "squad", assigneeId: "s-1", recipientSessionId: "session-picked",
+    });
+  });
+
   it("confirms when the issue is not parked", () => {
     expect(
       runConfirmIntent(issue({ status: "todo" }), { assignee_type: "agent", assignee_id: "a-2" }, CATALOG),

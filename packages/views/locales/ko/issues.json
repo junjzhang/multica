@@ -978,6 +978,7 @@
       "agent_runtime_required": "작업을 할당하기 전에 이 에이전트에 런타임을 연결하세요",
       "agent_execution_unsupported": "지원되지 않는 실행 유형",
       "agent_external_session": "외부 세션",
+      "assign_without_starting": "시작하지 않고 할당",
       "squad_runtime_required": "작업을 할당하기 전에 이 스쿼드의 리더에 런타임을 연결하세요",
       "squad_execution_unsupported": "이 스쿼드 리더의 실행 유형은 지원되지 않습니다"
     },
