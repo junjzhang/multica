@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,7 +37,7 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 		if _, ok := parseUUIDOrBadRequest(w, req.ID, "id"); !ok {
 			return
 		}
-		if len(req.RequestHash) != 64 || req.Deadline.IsZero() {
+		if _, err := hex.DecodeString(req.RequestHash); err != nil || len(req.RequestHash) != 64 || req.Deadline.IsZero() {
 			writeError(w, 400, "request hash and bounded deadline required")
 			return
 		}
@@ -198,4 +199,18 @@ func writeManagedWaitError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, 500, "managed wait state could not be committed; retry the same request")
+}
+
+func validTaskTurnRequest(w http.ResponseWriter, turn protocol.TaskTurn) bool {
+	if turn.Generation != "" {
+		if _, ok := parseUUIDOrBadRequest(w, turn.Generation, "turn_generation"); !ok {
+			return false
+		}
+	}
+	for _, id := range turn.KnownWaitIDs {
+		if _, ok := parseUUIDOrBadRequest(w, id, "known_wait_ids"); !ok {
+			return false
+		}
+	}
+	return true
 }

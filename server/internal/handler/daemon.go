@@ -4873,6 +4873,9 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// rather than just before the Marshal is deliberate: the context-exhaustion
 	// re-route below feeds req.Output into the failure classifier, and that
 	// classifier must see exactly the text we are going to persist.
+	if !validTaskTurnRequest(w, req.TaskTurn) {
+		return
+	}
 	sanitizeTaskCompleteRequest(&req)
 	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
 	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
@@ -5597,6 +5600,9 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 	// TaskService.FailTask normalizes req.Error itself, but every other field
 	// here lands in a TEXT column too and a NUL in any one of them fails the
 	// same transaction (GH #7098).
+	if !validTaskTurnRequest(w, req.TaskTurn) {
+		return
+	}
 	sanitizeTaskFailRequest(&req)
 
 	h.failTask(w, r, taskID, workspaceID, req)
