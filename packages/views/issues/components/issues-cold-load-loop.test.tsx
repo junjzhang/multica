@@ -68,6 +68,7 @@ vi.mock("../../navigation", () => ({
   useNavigation: () => ({ push: vi.fn(), pathname: "/issues" }),
   resolveClickIntent: () => "push",
   useIntentNavigate: () => () => {},
+  useRowLink: () => () => ({ onClick: vi.fn(), onAuxClick: vi.fn() }),
   NavigationProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 

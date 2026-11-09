@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -23,6 +24,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/integrations/slack"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -2492,6 +2494,17 @@ func (h *Handler) finalizeClaimDelivery(
 		// The runtime row is locked for the duration of FinalizeTaskClaim. Use
 		// its current owner as the task-token identity rather than the stale
 		// claim-time snapshot captured by the caller.
+		if response != nil && response.ResourceControlRequired {
+			generation := dbid.NewV7()
+			changed, err := qtx.MarkTaskResourceControlRequired(ctx, db.MarkTaskResourceControlRequiredParams{TaskID: task.ID, RuntimeID: task.RuntimeID, DispatchedAt: task.DispatchedAt, Generation: generation})
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return fmt.Errorf("claim generation changed before resource-control agreement")
+			}
+			response.SessionPinGeneration = uuidToString(generation)
+		}
 		tokenParams.UserID = locked.OwnerID
 		return nil
 	}
@@ -2693,6 +2706,9 @@ func (h *Handler) failClaimedTaskBeforeLaunch(
 	status int,
 	claimMessage string,
 ) *claimBuildFailure {
+	if delegation.IsResultTask(*task) {
+		failureReason = protocol.DelegationResultUnavailable
+	}
 	if _, err := h.TaskService.FailTask(
 		ctx,
 		task.ID,
@@ -2797,6 +2813,17 @@ func claimResponseAgentIdentityMatches(resp AgentTaskResponse) bool {
 	return resp.AgentID != "" && resp.Agent != nil && resp.Agent.ID == resp.AgentID
 }
 
+// issueCoordinatorForClaim returns the issue's recorded coordinator as claim
+// fields. A NULL coordinator stays empty on the wire: the daemon must report
+// "not recorded" rather than invent a coordinator from the assignee, the
+// triggering commenter, or any earlier run.
+func issueCoordinatorForClaim(coordinatorType pgtype.Text, coordinatorID pgtype.UUID) (string, string) {
+	if !coordinatorType.Valid || !coordinatorID.Valid {
+		return "", ""
+	}
+	return strings.TrimSpace(coordinatorType.String), uuidToString(coordinatorID)
+}
+
 // buildClaimedTaskResponse assembles the full daemon claim payload for a
 // single already-claimed task and computes the exact comment ids embedded in
 // it (deliveredCommentIDs). Shared by the per-runtime handler
@@ -2814,6 +2841,24 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		}
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Wakeup is disabled or its authorization is no longer available.", taskfailure.ReasonInvalidTaskIdentity, "wakeup_unavailable", http.StatusConflict, "wakeup unavailable")
 	}
+	resultTurn, resultErr := service.VerifiedDelegationResult(r.Context(), h.Queries, *task)
+	if resultErr != nil {
+		if !service.IsDelegationResultRefusal(resultErr) {
+			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, resultErr, "result", uuidToString(task.ID))
+		}
+
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Delegated result cannot be delivered to its original session: "+resultErr.Error(), protocol.DelegationResultUnavailable, "result_unavailable", http.StatusConflict, "result unavailable")
+	}
+	resp.ResourceControlRequired = requestHasClientCapability(r, protocol.DaemonCapabilityDelegationResultsV1)
+	if (resultTurn != nil || task.ResourceControlRequired) && !resp.ResourceControlRequired {
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Daemon does not support strict delegated result delivery.", protocol.DelegationResultUnavailable, "result_unsupported", http.StatusConflict, "result unsupported")
+	}
+	resp.RequireResume, resp.DelegationResult = resultTurn != nil, resultTurn
+	returns := []AgentTaskResponse{resp}
+	if err := h.hydrateAcceptedReturns(r.Context(), parseUUID(runtimeWorkspaceID), returns); err != nil {
+		return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "accepted_returns", uuidToString(task.ID))
+	}
+	resp.AcceptedReturns = returns[0].AcceptedReturns
 	// Preserve PostgreSQL's microseconds: second-resolution display timestamps
 	// cannot distinguish stale claims reclaimed within the same second.
 	if task.DispatchedAt.Valid {
@@ -3067,7 +3112,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Include workspace ID and repos so the daemon can set up worktrees.
 	// Project context, repo precedence and the tenant/failure rules around both
 	// live in resolveClaimProjectContext, which every claim path shares.
-	if task.IssueID.Valid {
+	if resultTurn == nil && task.IssueID.Valid {
 		issue, issueErr := h.Queries.GetIssue(r.Context(), task.IssueID)
 		if issueErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3095,11 +3140,23 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		if issue.AssigneeID.Valid {
 			resp.IssueAssigneeID = uuidToString(issue.AssigneeID)
 		}
+		// Refresh coordinator metadata on resumed turns too; accepted result
+		// addresses remain frozen independently of this issue metadata.
+		resp.CoordinatorType, resp.CoordinatorID = issueCoordinatorForClaim(issue.CoordinatorType, issue.CoordinatorID)
 		// This claim's own snapshot, recorded by FinalizeTaskClaim so a LATER
 		// run that resumes this one's session can compare against what THIS run
 		// was actually handed. Building it here, from the issue row already
 		// loaded, is what makes the snapshot mean "the issue as of this claim".
 		currentSnapshot := buildIssueStateSnapshot(issue)
+		// Contracts are separate records, but every semantic contract write
+		// advances the native owner revision. Including that revision only for
+		// contracted issues also detects permission/responsibility changes.
+		hasContract, contractErr := h.Queries.IssueHasContract(r.Context(), db.IssueHasContractParams{IssueID: issue.ID, WorkspaceID: issue.WorkspaceID})
+		if contractErr != nil {
+			currentSnapshot.Version = 0
+		} else if hasContract {
+			currentSnapshot.ContractIssueRevision = issue.Revision
+		}
 		if encoded, err := json.Marshal(currentSnapshot); err != nil {
 			// A snapshot that cannot be encoded is simply not recorded; the
 			// next run reports "not compared" and reads the issue, which is
@@ -3169,7 +3226,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					ownsIssueStatus := issue.AssigneeType.Valid &&
 						issue.AssigneeType.String == "squad" &&
 						uuidToString(issue.AssigneeID) == uuidToString(squad.ID)
-					briefing := buildSquadLeaderBriefing(r.Context(), h.Queries, squad, ownsIssueStatus)
+					briefing := squadbriefing.Build(r.Context(), h.Queries, squad, ownsIssueStatus)
 					if strings.TrimSpace(resp.Agent.Instructions) == "" {
 						resp.Agent.Instructions = briefing
 					} else {
@@ -3490,7 +3547,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		// prompt reached the session. A non-nil anchor here is a completed run.
 		if resumeAnchor != nil {
 			if prev, ok := decodeIssueStateSnapshot(resumeAnchor.IssueSnapshot); ok {
-				resp.IssueStateDeltaKnown = true
+				resp.IssueStateDeltaKnown = contractErr == nil
 				resp.IssueChangedFields = currentSnapshot.changedFieldsSince(prev)
 			}
 			// Comments that arrived issue-wide since the resumed run started
@@ -3523,7 +3580,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	}
 
 	// Chat task: populate workspace/session info from the chat_session table.
-	if task.ChatSessionID.Valid {
+	if resultTurn == nil && task.ChatSessionID.Valid {
 		cs, chatErr := h.Queries.GetChatSession(r.Context(), task.ChatSessionID)
 		if chatErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3784,7 +3841,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Autopilot run_only task: resolve workspace from autopilot_run →
 	// autopilot, and include the autopilot instructions because there is no
 	// issue for the agent to fetch.
-	if task.AutopilotRunID.Valid {
+	if resultTurn == nil && task.AutopilotRunID.Valid {
 		run, runErr := h.Queries.GetAutopilotRun(r.Context(), task.AutopilotRunID)
 		if runErr != nil {
 			return resp, deliveredCommentIDs, issueSnapshot, agentSkillCount, builtinSkillCount,
@@ -3842,7 +3899,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// prompt come from the task's context JSONB. Resolve workspace from
 	// there so the isolation check below has something to compare.
 	hasQuickCreate := false
-	if task.Context != nil && !task.IssueID.Valid && !task.ChatSessionID.Valid && !task.AutopilotRunID.Valid {
+	if resultTurn == nil && task.Context != nil && !task.IssueID.Valid && !task.ChatSessionID.Valid && !task.AutopilotRunID.Valid {
 		var qc service.QuickCreateContext
 		if json.Unmarshal(task.Context, &qc) == nil && qc.Type == service.QuickCreateContextType {
 			hasQuickCreate = true
@@ -3965,7 +4022,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 						// status to own on this turn. Once the leader opens the
 						// issue with the squad as assignee, the issue-bound
 						// claim path above grants ownership.
-						briefing := buildSquadLeaderBriefing(r.Context(), h.Queries, squad, false)
+						briefing := squadbriefing.Build(r.Context(), h.Queries, squad, false)
 						if strings.TrimSpace(resp.Agent.Instructions) == "" {
 							resp.Agent.Instructions = briefing
 						} else {
@@ -3984,6 +4041,18 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					}
 				}
 			}
+		}
+	}
+
+	if resultTurn != nil {
+		resp.PriorSessionID, resp.PriorWorkDir = resultTurn.SessionID, resultTurn.WorkDir
+		resp.ThreadName = "Delegated result"
+		if task.IssueID.Valid {
+			issue, err := h.Queries.GetIssue(r.Context(), task.IssueID)
+			if err != nil {
+				return resp, nil, nil, agentSkillCount, builtinSkillCount, h.rejectClaimSourceLoad(r.Context(), task, err, "issue", uuidToString(task.IssueID))
+			}
+			resp.WorkspaceID, resp.ThreadName, issueNumber = uuidToString(issue.WorkspaceID), issue.Title, issue.Number
 		}
 	}
 
@@ -4115,7 +4184,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 	// Wakeup rules that waited for this run hand it their inputs now, after
 	// every gate passed, and only for a daemon that renders them; otherwise
 	// they keep their inputs and start their own run.
-	if requestHasClientCapability(r, protocol.DaemonCapabilityJoinedWakeupsV1) {
+	if resultTurn == nil && requestHasClientCapability(r, protocol.DaemonCapabilityJoinedWakeupsV1) {
 		joined, err := (&service.IssueWakeupService{Tasks: h.TaskService}).JoinWaitingWakeups(r.Context(), *task)
 		if err != nil {
 			slog.Warn("daemon claim: waiting wakeups keep their inputs", "task_id", uuidToString(task.ID), "error", err)
@@ -4569,6 +4638,7 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 	}
 	enableTaskSupplement := slices.Contains(req.Capabilities, protocol.DaemonCapabilityTaskSupplementV1)
 	var task *db.AgentTaskQueue
+	var claim db.LockAgentTaskStartClaimParams
 	var err error
 	legacy := req.RuntimeID == "" && req.DispatchedAt == ""
 	if legacy {
@@ -4585,14 +4655,23 @@ func (h *Handler) StartTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "dispatched_at must be a PostgreSQL claim timestamp")
 			return
 		}
-		task, err = h.TaskService.StartTaskForClaim(r.Context(), db.LockAgentTaskStartClaimParams{
+		claim = db.LockAgentTaskStartClaimParams{
 			ID: parseUUID(taskID), RuntimeID: runtimeID,
 			DispatchedAt: pgtype.Timestamptz{Time: generation, Valid: true},
-		}, enableTaskSupplement)
+		}
+		task, err = h.TaskService.StartTaskForClaim(r.Context(), claim, enableTaskSupplement)
 	}
 	if err != nil {
 		slog.Warn("start task failed", "task_id", taskID, "error", err)
 		if errors.Is(err, pgx.ErrNoRows) {
+			if !legacy {
+				current, readErr := h.Queries.GetAgentTask(r.Context(), claim.ID)
+				if readErr == nil && current.Status == "cancelled" && !current.StartedAt.Valid && current.RuntimeID == claim.RuntimeID && current.DispatchedAt.Valid && current.DispatchedAt.Time.Equal(claim.DispatchedAt.Time) {
+					writeJSON(w, http.StatusConflict, map[string]any{"error": "this claim was cancelled before execution", "cancelled_claim": true})
+					return
+				}
+			}
+
 			status := http.StatusConflict
 			if legacy {
 				status = http.StatusBadRequest
@@ -4748,7 +4827,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
 	// Verify the caller owns this task's workspace.
-	_, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
+	existing, workspaceID, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, taskID)
 	if !ok {
 		return
 	}
@@ -4767,6 +4846,18 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// re-route below feeds req.Output into the failure classifier, and that
 	// classifier must see exactly the text we are going to persist.
 	sanitizeTaskCompleteRequest(&req)
+	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
+	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
+		writeError(w, 500, "verify result address failed")
+		return
+	}
+	if existing.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	if verificationErr != nil || (turn != nil && (req.SessionID == "" || req.WorkDir == "" || req.SessionID != turn.SessionID || req.WorkDir != turn.WorkDir || req.SessionRolloutMissing || req.RetiredSessionID != "")) {
+		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{Error: "Result handling reported no verified frozen address; input outcome is unknown. " + req.Output, FailureReason: protocol.DelegationResultInputUnknown, BranchName: req.BranchName})
+		return
+	}
 
 	// GH #6402: a daemon whose backend does not (yet) read the provider's
 	// structured terminal reason reports a context-exhausted run as a clean
@@ -4805,7 +4896,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// transaction (force session_id NULL + flag the row), so an auto-retry the
 	// same commit creates and wakes can never observe the withheld pointer or a
 	// missing continuity-gap flag.
-	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(r.Context(), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized
@@ -5002,11 +5093,10 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 			OriginatorUserID:        originatorUserID,
 		})
 		// Agent replies discovered only by timestamp must not start a new
-		// conversation. Replay explicit mentions, or a worker reply that the
-		// creation path already accepted and recorded in this run's input plan.
-		// Recomputed routing still checks current permissions and the self guard.
+		// conversation. Replay only explicit mentions; recomputed routing still
+		// checks current permissions and the self guard.
 		if actorType != "member" {
-			triggers = keepReplayableAgentTriggers(triggers, slices.Contains(plannedCommentIDs, c.ID))
+			triggers = keepReplayableAgentTriggers(triggers)
 		}
 		scoped := make([]commentAgentTrigger, 0, 1)
 		for _, trigger := range triggers {
@@ -5053,11 +5143,11 @@ func (h *Handler) reconcileCommentsOnCompletion(ctx context.Context, task *db.Ag
 	}
 }
 
-// keepReplayableAgentTriggers preserves explicit mentions (MUL-4304) and
-// accepted worker replies recorded in the completing run's plan. A timestamp
-// alone never authorizes replay of an implicit agent route. Member comments
-// retain their full routing and do not pass through this filter.
-func keepReplayableAgentTriggers(triggers []commentAgentTrigger, planned bool) []commentAgentTrigger {
+// keepReplayableAgentTriggers preserves explicit mentions (MUL-4304). A
+// timestamp alone never authorizes replay of an unmentioned comment: replies
+// are discussion, not requests, and completion must not turn one into a run.
+// Member comments retain their full routing and do not pass through this filter.
+func keepReplayableAgentTriggers(triggers []commentAgentTrigger) []commentAgentTrigger {
 	if len(triggers) == 0 {
 		return triggers
 	}
@@ -5066,10 +5156,6 @@ func keepReplayableAgentTriggers(triggers []commentAgentTrigger, planned bool) [
 		switch trigger.Source {
 		case commentTriggerSourceMentionAgent, commentTriggerSourceMentionSquadLeader:
 			filtered = append(filtered, trigger)
-		case commentTriggerSourceIssueAssignee, commentTriggerSourceThreadParent:
-			if planned && trigger.NonLeaderAgentReply {
-				filtered = append(filtered, trigger)
-			}
 		}
 	}
 	return filtered
@@ -5488,12 +5574,35 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 // transaction, token revocation and runtime wake-up as one the daemon reported
 // as failed itself.
 func (h *Handler) failTask(w http.ResponseWriter, r *http.Request, taskID, workspaceID string, req TaskFailRequest) {
+	existing, loadErr := h.Queries.GetAgentTask(r.Context(), parseUUID(taskID))
+	if loadErr != nil {
+		writeError(w, 500, "load terminal task failed")
+		return
+	}
+	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
+	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
+		writeError(w, 500, "verify result address failed")
+		return
+	}
+	if existing.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	if verificationErr != nil || turn != nil {
+		mismatch := verificationErr != nil || (req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir)
+		if mismatch {
+			req.FailureReason = protocol.DelegationResultInputUnknown
+			req.Error = "Result handling reported a different frozen address; input outcome is unknown. " + req.Error
+		}
+		req.SessionID, req.WorkDir, req.RetiredSessionID = "", "", ""
+		req.SessionRolloutMissing = false
+	}
+
 	// MUL-5305: SessionRolloutMissing is applied inside FailTask's terminal
 	// transaction — forcing session_id NULL (overriding the COALESCE that would
 	// keep a stale mid-flight pin) and flagging the row in the same commit that
 	// creates and wakes the auto-retry, so the retry can never claim the withheld
 	// pointer or miss the continuity gap.
-	task, transitioned, err := h.TaskService.FailTaskWithTransition(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.FailTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
 	if err != nil {
 		// A FailTask error is an infrastructure failure (the terminal
 		// transaction that also clears the withheld session, writes the
@@ -5712,6 +5821,8 @@ func (h *Handler) ReportTaskMessages(w http.ResponseWriter, r *http.Request) {
 // transcript (#5219); idempotent when nothing was deferred.
 // TaskCancelAckRequest is the body of the daemon's cancel acknowledgement.
 type TaskCancelAckRequest struct {
+	RuntimeID    string `json:"runtime_id,omitempty"`
+	DispatchedAt string `json:"dispatched_at,omitempty"`
 	// BranchName: a cancelled worktree task has already committed whatever the
 	// agent produced — the worktree is finalized before the daemon learns of
 	// the cancellation. The rest of the result is discarded on this path, so
@@ -5742,6 +5853,29 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 	// break the cancellation contract this endpoint exists for.
 	var req TaskCancelAckRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.RuntimeID != "" || req.DispatchedAt != "" {
+		runtimeID, ok := parseUUIDOrBadRequest(w, req.RuntimeID, "runtime_id")
+		if !ok {
+			return
+		}
+		generation, err := time.Parse(time.RFC3339Nano, req.DispatchedAt)
+		if err != nil || generation.Nanosecond()%1000 != 0 {
+			writeError(w, http.StatusBadRequest, "invalid dispatched_at")
+			return
+		}
+		exited, err := h.Queries.RecordCancelledClaimExit(r.Context(), db.RecordCancelledClaimExitParams{TaskID: task.ID, RuntimeID: runtimeID, DispatchedAt: pgtype.Timestamptz{Time: generation, Valid: true}})
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "cancelled claim no longer matches")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record claim exit")
+			return
+		}
+		h.TaskService.NotifyTaskFinished(exited)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	// Same persistence hazard as /fail and /complete: these strings go straight
 	// into TEXT columns, and this endpoint fails LOUD on write errors, so an
 	// unsanitized NUL here turns a cancelled task's only pointer to its work
@@ -5751,6 +5885,29 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 	req.BranchName = util.SanitizeTextForPostgres(req.BranchName)
 	req.DurableWorkDir = util.SanitizeTextForPostgres(req.DurableWorkDir)
 	req.RetiredSessionID = util.SanitizeTextForPostgres(req.RetiredSessionID)
+
+	if task.ResourceControlRequired {
+		req.DurableWorkDir = ""
+	}
+	typedResult := delegation.IsResultTask(task)
+	if !typedResult {
+		_, err := h.Queries.GetDelegationResultObligationForTask(r.Context(), task.ID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, 500, "verify result ownership failed")
+			return
+		}
+		typedResult = err == nil
+	}
+
+	if typedResult {
+		req.RetiredSessionID = ""
+		if task.StartedAt.Valid {
+			req.FailureReason = protocol.DelegationResultInputUnknown
+			if req.ErrorMessage == "" {
+				req.ErrorMessage = "Result handling was cancelled after execution started; input outcome is unknown."
+			}
+		}
+	}
 
 	// Terminal deliveries first, failing LOUD on persistence errors: these
 	// fields are the only pointer to a cancelled task's work, and the daemon
@@ -5819,6 +5976,10 @@ func (h *Handler) AckTaskCancelled(w http.ResponseWriter, r *http.Request) {
 		// clients may already hold a refetched row without the branch/error
 		// and will not refetch again on their own.
 		h.TaskService.RebroadcastCancelledTask(r.Context(), task.ID)
+	}
+	if _, err := h.Queries.RecordTaskTerminalReport(r.Context(), task.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record terminal acknowledgement")
+		return
 	}
 	h.TaskService.FinalizeDeferredCancelledChat(r.Context(), task.ID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -6154,6 +6315,14 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 	resp := make([]AgentTaskResponse, len(tasks))
 	for i, t := range tasks {
 		resp[i] = taskToResponse(t, workspaceID)
+	}
+	if err := h.hydrateResultNotifications(r.Context(), issue.WorkspaceID, issue.ID, resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load result notification state")
+		return
+	}
+	if err := h.hydrateAcceptedReturns(r.Context(), issue.WorkspaceID, resp); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load accepted return relationships")
+		return
 	}
 	h.hydrateTaskSupplementMetadata(r.Context(), r, issue.WorkspaceID, tasks, resp)
 	// Execution-log rows render the "on behalf of <member>" badge, so this
@@ -6594,8 +6763,10 @@ func (h *Handler) GetTaskGCCheck(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":       task.Status,
-		"completed_at": task.CompletedAt.Time,
-	})
+	projection, err := h.taskResourceGCProjection(r, task)
+	if err != nil {
+		writeError(w, 500, "resource dependencies unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, projection)
 }

@@ -41,6 +41,9 @@ type kimiBackend struct {
 }
 
 func (b *kimiBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "kimi"
@@ -266,11 +269,20 @@ func (b *kimiBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 				// same dead session on every later turn (GH #8116).
 				finalStatus, finalError, resumeRejected = classifyACPResumeFailure(
 					runCtx, "kimi", "session/resume", err, timeout, b.cfg.Logger)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResume(opts, result, "session/resume"); strictErr != nil {
+				b.cfg.Logger.Warn("kimi strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 			if changed {
 				b.cfg.Logger.Warn("agent returned a different session id on resume — original was likely lost; continuing with the new id",
 					"backend", "kimi",

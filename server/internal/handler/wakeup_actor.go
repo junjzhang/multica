@@ -78,3 +78,26 @@ func wakeupWrite[T any](h *Handler, r *http.Request, write func(*db.Queries) (T,
 	}
 	return result, nil
 }
+
+// wakeupWriteTx is wakeupWrite for a write that must coordinate nested
+// savepoints with the transaction it commits. The comment path uses it to
+// create a run and the comment in one outcome, while still being able to fall
+// back to the existing pending-task recovery if a concurrent run wins the
+// unique slot.
+func wakeupWriteTx[T any](h *Handler, r *http.Request, write func(pgx.Tx, *db.Queries) (T, error)) (T, error) {
+	var zero T
+	r = h.withWakeupActor(r)
+	tx, err := h.beginWakeupWrite(r.Context())
+	if err != nil {
+		return zero, err
+	}
+	defer tx.Rollback(r.Context())
+	result, err := write(tx, h.Queries.WithTx(tx))
+	if err != nil {
+		return zero, err
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		return zero, err
+	}
+	return result, nil
+}

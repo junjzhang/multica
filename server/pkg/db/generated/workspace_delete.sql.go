@@ -238,6 +238,9 @@ WITH deleted_wakeup_receipts AS (
 ), deleted_wakeups AS (
  DELETE FROM issue_wakeup WHERE workspace_id=$1
 ),
+deleted_contracts AS (
+ DELETE FROM issue_contract WHERE workspace_id=$1
+),
 deleted_child_events AS (
  DELETE FROM issue_child_event WHERE workspace_id=$1
 ),
@@ -388,6 +391,45 @@ deleted_issue_pr_automation AS (
 ),
 deleted_issue_pr_exclusions AS (
     DELETE FROM issue_pull_request_exclusion WHERE workspace_id = $1
+),
+deleted_agent_mailbox_messages AS (
+    DELETE FROM agent_mailbox_message WHERE workspace_id = $1
+),
+deleted_external_agent_tokens AS (
+    DELETE FROM external_agent_token WHERE workspace_id = $1
+),
+deleted_external_agent_sessions AS (
+    DELETE FROM external_agent_session WHERE workspace_id = $1
+),
+deleted_external_agent_session_bindings AS (
+    DELETE FROM external_agent_session_binding WHERE workspace_id = $1
+),
+deleted_comment_dispatch_obligations AS (
+    DELETE FROM comment_dispatch_obligation WHERE workspace_id = $1
+),
+deleted_comment_delegation_returns AS (
+    DELETE FROM comment_delegation_return
+    WHERE comment_id IN (SELECT id FROM comment WHERE workspace_id = $1)
+       OR delegation_return_id IN (SELECT id FROM issue_delegation_return WHERE workspace_id = $1)
+),
+deleted_issue_assignment_delegation_returns AS (
+    DELETE FROM issue_assignment_delegation_return
+    WHERE issue_id IN (SELECT id FROM ws_issues)
+),
+deleted_issue_assignment_delegations AS (
+    DELETE FROM issue_assignment_delegation
+    WHERE workspace_id = $1 OR issue_id IN (SELECT id FROM ws_issues)
+),
+deleted_result_takeovers AS (
+    DELETE FROM delegation_result_takeover WHERE workspace_id = $1
+),
+deleted_issue_delegation_returns AS (
+    DELETE FROM issue_delegation_return WHERE workspace_id = $1
+),
+deleted_agent_task_delegation_returns AS (
+    DELETE FROM agent_task_delegation_return
+    WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id IN (SELECT id FROM ws_issues))
+       OR delegation_return_id IN (SELECT id FROM issue_delegation_return WHERE workspace_id = $1)
 ),
 deleted_agent_invocation_targets AS (
     DELETE FROM agent_invocation_target
