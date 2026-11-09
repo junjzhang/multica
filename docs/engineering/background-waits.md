@@ -1,6 +1,6 @@
 # Background command waits
 
-An external Paseo session can submit a bounded command to its local Multica
+An external Paseo session or a managed task can submit a bounded command to its local Multica
 daemon and finish its turn. Waiting runs ordinary processes and makes no model
 calls. The daemon sends one terminal result through the existing Mailbox, with
 the original registered session frozen as its destination. Busy sessions wait;
@@ -17,6 +17,34 @@ multica wait get --daemon-profile trial <wait-id>
 multica wait cancel --daemon-profile trial <wait-id>
 multica agent mailbox list <agent-id> --kind background_wait --output json
 ```
+
+Inside a managed task, omit `--daemon-profile`:
+
+```bash
+multica wait start --timeout 2h -- gw mr checks 13 --watch
+multica wait get <wait-id>
+multica wait cancel <wait-id>
+```
+
+The injected task credential and daemon port select the active execution.
+The command directory must be inside that task's real work directory. The
+daemon verifies its active token registry and the API verifies the current
+task, workspace and confirmed provider pin. No owner profile or external
+credential is used. Providers must support strict session resume.
+
+A managed task may have one unconsumed wait. Ending its provider turn with an
+unconsumed wait suspends the task through the existing deferred queue; it does
+not complete the task, notify its callers of completion, or release its worktree.
+The journal persists and retries this suspension as well as the command result.
+Results enter Mailbox and make the same task eligible for another claim. That
+claim requires the original provider session and work directory, retaining the
+task's accepted returns. Missing original resources fail visibly rather than
+starting a fresh session. The result is included in the resumed prompt.
+
+`wait get` on a terminal result durably consumes it for the current task. When
+the running provider has already read the result, ending that turn follows normal
+completion and creates no extra result-handling turn. A running-status query
+does not consume anything. Other tasks cannot read or cancel this wait.
 
 `wait start` prints JSON immediately after durable registration. It also prints
 the request ID and absolute deadline to stderr before submitting. If a response
@@ -78,8 +106,9 @@ in the owner's private local profile. An API/session UUID alone grants no
 execution capability; there is no remote command queue. Session authorization
 reuses the authenticated external agent, exact registered session, workspace
 membership and daemon owner. The target must be a Paseo session registered to
-that daemon. Managed task tokens cannot submit waits or choose an external
-return address. `get` and `cancel` require the local owner capability.
+that daemon. Managed task tokens authorize only their active task and work
+directory; they cannot choose an external return address. External `get` and
+`cancel` require the local owner capability; managed operations use the task token.
 
 Processes sharing an OS account are not isolated from that account's readable
 files; this is the same local owner boundary as the daemon profile. Commands run

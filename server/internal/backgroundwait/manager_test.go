@@ -31,7 +31,8 @@ func openTestManager(t *testing.T, dir string, notify Notify) *Manager {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command fixtures")
 	}
-	auth := func(_ context.Context, token, ws, session string) (protocol.WaitAddress, error) {
+	auth := func(_ context.Context, token string, req protocol.WaitStart) (protocol.WaitAddress, error) {
+		ws, session := req.WorkspaceID, req.SessionRef
 		if token != "external-test-token" || ws != "workspace" || session != "original-session" {
 			return protocol.WaitAddress{}, fmt.Errorf("unauthorized")
 		}

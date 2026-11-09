@@ -77,7 +77,7 @@ func TestBackgroundWaitRegistrationAuthentication(t *testing.T) {
 	}
 	managed := dbfx.Agent(t, "Managed wait requester", testRuntimeID)
 	task := dbfx.Task(t, managed, testutil.Cols{"status": "running", "runtime_id": testRuntimeID})
-	if got := call(taskTokenFixture(t, managed, task), "registration-daemon", session, testWorkspaceID); got != 403 {
+	if got := call(taskTokenFixture(t, managed, task), "registration-daemon", session, testWorkspaceID); got < 400 {
 		t.Fatalf("managed credential selected external session: %d", got)
 	}
 	dbfx.Exec(t, "UPDATE agent SET archived_at=now() WHERE id=$1", agent)

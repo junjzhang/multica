@@ -2854,6 +2854,13 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Daemon does not support strict delegated result delivery.", protocol.DelegationResultUnavailable, "result_unsupported", http.StatusConflict, "result unsupported")
 	}
 	resp.RequireResume, resp.DelegationResult = resultTurn != nil, resultTurn
+	wait, waitErr := service.VerifiedBackgroundWait(r.Context(), h.Queries, *task, runtime)
+	if waitErr != nil || (wait != nil && !requestHasClientCapability(r, protocol.DaemonCapabilityManagedWaitV1)) {
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Background wait cannot resume its original session", protocol.DelegationResultUnavailable, "background_wait_unavailable", http.StatusConflict, "background wait unavailable")
+	}
+	if wait != nil {
+		resp.RequireResume, resp.BackgroundWait = true, wait
+	}
 	returns := []AgentTaskResponse{resp}
 	if err := h.hydrateAcceptedReturns(r.Context(), parseUUID(runtimeWorkspaceID), returns); err != nil {
 		return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "accepted_returns", uuidToString(task.ID))
@@ -4055,6 +4062,9 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			resp.WorkspaceID, resp.ThreadName, issueNumber = uuidToString(issue.WorkspaceID), issue.Title, issue.Number
 		}
 	}
+	if wait != nil {
+		resp.PriorSessionID, resp.PriorWorkDir = wait.Address.SessionID, wait.Address.WorkDir
+	}
 
 	// Catch-all workspace isolation check. Every context branch above already
 	// ran this the moment it resolved its owning workspace, which is what makes
@@ -4897,6 +4907,10 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// same commit creates and wakes can never observe the withheld pointer or a
 	// missing continuity-gap flag.
 	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	if errors.Is(err, service.ErrManagedWaitConflict) {
+		writeError(w, 409, "background wait is pending; suspend this turn instead of completing the task")
+		return
+	}
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized

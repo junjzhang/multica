@@ -5860,6 +5860,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// Check if we were cancelled by the polling goroutine.
 	select {
 	case <-cancelledByPoll:
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		taskLog.Info("task cancelled during execution, discarding result",
 			"branch_name", result.BranchName, "error", err)
 		// runner.run has returned, so the transcript flush is complete —
@@ -5892,6 +5895,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		// runTask may have reached worktree finalization before returning the
 		// error. Preserve any delivery metadata that defer attached to the named
 		// result, especially the actual/preserved workdir and delivered branch.
@@ -5915,6 +5921,14 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		}
 		return
 	}
+	if result.Status == "completed" && d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
+		request := protocol.WaitSuspend{Generation: task.SessionPinGeneration, SessionID: result.SessionID, WorkDir: result.WorkDir, BranchName: result.BranchName}
+		if _, suspendErr := d.backgroundWaits.SuspendTask(task.ID, request); suspendErr != nil {
+			taskLog.Error("background suspension not acknowledged; retaining original resources", "error", suspendErr)
+		}
+		taskLog.Info("task suspension persisted for background wait; no terminal result reported")
+		return
+	}
 
 	_ = d.client.ReportProgress(ctx, task.ID, "Finishing task", 2, 2)
 
@@ -5924,6 +5938,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// anyway. Reuse shouldInterruptAgent so this guard honors the same
 	// signals as the in-flight watcher.
 	if status, err := d.client.GetTaskStatus(ctx, task.ID); shouldInterruptAgent(status, err) {
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		taskLog.Info("task cancelled during execution, discarding result",
 			"status", status, "error", err, "branch_name", result.BranchName)
 		// Same contract as the poll-cancelled path above: the transcript is
@@ -6315,6 +6332,9 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 // the next chat turn to resume there rather than start over and "forget"
 // the conversation.
 func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result TaskResult, taskLog *slog.Logger) bool {
+	if result.Status != "completed" && d.backgroundWaits != nil {
+		d.backgroundWaits.CancelTask(taskID)
+	}
 	switch result.Status {
 	case "completed":
 		taskLog.Info("task completed", "status", result.Status)
@@ -7806,7 +7826,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := validateDelegationResultTask(task, provider); err != nil {
 		return TaskResult{}, err
 	}
-	if task.DelegationResult != nil {
+	if task.BackgroundWait != nil && d.backgroundWaits != nil {
+		if err := d.backgroundWaits.MarkHandled(task.ID, task.BackgroundWait.ID); err != nil {
+			taskLog.Warn("server owns the resumed wait receipt", "error", err)
+		}
+	}
+	if task.DelegationResult != nil || task.BackgroundWait != nil {
 		task.QuickCreatePrompt = ""
 		task.QuickCreateAttachmentIDs = nil
 		task.RegenerateQuickActionsFor = ""
@@ -8475,12 +8500,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		}
 	}
 	if task.RequireResume {
-		frozenInfo, frozenErr := os.Stat(task.DelegationResult.WorkDir)
+		frozenInfo, frozenErr := os.Stat(strictTaskWorkDir(task))
 		actualInfo, actualErr := os.Stat(env.WorkDir)
 		if frozenErr != nil || actualErr != nil || !os.SameFile(frozenInfo, actualInfo) {
 			return TaskResult{}, errors.New("strict result return workdir identity changed")
 		}
-		env.WorkDir = task.DelegationResult.WorkDir
+		env.WorkDir = strictTaskWorkDir(task)
 	}
 	stores := []string{hermesMemoryStore, hermesSessionStore}
 	if provider == "codex" {
@@ -8527,6 +8552,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 			if taskResult.EnvRoot == "" {
 				taskResult.EnvRoot = env.RootDir
+			}
+			if d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
+				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
+					returnErr = errors.Join(returnErr, err)
+				}
+				return
 			}
 			outcome, finalizeErr := env.LocalWorktree.Finalize(taskLog)
 			if outcome.Branch != "" {
@@ -9061,11 +9092,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// fields or ambient process environment. Register only for the provider
 	// execution window and always remove the credential afterwards.
 	d.registerActiveRepoCheckoutTask(agentToken, activeRepoCheckoutTask{
-		WorkspaceID: task.WorkspaceID,
-		TaskID:      task.ID,
-		AgentID:     task.AgentID,
-		AgentName:   task.Agent.Name,
-		WorkDir:     env.WorkDir,
+		LocalWorktree: env.LocalWorktree,
+		EnvRoot:       env.RootDir,
+		WorkspaceID:   task.WorkspaceID,
+		TaskID:        task.ID,
+		AgentID:       task.AgentID,
+		AgentName:     task.Agent.Name,
+		WorkDir:       env.WorkDir,
 	})
 	defer d.clearActiveRepoCheckoutTask(agentToken)
 

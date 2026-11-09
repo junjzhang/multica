@@ -1612,6 +1612,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
 		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
 		r.Post("/background-waits/complete", h.CompleteBackgroundWait)
+		r.Post("/tasks/{taskId}/background-wait/suspend", h.SuspendBackgroundWait)
 
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
@@ -2017,6 +2018,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Assignee frequency
 			r.Post("/api/background-waits/authorize", h.AuthorizeBackgroundWait)
+			r.Post("/api/background-waits/{waitId}/read", h.ReadBackgroundWait)
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
 			// Local search index sync for Web/Desktop (MUL-7754). Human clients

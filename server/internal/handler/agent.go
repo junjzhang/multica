@@ -388,6 +388,7 @@ type AgentTaskResponse struct {
 	SessionPinGeneration     string                         `json:"session_pin_generation,omitempty"`
 	ResultNotifications      *[]ResultNotificationResponse  `json:"result_notifications,omitempty"`
 	RequireResume            bool                           `json:"require_resume,omitempty"`
+	BackgroundWait           *protocol.ManagedWait          `json:"background_wait,omitempty"`
 	DelegationResult         *protocol.DelegationResultTurn `json:"delegation_result,omitempty"`
 	ResourceControlRequired  bool                           `json:"resource_control_required,omitempty"`
 	StartClaimSupported      bool                           `json:"start_claim_supported,omitempty"`

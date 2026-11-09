@@ -4592,6 +4592,9 @@ func (s *TaskService) StartTask(ctx context.Context, taskID pgtype.UUID, supplem
 		if err != nil {
 			return err
 		}
+		if err := consumeResumedWait(ctx, q, task); err != nil {
+			return err
+		}
 		change, err = syncQoderIssue(ctx, q, task, false)
 		return err
 	})
@@ -4635,6 +4638,9 @@ func (s *TaskService) StartTaskForClaim(ctx context.Context, claim db.LockAgentT
 		}
 	}
 	if !replay {
+		if err := consumeResumedWait(ctx, qtx, task); err != nil {
+			return nil, err
+		}
 		change, err = syncQoderIssue(ctx, qtx, task, false)
 		if err != nil {
 			return nil, err
@@ -4819,6 +4825,17 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 		}
 		if err := qtx.LockQoderIssueForTaskTransition(ctx, taskID); err != nil {
 			return err
+		}
+		current, err := qtx.LockTaskSessionPin(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		pending, err := TaskBackgroundWait(current)
+		if err != nil {
+			return err
+		}
+		if pending != nil && !pending.Consumed && !terminalResourceTask(current.Status) {
+			return ErrManagedWaitConflict
 		}
 		t, err := qtx.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
 			ID:                    taskID,
@@ -5818,6 +5835,9 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 // a human may have edited in the meantime, so replaying the failed attempt is
 // never what the workspace wants.
 func retryEligible(failureReason string, t db.AgentTaskQueue) bool {
+	if wait, err := TaskBackgroundWait(t); err != nil || wait != nil {
+		return false
+	}
 	return !delegation.IsResultTask(t) && retryableReasons[failureReason] &&
 		t.Attempt < retryAttemptCeiling(failureReason, t.MaxAttempts) &&
 		!t.AutopilotRunID.Valid &&

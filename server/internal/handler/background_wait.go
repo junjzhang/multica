@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -18,18 +20,32 @@ import (
 // private profile directory. A session UUID or an API credential alone cannot
 // submit executable work to a daemon.
 func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-Actor-Source") != "external_agent" {
+	if r.Header.Get("X-Actor-Source") != "external_agent" && r.Header.Get("X-Actor-Source") != "task_token" {
 		writeError(w, http.StatusForbidden, "background waits require an external session and local daemon access")
 		return
 	}
-	var req struct {
-		DaemonID string `json:"daemon_id"`
-	}
+	var req protocol.WaitAuthorization
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	wsID, agentID := h.resolveWorkspaceID(r), r.Header.Get("X-Agent-ID")
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		if _, ok := parseUUIDOrBadRequest(w, req.ID, "id"); !ok {
+			return
+		}
+		if len(req.RequestHash) != 64 || req.Deadline.IsZero() {
+			writeError(w, 400, "request hash and bounded deadline required")
+			return
+		}
+		address, err := h.TaskService.RegisterManagedWait(r.Context(), parseUUID(wsID), parseUUID(agentID), parseUUID(r.Header.Get("X-Task-ID")), req)
+		if err != nil {
+			writeManagedWaitError(w, err)
+			return
+		}
+		writeJSON(w, 200, address)
+		return
+	}
 	address, err := delegation.ResolveExternal(r.Context(), h.Queries, wsID, agentID, r.Header.Get(ReturnSessionHeader))
 	if err != nil {
 		writeError(w, http.StatusForbidden, "return session is unavailable")
@@ -62,6 +78,35 @@ func (h *Handler) CompleteBackgroundWait(w http.ResponseWriter, r *http.Request)
 	}
 	if req.Address.DaemonID == "" {
 		writeError(w, http.StatusBadRequest, "daemon_id is required")
+		return
+	}
+	if req.Address.TaskID != "" {
+		if _, ok := parseUUIDOrBadRequest(w, req.Address.TaskID, "task_id"); !ok {
+			return
+		}
+		task, workspace, ok := h.requireDaemonTaskAccessWithWorkspace(w, r, req.Address.TaskID)
+		if !ok {
+			return
+		}
+		if workspace != req.Address.WorkspaceID || uuidToString(task.RuntimeID) != req.Address.RuntimeID || !protocol.WaitTerminal(req.State) || req.FinishedAt.IsZero() || len(req.LogPath) > 4096 {
+			writeError(w, 400, "invalid managed wait result")
+			return
+		}
+		runtime, err := h.Queries.GetAgentRuntime(r.Context(), task.RuntimeID)
+		if err != nil || runtime.DaemonID.String != req.Address.DaemonID {
+			writeError(w, 404, "wait daemon not found")
+			return
+		}
+		id, err := h.TaskService.CompleteManagedWait(r.Context(), req)
+		if err != nil {
+			writeManagedWaitError(w, err)
+			return
+		}
+		if task.Status == "cancelled" && !task.StartedAt.Valid {
+			_, _ = h.Queries.RecordTaskTerminalReport(r.Context(), task.ID)
+		}
+		h.TaskService.NotifyTaskEnqueued(r.Context(), task)
+		writeJSON(w, 200, map[string]string{"delivery_id": id})
 		return
 	}
 	sessionID, ok := parseUUIDOrBadRequest(w, req.Address.SessionID, "session_id")
@@ -113,4 +158,60 @@ func (h *Handler) CompleteBackgroundWait(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"delivery_id": message.ID})
+}
+
+func (h *Handler) ReadBackgroundWait(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Actor-Source") != "task_token" {
+		writeError(w, 403, "current task credential required")
+		return
+	}
+	id := chi.URLParam(r, "waitId")
+	if _, ok := parseUUIDOrBadRequest(w, id, "wait_id"); !ok {
+		return
+	}
+	wait, err := h.TaskService.ReadManagedWait(r.Context(), parseUUID(h.resolveWorkspaceID(r)), parseUUID(r.Header.Get("X-Agent-ID")), parseUUID(r.Header.Get("X-Task-ID")), id)
+	if err != nil {
+		writeError(w, 404, "wait not found in current task")
+		return
+	}
+	status := protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: wait.ID, Address: wait.Address, State: "running"}, Deadline: wait.Deadline, DeliveryID: wait.DeliveryID}
+	if wait.Result != nil {
+		status.WaitResult = *wait.Result
+	}
+	writeJSON(w, 200, status)
+}
+
+func (h *Handler) SuspendBackgroundWait(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskId")
+	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
+	if !ok {
+		return
+	}
+	var req protocol.WaitSuspend
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&req); err != nil {
+		writeError(w, 400, "invalid suspension")
+		return
+	}
+	paused, err := h.TaskService.SuspendManagedWait(r.Context(), task.ID, req)
+	if err != nil {
+		writeError(w, 409, "wait suspension conflicts with current execution")
+		return
+	}
+	if paused {
+		h.TaskService.ReconcileAgentStatus(r.Context(), task.AgentID)
+		h.TaskService.NotifyTaskEnqueued(r.Context(), task)
+	}
+	writeJSON(w, 200, map[string]bool{"suspended": paused})
+}
+
+func writeManagedWaitError(w http.ResponseWriter, err error) {
+	if errors.Is(err, delegation.ErrReturnInvalid) || errors.Is(err, delegation.ErrReturnSourceClosed) {
+		writeError(w, 403, "managed task scope unavailable")
+		return
+	}
+	if errors.Is(err, service.ErrManagedWaitConflict) || errors.Is(err, delegation.ErrReturnNotReady) {
+		writeError(w, 409, "managed wait requires its registered current task and confirmed session")
+		return
+	}
+	writeError(w, 500, "managed wait state could not be committed; retry the same request")
 }

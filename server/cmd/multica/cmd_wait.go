@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,15 +45,12 @@ func runWaitStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if !strings.HasPrefix(client.Token, "mea_") {
-		return fmt.Errorf("wait start requires a connected external Paseo session; managed task credentials are not supported")
-	}
-	bound, err := readExternalSessionContext()
-	if err != nil {
-		return err
-	}
-	if bound == nil {
-		return fmt.Errorf("connect the current Paseo session first")
+	managed:=strings.HasPrefix(client.Token,"mat_")
+	var bound *externalSessionContext
+	if !managed {
+		if !strings.HasPrefix(client.Token,"mea_") { return fmt.Errorf("wait start requires a managed task or connected external Paseo session") }
+		bound,err=readExternalSessionContext(); if err!=nil { return err }
+		if bound==nil { return fmt.Errorf("connect the current Paseo session first") }
 	}
 	timeout, _ := cmd.Flags().GetDuration("timeout")
 	if timeout <= 0 || timeout > backgroundwait.MaxDuration {
@@ -84,23 +82,29 @@ func runWaitStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	request := protocol.WaitStart{ID: id, WorkspaceID: bound.WorkspaceID, SessionRef: bound.SessionID, Argv: args, Cwd: cwd, Deadline: deadline}
+	request := protocol.WaitStart{ID: id, Argv: args, Cwd: cwd, Deadline: deadline}
+	if managed {
+		request.WorkspaceID,request.TaskID=client.WorkspaceID,client.TaskID
+		request.Cwd,err=filepath.EvalSymlinks(cwd); if err!=nil { return err }
+	} else { request.WorkspaceID,request.SessionRef=bound.WorkspaceID,bound.SessionID }
 	fmt.Fprintf(cmd.ErrOrStderr(), "Wait request %s; retry deadline %s\n", id, deadline.Format(time.RFC3339Nano))
 	return callWait(cmd, http.MethodPost, "/waits", request, bound)
 }
 
 func callWait(cmd *cobra.Command, method, path string, body any, bound *externalSessionContext) error {
-	dir, err := cli.ProfileDir(flagString(cmd, "daemon-profile"))
-	if err != nil {
-		return err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "wait.endpoint.json"))
-	if err != nil {
-		return fmt.Errorf("local daemon wait endpoint unavailable; start an updated daemon for this profile")
-	}
 	var endpoint protocol.WaitEndpoint
-	if json.Unmarshal(data, &endpoint) != nil || endpoint.Secret == "" {
-		return fmt.Errorf("invalid local daemon wait endpoint")
+	credential:=""
+	if inDaemonManagedExecutionContext() {
+		client,err:=newAPIClient(cmd); if err!=nil { return err }
+		if !strings.HasPrefix(client.Token,"mat_") || client.TaskID=="" || flagString(cmd,"daemon-profile")!="" { return fmt.Errorf("managed waits use only the current task credential and injected daemon port") }
+		port,err:=strconv.Atoi(os.Getenv("MULTICA_DAEMON_PORT")); if err!=nil || port<1 || port>65535 { return fmt.Errorf("managed task has no valid daemon port") }
+		endpoint.URL="http://127.0.0.1:"+strconv.Itoa(port)
+		credential=client.Token
+	} else {
+		dir,err:=cli.ProfileDir(flagString(cmd,"daemon-profile")); if err!=nil { return err }
+		data,err:=os.ReadFile(filepath.Join(dir,"wait.endpoint.json")); if err!=nil { return fmt.Errorf("local daemon wait endpoint unavailable; start an updated daemon for this profile") }
+		if json.Unmarshal(data,&endpoint)!=nil || endpoint.Secret=="" { return fmt.Errorf("invalid local daemon wait endpoint") }
+		credential=endpoint.Secret
 	}
 	parsed, err := url.Parse(endpoint.URL)
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.User != nil || parsed.Path != "" {
@@ -119,7 +123,7 @@ func callWait(cmd *cobra.Command, method, path string, body any, bound *external
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+endpoint.Secret)
+	req.Header.Set("Authorization", "Bearer "+credential)
 	req.Header.Set("Content-Type", "application/json")
 	if bound != nil {
 		req.Header.Set("X-Wait-Actor-Token", bound.Token)

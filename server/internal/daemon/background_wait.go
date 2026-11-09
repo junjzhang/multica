@@ -3,17 +3,22 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
+
+type waitTaskContextKey struct{}
 
 func (d *Daemon) startBackgroundWaits(ctx context.Context, healthAddr net.Addr) error {
 	dir, err := cli.ProfileDir(d.cfg.Profile)
@@ -33,11 +38,31 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		return err
 	}
 	endpoint := protocol.WaitEndpoint{URL: localURL, Secret: hex.EncodeToString(secret), DaemonID: d.cfg.DaemonID}
-	authorize := func(ctx context.Context, token, workspaceID, sessionRef string) (protocol.WaitAddress, error) {
-		client := cli.NewAPIClient(d.cfg.ServerBaseURL, workspaceID, token)
-		client.ReturnSession = sessionRef
+	authorize := func(ctx context.Context, token string, req protocol.WaitStart) (protocol.WaitAddress, error) {
+		if req.TaskID != "" {
+			task, ok := ctx.Value(waitTaskContextKey{}).(activeRepoCheckoutTask)
+			if !ok || task.TaskID != req.TaskID || task.WorkspaceID != req.WorkspaceID {
+				return protocol.WaitAddress{}, fmt.Errorf("active task credential required")
+			}
+			cwd, err := authorizeRepoCheckoutWorkDir(task.WorkDir, req.Cwd)
+			if err != nil || cwd != req.Cwd {
+				return protocol.WaitAddress{}, fmt.Errorf("wait cwd must be inside the active task directory")
+			}
+			if task.LocalWorktree != nil {
+				if err := task.LocalWorktree.SaveForReuse(task.EnvRoot); err != nil {
+					return protocol.WaitAddress{}, err
+				}
+			}
+		}
+		client := cli.NewAPIClient(d.cfg.ServerBaseURL, req.WorkspaceID, token)
+		client.ReturnSession = req.SessionRef
+		data, err := json.Marshal(req)
+		if err != nil {
+			return protocol.WaitAddress{}, err
+		}
+		hash := sha256.Sum256(data)
 		var address protocol.WaitAddress
-		err := client.PostJSON(ctx, "/api/background-waits/authorize", map[string]string{"daemon_id": d.cfg.DaemonID}, &address)
+		err = client.PostJSON(ctx, "/api/background-waits/authorize", protocol.WaitAuthorization{DaemonID: d.cfg.DaemonID, ID: req.ID, RequestHash: hex.EncodeToString(hash[:]), Deadline: req.Deadline}, &address)
 		return address, err
 	}
 	notify := func(ctx context.Context, result protocol.WaitResult) (string, error) {
@@ -65,7 +90,29 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		manager.Close()
 		return err
 	}
+	manager.ConfigureManaged(func(ctx context.Context, token string, result protocol.WaitResult) error {
+		// Materialize first when get races the asynchronous outbox, then consume
+		// using only the requesting task's credential.
+		if _, err := notify(ctx, result); err != nil {
+			return err
+		}
+		client := cli.NewAPIClient(d.cfg.ServerBaseURL, result.Address.WorkspaceID, token)
+		return client.PostJSON(ctx, "/api/background-waits/"+result.ID+"/read", map[string]any{}, nil)
+	}, func(ctx context.Context, address protocol.WaitAddress) (bool, error) {
+		state, err := d.client.GetTaskStatus(ctx, address.TaskID)
+		if err != nil {
+			code := mailboxStatus(err)
+			if code == 404 || code == 403 {
+				return true, nil
+			}
+			return false, err
+		}
+		return state == "cancelled" || state == "failed" || state == "completed", nil
+	}, func(ctx context.Context, taskID string, req protocol.WaitSuspend) error {
+		return d.client.postJSON(ctx, "/api/daemon/tasks/"+taskID+"/background-wait/suspend", req, nil)
+	})
 	d.backgroundWaits = manager
+	d.client.backgroundWaitIDs = manager.KnownIDs
 	return nil
 }
 
@@ -80,6 +127,34 @@ func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if d.backgroundWaits == nil {
 			http.Error(w, "background waits unavailable", 503)
+			return
+		}
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer mat_") {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			d.repoCheckoutTasksMu.RLock()
+			task, ok := d.repoCheckoutTasks[token]
+			if !ok || task.waitGate == nil {
+				d.repoCheckoutTasksMu.RUnlock()
+				http.Error(w, "active task credential required", 403)
+				return
+			}
+			task.waitGate.RLock()
+			d.repoCheckoutTasksMu.RUnlock()
+			defer task.waitGate.RUnlock()
+			r.Header.Set("X-Wait-Actor-Token", token)
+			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/waits/") && !d.backgroundWaits.HasID(strings.TrimPrefix(r.URL.Path, "/waits/")) {
+				client := cli.NewAPIClient(d.cfg.ServerBaseURL, task.WorkspaceID, token)
+				var status protocol.WaitStatus
+				id := strings.TrimPrefix(r.URL.Path, "/waits/")
+				if err := client.PostJSON(r.Context(), "/api/background-waits/"+id+"/read", map[string]any{}, &status); err != nil {
+					http.Error(w, "wait not found in current task", 404)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(status)
+				return
+			}
+			d.backgroundWaits.ServeManagedHTTP(w, r.WithContext(context.WithValue(r.Context(), waitTaskContextKey{}, task)), task.TaskID)
 			return
 		}
 		d.backgroundWaits.ServeHTTP(w, r)

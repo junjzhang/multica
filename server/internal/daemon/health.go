@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/internal/util"
 )
@@ -124,11 +126,14 @@ type repoCheckoutRequest struct {
 }
 
 type activeRepoCheckoutTask struct {
-	WorkspaceID string
-	TaskID      string
-	AgentID     string
-	AgentName   string
-	WorkDir     string
+	waitGate      *sync.RWMutex
+	LocalWorktree *execenv.LocalWorktree
+	EnvRoot       string
+	WorkspaceID   string
+	TaskID        string
+	AgentID       string
+	AgentName     string
+	WorkDir       string
 }
 
 // registerActiveRepoCheckoutTask binds checkout identity to the active task.
@@ -137,6 +142,7 @@ type activeRepoCheckoutTask struct {
 // process that can steal the child's environment token can authenticate as
 // that task and already holds its API credential.
 func (d *Daemon) registerActiveRepoCheckoutTask(token string, task activeRepoCheckoutTask) {
+	task.waitGate = &sync.RWMutex{}
 	d.repoCheckoutTasksMu.Lock()
 	defer d.repoCheckoutTasksMu.Unlock()
 	if d.repoCheckoutTasks == nil {
@@ -147,8 +153,13 @@ func (d *Daemon) registerActiveRepoCheckoutTask(token string, task activeRepoChe
 
 func (d *Daemon) clearActiveRepoCheckoutTask(token string) {
 	d.repoCheckoutTasksMu.Lock()
+	task := d.repoCheckoutTasks[token]
 	delete(d.repoCheckoutTasks, token)
 	d.repoCheckoutTasksMu.Unlock()
+	if task.waitGate != nil {
+		task.waitGate.Lock()
+		task.waitGate.Unlock()
+	}
 }
 
 // repoCheckoutAuthResult distinguishes the two ways /repo/checkout auth fails.
