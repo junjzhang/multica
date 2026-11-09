@@ -160,8 +160,8 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 			sourceType = delegation.ResultTaskType
 		}
 	}
-	if sourceType != "comment" && sourceType != delegation.ResultTaskType {
-		writeError(w, http.StatusBadRequest, "kind must be comment or delegation_result")
+	if sourceType != "comment" && sourceType != delegation.ResultTaskType && (sourceType != "background_wait" || agent.ExecutionKind != "external") {
+		writeError(w, http.StatusBadRequest, "kind must be comment, delegation_result, or background_wait (external only)")
 		return
 	}
 	var caller db.AgentTaskQueue

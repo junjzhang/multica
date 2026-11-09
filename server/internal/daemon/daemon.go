@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -431,11 +432,12 @@ type repoCacheBackend interface {
 
 // Daemon is the local agent runtime that polls for and executes tasks.
 type Daemon struct {
-	cfg        Config
-	client     *Client
-	repoCache  repoCacheBackend
-	skillCache *SkillBundleCache
-	logger     *slog.Logger
+	backgroundWaits *backgroundwait.Manager
+	cfg             Config
+	client          *Client
+	repoCache       repoCacheBackend
+	skillCache      *SkillBundleCache
+	logger          *slog.Logger
 
 	// gitCALastErr is the last applyGitCACerts failure, so a persistent one
 	// (e.g. on Windows) is logged once rather than on every repo refresh.
@@ -2124,6 +2126,10 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	if err := d.resolveAuth(); err != nil {
 		return err
 	}
+	if err := d.startBackgroundWaits(ctx, healthLn.Addr()); err != nil {
+		return err
+	}
+	defer d.backgroundWaits.Close()
 
 	// Bind and serve the health port before the (potentially slow) preflight,
 	// so `daemon start` and the desktop see a live "starting" daemon instead
