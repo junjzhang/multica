@@ -5706,7 +5706,6 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	generation := &terminalTurnGeneration{}
 	generation.value.Store(task.SessionPinGeneration)
 	ctx = context.WithValue(ctx, terminalTurnGenerationKey{}, generation)
-	ctx = context.WithValue(ctx, taskTurnContextKey{}, protocol.TaskTurn{Generation: task.SessionPinGeneration})
 	d.mu.Lock()
 	rt, tracked := d.runtimeIndex[task.RuntimeID]
 	d.mu.Unlock()
@@ -6415,17 +6414,16 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 // 30-second drain, but terminal callbacks must still use that remaining window.
 // The explicit timeout keeps this detached work bounded during normal runs.
 func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTaskReport) error {
-	if turn, ok := parentCtx.Value(taskTurnContextKey{}).(protocol.TaskTurn); ok {
-		report.generation = turn.Generation
+	if current, ok := parentCtx.Value(terminalTurnGenerationKey{}).(*terminalTurnGeneration); ok {
+		report.generation = current.value.Load().(string)
 		if d.backgroundWaits != nil {
-			ids, _ := json.Marshal(d.backgroundWaits.KnownTaskIDs(report.taskID))
-			report.knownWaitIDs = string(ids)
+			ids := d.backgroundWaits.KnownTaskIDs(report.taskID)
+			sort.Strings(ids)
+			encoded, _ := json.Marshal(ids)
+			report.knownWaitIDs = string(encoded)
 		}
 	}
 
-	if current, ok := parentCtx.Value(terminalTurnGenerationKey{}).(*terminalTurnGeneration); ok {
-		report.generation = current.value.Load().(string)
-	}
 	if _, err := persistedTerminalReport(report, time.Now()); err != nil {
 		return err
 	}
@@ -8555,8 +8553,13 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := writeManagedResource(env.RootDir, resource); err != nil && task.RequireResume {
 		return TaskResult{}, err
 	}
+	pendingFinalization := false
 	defer func() {
 		resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+		resource.FinalizationPending = pendingFinalization
+		if env.LocalWorktree != nil {
+			resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
+		}
 		if err := writeManagedResource(env.RootDir, resource); err != nil {
 			taskLog.Warn("resource identity could not be saved; retain environment", "error", err)
 		}
@@ -8582,9 +8585,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
 					returnErr = errors.Join(returnErr, err)
 				}
+				pendingFinalization = true
 				taskResult.BranchName = env.LocalWorktree.Branch
 				resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
-				taskResult.completedWorktree = &completedWorktree{tree: env.LocalWorktree, resource: resource, root: env.RootDir, durableWorkDir: durableWorktreePath(env.LocalWorktree), finalizePending: true}
+				resource.FinalizationPending = true
+				resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
+				taskResult.completedWorktree = &completedWorktree{tree: env.LocalWorktree, resource: resource, root: env.RootDir, durableWorkDir: resource.DurableWorkDir}
 				return
 			}
 			if d.backgroundWaits != nil {
@@ -8600,6 +8606,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 					return
 				}
 				resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+				resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
 				if err := writeManagedResource(env.RootDir, resource); err != nil {
 					taskLog.Warn("cannot record worktree resource identity; retaining it", "error", err)
 					return

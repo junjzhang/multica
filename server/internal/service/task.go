@@ -5871,7 +5871,7 @@ func ResumeUnsafeFailure(failureReason, errorText string) bool {
 // a human may have edited in the meantime, so replaying the failed attempt is
 // never what the workspace wants.
 func retryEligible(failureReason string, t db.AgentTaskQueue) bool {
-	if wait, err := TaskBackgroundWait(t); err != nil || wait != nil {
+	if wait, err := TaskBackgroundWait(t); err == nil && wait != nil {
 		return false
 	}
 	return !delegation.IsResultTask(t) && retryableReasons[failureReason] &&
@@ -6659,6 +6659,19 @@ func SettleTerminalTaskState(ctx context.Context, q *db.Queries, tasks ...db.Age
 	taskIDs := make([]pgtype.UUID, 0, len(tasks))
 	for _, task := range tasks {
 		taskIDs = append(taskIDs, task.ID)
+	}
+	// A suspended provider has exited; its persisted command result closes
+	// the remaining execution dependency when cancellation wins before claim.
+	for _, task := range tasks {
+		if task.Status != "cancelled" || task.StartedAt.Valid {
+			continue
+		}
+		wait, err := TaskBackgroundWait(task)
+		if err == nil && wait != nil && wait.Suspended && wait.Result != nil {
+			if _, err := q.RecordTaskTerminalReport(ctx, task.ID); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := q.SettleTerminalTaskSupplements(ctx, taskIDs); err != nil {
 		return fmt.Errorf("settle terminal task supplements: %w", err)

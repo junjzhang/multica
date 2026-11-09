@@ -44,6 +44,12 @@ claim requires the original provider session and work directory, retaining the
 task's accepted returns. Missing original resources fail visibly rather than
 starting a fresh session. The result is included in the resumed prompt.
 
+The existing managed-resource record also retains delayed worktree finalization.
+After the owner is terminal and command/provider exit is confirmed, the normal
+release path or GC commits the retained work and retries removal/receipts. This
+survives result delivery followed by cancellation, and a crash after the task
+report is acknowledged. Disabling GC also disables these recovery retries.
+
 `wait get` on a terminal result durably consumes it for the current task. When
 the running provider has already read the result, ending that turn follows normal
 completion and creates no extra result-handling turn. A running-status query

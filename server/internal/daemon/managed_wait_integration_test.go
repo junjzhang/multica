@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 // Only the provider executable is fake. CLI, provider parsing/resume, worktree,
 // admission, Auth, DB queue and accepted upstream return are production.
 func TestManagedWaitCLIContinuation(t *testing.T) {
-	for _, mode := range []string{"success", "nonzero", "timeout", "cancel", "restart", "task-cancel", "provider-fail"} {
+	for _, mode := range []string{"success", "nonzero", "timeout", "cancel", "restart", "late-cancel", "completion-crash", "task-cancel", "provider-fail"} {
 		t.Run(mode, func(t *testing.T) { managedWaitCLIContinuation(t, mode) })
 	}
 }
@@ -95,20 +96,55 @@ func managedWaitCLIContinuation(t *testing.T, mode string) {
 	suspended := make(chan struct{}, 8)
 	completed := make(chan struct{}, 8)
 	released := make(chan struct{}, 8)
+	var releases, removalReceipts atomic.Int32
+	var consumedServerRead atomic.Bool
 	router := chi.NewRouter()
 	router.Group(func(r chi.Router) {
 		r.Use(middleware.Auth(q, nil, nil, nil))
 		r.Post("/api/background-waits/authorize", h.AuthorizeBackgroundWait)
-		r.Post("/api/background-waits/{waitId}/read", h.ReadBackgroundWait)
-		r.Post("/api/background-waits/{waitId}/access", h.ReadBackgroundWait)
+		r.Post("/api/background-waits/{waitId}/read", func(w http.ResponseWriter, r *http.Request) {
+			if mode == "completion-crash" {
+				sink := httptest.NewRecorder()
+				h.ReadBackgroundWait(sink, r)
+				consumedServerRead.Store(true)
+				w.WriteHeader(503)
+				return
+			}
+			h.ReadBackgroundWait(w, r)
+		})
+		r.Post("/api/background-waits/{waitId}/access", func(w http.ResponseWriter, r *http.Request) {
+			if mode == "completion-crash" && consumedServerRead.Load() {
+				w.WriteHeader(503)
+				return
+			}
+			h.ReadBackgroundWait(w, r)
+		})
 	})
 	router.Group(func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(q, nil, nil, nil))
 		r.Post("/api/daemon/background-waits/complete", func(w http.ResponseWriter, r *http.Request) { h.CompleteBackgroundWait(w, r); completed <- struct{}{} })
 
 		r.Get("/api/daemon/tasks/{taskId}/status", h.GetTaskStatus)
-		r.Post("/api/daemon/resources/release", h.ReleaseManagedResource)
-		r.Post("/api/daemon/tasks/{taskId}/resources-released", func(w http.ResponseWriter, r *http.Request) { h.RecordResourcesReleased(w, r); released <- struct{}{} })
+		r.Get("/api/daemon/tasks/{taskId}/gc-check", h.GetTaskGCCheck)
+		r.Get("/api/daemon/issues/{issueId}/gc-check", h.GetIssueGCCheck)
+		r.Post("/api/daemon/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
+		r.Post("/api/daemon/resources/release", func(w http.ResponseWriter, r *http.Request) {
+			if mode == "completion-crash" && releases.Add(1) == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			h.ReleaseManagedResource(w, r)
+		})
+		r.Post("/api/daemon/tasks/{taskId}/resources-released", func(w http.ResponseWriter, r *http.Request) {
+			if mode == "completion-crash" && removalReceipts.Add(1) == 1 {
+				sink := httptest.NewRecorder()
+				h.RecordResourcesReleased(sink, r)
+				w.WriteHeader(503)
+				return
+			}
+			h.RecordResourcesReleased(w, r)
+			released <- struct{}{}
+		})
 		r.Post("/api/daemon/tasks/{taskId}/complete", func(w http.ResponseWriter, r *http.Request) { h.CompleteTask(w, r); suspended <- struct{}{} })
 		r.Post("/api/daemon/tasks/{taskId}/fail", h.FailTask)
 		r.Post("/api/daemon/tasks/{taskId}/start", h.StartTask)
@@ -129,7 +165,7 @@ func managedWaitCLIContinuation(t *testing.T, mode string) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v %s", err, out)
 	}
-	d := New(Config{DaemonID: daemonID, ServerBaseURL: server.URL, WorkspacesRoot: root, Agents: map[string]AgentEntry{}}, slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	d := New(Config{DaemonID: daemonID, ServerBaseURL: server.URL, WorkspacesRoot: root, GCOrphanTTL: time.Hour, Agents: map[string]AgentEntry{}}, slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	d.executionEnvironmentCommand = func() ([]string, error) { return []string{binary, execenv.PreparationHelperArg}, nil }
 	d.client.SetToken(mdt)
 	d.runtimeIndex[runtimeID] = Runtime{ID: runtimeID, Provider: "claude"}
@@ -168,6 +204,12 @@ if [ "$resume" = no ]; then
     sleep 0.05
   done
   if [ "$WAIT_MODE" = cancel ]; then "$WAIT_CLI" wait cancel "$WAIT_ID" > /dev/null || exit 23; fi
+  if [ "$WAIT_MODE" = completion-crash ]; then
+    count=0
+    while "$WAIT_CLI" wait get "$WAIT_ID" > /dev/null 2>&1; do
+      count=$((count+1)); [ "$count" -lt 100 ] || exit 24; sleep 0.02
+    done
+  fi
 else
   [ "$(cat scratch)" = 'retained original work' ] || exit 22
   printf '%s\n' "$prompt" > "$WAIT_PROMPT"
@@ -184,6 +226,10 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 		script = strings.ReplaceAll(script, "while [ ! -e release ]; do sleep 0.01; done; printf x >> executions; exit WAIT_EXIT", "printf x >> executions; sleep 30")
 	}
 	script = strings.ReplaceAll(script, "WAIT_EXIT", exitCode)
+	if mode == "completion-crash" {
+		script = strings.Replace(script, "while [ ! -e release ]; do sleep 0.01; done; printf x >> executions; exit 7", "printf x >> executions; exit 0", 1)
+	}
+
 	script = strings.Replace(script, "-- /bin/sh -c '", "-- /bin/sh -c 'printf x >> started-executions; ", 1)
 	if mode == "provider-fail" {
 		script = strings.Replace(script, "else\n  [ ", "  exit 8\nelse\n  [ ", 1)
@@ -217,6 +263,36 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	if mode == "provider-fail" {
 		if row.Status != "failed" || row.BranchName.String == "" || strings.TrimSpace(gitOK(t, repo, "show", row.BranchName.String+":scratch")) != "retained original work" || d.backgroundWaits.Active() != 0 {
 			t.Fatalf("failed provider lost branch or command: %s %s active=%d", row.Status, row.BranchName.String, d.backgroundWaits.Active())
+		}
+		return
+	}
+	if mode == "completion-crash" {
+		if row.Status != "completed" {
+			t.Fatalf("consumed result did not complete source: %s", row.Status)
+		}
+		resource, err := readManagedResource(managedRootForWorkDir(root, row.WorkDir.String))
+		if err != nil || !resource.FinalizationPending {
+			t.Fatalf("finalization obligation not durable: %+v %v", resource, err)
+		}
+		items, err := d.terminalReports.list()
+		if err != nil || len(items) != 0 {
+			t.Fatalf("terminal outbox was not acknowledged before simulated crash: %+v %v", items, err)
+		}
+		d.backgroundWaits.Close()
+		recovered := New(d.cfg, slog.Default())
+		recovered.client.SetToken(mdt)
+		envRoot := resource.Address.ResourcePath
+		recovered.gcWorkspace(t.Context(), filepath.Dir(envRoot), &gcStats{})
+		retained, err := readManagedResource(envRoot)
+		if err != nil || !retained.FinalizationPending {
+			t.Fatalf("lost removal acknowledgement retired durable cleanup: %+v %v", retained, err)
+		}
+		recovered.gcWorkspace(t.Context(), filepath.Dir(envRoot), &gcStats{})
+		if strings.TrimSpace(gitOK(t, repo, "show", row.BranchName.String+":scratch")) != "retained original work" {
+			t.Fatal("GC recovery lost completed work")
+		}
+		if _, err := os.Stat(resource.Address.WorkDir); !os.IsNotExist(err) {
+			t.Fatalf("GC did not release completed worktree: %v", err)
 		}
 		return
 	}
@@ -291,6 +367,36 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	case <-completed:
 	case <-time.After(15 * time.Second):
 		t.Fatal("command result missing")
+	}
+	if mode == "late-cancel" {
+		journal := filepath.Join(dir, "waits", waitID+".json")
+		limit := time.Now().Add(2 * time.Second)
+		for {
+			data, err := os.ReadFile(journal)
+			var status protocol.WaitStatus
+			if err == nil && json.Unmarshal(data, &status) == nil && status.DeliveryID != "" {
+				break
+			}
+			if time.Now().After(limit) {
+				t.Fatal("result outbox was not acknowledged")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		d.backgroundWaits.Close()
+		if _, err := h.TaskService.CancelTask(t.Context(), mustUUID(sourceID)); err != nil {
+			t.Fatal(err)
+		}
+		recovered := New(d.cfg, slog.Default())
+		recovered.client.SetToken(mdt)
+		recovered.gcWorkspace(t.Context(), filepath.Dir(managedRootForWorkDir(root, workdir)), &gcStats{})
+		row, err = q.GetAgentTask(t.Context(), mustUUID(sourceID))
+		if err != nil || row.Status != "cancelled" || !row.TerminalReportedAt.Valid || strings.TrimSpace(gitOK(t, repo, "show", row.BranchName.String+":scratch")) != "retained original work" {
+			t.Fatalf("late cancellation lost delivery: %s %v", row.Status, err)
+		}
+		if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+			t.Fatalf("late cancelled worktree remains: %v", err)
+		}
+		return
 	}
 	next, err := d.client.ClaimTask(t.Context(), runtimeID)
 	if err != nil || next == nil {

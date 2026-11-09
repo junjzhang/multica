@@ -15,7 +15,6 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
-	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -71,6 +70,15 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 				if err := task.LocalWorktree.SaveForReuse(task.EnvRoot); err != nil {
 					return protocol.WaitAddress{}, err
 				}
+				resource, err := readManagedResource(task.EnvRoot)
+				if err != nil {
+					return protocol.WaitAddress{}, err
+				}
+				resource.FinalizationPending = true
+				resource.DurableWorkDir = durableWorktreePath(task.LocalWorktree)
+				if err := writeManagedResource(task.EnvRoot, resource); err != nil {
+					return protocol.WaitAddress{}, err
+				}
 			}
 		}
 		client := cli.NewAPIClient(d.cfg.ServerBaseURL, req.WorkspaceID, token)
@@ -90,7 +98,7 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		}
 		err := d.client.postDaemonDeliveryJSON(ctx, result.Address.WorkspaceID, "/api/daemon/background-waits/complete", result, &response)
 		if err == nil && response.ID != "" && result.Address.TaskID != "" {
-			d.finalizeCancelledWait(ctx, result.Address)
+			d.reconcileRetainedWorktree(ctx, managedRootForWorkDir(d.cfg.WorkspacesRoot, result.Address.WorkDir))
 		}
 		return response.ID, err
 	}
@@ -210,21 +218,4 @@ func (d *Daemon) reconcileWaitReads(ctx context.Context, task Task, token string
 			_ = d.backgroundWaits.MarkHandled(task.ID, id)
 		}
 	}
-}
-
-func (d *Daemon) finalizeCancelledWait(ctx context.Context, address protocol.WaitAddress) {
-	state, err := d.client.GetTaskStatus(ctx, address.TaskID)
-	if err != nil || state != "cancelled" {
-		return
-	}
-	root := managedRootForWorkDir(d.cfg.WorkspacesRoot, address.WorkDir)
-	resource, err := readManagedResource(root)
-	if err != nil || resource.OwnerTaskID != address.TaskID {
-		return
-	}
-	tree, err := execenv.LoadRetainedWorktree(root, address.WorkDir, address.WorkspaceID, address.AgentID, resource.Address.ScopeID, d.logger)
-	if err != nil {
-		return
-	}
-	d.releaseCompletedWorktree(ctx, &completedWorktree{tree: tree, resource: resource, root: root, durableWorkDir: durableWorktreePath(tree), finalizePending: true})
 }
