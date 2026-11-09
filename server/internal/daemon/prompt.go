@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -349,6 +350,10 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 }
 
 func buildPromptBody(task Task, provider string) string {
+	if wait := task.BackgroundWait; wait != nil && wait.Result != nil {
+		result, _ := json.Marshal(wait.Result)
+		return fmt.Sprintf("The background command registered by this original task has finished. Continue this task in its original provider session and worktree. The command was not rerun. Its result was included in this turn and acknowledged at start; do not register it again merely to read it. Original accepted_returns still apply; assess the result before reporting the complete task.\n\nBackground wait result:\n%s\n", result)
+	}
 	if result := task.DelegationResult; result != nil {
 		body := fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
 		if result.UpstreamReturnsUnknown {

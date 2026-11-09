@@ -330,6 +330,8 @@ WITH victims AS (
   FROM agent_task_queue task
   JOIN agent_runtime runtime ON runtime.id = task.runtime_id
   WHERE task.status IN ('dispatched', 'running', 'waiting_local_directory')
+    AND NOT COALESCE(task.context->'background_wait'->'address'->>'task_id'=task.id::text
+        AND task.context->'background_wait'->>'consumed' IS DISTINCT FROM 'true',false)
     AND runtime.status = 'offline'
     AND COALESCE(runtime.last_seen_at, runtime.updated_at) <
         now() - make_interval(secs => $1::double precision)

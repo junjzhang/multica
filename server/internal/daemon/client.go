@@ -94,10 +94,11 @@ func isRuntimeNotFoundError(err error) bool {
 
 // Client handles HTTP communication with the Multica server daemon API.
 type Client struct {
-	baseURL         string
-	token           string
-	client          *http.Client
-	mailboxDaemonID string
+	backgroundWaitIDs func() []string
+	baseURL           string
+	token             string
+	client            *http.Client
+	mailboxDaemonID   string
 
 	// bundleClient downloads skill bundles. Unlike client it carries no fixed
 	// Timeout: bundles can be large and slow on jittery links, so the caller
@@ -216,6 +217,7 @@ func daemonCommonCapabilities() []string {
 		protocol.DaemonCapabilityCheckoutKeepsWorkV1,
 		protocol.DaemonCapabilityJoinedWakeupsV1,
 		protocol.DaemonCapabilityDelegationResultsV1,
+		protocol.DaemonCapabilityManagedWaitV1,
 	}
 }
 
@@ -647,6 +649,7 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
 
 func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"output": output}
+	addTaskTurn(ctx, body)
 	if branchName != "" {
 		body["branch_name"] = branchName
 	}
@@ -683,6 +686,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
 
 func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"error": errMsg}
+	addTaskTurn(ctx, body)
 	if sessionID != "" {
 		body["session_id"] = sessionID
 	}
@@ -735,7 +739,11 @@ func (c *Client) InvalidateTaskSession(ctx context.Context, taskID, generation, 
 // previous daemon process for this runtime left behind. The server will
 // auto-retry eligible tasks.
 func (c *Client) RecoverOrphans(ctx context.Context, runtimeID string) error {
-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/recover-orphans", runtimeID), map[string]any{}, nil)
+	body := map[string]any{}
+	if c.backgroundWaitIDs != nil {
+		body["background_wait_ids"] = c.backgroundWaitIDs()
+	}
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/recover-orphans", runtimeID), body, nil)
 }
 
 // GetTaskStatus returns the current status of a task. Used by the daemon to

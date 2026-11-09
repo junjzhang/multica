@@ -17,8 +17,10 @@ import (
 const managedResourceFile = ".managed_resource.json"
 
 type managedResource struct {
-	OwnerTaskID string                          `json:"owner_task_id"`
-	Address     protocol.ResourceReleaseRequest `json:"address"`
+	FinalizationPending bool                            `json:"finalization_pending,omitempty"`
+	DurableWorkDir      string                          `json:"durable_work_dir,omitempty"`
+	OwnerTaskID         string                          `json:"owner_task_id"`
+	Address             protocol.ResourceReleaseRequest `json:"address"`
 }
 
 type completedWorktree struct {
@@ -130,7 +132,10 @@ func (d *Daemon) releaseCompletedWorktree(ctx context.Context, completed *comple
 		return
 	}
 	request := current.Address
-	request.ResourcePath = completed.tree.Path
+	request.ResourcePath = filepath.Join(completed.root, "worktree")
+	if completed.tree != nil {
+		request.ResourcePath = completed.tree.Path
+	}
 	decision, err := d.client.ReleaseResource(ctx, request)
 	if err != nil {
 		d.logger.Warn("retaining worktree: release permission unavailable", "resource", request.ResourcePath, "error", err)
@@ -139,11 +144,43 @@ func (d *Daemon) releaseCompletedWorktree(ctx context.Context, completed *comple
 	if !d.permitResourceRelease(request, decision) {
 		return
 	}
+	if completed.tree == nil && current.FinalizationPending {
+		if _, err := os.Lstat(request.ResourcePath); errors.Is(err, os.ErrNotExist) {
+			if err := execenv.ValidateRemovedWorktree(completed.root, current.Address.WorkDir, current.Address.WorkspaceID, current.Address.AgentID, current.Address.ScopeType, current.Address.ScopeID, current.OwnerTaskID, current.DurableWorkDir, d.logger); err != nil {
+				return
+			}
+			if d.acknowledgeResourceRemoval(ctx, current.OwnerTaskID, request, current.DurableWorkDir) {
+				current.FinalizationPending = false
+				_ = writeManagedResource(completed.root, current)
+			}
+			return
+		}
+		completed.tree, err = execenv.LoadRetainedWorktree(completed.root, current.Address.WorkDir, current.Address.WorkspaceID, current.Address.AgentID, current.Address.ScopeID, d.logger)
+		if err != nil {
+			return
+		}
+	}
+	if current.FinalizationPending {
+		if _, err := completed.tree.Finalize(d.logger); err != nil {
+			d.logger.Warn("retaining unfinished worktree", "path", completed.tree.Path, "error", err)
+			return
+		}
+		if err := completed.tree.SaveForReuse(completed.root); err != nil {
+			return
+		}
+	}
 	if err := completed.tree.Remove(d.logger); err != nil {
 		d.logger.Warn("retaining finalized worktree", "error", err)
 		return
 	}
-	d.acknowledgeResourceRemoval(ctx, current.OwnerTaskID, request, completed.durableWorkDir)
+	durable := completed.durableWorkDir
+	if durable == "" {
+		durable = current.DurableWorkDir
+	}
+	if d.acknowledgeResourceRemoval(ctx, current.OwnerTaskID, request, durable) && current.FinalizationPending {
+		current.FinalizationPending = false
+		_ = writeManagedResource(completed.root, current)
+	}
 }
 
 func (d *Daemon) reserveProviderStoreForDeletion(ctx context.Context, provider string, retention time.Duration) func(string) (func(), bool) {
@@ -265,12 +302,14 @@ func durableWorktreePath(tree *execenv.LocalWorktree) string {
 	return filepath.Join(tree.GitRoot, rel)
 }
 
-func (d *Daemon) acknowledgeResourceRemoval(ctx context.Context, taskID string, request protocol.ResourceReleaseRequest, durableWorkDir string) {
+func (d *Daemon) acknowledgeResourceRemoval(ctx context.Context, taskID string, request protocol.ResourceReleaseRequest, durableWorkDir string) bool {
 	receipt := protocol.ResourceReleaseReceipt{ResourceReleaseRequest: request, DurableWorkDir: durableWorkDir}
 	var acknowledgement protocol.ResourceReleaseAcknowledgement
 	if err := d.client.postJSON(ctx, "/api/daemon/tasks/"+taskID+"/resources-released", receipt, &acknowledgement); err != nil {
 		d.logger.Warn("worktree removal metadata not acknowledged", "task", taskID, "error", err)
+		return false
 	}
+	return acknowledgement.Recorded
 }
 
 func (d *Daemon) confirmRemovedWorktree(ctx context.Context, root string, resource managedResource) bool {
@@ -289,4 +328,31 @@ func (d *Daemon) confirmRemovedWorktree(ctx context.Context, root string, resour
 		return false
 	}
 	return true
+}
+
+// The resource record owns delayed finalization until removal is acknowledged.
+// GC replays it after a crash even when the wait/result outbox is already acked.
+func (d *Daemon) reconcileRetainedWorktree(ctx context.Context, root string) {
+	resource, err := readManagedResource(root)
+	if err != nil || !resource.FinalizationPending {
+		return
+	}
+	if _, err := d.gcTaskDirOwner(root); err != nil {
+		return
+	}
+	status, err := d.client.GetTaskGCCheck(ctx, resource.OwnerTaskID)
+	if err != nil || status == nil || !isAgentTaskTerminal(status.Status) || status.TerminalReportedAt == nil || status.ResourceIdentity == nil {
+		return
+	}
+	identity := status.ResourceIdentity
+	address := resource.Address
+	if identity.SourceTaskID != resource.OwnerTaskID || identity.WorkspaceID != address.WorkspaceID || identity.AgentID != address.AgentID || identity.RuntimeID != address.RuntimeID || identity.Provider != address.Provider || identity.WorkDir != address.WorkDir || identity.SessionID != address.SessionID {
+		return
+	}
+	release, ok := d.reserveEnvRootForGC(root)
+	if !ok {
+		return
+	}
+	defer release()
+	d.releaseCompletedWorktree(ctx, &completedWorktree{root: root, resource: resource, durableWorkDir: resource.DurableWorkDir})
 }

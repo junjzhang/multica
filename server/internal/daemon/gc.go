@@ -216,6 +216,7 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			stats.skipped++
 			continue
 		}
+		d.reconcileRetainedWorktree(ctx, taskDir)
 		meta, metaErr := execenv.ReadGCMeta(taskDir)
 		if metaErr == nil && meta.Kind == execenv.GCKindIssue && strings.TrimSpace(meta.IssueID) != "" {
 			if workspaceID := strings.TrimSpace(meta.WorkspaceID); workspaceID != "" {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -210,5 +211,46 @@ func TestFreshRetryRequiresAcknowledgedPinGeneration(t *testing.T) {
 				t.Fatal("late old pin did not retain its old generation")
 			}
 		})
+	}
+}
+
+func TestTerminalReportUsesLastAcknowledgedProviderGeneration(t *testing.T) {
+	const original = "22222222-2222-4222-8222-222222222222"
+	var acknowledged string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request protocol.SessionPinRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			http.Error(w, "decode", 400)
+			return
+		}
+		if request.Generation != original || request.NextGeneration == "" {
+			t.Errorf("wrong rotation: %+v", request)
+		}
+		acknowledged = request.NextGeneration
+		_ = json.NewEncoder(w).Encode(protocol.SessionPinAcknowledgement{Generation: acknowledged})
+	}))
+	defer server.Close()
+	d := New(Config{ServerBaseURL: server.URL, WorkspacesRoot: t.TempDir()}, slog.Default())
+	state := &terminalTurnGeneration{}
+	state.value.Store(original)
+	ctx := context.WithValue(t.Context(), terminalTurnGenerationKey{}, state)
+	ctx = context.WithValue(ctx, taskTurnContextKey{}, protocol.TaskTurn{Generation: original})
+	ctx = withSessionPinGeneration(ctx, original)
+	rotated, err := d.invalidateSessionPin(ctx, "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionPinGenerationFromContext(ctx) != original || sessionPinGenerationFromContext(rotated) != acknowledged {
+		t.Fatal("old asynchronous pins lost immutable attempt generation")
+	}
+	d.terminalReportSend = func(_ context.Context, report terminalTaskReport, _ []time.Duration) error {
+		if report.generation != acknowledged {
+			t.Errorf("terminal report used abandoned generation: %s want %s", report.generation, acknowledged)
+		}
+		return nil
+	}
+	if err := d.reportTerminalTask(ctx, terminalTaskReport{kind: terminalTaskReportComplete, taskID: "task", output: "completed after provider retry"}); err != nil {
+		t.Fatal(err)
 	}
 }

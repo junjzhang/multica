@@ -33,6 +33,17 @@ func (h *Handler) RecoverOrphanedTasks(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
 		return
 	}
+	var request struct {
+		WaitIDs []string `json:"background_wait_ids"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536)).Decode(&request); err != nil && err != io.EOF {
+		writeError(w, 400, "invalid recovery request")
+		return
+	}
+	if err := h.TaskService.RecoverBackgroundWaits(r.Context(), parseUUID(runtimeID), request.WaitIDs); err != nil {
+		writeError(w, 500, "background wait recovery failed")
+		return
+	}
 
 	rows, err := h.TaskService.RecoverOrphanedTasksForRuntime(r.Context(), parseUUID(runtimeID))
 	if err != nil {
@@ -145,6 +156,11 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nextGeneration.Valid {
+		wait, waitErr := service.TaskBackgroundWait(task)
+		if waitErr != nil || wait != nil {
+			writeError(w, 409, "background wait must retain the original provider session")
+			return
+		}
 		updated, err := qtx.InvalidateTaskSessionPin(r.Context(), db.InvalidateTaskSessionPinParams{TaskID: task.ID, Generation: generation, NextGeneration: nextGeneration})
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, 409, "session generation changed or strict return cannot start fresh")
@@ -168,6 +184,10 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 	turn, err := service.VerifiedDelegationResult(r.Context(), qtx, task)
 	if err != nil || (turn != nil && ((req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir))) {
 		writeError(w, http.StatusConflict, "result task must retain its frozen session and directory")
+		return
+	}
+	if wait, waitErr := service.TaskBackgroundWait(task); waitErr != nil || (wait != nil && ((req.SessionID != "" && req.SessionID != wait.Address.SessionID) || (req.WorkDir != "" && req.WorkDir != wait.Address.WorkDir))) {
+		writeError(w, 409, "background wait session pin cannot change")
 		return
 	}
 	if err := qtx.UpdateAgentTaskSession(r.Context(), params); err != nil {

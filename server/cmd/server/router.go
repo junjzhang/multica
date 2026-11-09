@@ -2017,6 +2017,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Assignee frequency
 			r.Post("/api/background-waits/authorize", h.AuthorizeBackgroundWait)
+			r.Post("/api/background-waits/{waitId}/read", h.ReadBackgroundWait)
+			r.Post("/api/background-waits/{waitId}/access", h.ReadBackgroundWait)
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
 			// Local search index sync for Web/Desktop (MUL-7754). Human clients

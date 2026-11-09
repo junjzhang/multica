@@ -24,7 +24,7 @@ import (
 const MaxDuration = 7 * 24 * time.Hour
 const MaxLogBytes = 1 << 20
 
-type Authorize func(context.Context, string, string, string) (protocol.WaitAddress, error)
+type Authorize func(context.Context, string, protocol.WaitStart) (protocol.WaitAddress, error)
 type Notify func(context.Context, protocol.WaitResult) (string, error)
 
 // Admission reserves execution against a daemon restart barrier. Release must
@@ -35,10 +35,14 @@ type record struct {
 	protocol.WaitStatus
 	Request         protocol.WaitStart `json:"request"`
 	CancelRequested bool               `json:"cancel_requested,omitempty"`
+	Handled         bool               `json:"handled,omitempty"`
 }
 
 type Manager struct {
 	mu                    sync.Mutex
+	startMu               sync.Mutex
+	admitting             int
+	reauthorize           Authorize
 	dir, secret, daemonID string
 	helper                []string
 	authorize             Authorize
@@ -50,6 +54,9 @@ type Manager struct {
 	rows                  map[string]*record
 	running               map[string]context.CancelFunc
 	wake                  chan struct{}
+	consume               func(context.Context, string, protocol.WaitResult) error
+	checkTask             func(context.Context, protocol.WaitAddress) (bool, error)
+	finished              map[string]chan struct{}
 }
 
 // Open must be called once under the daemon profile's existing process lock.
@@ -62,7 +69,7 @@ func Open(parent context.Context, dir, secret, daemonID string, helper []string,
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m := &Manager{dir: dir, secret: secret, daemonID: daemonID, helper: helper, authorize: authorize, notify: notify, admit: admit, ctx: ctx, cancel: cancel, rows: map[string]*record{}, running: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1)}
+	m := &Manager{dir: dir, secret: secret, daemonID: daemonID, helper: helper, authorize: authorize, notify: notify, admit: admit, ctx: ctx, cancel: cancel, rows: map[string]*record{}, running: map[string]context.CancelFunc{}, finished: map[string]chan struct{}{}, wake: make(chan struct{}, 1)}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		cancel()
@@ -103,7 +110,90 @@ func (m *Manager) Close() {
 func (m *Manager) Active() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.running)
+	return len(m.running) + m.admitting
+}
+
+func (m *Manager) ReauthorizeWith(authorize Authorize) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reauthorize = authorize
+}
+
+func (m *Manager) KnownTaskIDs(taskID string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := []string{}
+	for id, row := range m.rows {
+		if row.Address.TaskID == taskID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func (m *Manager) ConfigureManaged(consume func(context.Context, string, protocol.WaitResult) error, check func(context.Context, protocol.WaitAddress) (bool, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.consume, m.checkTask = consume, check
+}
+
+func (m *Manager) CancelTask(taskID string) {
+	m.mu.Lock()
+	var finished []chan struct{}
+	for id, cancel := range m.running {
+		if m.rows[id].Address.TaskID == taskID {
+			m.rows[id].CancelRequested = true
+			cancel()
+			finished = append(finished, m.finished[id])
+		}
+	}
+	m.mu.Unlock()
+	for _, done := range finished {
+		<-done
+	}
+}
+
+func (m *Manager) HasPendingTask(taskID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, row := range m.rows {
+		if row.Address.TaskID == taskID && !row.Handled {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) MarkHandled(taskID, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row := m.rows[id]
+	if row == nil {
+		return nil
+	}
+	if row.Address.TaskID != taskID {
+		return fmt.Errorf("wait belongs to another task")
+	}
+	row.Handled = true
+	return m.save(row)
+}
+
+func (m *Manager) KnownIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.rows))
+	for id, row := range m.rows {
+		if row.Address.TaskID != "" {
+			ids = append(ids, row.Address.TaskID+":"+id)
+		}
+	}
+	return ids
+}
+
+func (m *Manager) HasID(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rows[id] != nil
 }
 
 // WritePrivate atomically publishes durable owner-only state.
@@ -150,8 +240,22 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "local daemon capability required", http.StatusUnauthorized)
 		return
 	}
+	m.serve(w, r, "")
+}
+
+// ServeManagedHTTP is called only after the daemon has resolved its active
+// task-token registry. A caller-supplied header never selects this scope.
+func (m *Manager) ServeManagedHTTP(w http.ResponseWriter, r *http.Request, taskID string) {
+	if taskID == "" {
+		http.Error(w, "task scope required", 403)
+		return
+	}
+	m.serve(w, r, taskID)
+}
+
+func (m *Manager) serve(w http.ResponseWriter, r *http.Request, scope string) {
 	if r.Method == http.MethodPost && r.URL.Path == "/waits" {
-		m.start(w, r)
+		m.start(w, r, scope)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/waits/")
@@ -164,9 +268,14 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	row := m.rows[id]
 	if row == nil {
+		m.mu.Unlock()
+		http.Error(w, "wait not found", 404)
+		return
+	}
+	if scope != "" && row.Address.TaskID != scope {
+		m.mu.Unlock()
 		http.Error(w, "wait not found", 404)
 		return
 	}
@@ -176,6 +285,7 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		next := *row
 		next.State, next.CancelRequested = "cancelling", true
 		if err := m.save(&next); err != nil {
+			m.mu.Unlock()
 			http.Error(w, "cannot persist cancellation", 500)
 			return
 		}
@@ -185,10 +295,22 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		m.signal()
 	}
-	writeJSON(w, row.WaitStatus)
+	status, consume, handled := row.WaitStatus, m.consume, row.Handled
+	m.mu.Unlock()
+	if scope != "" && r.Method == http.MethodGet && protocol.WaitTerminal(status.State) && !handled {
+		if consume == nil || consume(r.Context(), r.Header.Get("X-Wait-Actor-Token"), status.WaitResult) != nil {
+			http.Error(w, "cannot durably consume wait result; retry", 503)
+			return
+		}
+		if err := m.MarkHandled(scope, id); err != nil {
+			http.Error(w, "cannot persist result receipt; retry", 503)
+			return
+		}
+	}
+	writeJSON(w, status)
 }
 
-func (m *Manager) start(w http.ResponseWriter, r *http.Request) {
+func (m *Manager) start(w http.ResponseWriter, r *http.Request, scope string) {
 	var req protocol.WaitStart
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32768)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", 400)
@@ -199,54 +321,104 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Deadline = req.Deadline.UTC()
-	if len(req.Argv) == 0 || req.Argv[0] == "" || !filepath.IsAbs(req.Cwd) || req.SessionRef == "" || req.WorkspaceID == "" {
+	if scope != "" {
+		req.TaskID = scope
+	}
+	if len(req.Argv) == 0 || req.Argv[0] == "" || !filepath.IsAbs(req.Cwd) || (req.SessionRef == "" && scope == "") || req.WorkspaceID == "" {
 		http.Error(w, "argv, absolute cwd, workspace and session required", 400)
 		return
 	}
-	// Authorization is deliberately outside the journal mutex and repeated
-	// on duplicate registrations; an expired or revoked token cannot reuse it.
-	address, err := m.authorize(r.Context(), r.Header.Get("X-Wait-Actor-Token"), req.WorkspaceID, req.SessionRef)
-	if err != nil || address.DaemonID != m.daemonID || address.WorkspaceID != req.WorkspaceID {
-		http.Error(w, "session authorization failed", 403)
-		return
-	}
+	// Reserve local admission before the API can commit a return obligation.
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
 	if m.admit != nil {
 		release, allowed := m.admit()
 		if !allowed {
-			http.Error(w, "daemon restart in progress; retry this request", http.StatusServiceUnavailable)
+			http.Error(w, "daemon restart in progress; retry this request", 503)
 			return
 		}
-		defer release()
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		m.mu.Lock()
+		if m.ctx.Err() != nil {
+			m.mu.Unlock()
+			http.Error(w, "daemon stopping", 503)
+			return
+		}
+		m.admitting++
+		m.wg.Add(1)
+		m.mu.Unlock()
+		release()
+		release = nil
+	} else {
+		m.mu.Lock()
+		if m.ctx.Err() != nil {
+			m.mu.Unlock()
+			http.Error(w, "daemon stopping", 503)
+			return
+		}
+		m.admitting++
+		m.wg.Add(1)
+		m.mu.Unlock()
+	}
+	defer func() { m.mu.Lock(); m.admitting--; m.mu.Unlock(); m.wg.Done() }()
+	m.mu.Lock()
+	old := m.rows[req.ID]
+	if old != nil && (!reflect.DeepEqual(old.Request, req) || old.Address.TaskID != scope) {
+		m.mu.Unlock()
+		http.Error(w, "request id already used", 409)
+		return
+	}
+	if old == nil && (!req.Deadline.After(time.Now()) || req.Deadline.After(time.Now().Add(MaxDuration))) {
+		m.mu.Unlock()
+		http.Error(w, "deadline must be within seven days", 400)
+		return
+	}
+	if old == nil && len(m.running) >= 32 {
+		m.mu.Unlock()
+		http.Error(w, "too many active waits", 429)
+		return
+	}
+	authorize := m.authorize
+	if old != nil && scope != "" && m.reauthorize != nil {
+		authorize = m.reauthorize
+	}
+	m.mu.Unlock()
+	authCtx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
+	defer cancel()
+	address, err := authorize(authCtx, r.Header.Get("X-Wait-Actor-Token"), req)
+	if err != nil || address.DaemonID != m.daemonID || address.WorkspaceID != req.WorkspaceID || address.TaskID != scope {
+		http.Error(w, "session authorization failed", 403)
+		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.ctx.Err() != nil {
-		http.Error(w, "daemon stopping", 503)
-		return
-	}
-	if old := m.rows[req.ID]; old != nil {
-		if !reflect.DeepEqual(old.Request, req) || old.Address != address {
+	if old != nil {
+		if old.Address != address {
 			http.Error(w, "request id already used", 409)
 			return
 		}
 		writeJSON(w, old.WaitStatus)
 		return
 	}
-	if !req.Deadline.After(time.Now()) || req.Deadline.After(time.Now().Add(MaxDuration)) {
-		http.Error(w, "deadline must be within seven days", 400)
-		return
-	}
-	if len(m.running) >= 32 {
-		http.Error(w, "too many active waits", 429)
-		return
-	}
 	row := &record{Request: req, WaitStatus: protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: req.ID, Address: address, State: "running", LogPath: filepath.Join(m.dir, req.ID+".log")}, Deadline: req.Deadline}}
 	if err := m.save(row); err != nil {
+		if scope != "" {
+			row.State, row.FinishedAt = "lost", time.Now().UTC()
+			m.rows[row.ID] = row
+			m.signal()
+		}
 		http.Error(w, "cannot persist wait", 500)
 		return
 	}
 	ctx, cancel := context.WithDeadline(m.ctx, req.Deadline)
 	m.running[row.ID], m.rows[row.ID] = cancel, row
+	m.finished[row.ID] = make(chan struct{})
 	m.wg.Add(1)
 	go m.execute(ctx, *row, cancel)
 	writeJSON(w, row.WaitStatus)
@@ -258,6 +430,7 @@ func (m *Manager) execute(ctx context.Context, row record, cancel context.Cancel
 	exitCode, err := runHelper(ctx, m.helper, row.Request, row.LogPath)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer close(m.finished[row.ID])
 	delete(m.running, row.ID)
 	current := m.rows[row.ID]
 	if protocol.WaitTerminal(current.State) {
@@ -299,7 +472,12 @@ func (m *Manager) deliver() {
 func (m *Manager) flush() {
 	m.mu.Lock()
 	var pending []record
+	var active []record
+	check := m.checkTask
 	for _, row := range m.rows {
+		if row.Address.TaskID != "" && !protocol.WaitTerminal(row.State) {
+			active = append(active, *row)
+		}
 		if protocol.WaitTerminal(row.State) && row.DeliveryID == "" {
 			if m.save(row) == nil {
 				pending = append(pending, *row)
@@ -307,6 +485,23 @@ func (m *Manager) flush() {
 		}
 	}
 	m.mu.Unlock()
+	if check != nil {
+		for _, row := range active {
+			ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+			stop, err := check(ctx, row.Address)
+			cancel()
+			if err == nil && stop {
+				m.mu.Lock()
+				if current := m.rows[row.ID]; !protocol.WaitTerminal(current.State) {
+					current.CancelRequested = true
+					if cancel := m.running[row.ID]; cancel != nil {
+						cancel()
+					}
+				}
+				m.mu.Unlock()
+			}
+		}
+	}
 	for _, row := range pending {
 		ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 		id, err := m.notify(ctx, row.WaitResult)

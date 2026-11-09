@@ -2854,6 +2854,30 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Daemon does not support strict delegated result delivery.", protocol.DelegationResultUnavailable, "result_unsupported", http.StatusConflict, "result unsupported")
 	}
 	resp.RequireResume, resp.DelegationResult = resultTurn != nil, resultTurn
+	wait, waitErr := service.VerifiedBackgroundWait(r.Context(), h.Queries, *task, runtime)
+	if waitErr != nil || (wait != nil && !requestHasClientCapability(r, protocol.DaemonCapabilityManagedWaitV1)) {
+		return resp, nil, nil, 0, 0, h.failClaimedTaskBeforeLaunch(r.Context(), task, "Background wait cannot resume its original session", protocol.DelegationResultUnavailable, "background_wait_unavailable", http.StatusConflict, "background wait unavailable")
+	}
+	if wait != nil {
+		resp.RequireResume, resp.BackgroundWait = true, wait
+		seq, err := h.Queries.GetTaskMessageSequence(r.Context(), task.ID)
+		if err != nil {
+			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "wait_transcript", uuidToString(task.ID))
+		}
+		resp.MessageSeqOffset = seq
+		usage, err := h.Queries.GetTaskUsage(r.Context(), task.ID)
+		if err != nil {
+			return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "wait_usage", uuidToString(task.ID))
+		}
+		for _, entry := range usage {
+			value := TaskUsageData{Provider: entry.Provider, Model: entry.Model, InputTokens: entry.InputTokens, OutputTokens: entry.OutputTokens, CacheReadTokens: entry.CacheReadTokens, CacheWriteTokens: entry.CacheWriteTokens}
+			if entry.CostUsdTicks.Valid {
+				cost := entry.CostUsdTicks.Int64
+				value.CostUsdTicks = &cost
+			}
+			resp.UsageBaseline = append(resp.UsageBaseline, value)
+		}
+	}
 	returns := []AgentTaskResponse{resp}
 	if err := h.hydrateAcceptedReturns(r.Context(), parseUUID(runtimeWorkspaceID), returns); err != nil {
 		return resp, nil, nil, 0, 0, h.rejectClaimSourceLoad(r.Context(), task, err, "accepted_returns", uuidToString(task.ID))
@@ -4055,6 +4079,9 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			resp.WorkspaceID, resp.ThreadName, issueNumber = uuidToString(issue.WorkspaceID), issue.Title, issue.Number
 		}
 	}
+	if wait != nil {
+		resp.PriorSessionID, resp.PriorWorkDir = wait.Address.SessionID, wait.Address.WorkDir
+	}
 
 	// Catch-all workspace isolation check. Every context branch above already
 	// ran this the moment it resolved its owning workspace, which is what makes
@@ -4774,6 +4801,7 @@ func (h *Handler) ReportTaskProgress(w http.ResponseWriter, r *http.Request) {
 
 // CompleteTask marks a running task as completed.
 type TaskCompleteRequest struct {
+	protocol.TaskTurn
 	PRURL     string `json:"pr_url"`
 	Output    string `json:"output"`
 	SessionID string `json:"session_id"` // Claude session ID for future resumption
@@ -4845,6 +4873,9 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// rather than just before the Marshal is deliberate: the context-exhaustion
 	// re-route below feeds req.Output into the failure classifier, and that
 	// classifier must see exactly the text we are going to persist.
+	if !validTaskTurnRequest(w, req.TaskTurn) {
+		return
+	}
 	sanitizeTaskCompleteRequest(&req)
 	turn, verificationErr := service.VerifiedDelegationResult(r.Context(), h.Queries, existing)
 	if verificationErr != nil && !service.IsDelegationResultRefusal(verificationErr) {
@@ -4855,7 +4886,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 		req.DurableWorkDir = ""
 	}
 	if verificationErr != nil || (turn != nil && (req.SessionID == "" || req.WorkDir == "" || req.SessionID != turn.SessionID || req.WorkDir != turn.WorkDir || req.SessionRolloutMissing || req.RetiredSessionID != "")) {
-		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{Error: "Result handling reported no verified frozen address; input outcome is unknown. " + req.Output, FailureReason: protocol.DelegationResultInputUnknown, BranchName: req.BranchName})
+		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{TaskTurn: req.TaskTurn, Error: "Result handling reported no verified frozen address; input outcome is unknown. " + req.Output, FailureReason: protocol.DelegationResultInputUnknown, BranchName: req.BranchName})
 		return
 	}
 
@@ -4876,6 +4907,7 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 			"failure_reason", taskfailure.ReasonAgentContextOverflow,
 		)
 		h.failTask(w, r, taskID, workspaceID, TaskFailRequest{
+			TaskTurn:       req.TaskTurn,
 			Error:          req.Output,
 			FailureReason:  string(taskfailure.ReasonAgentContextOverflow),
 			SessionID:      req.SessionID,
@@ -4896,7 +4928,11 @@ func (h *Handler) CompleteTask(w http.ResponseWriter, r *http.Request) {
 	// transaction (force session_id NULL + flag the row), so an auto-retry the
 	// same commit creates and wakes can never observe the withheld pointer or a
 	// missing continuity-gap flag.
-	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.CompleteTaskWithTransition(service.WithTaskTurn(service.WithTerminalReport(r.Context()), req.TaskTurn), parseUUID(taskID), result, req.SessionID, req.WorkDir, req.BranchName, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	if errors.Is(err, service.ErrManagedWaitConflict) {
+		writeError(w, 409, "background wait is pending; suspend this turn instead of completing the task")
+		return
+	}
 	if err != nil {
 		// A CompleteTask error is an infrastructure failure (transaction /
 		// assistant-outcome write), not a bad request: an already-finalized
@@ -5526,6 +5562,7 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 // FailTask marks a running task as failed.
 type TaskFailRequest struct {
+	protocol.TaskTurn
 	Error          string `json:"error"`
 	SessionID      string `json:"session_id,omitempty"`
 	WorkDir        string `json:"work_dir,omitempty"`
@@ -5563,6 +5600,9 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 	// TaskService.FailTask normalizes req.Error itself, but every other field
 	// here lands in a TEXT column too and a NUL in any one of them fails the
 	// same transaction (GH #7098).
+	if !validTaskTurnRequest(w, req.TaskTurn) {
+		return
+	}
 	sanitizeTaskFailRequest(&req)
 
 	h.failTask(w, r, taskID, workspaceID, req)
@@ -5602,7 +5642,7 @@ func (h *Handler) failTask(w http.ResponseWriter, r *http.Request, taskID, works
 	// keep a stale mid-flight pin) and flagging the row in the same commit that
 	// creates and wakes the auto-retry, so the retry can never claim the withheld
 	// pointer or miss the continuity gap.
-	task, transitioned, err := h.TaskService.FailTaskWithTransition(service.WithTerminalReport(r.Context()), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
+	task, transitioned, err := h.TaskService.FailTaskWithTransition(service.WithTaskTurn(service.WithTerminalReport(r.Context()), req.TaskTurn), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir, req.BranchName, req.FailureReason, req.SessionRolloutMissing, req.RetiredSessionID, req.DurableWorkDir)
 	if err != nil {
 		// A FailTask error is an infrastructure failure (the terminal
 		// transaction that also clears the withheld session, writes the

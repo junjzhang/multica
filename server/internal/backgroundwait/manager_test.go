@@ -31,7 +31,8 @@ func openTestManager(t *testing.T, dir string, notify Notify) *Manager {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command fixtures")
 	}
-	auth := func(_ context.Context, token, ws, session string) (protocol.WaitAddress, error) {
+	auth := func(_ context.Context, token string, req protocol.WaitStart) (protocol.WaitAddress, error) {
+		ws, session := req.WorkspaceID, req.SessionRef
 		if token != "external-test-token" || ws != "workspace" || session != "original-session" {
 			return protocol.WaitAddress{}, fmt.Errorf("unauthorized")
 		}
@@ -281,4 +282,32 @@ func TestWaitDaemonDeathStopsCommandTree(t *testing.T) {
 		t.Fatalf("recovered state = %+v", result)
 	}
 	m.Close()
+}
+
+func TestWaitLocalRejectionsDoNotRegisterObligations(t *testing.T) {
+	m := openTestManager(t, t.TempDir(), func(context.Context, protocol.WaitResult) (string, error) { return "id", nil })
+	calls := 0
+	m.authorize = func(context.Context, string, protocol.WaitStart) (protocol.WaitAddress, error) {
+		calls++
+		return protocol.WaitAddress{}, fmt.Errorf("unexpected registration")
+	}
+	req := startRequest(t, "exit 0")
+	m.admit = func() (func(), bool) { return nil, false }
+	waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", req, 503)
+	m.admit = nil
+	expired := req
+	expired.Deadline = time.Now().Add(-time.Second)
+	waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", expired, 400)
+	m.rows[req.ID] = &record{Request: req}
+	changed := req
+	changed.Argv = []string{"different"}
+	waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", changed, 409)
+	delete(m.rows, req.ID)
+	for i := 0; i < 32; i++ {
+		m.running[fmt.Sprint(i)] = func() {}
+	}
+	waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", req, 429)
+	if calls != 0 {
+		t.Fatalf("local rejection created %d server obligations", calls)
+	}
 }
