@@ -48,6 +48,11 @@ records `cancelled` with its exit code. It does not cancel the remote CI/job.
 Cancellation after a terminal result returns that same result. The first terminal
 decision wins completion/cancellation races. Timeout records `timed_out`.
 
+Automatic reload and CLI upgrades defer while any wait process is active.
+The same admission barrier prevents a new wait from starting once an upgrade
+has committed to restart. Explicit daemon shutdown/restart still interrupts
+unfinished waits and reports `lost`.
+
 The daemon owns its profile's private `waits/` journal and
 `wait.endpoint.json` capability. It commits the terminal result before posting
 it to `/api/daemon/background-waits/complete`. A failed request or lost response
@@ -62,6 +67,9 @@ If the daemon dies, EOF cancels and reaps the command's process group / Windows
 Job Object. Commands must not deliberately escape process-tree containment or
 detach into independent services. Journals and logs remain until the owner
 removes them; there is no automatic command replay or retention policy.
+An unreadable or invalid journal stops daemon startup rather than guessing its
+return address. The owner must preserve and repair or move that file before
+restarting; moving it does not authorize replaying its command.
 
 ## Authority and verified boundary
 

@@ -47,7 +47,17 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		err := d.client.postDaemonDeliveryJSON(ctx, result.Address.WorkspaceID, "/api/daemon/background-waits/complete", result, &response)
 		return response.ID, err
 	}
-	manager, err := backgroundwait.Open(ctx, filepath.Join(dir, "waits"), endpoint.Secret, d.cfg.DaemonID, helper, authorize, notify)
+	admit := func() (func(), bool) {
+		// Lock order is claimMu then the manager's journal mutex, including
+		// Active() in the update barriers. No network call holds claimMu.
+		d.claimMu.Lock()
+		if d.pauseClaims {
+			d.claimMu.Unlock()
+			return nil, false
+		}
+		return d.claimMu.Unlock, true
+	}
+	manager, err := backgroundwait.Open(ctx, filepath.Join(dir, "waits"), endpoint.Secret, d.cfg.DaemonID, helper, authorize, notify, admit)
 	if err != nil {
 		return fmt.Errorf("open background waits: %w", err)
 	}
@@ -57,6 +67,13 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 	}
 	d.backgroundWaits = manager
 	return nil
+}
+
+func (d *Daemon) activeBackgroundWaits() int {
+	if d.backgroundWaits == nil {
+		return 0
+	}
+	return d.backgroundWaits.Active()
 }
 
 func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {

@@ -65,6 +65,7 @@ func runWaitStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid deadline")
 		}
 	}
+	deadline = deadline.UTC()
 	id := flagString(cmd, "request-id")
 	if id == "" {
 		id = uuid.NewString()

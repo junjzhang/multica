@@ -37,7 +37,7 @@ func openTestManager(t *testing.T, dir string, notify Notify) *Manager {
 		}
 		return protocol.WaitAddress{WorkspaceID: ws, AgentID: "agent", SessionID: "frozen-session-row", DaemonID: "daemon"}, nil
 	}
-	m, err := Open(t.Context(), dir, "local-capability", "daemon", []string{os.Args[0], "-test.run=^TestWaitProcess$", "--", "wait-helper"}, auth, notify)
+	m, err := Open(t.Context(), dir, "local-capability", "daemon", []string{os.Args[0], "-test.run=^TestWaitProcess$", "--", "wait-helper"}, auth, notify, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,9 @@ func TestWaitTerminalAndRegistrationBoundaries(t *testing.T) {
 				t.Fatalf("registration = %+v", registered)
 			}
 			waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", req, 200)
+			withOffset := req
+			withOffset.Deadline = req.Deadline.In(time.FixedZone("", 8*60*60))
+			waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", withOffset, 200)
 			changed := req
 			changed.Argv = []string{"other-command"}
 			waitRequest(t, m, "POST", "/waits", "local-capability", "external-test-token", changed, 409)

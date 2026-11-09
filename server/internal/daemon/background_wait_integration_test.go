@@ -108,7 +108,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	t.Cleanup(server.Close)
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "multica")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/multica")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binary, "./cmd/multica")
 	build.Dir = filepath.Join("..", "..")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %v %s", err, out)
@@ -150,15 +150,27 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 		return result
 	}
 	requestID := uuid.NewString()
-	deadline := time.Now().Add(20 * time.Second).UTC().Format(time.RFC3339Nano)
-	args := []string{"wait", "start", "--request-id", requestID, "--deadline", deadline, "--cwd", dir, "--", "/bin/sh", "-c", "sleep 0.4; printf x >> executions; exit 7"}
+	deadline := time.Now().Add(60 * time.Second).UTC().Format(time.RFC3339Nano)
+	args := []string{"wait", "start", "--request-id", requestID, "--deadline", deadline, "--cwd", dir, "--", "/bin/sh", "-c", "while [ ! -e release ]; do sleep 0.01; done; printf x >> executions; exit 7"}
 	started := runCLI(args...)
 	if started.ID != requestID || started.State != "running" {
 		t.Fatalf("registration waited for command: %+v", started)
 	}
+	if d.trySetClaimBarrier() {
+		d.releaseClaimBarrier()
+		t.Fatal("automatic reload admitted while a wait was active")
+	}
+	if got := d.tryBeginServerUpdate(t.Context()); got != serverUpdateRuntimeBusy {
+		d.releaseClaimBarrier()
+		d.updating.Store(false)
+		t.Fatalf("server update admitted while a wait was active: %v", got)
+	}
 	// No caller needs to query the wait after registration. API authorization
 	// is not polled during execution; the result arrives through the outbox.
 	runCLI(args...)
+	if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	var deliveryID string
 	select {
 	case deliveryID = <-completed:
@@ -173,6 +185,42 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if status.State != "failed" || status.ExitCode == nil || *status.ExitCode != 7 {
 		t.Fatalf("status = %+v", status)
 	}
+	if !d.trySetClaimBarrier() {
+		t.Fatal("completed wait still blocked reload")
+	}
+	var endpoint protocol.WaitEndpoint
+	endpointBytes, err := os.ReadFile(filepath.Join(dir, "wait.endpoint.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(endpointBytes, &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	blockedID := uuid.NewString()
+	body, _ := json.Marshal(protocol.WaitStart{ID: blockedID, WorkspaceID: f.WorkspaceID, SessionRef: "chosen-host-session", Argv: []string{"/bin/sh", "-c", "touch must-not-start"}, Cwd: dir, Deadline: time.Now().Add(time.Minute)})
+	req, err := http.NewRequest(http.MethodPost, local.URL+"/waits", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+endpoint.Secret)
+	req.Header.Set("X-Wait-Actor-Token", externalToken)
+	response, err := local.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != 503 {
+		t.Fatalf("registration crossed restart barrier: %d", response.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "waits", blockedID+".json")); !os.IsNotExist(err) {
+		t.Fatal("blocked request was journaled or executed")
+	}
+	d.releaseClaimBarrier()
+	if got := d.tryBeginServerUpdate(t.Context()); got != serverUpdateAcquired {
+		t.Fatalf("completed wait still blocked server update: %v", got)
+	}
+	d.releaseClaimBarrier()
+	d.updating.Store(false)
 	var target string
 	var count int
 	if err := pool.QueryRow(t.Context(), "SELECT target_session_id FROM agent_mailbox_message WHERE id=$1", deliveryID).Scan(&target); err != nil || target != sessionID {
@@ -191,7 +239,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if err != nil || string(data) != "x" {
 		t.Fatalf("duplicate execution: %q %v", data, err)
 	}
-	if strings.Contains(prompt, externalToken) || strings.Contains(prompt, "sleep 0.4") {
+	if strings.Contains(prompt, externalToken) || strings.Contains(prompt, "printf x >> executions") {
 		t.Fatal("credentials or command leaked into host prompt")
 	}
 	t.Log(fmt.Sprintf("CLI -> local daemon -> external auth -> command exit 7 -> daemon auth -> DB delivery %s -> exact fake Paseo session; no model polling or managed runs", deliveryID))

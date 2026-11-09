@@ -27,6 +27,10 @@ const MaxLogBytes = 1 << 20
 type Authorize func(context.Context, string, string, string) (protocol.WaitAddress, error)
 type Notify func(context.Context, protocol.WaitResult) (string, error)
 
+// Admission reserves execution against a daemon restart barrier. Release must
+// remain held until the running entry is published under the journal mutex.
+type Admission func() (release func(), allowed bool)
+
 type record struct {
 	protocol.WaitStatus
 	Request         protocol.WaitStart `json:"request"`
@@ -39,6 +43,7 @@ type Manager struct {
 	helper                []string
 	authorize             Authorize
 	notify                Notify
+	admit                 Admission
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	wg                    sync.WaitGroup
@@ -49,7 +54,7 @@ type Manager struct {
 
 // Open must be called once under the daemon profile's existing process lock.
 // No command is ever replayed: an unfinished journal becomes lost on startup.
-func Open(parent context.Context, dir, secret, daemonID string, helper []string, authorize Authorize, notify Notify) (*Manager, error) {
+func Open(parent context.Context, dir, secret, daemonID string, helper []string, authorize Authorize, notify Notify, admit Admission) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -57,7 +62,7 @@ func Open(parent context.Context, dir, secret, daemonID string, helper []string,
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	m := &Manager{dir: dir, secret: secret, daemonID: daemonID, helper: helper, authorize: authorize, notify: notify, ctx: ctx, cancel: cancel, rows: map[string]*record{}, running: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1)}
+	m := &Manager{dir: dir, secret: secret, daemonID: daemonID, helper: helper, authorize: authorize, notify: notify, admit: admit, ctx: ctx, cancel: cancel, rows: map[string]*record{}, running: map[string]context.CancelFunc{}, wake: make(chan struct{}, 1)}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		cancel()
@@ -93,6 +98,12 @@ func (m *Manager) Close() {
 	m.cancel()
 	m.mu.Unlock()
 	m.wg.Wait()
+}
+
+func (m *Manager) Active() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.running)
 }
 
 // WritePrivate atomically publishes durable owner-only state.
@@ -187,6 +198,7 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request id must be a UUID", 400)
 		return
 	}
+	req.Deadline = req.Deadline.UTC()
 	if len(req.Argv) == 0 || req.Argv[0] == "" || !filepath.IsAbs(req.Cwd) || req.SessionRef == "" || req.WorkspaceID == "" {
 		http.Error(w, "argv, absolute cwd, workspace and session required", 400)
 		return
@@ -197,6 +209,14 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request) {
 	if err != nil || address.DaemonID != m.daemonID || address.WorkspaceID != req.WorkspaceID {
 		http.Error(w, "session authorization failed", 403)
 		return
+	}
+	if m.admit != nil {
+		release, allowed := m.admit()
+		if !allowed {
+			http.Error(w, "daemon restart in progress; retry this request", http.StatusServiceUnavailable)
+			return
+		}
+		defer release()
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
