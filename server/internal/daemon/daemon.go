@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -431,11 +432,12 @@ type repoCacheBackend interface {
 
 // Daemon is the local agent runtime that polls for and executes tasks.
 type Daemon struct {
-	cfg        Config
-	client     *Client
-	repoCache  repoCacheBackend
-	skillCache *SkillBundleCache
-	logger     *slog.Logger
+	backgroundWaits *backgroundwait.Manager
+	cfg             Config
+	client          *Client
+	repoCache       repoCacheBackend
+	skillCache      *SkillBundleCache
+	logger          *slog.Logger
 
 	// gitCALastErr is the last applyGitCACerts failure, so a persistent one
 	// (e.g. on Windows) is logged once rather than on every repo refresh.
@@ -2124,6 +2126,10 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	if err := d.resolveAuth(); err != nil {
 		return err
 	}
+	if err := d.startBackgroundWaits(ctx, healthLn.Addr()); err != nil {
+		return err
+	}
+	defer d.backgroundWaits.Close()
 
 	// Bind and serve the health port before the (potentially slow) preflight,
 	// so `daemon start` and the desktop see a live "starting" daemon instead
@@ -5054,7 +5060,7 @@ const (
 	serverUpdateRuntimeBusy
 )
 
-// tryBeginServerUpdate atomically claims update ownership, pauses new claims,
+// tryBeginServerUpdate atomically claims update ownership, pauses new claims and waits,
 // and lets any claim already in flight finish its handoff. An empty claim can
 // therefore never starve an update; a claim that returns work increments
 // activeTasks before exitClaim, so the final check still defers safely.
@@ -5064,7 +5070,7 @@ func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireRe
 	}
 
 	d.claimMu.Lock()
-	if d.pauseClaims || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.activeTasks.Load() > 0 || d.activeBackgroundWaits() > 0 {
 		d.claimMu.Unlock()
 		d.updating.Store(false)
 		return serverUpdateRuntimeBusy
@@ -5077,7 +5083,7 @@ func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireRe
 	for {
 		d.claimMu.Lock()
 		if d.claimsInFlight == 0 {
-			if d.activeTasks.Load() == 0 {
+			if d.activeTasks.Load() == 0 && d.activeBackgroundWaits() == 0 {
 				d.claimMu.Unlock()
 				return serverUpdateAcquired
 			}
@@ -5200,7 +5206,7 @@ func (d *Daemon) exitClaim() {
 }
 
 // trySetClaimBarrier atomically pauses new ClaimTask calls if the daemon is
-// fully idle (no claims in flight, no tasks running). Returns true if the
+// fully idle (no claims in flight, no tasks or waits running). Returns true if the
 // caller now holds the barrier and must release it with releaseClaimBarrier
 // on every non-restart exit path; false if the daemon is busy and the caller
 // should defer to the next tick. Used by tryAutoUpdate to close the race
@@ -5213,7 +5219,7 @@ func (d *Daemon) trySetClaimBarrier() bool {
 	// double-acquires: two holders both believe they own it, and whichever
 	// finishes first releases it out from under the other. tryBeginServerUpdate
 	// makes the same check for the same reason.
-	if d.pauseClaims || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 || d.activeBackgroundWaits() > 0 {
 		return false
 	}
 	d.pauseClaims = true

@@ -125,7 +125,7 @@ func registerAgentTokenRevokeFlags(cmd *cobra.Command) {
 }
 
 func registerAgentMailboxListFlags(cmd *cobra.Command) {
-	cmd.Flags().String("kind", "", "Message kind: comment or delegation_result")
+	cmd.Flags().String("kind", "", "Message kind: comment, delegation_result, or background_wait (external only)")
 	cmd.Flags().String("after", "", "Opaque cursor from the previous page")
 	cmd.Flags().Int("limit", 50, "Maximum messages to return (1-100)")
 	cmd.Flags().String("output", "table", "Output format: table or json")
