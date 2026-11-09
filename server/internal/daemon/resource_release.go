@@ -22,10 +22,11 @@ type managedResource struct {
 }
 
 type completedWorktree struct {
-	tree           *execenv.LocalWorktree
-	resource       managedResource
-	root           string
-	durableWorkDir string
+	finalizePending bool
+	tree            *execenv.LocalWorktree
+	resource        managedResource
+	root            string
+	durableWorkDir  string
 }
 
 func resourceForTask(task Task, provider, root, workDir, session string) managedResource {
@@ -128,6 +129,19 @@ func (d *Daemon) releaseCompletedWorktree(ctx context.Context, completed *comple
 	actual, err := os.Stat(completed.root)
 	if err != nil || !os.SameFile(info, actual) {
 		return
+	}
+	if completed.finalizePending {
+		state, err := d.client.GetTaskStatus(ctx, current.OwnerTaskID)
+		if err != nil || (state != "completed" && state != "failed" && state != "cancelled") {
+			return
+		}
+		if _, err := completed.tree.Finalize(d.logger); err != nil {
+			d.logger.Warn("retaining worktree after terminal finalization failed", "error", err)
+			return
+		}
+		if err := completed.tree.SaveForReuse(completed.root); err != nil {
+			return
+		}
 	}
 	request := current.Address
 	request.ResourcePath = completed.tree.Path

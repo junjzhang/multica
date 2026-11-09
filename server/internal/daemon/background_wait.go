@@ -15,10 +15,29 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
+	"github.com/multica-ai/multica/server/internal/daemon/execenv"
+	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 type waitTaskContextKey struct{}
+type taskTurnContextKey struct{}
+
+func (report terminalTaskReport) queueID() string {
+	if report.generation == "" {
+		return report.taskID
+	}
+	return report.taskID + ":" + report.generation
+}
+
+func addTaskTurn(ctx context.Context, body map[string]any) {
+	if turn, ok := ctx.Value(taskTurnContextKey{}).(protocol.TaskTurn); ok {
+		body["turn_generation"] = turn.Generation
+		if turn.KnownWaitIDs != nil {
+			body["known_wait_ids"] = turn.KnownWaitIDs
+		}
+	}
+}
 
 func (d *Daemon) startBackgroundWaits(ctx context.Context, healthAddr net.Addr) error {
 	dir, err := cli.ProfileDir(d.cfg.Profile)
@@ -70,6 +89,9 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 			ID string `json:"delivery_id"`
 		}
 		err := d.client.postDaemonDeliveryJSON(ctx, result.Address.WorkspaceID, "/api/daemon/background-waits/complete", result, &response)
+		if err == nil && response.ID != "" && result.Address.TaskID != "" {
+			d.finalizeCancelledWait(ctx, result.Address)
+		}
 		return response.ID, err
 	}
 	admit := func() (func(), bool) {
@@ -108,8 +130,12 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 			return false, err
 		}
 		return state == "cancelled" || state == "failed" || state == "completed", nil
-	}, func(ctx context.Context, taskID string, req protocol.WaitSuspend) error {
-		return d.client.postJSON(ctx, "/api/daemon/tasks/"+taskID+"/background-wait/suspend", req, nil)
+	})
+	manager.ReauthorizeWith(func(ctx context.Context, token string, req protocol.WaitStart) (protocol.WaitAddress, error) {
+		client := cli.NewAPIClient(d.cfg.ServerBaseURL, req.WorkspaceID, token)
+		var status protocol.WaitStatus
+		err := client.PostJSON(ctx, "/api/background-waits/"+req.ID+"/access", map[string]any{}, &status)
+		return status.Address, err
 	})
 	d.backgroundWaits = manager
 	d.client.backgroundWaitIDs = manager.KnownIDs
@@ -142,6 +168,18 @@ func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {
 			d.repoCheckoutTasksMu.RUnlock()
 			defer task.waitGate.RUnlock()
 			r.Header.Set("X-Wait-Actor-Token", token)
+			if r.Method != http.MethodPost {
+				id := strings.TrimPrefix(r.URL.Path, "/waits/")
+				if _, err := util.ParseUUID(id); err != nil {
+					http.Error(w, "invalid wait id", 400)
+					return
+				}
+				client := cli.NewAPIClient(d.cfg.ServerBaseURL, task.WorkspaceID, token)
+				if err := client.PostJSON(r.Context(), "/api/background-waits/"+id+"/access", map[string]any{}, nil); err != nil {
+					http.Error(w, "current task credential or wait scope is unavailable", 403)
+					return
+				}
+			}
 			if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/waits/") && !d.backgroundWaits.HasID(strings.TrimPrefix(r.URL.Path, "/waits/")) {
 				client := cli.NewAPIClient(d.cfg.ServerBaseURL, task.WorkspaceID, token)
 				var status protocol.WaitStatus
@@ -159,4 +197,34 @@ func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {
 		}
 		d.backgroundWaits.ServeHTTP(w, r)
 	}
+}
+
+func (d *Daemon) reconcileWaitReads(ctx context.Context, task Task, token string) {
+	if d.backgroundWaits == nil {
+		return
+	}
+	client := cli.NewAPIClient(d.cfg.ServerBaseURL, task.WorkspaceID, token)
+	for _, id := range d.backgroundWaits.KnownTaskIDs(task.ID) {
+		var status protocol.WaitStatus
+		if err := client.PostJSON(ctx, "/api/background-waits/"+id+"/access", map[string]any{}, &status); err == nil && status.Consumed {
+			_ = d.backgroundWaits.MarkHandled(task.ID, id)
+		}
+	}
+}
+
+func (d *Daemon) finalizeCancelledWait(ctx context.Context, address protocol.WaitAddress) {
+	state, err := d.client.GetTaskStatus(ctx, address.TaskID)
+	if err != nil || state != "cancelled" {
+		return
+	}
+	root := managedRootForWorkDir(d.cfg.WorkspacesRoot, address.WorkDir)
+	resource, err := readManagedResource(root)
+	if err != nil || resource.OwnerTaskID != address.TaskID {
+		return
+	}
+	tree, err := execenv.LoadRetainedWorktree(root, address.WorkDir, address.WorkspaceID, address.AgentID, resource.Address.ScopeID, d.logger)
+	if err != nil {
+		return
+	}
+	d.releaseCompletedWorktree(ctx, &completedWorktree{tree: tree, resource: resource, root: root, durableWorkDir: durableWorktreePath(tree), finalizePending: true})
 }

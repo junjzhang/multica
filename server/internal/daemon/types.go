@@ -77,6 +77,8 @@ type ProjectWorkflowData struct {
 // Agent data (name, skills) is populated by the claim endpoint.
 type Task struct {
 	BackgroundWait       *protocol.ManagedWait          `json:"background_wait,omitempty"`
+	MessageSeqOffset     int32                          `json:"message_seq_offset,omitempty"`
+	UsageBaseline        []TaskUsageEntry               `json:"usage_baseline,omitempty"`
 	AcceptedReturns      *[]protocol.AcceptedReturn     `json:"accepted_returns,omitempty"`
 	SessionPinGeneration string                         `json:"session_pin_generation,omitempty"`
 	RequireResume        bool                           `json:"require_resume,omitempty"`

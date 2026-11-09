@@ -33,15 +33,16 @@ type Admission func() (release func(), allowed bool)
 
 type record struct {
 	protocol.WaitStatus
-	Request         protocol.WaitStart    `json:"request"`
-	CancelRequested bool                  `json:"cancel_requested,omitempty"`
-	Handled         bool                  `json:"handled,omitempty"`
-	Suspension      *protocol.WaitSuspend `json:"suspension,omitempty"`
-	Suspended       bool                  `json:"suspended,omitempty"`
+	Request         protocol.WaitStart `json:"request"`
+	CancelRequested bool               `json:"cancel_requested,omitempty"`
+	Handled         bool               `json:"handled,omitempty"`
 }
 
 type Manager struct {
 	mu                    sync.Mutex
+	startMu               sync.Mutex
+	admitting             int
+	reauthorize           Authorize
 	dir, secret, daemonID string
 	helper                []string
 	authorize             Authorize
@@ -55,7 +56,6 @@ type Manager struct {
 	wake                  chan struct{}
 	consume               func(context.Context, string, protocol.WaitResult) error
 	checkTask             func(context.Context, protocol.WaitAddress) (bool, error)
-	suspend               func(context.Context, string, protocol.WaitSuspend) error
 	finished              map[string]chan struct{}
 }
 
@@ -110,27 +110,31 @@ func (m *Manager) Close() {
 func (m *Manager) Active() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.running)
+	return len(m.running) + m.admitting
 }
 
-func (m *Manager) ConfigureManaged(consume func(context.Context, string, protocol.WaitResult) error, check func(context.Context, protocol.WaitAddress) (bool, error), suspend func(context.Context, string, protocol.WaitSuspend) error) {
+func (m *Manager) ReauthorizeWith(authorize Authorize) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.consume, m.checkTask, m.suspend = consume, check, suspend
+	m.reauthorize = authorize
 }
 
-func (m *Manager) SuspendTask(taskID string, req protocol.WaitSuspend) (bool, error) {
+func (m *Manager) KnownTaskIDs(taskID string) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, row := range m.rows {
-		if row.Address.TaskID == taskID && !row.Handled {
-			row.Suspension = &req
-			err := m.save(row)
-			m.signal()
-			return true, err
+	ids := []string{}
+	for id, row := range m.rows {
+		if row.Address.TaskID == taskID {
+			ids = append(ids, id)
 		}
 	}
-	return false, nil
+	return ids
+}
+
+func (m *Manager) ConfigureManaged(consume func(context.Context, string, protocol.WaitResult) error, check func(context.Context, protocol.WaitAddress) (bool, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.consume, m.checkTask = consume, check
 }
 
 func (m *Manager) CancelTask(taskID string) {
@@ -178,8 +182,10 @@ func (m *Manager) KnownIDs() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ids := make([]string, 0, len(m.rows))
-	for id := range m.rows {
-		ids = append(ids, id)
+	for id, row := range m.rows {
+		if row.Address.TaskID != "" {
+			ids = append(ids, row.Address.TaskID+":"+id)
+		}
 	}
 	return ids
 }
@@ -322,41 +328,82 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request, scope string) {
 		http.Error(w, "argv, absolute cwd, workspace and session required", 400)
 		return
 	}
-	// Authorization is deliberately outside the journal mutex and repeated
-	// on duplicate registrations; an expired or revoked token cannot reuse it.
-	address, err := m.authorize(r.Context(), r.Header.Get("X-Wait-Actor-Token"), req)
+	// Reserve local admission before the API can commit a return obligation.
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
+	if m.admit != nil {
+		release, allowed := m.admit()
+		if !allowed {
+			http.Error(w, "daemon restart in progress; retry this request", 503)
+			return
+		}
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		m.mu.Lock()
+		if m.ctx.Err() != nil {
+			m.mu.Unlock()
+			http.Error(w, "daemon stopping", 503)
+			return
+		}
+		m.admitting++
+		m.wg.Add(1)
+		m.mu.Unlock()
+		release()
+		release = nil
+	} else {
+		m.mu.Lock()
+		if m.ctx.Err() != nil {
+			m.mu.Unlock()
+			http.Error(w, "daemon stopping", 503)
+			return
+		}
+		m.admitting++
+		m.wg.Add(1)
+		m.mu.Unlock()
+	}
+	defer func() { m.mu.Lock(); m.admitting--; m.mu.Unlock(); m.wg.Done() }()
+	m.mu.Lock()
+	old := m.rows[req.ID]
+	if old != nil && (!reflect.DeepEqual(old.Request, req) || old.Address.TaskID != scope) {
+		m.mu.Unlock()
+		http.Error(w, "request id already used", 409)
+		return
+	}
+	if old == nil && (!req.Deadline.After(time.Now()) || req.Deadline.After(time.Now().Add(MaxDuration))) {
+		m.mu.Unlock()
+		http.Error(w, "deadline must be within seven days", 400)
+		return
+	}
+	if old == nil && len(m.running) >= 32 {
+		m.mu.Unlock()
+		http.Error(w, "too many active waits", 429)
+		return
+	}
+	authorize := m.authorize
+	if old != nil && scope != "" && m.reauthorize != nil {
+		authorize = m.reauthorize
+	}
+	m.mu.Unlock()
+	authCtx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
+	defer cancel()
+	address, err := authorize(authCtx, r.Header.Get("X-Wait-Actor-Token"), req)
 	if err != nil || address.DaemonID != m.daemonID || address.WorkspaceID != req.WorkspaceID || address.TaskID != scope {
 		http.Error(w, "session authorization failed", 403)
 		return
 	}
-	if m.admit != nil {
-		release, allowed := m.admit()
-		if !allowed {
-			http.Error(w, "daemon restart in progress; retry this request", http.StatusServiceUnavailable)
-			return
-		}
-		defer release()
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.ctx.Err() != nil {
-		http.Error(w, "daemon stopping", 503)
-		return
-	}
-	if old := m.rows[req.ID]; old != nil {
-		if !reflect.DeepEqual(old.Request, req) || old.Address != address {
+	if old != nil {
+		if old.Address != address {
 			http.Error(w, "request id already used", 409)
 			return
 		}
 		writeJSON(w, old.WaitStatus)
-		return
-	}
-	if !req.Deadline.After(time.Now()) || req.Deadline.After(time.Now().Add(MaxDuration)) {
-		http.Error(w, "deadline must be within seven days", 400)
-		return
-	}
-	if len(m.running) >= 32 {
-		http.Error(w, "too many active waits", 429)
 		return
 	}
 	row := &record{Request: req, WaitStatus: protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: req.ID, Address: address, State: "running", LogPath: filepath.Join(m.dir, req.ID+".log")}, Deadline: req.Deadline}}
@@ -389,7 +436,6 @@ func (m *Manager) execute(ctx context.Context, row record, cancel context.Cancel
 	if protocol.WaitTerminal(current.State) {
 		return
 	}
-	row.Suspension, row.Suspended = current.Suspension, current.Suspended
 	row.ExitCode, row.FinishedAt, row.State = exitCode, time.Now().UTC(), "succeeded"
 	switch {
 	case current.CancelRequested:
@@ -428,14 +474,7 @@ func (m *Manager) flush() {
 	var pending []record
 	var active []record
 	check := m.checkTask
-	suspend := m.suspend
-	var suspensions []record
 	for _, row := range m.rows {
-		if row.Suspension != nil && !row.Suspended && !row.Handled {
-			if m.save(row) == nil {
-				suspensions = append(suspensions, *row)
-			}
-		}
 		if row.Address.TaskID != "" && !protocol.WaitTerminal(row.State) {
 			active = append(active, *row)
 		}
@@ -446,19 +485,6 @@ func (m *Manager) flush() {
 		}
 	}
 	m.mu.Unlock()
-	if suspend != nil {
-		for _, row := range suspensions {
-			ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
-			err := suspend(ctx, row.Address.TaskID, *row.Suspension)
-			cancel()
-			if err == nil {
-				m.mu.Lock()
-				m.rows[row.ID].Suspended = true
-				_ = m.save(m.rows[row.ID])
-				m.mu.Unlock()
-			}
-		}
-	}
 	if check != nil {
 		for _, row := range active {
 			ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)

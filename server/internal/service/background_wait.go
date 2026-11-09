@@ -80,52 +80,9 @@ func (s *TaskService) RegisterManagedWait(ctx context.Context, workspace, actor,
 			return ErrManagedWaitConflict
 		}
 		out = protocol.WaitAddress{WorkspaceID: util.UUIDToString(workspace), AgentID: util.UUIDToString(actor), TaskID: util.UUIDToString(task.ID), RuntimeID: util.UUIDToString(runtime.ID), DaemonID: req.DaemonID, Provider: runtime.Provider, SessionID: task.SessionID.String, WorkDir: task.WorkDir.String}
-		return storeTaskWait(ctx, q, task, &protocol.ManagedWait{ID: req.ID, Address: out, RequestHash: req.RequestHash, Deadline: req.Deadline.UTC()})
+		return storeTaskWait(ctx, q, task, &protocol.ManagedWait{ID: req.ID, Generation: util.UUIDToString(task.SessionPinGeneration), Address: out, RequestHash: req.RequestHash, Deadline: req.Deadline.UTC()})
 	})
 	return out, err
-}
-
-// SuspendManagedWait leaves the task nonterminal and keeps its original id,
-// accepted returns and resources. A ready result uses the existing deferred
-// promoter, including its busy/pending-slot fences.
-func (s *TaskService) SuspendManagedWait(ctx context.Context, taskID pgtype.UUID, req protocol.WaitSuspend) (bool, error) {
-	suspended := false
-	err := s.runInTx(ctx, func(q *db.Queries) error {
-		task, err := q.LockTaskSessionPin(ctx, taskID)
-		if err != nil {
-			return err
-		}
-		wait, err := TaskBackgroundWait(task)
-		if err != nil || wait == nil || wait.Consumed {
-			return err
-		}
-		if terminalResourceTask(task.Status) {
-			if task.Status == "cancelled" && wait.Result != nil {
-				_, err := q.RecordTaskTerminalReport(ctx, task.ID)
-				return err
-			}
-			return nil
-		}
-		if wait.Suspended && task.Status == "deferred" {
-			suspended = true
-			return nil
-		}
-		if util.UUIDToString(task.SessionPinGeneration) != req.Generation || wait.Address.SessionID != req.SessionID || wait.Address.WorkDir != req.WorkDir {
-			return ErrManagedWaitConflict
-		}
-		wait.Suspended = true
-		if err := storeTaskWait(ctx, q, task, wait); err != nil {
-			return err
-		}
-		wake := pgtype.Timestamptz{}
-		if wait.Result != nil {
-			wake = pgtype.Timestamptz{Time: time.Now(), Valid: true}
-		}
-		_, err = q.SuspendTaskForBackgroundWait(ctx, db.SuspendTaskForBackgroundWaitParams{TaskID: taskID, BranchName: req.BranchName, WakeAt: wake})
-		suspended = err == nil
-		return err
-	})
-	return suspended, err
 }
 
 func managedWaitKey(id string) string { return "background_wait:" + id }
@@ -226,7 +183,7 @@ func consumeTaskWait(ctx context.Context, q *db.Queries, task db.AgentTaskQueue,
 	return storeTaskWait(ctx, q, task, wait)
 }
 
-func (s *TaskService) ReadManagedWait(ctx context.Context, workspace, actor, taskID pgtype.UUID, id string) (*protocol.ManagedWait, error) {
+func (s *TaskService) ReadManagedWait(ctx context.Context, workspace, actor, taskID pgtype.UUID, id string, consume bool) (*protocol.ManagedWait, error) {
 	var wait *protocol.ManagedWait
 	err := s.runInTx(ctx, func(q *db.Queries) error {
 		task, err := q.LockTaskSessionPin(ctx, taskID)
@@ -244,9 +201,18 @@ func (s *TaskService) ReadManagedWait(ctx context.Context, workspace, actor, tas
 			return err
 		}
 		if wait == nil || wait.ID != id {
-			return pgx.ErrNoRows
+			message, err := q.GetDeliveryByNotificationKey(ctx, db.GetDeliveryByNotificationKeyParams{WorkspaceID: workspace, NotificationKey: pgtype.Text{String: managedWaitKey(id), Valid: true}})
+			if err != nil {
+				return err
+			}
+			var result protocol.WaitResult
+			if json.Unmarshal(message.Payload, &result) != nil || result.Address.TaskID != util.UUIDToString(task.ID) || message.RecipientAgentID != actor || message.ProcessingStatus != "handled" || message.TargetSessionID.Valid {
+				return pgx.ErrNoRows
+			}
+			wait = &protocol.ManagedWait{ID: id, Address: result.Address, Consumed: true, Result: &result, DeliveryID: util.UUIDToString(message.ID)}
+			return nil
 		}
-		if wait.Result != nil {
+		if wait.Result != nil && consume {
 			return consumeTaskWait(ctx, q, task, wait)
 		}
 		return nil
@@ -310,7 +276,7 @@ func (s *TaskService) RecoverBackgroundWaits(ctx context.Context, runtimeID pgty
 			if err != nil {
 				return err
 			}
-			if wait.Result == nil && !known[wait.ID] {
+			if wait.Result == nil && !known[wait.Address.TaskID+":"+wait.ID] {
 				_, err = completeManagedWait(ctx, q, task, protocol.WaitResult{ID: wait.ID, Address: wait.Address, State: "lost", FinishedAt: time.Now().UTC()})
 			}
 			return err
@@ -322,4 +288,52 @@ func (s *TaskService) RecoverBackgroundWaits(ctx context.Context, runtimeID pgty
 		}
 	}
 	return nil
+}
+
+type taskTurnKey struct{}
+
+func WithTaskTurn(ctx context.Context, turn protocol.TaskTurn) context.Context {
+	return context.WithValue(ctx, taskTurnKey{}, turn)
+}
+
+func staleWaitTurn(ctx context.Context, task db.AgentTaskQueue) bool {
+	wait, _ := TaskBackgroundWait(task)
+	turn, transport := ctx.Value(taskTurnKey{}).(protocol.TaskTurn)
+	return wait != nil && transport && turn.Generation != util.UUIDToString(task.SessionPinGeneration)
+}
+
+func suspendCompletedTurn(ctx context.Context, q *db.Queries, task db.AgentTaskQueue, wait *protocol.ManagedWait, branch string) (db.AgentTaskQueue, error) {
+	if wait.Suspended && task.Status == "deferred" {
+		return task, nil
+	}
+	turn, transport := ctx.Value(taskTurnKey{}).(protocol.TaskTurn)
+	if transport && turn.Generation != wait.Generation {
+		return task, ErrManagedWaitConflict
+	}
+	wait.Suspended = true
+	if err := storeTaskWait(ctx, q, task, wait); err != nil {
+		return task, err
+	}
+	wake := pgtype.Timestamptz{}
+	if wait.Result != nil {
+		wake = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	}
+	updated, err := q.SuspendTaskForBackgroundWait(ctx, db.SuspendTaskForBackgroundWaitParams{TaskID: task.ID, BranchName: branch, WakeAt: wake})
+	if err != nil {
+		return task, err
+	}
+	if transport && wait.Result == nil && turn.KnownWaitIDs != nil {
+		known := false
+		for _, id := range turn.KnownWaitIDs {
+			known = known || id == wait.ID
+		}
+		if !known {
+			_, err = completeManagedWait(ctx, q, updated, protocol.WaitResult{ID: wait.ID, Address: wait.Address, State: "lost", FinishedAt: time.Now().UTC()})
+			if err != nil {
+				return task, err
+			}
+			return q.GetAgentTask(ctx, task.ID)
+		}
+	}
+	return updated, nil
 }

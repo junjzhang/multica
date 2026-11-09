@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
@@ -88,7 +90,7 @@ func (h *Handler) CompleteBackgroundWait(w http.ResponseWriter, r *http.Request)
 		if !ok {
 			return
 		}
-		if workspace != req.Address.WorkspaceID || uuidToString(task.RuntimeID) != req.Address.RuntimeID || !protocol.WaitTerminal(req.State) || req.FinishedAt.IsZero() || len(req.LogPath) > 4096 {
+		if workspace != req.Address.WorkspaceID || uuidToString(task.RuntimeID) != req.Address.RuntimeID || !protocol.WaitTerminal(req.State) || req.FinishedAt.IsZero() || req.FinishedAt.After(time.Now().Add(time.Minute)) || len(req.LogPath) > 4096 {
 			writeError(w, 400, "invalid managed wait result")
 			return
 		}
@@ -169,39 +171,21 @@ func (h *Handler) ReadBackgroundWait(w http.ResponseWriter, r *http.Request) {
 	if _, ok := parseUUIDOrBadRequest(w, id, "wait_id"); !ok {
 		return
 	}
-	wait, err := h.TaskService.ReadManagedWait(r.Context(), parseUUID(h.resolveWorkspaceID(r)), parseUUID(r.Header.Get("X-Agent-ID")), parseUUID(r.Header.Get("X-Task-ID")), id)
+	consume := strings.HasSuffix(r.URL.Path, "/read")
+	wait, err := h.TaskService.ReadManagedWait(r.Context(), parseUUID(h.resolveWorkspaceID(r)), parseUUID(r.Header.Get("X-Agent-ID")), parseUUID(r.Header.Get("X-Task-ID")), id, consume)
 	if err != nil {
-		writeError(w, 404, "wait not found in current task")
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, service.ErrManagedWaitConflict) || errors.Is(err, delegation.ErrReturnInvalid) {
+			writeError(w, 404, "wait not found in current task")
+		} else {
+			writeManagedWaitError(w, err)
+		}
 		return
 	}
-	status := protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: wait.ID, Address: wait.Address, State: "running"}, Deadline: wait.Deadline, DeliveryID: wait.DeliveryID}
+	status := protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: wait.ID, Address: wait.Address, State: "running"}, Deadline: wait.Deadline, DeliveryID: wait.DeliveryID, Consumed: wait.Consumed}
 	if wait.Result != nil {
 		status.WaitResult = *wait.Result
 	}
 	writeJSON(w, 200, status)
-}
-
-func (h *Handler) SuspendBackgroundWait(w http.ResponseWriter, r *http.Request) {
-	taskID := chi.URLParam(r, "taskId")
-	task, ok := h.requireDaemonTaskAccess(w, r, taskID)
-	if !ok {
-		return
-	}
-	var req protocol.WaitSuspend
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384)).Decode(&req); err != nil {
-		writeError(w, 400, "invalid suspension")
-		return
-	}
-	paused, err := h.TaskService.SuspendManagedWait(r.Context(), task.ID, req)
-	if err != nil {
-		writeError(w, 409, "wait suspension conflicts with current execution")
-		return
-	}
-	if paused {
-		h.TaskService.ReconcileAgentStatus(r.Context(), task.AgentID)
-		h.TaskService.NotifyTaskEnqueued(r.Context(), task)
-	}
-	writeJSON(w, 200, map[string]bool{"suspended": paused})
 }
 
 func writeManagedWaitError(w http.ResponseWriter, err error) {

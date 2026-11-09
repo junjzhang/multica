@@ -35,7 +35,10 @@ credential is used. Providers must support strict session resume.
 A managed task may have one unconsumed wait. Ending its provider turn with an
 unconsumed wait suspends the task through the existing deferred queue; it does
 not complete the task, notify its callers of completion, or release its worktree.
-The journal persists and retries this suspension as well as the command result.
+The existing terminal-report outbox retains the provider turn outcome. In the same
+transaction, the server either suspends for an unread wait or completes a turn
+whose result was already consumed. Callback generations fence old-turn replays.
+A registration missing from the daemon journal becomes `lost`, never a rerun.
 Results enter Mailbox and make the same task eligible for another claim. That
 claim requires the original provider session and work directory, retaining the
 task's accepted returns. Missing original resources fail visibly rather than
@@ -72,7 +75,13 @@ included in Mailbox messages. Treat tool logs as private: tools can print secret
 ## Cancellation and recovery
 
 Cancellation durably records `cancelling`, stops the local process tree and then
-records `cancelled` with its exit code. It does not cancel the remote CI/job.
+records `cancelled` with its exit code. Cancelling a managed wait resumes the
+original task with that result; it does not cancel the logical task. Cancelling
+the logical task stops its wait before releasing the original resources. A
+provider failure stops the wait and follows normal failure/branch finalization.
+Expired task credentials reject new start/get/cancel calls, while already
+registered execution and daemon-authenticated result delivery continue. A resumed
+claim mints a new task credential. It does not cancel the remote CI/job.
 Cancellation after a terminal result returns that same result. The first terminal
 decision wins completion/cancellation races. Timeout records `timed_out`.
 
@@ -86,7 +95,10 @@ The daemon owns its profile's private `waits/` journal and
 it to `/api/daemon/background-waits/complete`. A failed request or lost response
 replays the identical result using `background_wait:<wait-id>` as notification
 identity; the existing Mailbox returns the original message ID. A restart never
-reruns commands. Any unfinished journal becomes `lost` and is notified. Terminal
+reruns commands. Managed waits retain their task and resources while the runtime
+is offline; the daemon enforces command deadlines. If it stays offline, recovery
+and result delivery wait for that same daemon to return, or for explicit task
+cancellation. The server does not move the wait to another daemon. Any unfinished journal becomes `lost` and is notified. Terminal
 results waiting for API acceptance are retried; `notify_error` makes that visible.
 `delivery_id` means queued in Mailbox, not received or handled by the session.
 
@@ -118,6 +130,6 @@ The server completion endpoint authenticates the executing daemon/owner and
 workspace. Subsequent session rebinding cannot retarget an accepted result.
 Archive/revocation/membership checks remain in the existing delivery claim path.
 
-Tests use isolated databases, test-created commands and a fake Paseo executable.
+Tests use isolated databases, test-created commands and fake provider executables.
 They do not exercise production sessions, actual CI tools, model calls or shared
 service deployment. No production migration or new server table is required.

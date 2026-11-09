@@ -4814,6 +4814,7 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 // terminal task is still an idempotent success but must not emit them again.
 func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgtype.UUID, result []byte, sessionID, workDir, branchName string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string) (*db.AgentTaskQueue, bool, error) {
 	var task db.AgentTaskQueue
+	var nonterminal bool
 	var change *qoderIssueChange
 	// chatAssistantMsg is the single assistant outcome row written for a chat
 	// task inside the completion transaction below. It is broadcast (chat:done)
@@ -4834,8 +4835,20 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 		if err != nil {
 			return err
 		}
+		if staleWaitTurn(ctx, current) {
+			task = current
+			nonterminal = true
+			return nil
+		}
 		if pending != nil && !pending.Consumed && !terminalResourceTask(current.Status) {
-			return ErrManagedWaitConflict
+			task, err = suspendCompletedTurn(ctx, qtx, current, pending, branchName)
+			nonterminal = true
+			return err
+		}
+		if pending != nil {
+			sessionID, workDir = current.SessionID.String, current.WorkDir.String
+			durableWorkDir, retiredSessionID = "", ""
+			sessionRolloutMissing = false
 		}
 		t, err := qtx.CompleteAgentTask(ctx, db.CompleteAgentTaskParams{
 			ID:                    taskID,
@@ -4948,6 +4961,11 @@ func (s *TaskService) CompleteTaskWithTransition(ctx context.Context, taskID pgt
 		return nil, false, fmt.Errorf("complete task: %w", err)
 	}
 
+	if nonterminal {
+		s.ReconcileAgentStatus(ctx, task.AgentID)
+		s.NotifyTaskEnqueued(ctx, task)
+		return &task, false, nil
+	}
 	s.publishQoderIssueChange(ctx, change)
 	slog.Info("task completed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID))
 	s.captureTaskCompleted(ctx, task)
@@ -5333,10 +5351,25 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 	}
 
 	var task db.AgentTaskQueue
+	var stale bool
 	var retried *db.AgentTaskQueue
 	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
 		if err := lockChatSessionForTaskWrite(ctx, qtx, taskID); err != nil {
 			return err
+		}
+		current, err := qtx.LockTaskSessionPin(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if staleWaitTurn(ctx, current) {
+			task = current
+			stale = true
+			return nil
+		}
+		if wait, _ := TaskBackgroundWait(current); wait != nil {
+			sessionID, workDir = current.SessionID.String, current.WorkDir.String
+			durableWorkDir, retiredSessionID = "", ""
+			sessionRolloutMissing = false
 		}
 		t, err := qtx.FailAgentTask(ctx, db.FailAgentTaskParams{
 			ID:             taskID,
@@ -5595,6 +5628,9 @@ func (s *TaskService) FailTaskWithTransition(ctx context.Context, taskID pgtype.
 		return nil, false, fmt.Errorf("fail task: %w", err)
 	}
 
+	if stale {
+		return &task, false, nil
+	}
 	slog.Warn("task failed", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(task.IssueID), "error", errMsg, "failure_reason", failureReason)
 	s.captureTaskFailed(ctx, task)
 

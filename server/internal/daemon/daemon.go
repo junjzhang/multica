@@ -256,6 +256,8 @@ const (
 // reportTerminalTask gives the durable outbox one insertion point without
 // revisiting every task exit when it is added.
 type terminalTaskReport struct {
+	generation     string
+	knownWaitIDs   string
 	kind           terminalTaskReportKind
 	taskID         string
 	output         string
@@ -5701,6 +5703,10 @@ func (d *Daemon) watchTaskCancellation(ctx context.Context, taskID string, pollI
 }
 
 func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+	generation := &terminalTurnGeneration{}
+	generation.value.Store(task.SessionPinGeneration)
+	ctx = context.WithValue(ctx, terminalTurnGenerationKey{}, generation)
+	ctx = context.WithValue(ctx, taskTurnContextKey{}, protocol.TaskTurn{Generation: task.SessionPinGeneration})
 	d.mu.Lock()
 	rt, tracked := d.runtimeIndex[task.RuntimeID]
 	d.mu.Unlock()
@@ -5852,7 +5858,11 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// runCtx is cancelled, so dropping this on the cancelled path silently
 	// under-reports billing.
 	if len(result.Usage) > 0 {
-		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, result.Usage); usageErr != nil {
+		usage := result.Usage
+		if task.BackgroundWait != nil {
+			usage = mergeWaitUsage(task.UsageBaseline, usage)
+		}
+		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, usage); usageErr != nil {
 			taskLog.Warn("report task usage failed", "error", usageErr)
 		}
 	}
@@ -5919,14 +5929,6 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		} else {
 			terminalConfirmed = true
 		}
-		return
-	}
-	if result.Status == "completed" && d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
-		request := protocol.WaitSuspend{Generation: task.SessionPinGeneration, SessionID: result.SessionID, WorkDir: result.WorkDir, BranchName: result.BranchName}
-		if _, suspendErr := d.backgroundWaits.SuspendTask(task.ID, request); suspendErr != nil {
-			taskLog.Error("background suspension not acknowledged; retaining original resources", "error", suspendErr)
-		}
-		taskLog.Info("task suspension persisted for background wait; no terminal result reported")
 		return
 	}
 
@@ -6413,10 +6415,21 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 // 30-second drain, but terminal callbacks must still use that remaining window.
 // The explicit timeout keeps this detached work bounded during normal runs.
 func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTaskReport) error {
+	if turn, ok := parentCtx.Value(taskTurnContextKey{}).(protocol.TaskTurn); ok {
+		report.generation = turn.Generation
+		if d.backgroundWaits != nil {
+			ids, _ := json.Marshal(d.backgroundWaits.KnownTaskIDs(report.taskID))
+			report.knownWaitIDs = string(ids)
+		}
+	}
+
+	if current, ok := parentCtx.Value(terminalTurnGenerationKey{}).(*terminalTurnGeneration); ok {
+		report.generation = current.value.Load().(string)
+	}
 	if _, err := persistedTerminalReport(report, time.Now()); err != nil {
 		return err
 	}
-	release, ok := d.beginTerminalReportDelivery(report.taskID)
+	release, ok := d.beginTerminalReportDelivery(report.queueID())
 	if !ok {
 		return fmt.Errorf("terminal task report for %s is already being delivered", report.taskID)
 	}
@@ -6444,7 +6457,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 	if err != nil {
 		quarantined := false
 		if persisted {
-			item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.taskID), report: report}
+			item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.queueID()), report: report}
 			quarantined = d.handleTerminalReportDeliveryError(ctx, item, err)
 		}
 		if persisted && !quarantined {
@@ -6455,7 +6468,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 	if !persisted {
 		return nil
 	}
-	item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.taskID), report: report}
+	item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.queueID()), report: report}
 	if err := d.terminalReports.acknowledge(item); err != nil {
 		d.signalTerminalReportReplay()
 		return fmt.Errorf("acknowledge terminal task report: %w", err)
@@ -6492,6 +6505,13 @@ func (d *Daemon) sendTerminalTaskReport(ctx context.Context, report terminalTask
 	if d.terminalReportSend != nil {
 		return d.terminalReportSend(ctx, report, schedule)
 	}
+	var ids []string
+	if report.knownWaitIDs != "" {
+		if err := json.Unmarshal([]byte(report.knownWaitIDs), &ids); err != nil {
+			return err
+		}
+	}
+	ctx = context.WithValue(ctx, taskTurnContextKey{}, protocol.TaskTurn{Generation: report.generation, KnownWaitIDs: ids})
 	switch report.kind {
 	case terminalTaskReportComplete:
 		return d.client.completeTaskWithRetrySchedule(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, schedule)
@@ -7949,7 +7969,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
-		ResultHandling:      task.DelegationResult != nil,
+		ResultHandling:      task.RequireResume,
 		ScopeTaskID:         originalTaskScopeID(task),
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
@@ -8062,9 +8082,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// *os.File cannot cross its JSON response back to us. Claiming there would
 	// leave the agent running with no protection at all — which is exactly the
 	// re-dispatch window this guards.
-	envClaim, err := execenv.ClaimEnvRoot(taskRootDirParams(d.cfg.WorkspacesRoot, task))
-	if err != nil {
-		return TaskResult{}, fmt.Errorf("claim execution environment: %w", err)
+	var envClaim *execenv.EnvRootClaim
+	heldRoot := ""
+	if !task.RequireResume {
+		envClaim, err = execenv.ClaimEnvRoot(taskRootDirParams(d.cfg.WorkspacesRoot, task))
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("claim execution environment: %w", err)
+		}
+		heldRoot = envClaim.RootDir()
 	}
 	defer envClaim.Release()
 
@@ -8307,7 +8332,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		reasonixEnv = sanitizeAgentEnv(agentEnvOverrides)
 	}
 	envReused := false
-	priorClaim, priorWorkDir, lockedPriorInfo, reusable, reuseErr := d.lockReusablePriorEnvRoot(ctx, task, localAssignment, envClaim.RootDir())
+	priorClaim, priorWorkDir, lockedPriorInfo, reusable, reuseErr := d.lockReusablePriorEnvRoot(ctx, task, localAssignment, heldRoot)
 	if reuseErr != nil {
 		// Cancelled while waiting for the previous run to let go of its
 		// directory. Ending here IS the behaviour: falling through would
@@ -8553,11 +8578,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			if taskResult.EnvRoot == "" {
 				taskResult.EnvRoot = env.RootDir
 			}
-			if d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
+			if returnErr == nil && taskResult.Status == "completed" && ctx.Err() == nil && d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
 				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
 					returnErr = errors.Join(returnErr, err)
 				}
+				taskResult.BranchName = env.LocalWorktree.Branch
+				resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+				taskResult.completedWorktree = &completedWorktree{tree: env.LocalWorktree, resource: resource, root: env.RootDir, durableWorkDir: durableWorktreePath(env.LocalWorktree), finalizePending: true}
 				return
+			}
+			if d.backgroundWaits != nil {
+				d.backgroundWaits.CancelTask(task.ID)
 			}
 			outcome, finalizeErr := env.LocalWorktree.Finalize(taskLog)
 			if outcome.Branch != "" {
@@ -9100,7 +9131,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AgentName:     task.Agent.Name,
 		WorkDir:       env.WorkDir,
 	})
-	defer d.clearActiveRepoCheckoutTask(agentToken)
+	defer func() {
+		d.clearActiveRepoCheckoutTask(agentToken)
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		d.reconcileWaitReads(readCtx, task, agentToken)
+	}()
 
 	taskLog.Debug("invoking backend",
 		"provider", provider,
@@ -9118,6 +9154,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Shared across the resume-retry below so the retry's transcript rows
 	// keep ascending seq values for the same task.
 	var msgSeq atomic.Int32
+	msgSeq.Store(task.MessageSeqOffset)
 	d.reportThinkingLevelWarning(ctx, task.ID, selection.ThinkingLevelWarning, &msgSeq, taskLog)
 	outputObserver := &taskOutputObserver{}
 	ctx = withTaskOutputObserver(ctx, outputObserver)

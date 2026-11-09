@@ -4,6 +4,9 @@ SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('background_w
 WHERE id = @task_id
 RETURNING *;
 
+-- name: GetTaskMessageSequence :one
+SELECT COALESCE(max(seq),0)::integer AS seq FROM task_message WHERE task_id = @task_id;
+
 -- name: SuspendTaskForBackgroundWait :one
 UPDATE agent_task_queue
 SET status = 'deferred', started_at = NULL, dispatched_at = NULL,

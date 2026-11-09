@@ -1312,7 +1312,7 @@ UPDATE agent_task_queue
 SET status = 'failed', completed_at = now(), error = 'task timed out',
     failure_reason = 'timeout',
     prepare_lease_expires_at = NULL
-WHERE (
+WHERE ((
     status = 'dispatched'
     AND dispatched_at < now() - make_interval(secs => @dispatch_timeout_secs::double precision)
     AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
@@ -1349,7 +1349,9 @@ WHERE (
               now() - make_interval(secs => @runtime_reconnect_grace_secs::double precision)
       )
     )
-  )
+  ))
+  AND NOT COALESCE(context->'background_wait'->'address'->>'task_id'=id::text
+      AND context->'background_wait'->>'consumed' IS DISTINCT FROM 'true',false)
 RETURNING *;
 
 -- name: ExpireStaleQueuedTasks :many

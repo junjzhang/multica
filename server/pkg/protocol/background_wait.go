@@ -28,6 +28,7 @@ type WaitStart struct {
 // and credentials stay in the daemon; accepted returns remain on the same task.
 type ManagedWait struct {
 	ID          string      `json:"id"`
+	Generation  string      `json:"generation"`
 	Address     WaitAddress `json:"address"`
 	RequestHash string      `json:"request_hash"`
 	Deadline    time.Time   `json:"deadline"`
@@ -42,13 +43,6 @@ type WaitAuthorization struct {
 	ID          string    `json:"id,omitempty"`
 	RequestHash string    `json:"request_hash,omitempty"`
 	Deadline    time.Time `json:"deadline,omitempty"`
-}
-
-type WaitSuspend struct {
-	Generation string `json:"generation"`
-	SessionID  string `json:"session_id"`
-	WorkDir    string `json:"work_dir"`
-	BranchName string `json:"branch_name,omitempty"`
 }
 
 const DaemonCapabilityManagedWaitV1 = "managed_background_wait_v1"
@@ -73,6 +67,7 @@ func WaitTerminal(state string) bool {
 }
 
 type WaitStatus struct {
+	Consumed bool `json:"consumed,omitempty"`
 	WaitResult
 	Deadline    time.Time `json:"deadline"`
 	DeliveryID  string    `json:"delivery_id,omitempty"`
@@ -84,4 +79,10 @@ type WaitEndpoint struct {
 	URL      string `json:"url"`
 	Secret   string `json:"secret"`
 	DaemonID string `json:"daemon_id"`
+}
+
+// TaskTurn fences replayed callbacks when one logical task resumes across turns.
+type TaskTurn struct {
+	Generation   string   `json:"turn_generation,omitempty"`
+	KnownWaitIDs []string `json:"known_wait_ids"`
 }

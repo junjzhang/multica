@@ -649,6 +649,7 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
 
 func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"output": output}
+	addTaskTurn(ctx, body)
 	if branchName != "" {
 		body["branch_name"] = branchName
 	}
@@ -685,6 +686,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
 
 func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"error": errMsg}
+	addTaskTurn(ctx, body)
 	if sessionID != "" {
 		body["session_id"] = sessionID
 	}
