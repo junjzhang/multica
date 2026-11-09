@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
+	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -179,7 +181,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM agent_task_queue t JOIN agent a ON a.id=t.agent_id WHERE a.workspace_id=$1", f.WorkspaceID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("fabricated %d managed runs: %v", count, err)
 	}
-	prompt := acceptIsolatedAssignmentRequests(t, server.URL, daemonToken, f.WorkspaceID, daemonID, 1)
+	prompt := acceptWaitAfterBusyAndUnknown(t, pool, server.URL, daemonToken, f.WorkspaceID, daemonID, deliveryID)
 	for _, required := range []string{requestID, "background_wait", `"state":"failed"`, `"exit_code":7`} {
 		if !strings.Contains(prompt, required) {
 			t.Errorf("host prompt missing %s: %s", required, prompt)
@@ -193,4 +195,88 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 		t.Fatal("credentials or command leaked into host prompt")
 	}
 	t.Log(fmt.Sprintf("CLI -> local daemon -> external auth -> command exit 7 -> daemon auth -> DB delivery %s -> exact fake Paseo session; no model polling or managed runs", deliveryID))
+}
+
+func acceptWaitAfterBusyAndUnknown(t *testing.T, pool *pgxpool.Pool, serverURL, token, workspaceID, daemonID, deliveryID string) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("MULTICA_WAIT_HOST_FIXTURE", dir)
+	fake := filepath.Join(dir, "fake-paseo")
+	script := `#!/bin/sh
+if [ "$1" = status ]; then printf '{"serverId":"isolated-host"}'; exit 0; fi
+if [ "$1" = agent ] && [ "$2" = receipt ]; then
+  [ "$3" = chosen-host-session ] || exit 17
+  printf 'receipt %s\n' "$4" >> "$MULTICA_WAIT_HOST_FIXTURE/trace"
+  if [ ! -e "$MULTICA_WAIT_HOST_FIXTURE/first-receipt" ]; then
+    touch "$MULTICA_WAIT_HOST_FIXTURE/first-receipt"
+    printf '{"agentId":"chosen-host-session","messageId":"%s","status":"pending"}' "$4"
+    exit 0
+  fi
+  printf '{"agentId":"chosen-host-session","messageId":"%s","status":"accepted"}' "$4"
+  exit 0
+fi
+[ "$1" = send ] && [ "$2" = chosen-host-session ] || exit 18
+shift 2
+idle=no
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --if-idle) idle=yes ;;
+    --message-id) shift; message="$1" ;;
+    --prompt-file) shift; prompt="$1" ;;
+  esac
+  shift
+done
+[ "$idle" = yes ] || exit 19
+printf 'send %s\n' "$message" >> "$MULTICA_WAIT_HOST_FIXTURE/trace"
+if [ ! -e "$MULTICA_WAIT_HOST_FIXTURE/busy" ]; then
+  touch "$MULTICA_WAIT_HOST_FIXTURE/busy"
+  printf '{"error":{"code":"agent_busy"}}' >&2
+  exit 1
+fi
+cat "$prompt" >> "$MULTICA_WAIT_HOST_FIXTURE/prompt"
+printf '{"error":{"code":"agent_request_outcome_unknown"}}' >&2
+exit 1
+`
+	if err := os.WriteFile(fake, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(serverURL)
+	client.SetToken(token)
+	client.mailboxDaemonID = daemonID
+	observed := observedAssignmentClient{Client: client, results: make(chan delivery.Delivery, 8)}
+	host := &paseoDeliveryHost{transport: &paseoCliTransport{bin: fake, run: runPaseoCommand, timeout: 3 * time.Second}}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	worker := delivery.NewWorker(observed, host, func() []string { return []string{workspaceID} }, daemonID, nil)
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx) }()
+	for _, state := range []string{"pending", "unknown", "delivered"} {
+		select {
+		case result := <-observed.results:
+			if result.ID != deliveryID || result.DeliveryStatus != state {
+				t.Errorf("outcome = %+v, want %s for %s", result, state, deliveryID)
+			}
+			// Backoff durations are already tested in delivery. Advance only
+			// this isolated fixture's next attempt to exercise receipt recovery.
+			if state != "delivered" {
+				if _, err := pool.Exec(t.Context(), "UPDATE agent_mailbox_message SET next_attempt_at=now() WHERE id=$1", deliveryID); err != nil {
+					t.Error(err)
+				}
+			}
+		case <-ctx.Done():
+			t.Error("host receipt timeout")
+		}
+	}
+	cancel()
+	<-done
+	trace, err := os.ReadFile(filepath.Join(dir, "trace"))
+	want := fmt.Sprintf("send %s\nsend %s\nreceipt %s\nreceipt %s\n", deliveryID, deliveryID, deliveryID, deliveryID)
+	if err != nil || string(trace) != want {
+		t.Fatalf("busy/unknown replayed or retargeted: %q want %q err=%v", trace, want, err)
+	}
+	prompt, err := os.ReadFile(filepath.Join(dir, "prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(prompt)
 }

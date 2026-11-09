@@ -257,7 +257,9 @@ func TestWaitDaemonDeathStopsCommandTree(t *testing.T) {
 	}
 	dir := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestWaitDaemonCrashHarness$")
-	cmd.Env = append(os.Environ(), "BACKGROUND_WAIT_TEST_CRASH_DIR="+dir)
+	// The race runtime otherwise delays os.Exit for one second, allowing the
+	// fixture to finish before the simulated daemon death actually happens.
+	cmd.Env = append(os.Environ(), "BACKGROUND_WAIT_TEST_CRASH_DIR="+dir, "GORACE=atexit_sleep_ms=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("crash harness: %v %s", err, out)
 	}

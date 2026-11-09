@@ -88,7 +88,12 @@ func Open(parent context.Context, dir, secret, daemonID string, helper []string,
 	return m, nil
 }
 
-func (m *Manager) Close() { m.cancel(); m.wg.Wait() }
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.cancel()
+	m.mu.Unlock()
+	m.wg.Wait()
+}
 
 // WritePrivate atomically publishes durable owner-only state.
 func WritePrivate(path string, value any) error {
@@ -326,6 +331,9 @@ func (l *limitedLog) Write(p []byte) (int, error) {
 }
 
 func runHelper(ctx context.Context, helper []string, req protocol.WaitStart, logPath string) (*int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return nil, err
