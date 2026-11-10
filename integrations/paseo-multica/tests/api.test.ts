@@ -67,6 +67,8 @@ describe("Multica API client", () => {
 
     const result = await api.registerExternalAgent(credential, {
       name: "Workstation · Fix the build",
+      template: true,
+      templateName: "Paseo · Workstation",
       hostId: "srv_workstation",
       sessionId: "paseo-session-a",
       displayName: "Fix the build",
@@ -82,6 +84,8 @@ describe("Multica API client", () => {
     expect(calls[0]?.headers["x-workspace-id"]).toBe(WORKSPACE_ID);
     expect(JSON.parse(calls[0]?.body ?? "{}")).toMatchObject({
       name: "Workstation · Fix the build",
+      template: true,
+      template_name: "Paseo · Workstation",
       external_session: {
         provider: "paseo",
         host_id: "srv_workstation",

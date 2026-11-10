@@ -94,8 +94,15 @@ type externalSessionInput struct {
 type createExternalAgentRequest struct {
 	// AgentID attaches another host session to an existing external agent.
 	// Omitted, registration mints a new agent identity, as before.
-	AgentID         string               `json:"agent_id,omitempty"`
-	Name            string               `json:"name"`
+	AgentID string `json:"agent_id,omitempty"`
+	// Name is the session/agent display name. Legacy registration uses it as
+	// the agent name; template registration uses TemplateName for the host
+	// identity and keeps this as the session's own title.
+	Name string `json:"name"`
+	// TemplateName is the host template's display name. It never includes the
+	// session title, so legacy servers (which ignore this field) keep minting
+	// one distinctly named agent per session.
+	TemplateName    string               `json:"template_name,omitempty"`
 	ExternalSession externalSessionInput `json:"external_session"`
 	PermissionMode  *string              `json:"permission_mode"`
 	// Template attaches a NEW host session to the host template keyed by
@@ -205,12 +212,22 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		// template-capable client must know it is talking to a server that
 		// has not opened them yet, so the write is refused before anything
 		// else is validated or created.
-		writeError(w, http.StatusBadRequest, "external agent templates are not enabled on this server")
+		writeErrorCode(w, http.StatusBadRequest, "external_agent_templates_disabled", "external agent templates are not enabled on this server")
 		return
 	}
 	if utf8.RuneCountInString(name) > maxExternalAgentNameLength {
 		writeError(w, http.StatusBadRequest, "name is too long")
 		return
+	}
+	templateName := strings.TrimSpace(req.TemplateName)
+	if req.Template {
+		if templateName == "" {
+			templateName = name
+		}
+		if utf8.RuneCountInString(templateName) > maxExternalAgentNameLength {
+			writeError(w, http.StatusBadRequest, "template_name is too long")
+			return
+		}
 	}
 
 	session := req.ExternalSession
@@ -303,6 +320,13 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "archived agents cannot register a session")
 			return
 		}
+		// A template is the identity of ONE host instance. Attaching a session
+		// that reports another host would silently merge two hosts under one
+		// template, which the key deliberately keeps apart.
+		if targetAgent.ExternalProvider.Valid && (targetAgent.ExternalProvider.String != session.Provider || targetAgent.ExternalHostID.String != session.HostID) {
+			writeError(w, http.StatusBadRequest, "external session belongs to a different host template")
+			return
+		}
 		if !h.canManageAgent(w, r, targetAgent) {
 			return
 		}
@@ -336,10 +360,23 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	var resolvedTemplate db.Agent
 	templateCreated := false
 	if req.Template {
-		resolvedTemplate, templateCreated, err = h.resolveExternalTemplate(r.Context(), h.Queries, wsUUID, parseUUID(ownerID), session.Provider, session.HostID, name, permissionMode, visibility)
+		resolvedTemplate, templateCreated, err = h.resolveExternalTemplate(r.Context(), h.Queries, wsUUID, parseUUID(ownerID), session.Provider, session.HostID, templateName, permissionMode, visibility)
 		if err != nil {
 			h.writeExternalTemplateError(w, err)
 			return
+		}
+		// The template row is created before the session transaction, so its
+		// invocation targets must be written in the same window: a later
+		// refused session write would otherwise leave a public_to template
+		// without targets, and a retry no longer counts as "created".
+		if templateCreated && permissionMode == "public_to" {
+			if err := replaceInvocationTargetsWithQueries(r.Context(), h.Queries, resolvedTemplate.ID, parseUUID(ownerID), []targetSpec{{
+				targetType: invocationTargetWorkspace,
+				targetID:   wsUUID,
+			}}); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to save agent access")
+				return
+			}
 		}
 	}
 
@@ -428,7 +465,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create external session")
 		return
 	}
-	if permissionMode == "public_to" && !targetAgent.ID.Valid && (!req.Template || templateCreated) {
+	if permissionMode == "public_to" && !targetAgent.ID.Valid && !req.Template {
 		if err := replaceInvocationTargetsWithQueries(r.Context(), qtx, created.ID, parseUUID(ownerID), []targetSpec{{
 			targetType: invocationTargetWorkspace,
 			targetID:   wsUUID,
@@ -443,7 +480,6 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.agentToResponse(created)
-	resp.ExternalTemplate = externalTemplateToResponse(created)
 	resp.ExternalSession = externalSessionToResponse(createdSession)
 	enrichInvocationTargets := func(resp *AgentResponse) {
 		if err := h.enrichAgentResponseWithTargets(r.Context(), resp, created.ID); err != nil {
@@ -484,7 +520,6 @@ func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resp := h.agentToResponse(agent)
-	resp.ExternalTemplate = externalTemplateToResponse(agent)
 	resp.ExternalSession = externalSessionToResponse(updatedSession)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, agent.ID); err != nil {
 		resp.InvocationTargets = []AgentInvocationTargetDTO{}
@@ -600,6 +635,34 @@ func (h *Handler) RevokeExternalAgentToken(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RevokeExternalAgentSession revokes one registered session without touching
+// its siblings, the agent, or its history. 204 is returned for an
+// already-revoked session so a retry is idempotent.
+func (h *Handler) RevokeExternalAgentSession(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.loadExternalAgentForHumanAdmin(w, r)
+	if !ok {
+		return
+	}
+	sessionID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "sessionId"), "session id")
+	if !ok {
+		return
+	}
+	_, err := h.Queries.RevokeExternalAgentSession(r.Context(), db.RevokeExternalAgentSessionParams{
+		ID:          sessionID,
+		AgentID:     agent.ID,
+		WorkspaceID: agent.WorkspaceID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to revoke session")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

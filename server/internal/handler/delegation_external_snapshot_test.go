@@ -23,7 +23,9 @@ func externalRebindingPreservesResult(t *testing.T, action string) {
 	}
 	ctx := context.Background()
 	dispatcher, originalSession, ownerID := externalAgentFixture(t, "result rebind", "result-rebind-daemon")
-	token := externalTokenFixture(t, dispatcher, ownerID, time.Now().Add(time.Hour))
+	// The credential acts as one session: the accepted return is addressed by
+	// that session, not by a header a wide legacy token could retarget.
+	token := externalSessionTokenFixture(t, dispatcher, originalSession, ownerID, time.Now().Add(time.Hour))
 	target, _ := executableTarget(t, "result-rebind-target")
 	title := fmt.Sprintf("result rebind %d", time.Now().UnixNano())
 	bumpIssueCounter(t)
@@ -46,6 +48,7 @@ func externalRebindingPreservesResult(t *testing.T, action string) {
 		"session_id": "replacement-" + dispatcher, "display_name": "Replacement",
 		"daemon_id": "result-rebind-daemon",
 	})
+	replacementToken := externalSessionTokenFixture(t, dispatcher, replacement, ownerID, time.Now().Add(time.Hour))
 	request := withURLParam(newRequestAs(ownerID, http.MethodPost, "/api/agents/"+dispatcher+"/session-bindings", map[string]any{
 		"issue_id": issueID, "session_id": replacement,
 	}), "id", dispatcher)
@@ -56,7 +59,7 @@ func externalRebindingPreservesResult(t *testing.T, action string) {
 	if action == "rerun" {
 		handler, endpoint, body = testHandler.RerunIssue, "rerun", map[string]any{}
 	}
-	w = serveAuthenticated(t, token, http.HandlerFunc(handler), http.MethodPost,
+	w = serveAuthenticated(t, replacementToken, http.HandlerFunc(handler), http.MethodPost,
 		"/api/issues/"+issueID+"/"+endpoint, body, map[string]string{"id": issueID}, func(r *http.Request) {
 			r.Header.Set(ReturnSessionHeader, replacement)
 		})

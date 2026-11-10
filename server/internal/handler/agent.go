@@ -254,6 +254,7 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 		OwnerID:                  uuidToPtr(a.OwnerID),
 		ExecutionKind:            executionKind,
 		ExternalSession:          nil,
+		ExternalTemplate:         externalTemplateToResponse(a),
 		Skills:                   []AgentSkillSummary{},
 		DisabledRuntimeSkills:    decodeDisabledRuntimeSkills(a.DisabledRuntimeSkills),
 		CreatedAt:                timestampToString(a.CreatedAt),

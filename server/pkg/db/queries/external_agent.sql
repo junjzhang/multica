@@ -109,6 +109,18 @@ SET display_name = @display_name,
 WHERE id = @id AND workspace_id = @workspace_id
 RETURNING *;
 
+-- name: RevokeExternalAgentSession :one
+-- Revocation is idempotent and scoped to one session: siblings and the agent
+-- identity keep working. Auth re-reads this column on every request.
+UPDATE external_agent_session
+SET revoked_at = now(),
+    updated_at = now()
+WHERE id = @id
+  AND agent_id = @agent_id
+  AND workspace_id = @workspace_id
+  AND revoked_at IS NULL
+RETURNING *;
+
 -- name: WorkspaceDaemonOwnedByUser :one
 SELECT EXISTS (
     SELECT 1 FROM agent_runtime
@@ -153,9 +165,3 @@ WHERE workspace_id = @workspace_id
   AND agent_id = @agent_id
   AND session_id = @host_session_id
 ORDER BY created_at ASC, id ASC;
--- name: CountExternalAgentSessions :one
--- The legacy-token gate needs the number of live sessions before it can decide
--- whether a session-less token names exactly one identity. Revoked sessions do
--- not count: they can no longer receive work.
-SELECT count(*) FROM external_agent_session
-WHERE workspace_id = @workspace_id AND agent_id = @agent_id AND revoked_at IS NULL;

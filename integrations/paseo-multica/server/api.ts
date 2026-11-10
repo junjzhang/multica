@@ -21,6 +21,11 @@ export interface RegisterExternalAgentInput {
    * writes reject it; the caller falls back to legacy registration.
    */
   template?: boolean;
+  /**
+   * Host template display name. Kept separate from name so a legacy server
+   * (which ignores this field) still mints a session-scoped agent name.
+   */
+  templateName?: string;
 }
 
 export interface ExternalAgentRegistration {
@@ -57,6 +62,8 @@ export class MulticaApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Machine-readable error code from the response body, when present. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "MulticaApiError";
@@ -122,9 +129,12 @@ export function createMulticaApi(options: {
       }
       if (response.status >= 400) {
         const detail = redactSecrets(text.slice(0, MAX_ERROR_BODY)).trim();
+        const body = parseJson(text) as { code?: unknown } | null;
+        const code = typeof body?.code === "string" && body.code !== "" ? body.code : undefined;
         throw new MulticaApiError(
           response.status,
           `Multica API ${method} ${path} returned ${response.status}${detail ? `: ${detail}` : ""}`,
+          code,
         );
       }
       return text;
@@ -138,6 +148,7 @@ export function createMulticaApi(options: {
       const text = await request(credential, "POST", "/api/agents/external", credential.token, {
         name: input.name,
         template: input.template === true ? true : undefined,
+        template_name: input.templateName,
         external_session: {
           provider: "paseo",
           host_id: input.hostId,

@@ -69,10 +69,12 @@ func (h *Handler) resolveExternalTemplate(
 		return db.Agent{}, false, fmt.Errorf("load external template: %w", err)
 	}
 
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 4; attempt++ {
 		candidate := name
 		if attempt > 0 {
-			candidate = externalTemplateNameWithSuffix(name, uuidToString(dbid.NewV7()))
+			// The suffix must come from the random tail of the id, not its
+			// timestamp prefix, and must grow until the name is unique.
+			candidate = externalTemplateNameWithSuffix(name, uuidToString(dbid.NewV7()), 6*attempt)
 		}
 		created, createErr := q.CreateExternalAgentTemplate(ctx, db.CreateExternalAgentTemplateParams{
 			WorkspaceID:      wsUUID,
@@ -105,11 +107,17 @@ func (h *Handler) resolveExternalTemplate(
 }
 
 // externalTemplateNameWithSuffix appends a short, unique suffix so a display-name
-// collision cannot force the caller to pick a different host identity.
-func externalTemplateNameWithSuffix(name, id string) string {
+// collision cannot force the caller to pick a different host identity. The
+// suffix is taken from the RANDOM tail of the v7 id (its leading bits are the
+// timestamp, so they only change once per millisecond) and grows with each
+// retry until it fits the name budget.
+func externalTemplateNameWithSuffix(name, id string, length int) string {
 	suffix := strings.ReplaceAll(id, "-", "")
-	if len(suffix) > 8 {
-		suffix = suffix[:8]
+	if length < 4 {
+		length = 4
+	}
+	if len(suffix) > length {
+		suffix = suffix[len(suffix)-length:]
 	}
 	candidate := strings.TrimSpace(name) + " · " + suffix
 	if utf8Len := len([]rune(candidate)); utf8Len > maxExternalAgentNameLength {

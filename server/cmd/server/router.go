@@ -2311,6 +2311,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// external agent. Raw token is returned once, hash only.
 					r.With(handler.RequireHumanActor).Post("/tokens", h.CreateExternalAgentToken)
 					r.With(handler.RequireHumanActor).Delete("/tokens/{tokenId}", h.RevokeExternalAgentToken)
+					// Revoke one registered host session. The agent keeps its
+					// other sessions and history; credentials bound to the
+					// revoked session stop authenticating immediately.
+					r.With(handler.RequireHumanActor).Delete("/sessions/{sessionId}", h.RevokeExternalAgentSession)
 					// Explicit (issue -> session) target for this external
 					// agent. Producers resolve it before enqueueing; a
 					// rebind never retargets an existing delivery.

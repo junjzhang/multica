@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  ApiCredential,
-  ExternalAgentRegistration,
-  IssuedToken,
-  MulticaApi,
-  RegisterExternalAgentInput,
+import {
+  MulticaApiError,
+  type ApiCredential,
+  type ExternalAgentRegistration,
+  type IssuedToken,
+  type MulticaApi,
+  type RegisterExternalAgentInput,
 } from "../server/api";
 import type { PaseoHostAdapter } from "../server/host";
 import type { SessionContext } from "../shared/session";
@@ -48,6 +49,8 @@ export class FakeApi implements MulticaApi {
   verifyCalls = 0;
   verifyResult: "subject" | "invalid" | "throw" = "subject";
   registerError: Error | null = null;
+  /** Models a server whose template-write switch is still closed. */
+  templateDisabled = false;
   tokenError: Error | null = null;
   revokeError: Error | null = null;
   private tokenSequence = 0;
@@ -60,6 +63,13 @@ export class FakeApi implements MulticaApi {
   ): Promise<ExternalAgentRegistration> {
     this.credentialCalls.push(credential);
     if (this.registerError) throw this.registerError;
+    if (input.template && this.templateDisabled) {
+      throw new MulticaApiError(
+        400,
+        'Multica API POST /api/agents/external returned 400: {"code":"external_agent_templates_disabled","error":"external agent templates are not enabled on this server"}',
+        "external_agent_templates_disabled",
+      );
+    }
     this.registrations.push(input);
     let registered = this.registeredSessions.get(input.sessionId);
     if (!registered) {

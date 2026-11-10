@@ -11,26 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countExternalAgentSessions = `-- name: CountExternalAgentSessions :one
-SELECT count(*) FROM external_agent_session
-WHERE workspace_id = $1 AND agent_id = $2 AND revoked_at IS NULL
-`
-
-type CountExternalAgentSessionsParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	AgentID     pgtype.UUID `json:"agent_id"`
-}
-
-// The legacy-token gate needs the number of live sessions before it can decide
-// whether a session-less token names exactly one identity. Revoked sessions do
-// not count: they can no longer receive work.
-func (q *Queries) CountExternalAgentSessions(ctx context.Context, arg CountExternalAgentSessionsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countExternalAgentSessions, arg.WorkspaceID, arg.AgentID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const createExternalAgent = `-- name: CreateExternalAgent :one
 INSERT INTO agent (
     workspace_id, name, description, runtime_mode, runtime_config, visibility,
@@ -680,6 +660,46 @@ func (q *Queries) ListExternalAgentSessionsForRead(ctx context.Context, arg List
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeExternalAgentSession = `-- name: RevokeExternalAgentSession :one
+UPDATE external_agent_session
+SET revoked_at = now(),
+    updated_at = now()
+WHERE id = $1
+  AND agent_id = $2
+  AND workspace_id = $3
+  AND revoked_at IS NULL
+RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at
+`
+
+type RevokeExternalAgentSessionParams struct {
+	ID          pgtype.UUID `json:"id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Revocation is idempotent and scoped to one session: siblings and the agent
+// identity keep working. Auth re-reads this column on every request.
+func (q *Queries) RevokeExternalAgentSession(ctx context.Context, arg RevokeExternalAgentSessionParams) (ExternalAgentSession, error) {
+	row := q.db.QueryRow(ctx, revokeExternalAgentSession, arg.ID, arg.AgentID, arg.WorkspaceID)
+	var i ExternalAgentSession
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.OwnerUserID,
+		&i.AgentID,
+		&i.Provider,
+		&i.HostID,
+		&i.SessionID,
+		&i.DisplayName,
+		&i.Url,
+		&i.DaemonID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }
 
 const revokeExternalAgentToken = `-- name: RevokeExternalAgentToken :one

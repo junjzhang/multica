@@ -113,6 +113,7 @@ func registerAgentSessionBindFlags(cmd *cobra.Command) {
 
 func registerAgentTokenCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().String("expires-at", "", "Expiry as RFC3339 (required)")
+	cmd.Flags().String("external-session", "", "Registered external session id to bind this token to (required when the agent has several sessions)")
 	cmd.Flags().String("save-to", "", "Write the token JSON to this file with mode 0600 (required unless --save-profile or --print-token)")
 	cmd.Flags().String("save-profile", "", "Store the token as this CLI profile's credential (required unless --save-to or --print-token)")
 	cmd.Flags().Bool("print-token", false, "Print the raw token to stdout; prefer --save-to or --save-profile so the secret does not enter terminal or CI logs")
@@ -137,9 +138,10 @@ func registerAgentMailboxAckFlags(cmd *cobra.Command) {
 }
 
 type externalAgentTokenResponse struct {
-	ID        string `json:"id"`
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	ID                string `json:"id"`
+	Token             string `json:"token"`
+	ExpiresAt         string `json:"expires_at"`
+	ExternalSessionID string `json:"external_session_id"`
 }
 
 func runAgentExternalRegister(cmd *cobra.Command, _ []string) error {
@@ -317,11 +319,19 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 
 	var issued externalAgentTokenResponse
 	path := "/api/agents/" + url.PathEscape(args[0]) + "/tokens"
-	if err := client.PostJSON(ctx, path, map[string]any{"expires_at": expiresAt.UTC().Format(time.RFC3339)}, &issued); err != nil {
+	body := map[string]any{"expires_at": expiresAt.UTC().Format(time.RFC3339)}
+	externalSessionID := strings.TrimSpace(flagString(cmd, "external-session"))
+	if externalSessionID != "" {
+		body["external_session_id"] = externalSessionID
+	}
+	if err := client.PostJSON(ctx, path, body, &issued); err != nil {
 		return fmt.Errorf("create agent token: %w", err)
 	}
 	if issued.Token == "" {
 		return fmt.Errorf("create agent token: server response did not include a token")
+	}
+	if externalSessionID != "" && issued.ExternalSessionID != "" && issued.ExternalSessionID != externalSessionID {
+		return fmt.Errorf("create agent token: server bound the credential to session %s, not %s", issued.ExternalSessionID, externalSessionID)
 	}
 
 	if printToken {
@@ -352,6 +362,9 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 			"expires_at":       issued.ExpiresAt,
 			"saved_to_profile": saveProfile,
 		}
+		if issued.ExternalSessionID != "" {
+			metadata["external_session_id"] = issued.ExternalSessionID
+		}
 		if flagString(cmd, "output") == "table" {
 			fmt.Printf("Token %s saved to profile %s (expires %s)\n", issued.ID, saveProfile, issued.ExpiresAt)
 			return nil
@@ -367,6 +380,9 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 		"server_url":   resolveServerURL(cmd),
 		"workspace_id": resolveWorkspaceID(cmd),
 	}
+	if issued.ExternalSessionID != "" {
+		payload["external_session_id"] = issued.ExternalSessionID
+	}
 	if err := writeSecretFile(saveTo, payload, flagBool(cmd, "force")); err != nil {
 		return fmt.Errorf("token %s was issued but could not be saved: %w; revoke it with `multica agent token revoke %s %s` if you cannot recover it", issued.ID, err, args[0], issued.ID)
 	}
@@ -375,6 +391,9 @@ func runAgentTokenCreate(cmd *cobra.Command, args []string) error {
 		"id":         issued.ID,
 		"expires_at": issued.ExpiresAt,
 		"saved_to":   saveTo,
+	}
+	if issued.ExternalSessionID != "" {
+		metadata["external_session_id"] = issued.ExternalSessionID
 	}
 	if flagString(cmd, "output") == "table" {
 		fmt.Printf("Token %s saved to %s (expires %s)\n", issued.ID, saveTo, issued.ExpiresAt)

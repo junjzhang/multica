@@ -370,10 +370,14 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
 
 function registrationFor(host: HostSession, daemonId: string): RegisterExternalAgentInput {
   const displayName = truncate(host.title?.trim() || host.sessionId, 200);
-  // The template is the host; its name must not include the session title.
+  // name stays the per-session name: a legacy server (or a server with
+  // template writes still closed) ignores template/template_name and would
+  // otherwise collide on the second session of one host.
+  const name = truncate(`${host.hostLabel || "Paseo"} · ${displayName}`, 120);
   const templateName = truncate(`Paseo · ${host.hostLabel || host.hostId}`, 120);
   return {
-    name: templateName,
+    name,
+    templateName,
     hostId: host.hostId,
     sessionId: host.sessionId,
     displayName,
@@ -400,12 +404,10 @@ async function registerSession(
   try {
     return await api.registerExternalAgent(credential, input);
   } catch (error) {
-    if (
-      error instanceof MulticaApiError &&
-      error.status === 400 &&
-      error.message.includes("external agent templates are not enabled")
-    ) {
-      return api.registerExternalAgent(credential, { ...input, template: false });
+    // The server tags this rejection with a stable code; prose is not a
+    // contract. Only this documented rollout gate falls back to legacy.
+    if (error instanceof MulticaApiError && error.code === "external_agent_templates_disabled") {
+      return api.registerExternalAgent(credential, { ...input, template: false, templateName: undefined });
     }
     throw error;
   }

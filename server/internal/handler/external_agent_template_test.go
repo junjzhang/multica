@@ -19,6 +19,7 @@ import (
 
 type templateRegistrationResponse struct {
 	ID               string                         `json:"id"`
+	Name             string                         `json:"name"`
 	ExternalSession  *ExternalSessionResponse       `json:"external_session"`
 	ExternalTemplate *ExternalAgentTemplateResponse `json:"external_template"`
 }
@@ -353,5 +354,160 @@ func TestLegacyWideTokenIsGatedForSessionSensitiveOperations(t *testing.T) {
 	rec = serveAuthenticated(t, legacyToken, http.HandlerFunc(testHandler.ListAgentMailbox), http.MethodGet, "/api/agents/"+agentID+"/mailbox", nil, map[string]string{"id": agentID}, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("ambiguous legacy token = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A template display name and a session title are separate: the client keeps
+// the old per-session name so a legacy server keeps minting distinct agents.
+func TestExternalTemplateKeepsSessionNameSeparate(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemonID := "template-name-daemon-" + suffix
+	dbfx.Runtime(t, "Template name daemon "+suffix, testutil.Cols{"daemon_id": daemonID})
+	hostID := "template-name-host-" + suffix
+	templateName := "Paseo · Workstation " + suffix
+
+	body := templateBody("Workstation · Fix the build", hostID, "session-"+suffix, "Fix the build", daemonID)
+	body["template_name"] = templateName
+	code, resp, raw := registerExternal(t, h, body)
+	if code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, raw)
+	}
+	defer cleanupExternalAgent(t, resp.ID)
+	if resp.Name != templateName {
+		t.Fatalf("agent name = %q, want template name %q", resp.Name, templateName)
+	}
+	if resp.ExternalTemplate == nil || resp.ExternalTemplate.Name != templateName {
+		t.Fatalf("external_template = %+v, want name %q", resp.ExternalTemplate, templateName)
+	}
+	if resp.ExternalSession == nil || resp.ExternalSession.DisplayName != "Fix the build" {
+		t.Fatalf("session title = %+v, want the session's own name", resp.ExternalSession)
+	}
+}
+
+// Three hosts that share a label still get distinct template names: the
+// suffix is random and grows until the workspace-unique name fits.
+func TestExternalTemplateNameSuffixGrowsForSameLabelHosts(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemonID := "template-suffix-daemon-" + suffix
+	dbfx.Runtime(t, "Template suffix daemon "+suffix, testutil.Cols{"daemon_id": daemonID})
+	base := "Paseo · Workstation " + suffix
+
+	names := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		hostID := fmt.Sprintf("suffix-host-%d-%s", i, suffix)
+		body := templateBody("Workstation "+suffix, hostID, fmt.Sprintf("suffix-session-%d-%s", i, suffix), "Session", daemonID)
+		body["template_name"] = base
+		code, resp, raw := registerExternal(t, h, body)
+		if code != http.StatusCreated {
+			t.Fatalf("host %d registration: %d %s", i, code, raw)
+		}
+		if resp.ExternalTemplate == nil || !strings.HasPrefix(resp.ExternalTemplate.Name, base) {
+			t.Fatalf("host %d template = %+v, want name prefixed %q", i, resp.ExternalTemplate, base)
+		}
+		names = append(names, resp.ExternalTemplate.Name)
+		cleanupExternalAgent(t, resp.ID)
+	}
+	seen := map[string]bool{}
+	for _, name := range names {
+		if seen[name] {
+			t.Fatalf("template names repeat: %v", names)
+		}
+		seen[name] = true
+	}
+}
+
+// A session registered to a template is returned by the ordinary agent read,
+// so `multica session status` can show the host identity.
+func TestGetAgentReturnsExternalTemplate(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemonID := "template-read-daemon-" + suffix
+	dbfx.Runtime(t, "Template read daemon "+suffix, testutil.Cols{"daemon_id": daemonID})
+	hostID := "template-read-host-" + suffix
+	code, resp, raw := registerExternal(t, h, templateBody("Paseo · Read "+suffix, hostID, "read-session-"+suffix, "Read", daemonID))
+	if code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, raw)
+	}
+	defer cleanupExternalAgent(t, resp.ID)
+
+	rec := httptest.NewRecorder()
+	testHandler.GetAgent(rec, withURLParam(newRequest(http.MethodGet, "/api/agents/"+resp.ID, nil), "id", resp.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET agent: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	var got ExternalAgentTemplateResponse
+	if raw, ok := body["external_template"]; !ok || json.Unmarshal(raw, &got) != nil {
+		t.Fatalf("GET agent external_template = %s", string(body["external_template"]))
+	}
+	if got.ID != resp.ID || got.HostID != hostID {
+		t.Fatalf("GET agent external_template = %+v", got)
+	}
+}
+
+// Revoking one session kills only credentials bound to it; its sibling keeps
+// working and the agent identity is untouched.
+func TestExternalSessionRevocationInvalidatesOnlyItsCredential(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agentID, sessionA, owner := externalAgentFixture(t, "Session revocation", "revocation-daemon")
+	defer cleanupExternalAgent(t, agentID)
+	sessionB := dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id": testWorkspaceID, "agent_id": agentID, "owner_user_id": owner,
+		"provider": "paseo", "host_id": "revocation-second", "session_id": "revocation-second-session", "daemon_id": "revocation-daemon",
+	})
+	tokenA := externalSessionTokenFixture(t, agentID, sessionA, owner, time.Now().Add(time.Hour))
+	tokenB := externalSessionTokenFixture(t, agentID, sessionB, owner, time.Now().Add(time.Hour))
+
+	revoke := func(sessionID string) int {
+		rec := httptest.NewRecorder()
+		testHandler.RevokeExternalAgentSession(rec, testutil.WithURLParams(newRequest(http.MethodDelete, "/api/agents/"+agentID+"/sessions/"+sessionID, nil), "id", agentID, "sessionId", sessionID))
+		return rec.Code
+	}
+	if code := revoke(sessionA); code != http.StatusNoContent {
+		t.Fatalf("revoke session A: %d", code)
+	}
+	if code := revoke(sessionA); code != http.StatusNoContent {
+		t.Fatalf("repeat revoke: %d", code)
+	}
+	list := func(token string) int {
+		rec := serveAuthenticated(t, token, http.HandlerFunc(testHandler.ListAgentMailbox), http.MethodGet, "/api/agents/"+agentID+"/mailbox", nil, map[string]string{"id": agentID}, nil)
+		return rec.Code
+	}
+	if code := list(tokenA); code != http.StatusUnauthorized {
+		t.Fatalf("revoked session credential = %d, want 401", code)
+	}
+	if code := list(tokenB); code != http.StatusOK {
+		t.Fatalf("sibling session credential = %d, want 200", code)
+	}
+}
+
+// A template is one host; another host's session cannot be attached through
+// agent_id.
+func TestExternalRegistrationRejectsForeignHostSession(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemonID := "template-foreign-daemon-" + suffix
+	dbfx.Runtime(t, "Template foreign daemon "+suffix, testutil.Cols{"daemon_id": daemonID})
+	hostID := "template-foreign-host-" + suffix
+	code, first, raw := registerExternal(t, h, templateBody("Paseo · Foreign "+suffix, hostID, "foreign-session-"+suffix, "Foreign", daemonID))
+	if code != http.StatusCreated {
+		t.Fatalf("register template: %d %s", code, raw)
+	}
+	defer cleanupExternalAgent(t, first.ID)
+
+	code, _, raw = registerExternal(t, h, map[string]any{
+		"agent_id":         first.ID,
+		"name":             "Other host",
+		"external_session": externalSessionBody("another-host-"+suffix, "another-session-"+suffix, "Other", daemonID),
+	})
+	if code != http.StatusBadRequest || !strings.Contains(raw, "different host template") {
+		t.Fatalf("foreign host attach = %d %s, want 400", code, raw)
 	}
 }
