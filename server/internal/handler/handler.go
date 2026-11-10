@@ -83,6 +83,13 @@ type Config struct {
 	// decides who may create a workspace; it grants no cross-workspace
 	// visibility or admin rights (#9400).
 	WorkspaceCreationAllowedEmails []string
+	// ExternalAgentTemplatesEnabled opens template-mode external registration:
+	// new host sessions attach to one template keyed by (workspace, owner,
+	// provider, host instance). Off by default so merging a host identity is a
+	// deliberate rollout step, not a side effect of deploying. Legacy
+	// per-session registration keeps its existing behavior either way.
+	// Populated from MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED.
+	ExternalAgentTemplatesEnabled bool
 	// VCSIntegrationEnabled gates the self-hosted Git provider integration
 	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
 	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is

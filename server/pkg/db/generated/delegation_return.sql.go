@@ -950,7 +950,7 @@ func (q *Queries) ListRunReturnIntents(ctx context.Context, taskID pgtype.UUID) 
 }
 
 const lockAgentForDelegation = `-- name: LockAgentForDelegation :one
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind FROM agent WHERE id = $1 AND workspace_id = $2 FOR SHARE
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind, external_provider, external_host_id FROM agent WHERE id = $1 AND workspace_id = $2 FOR SHARE
 `
 
 type LockAgentForDelegationParams struct {
@@ -995,6 +995,8 @@ func (q *Queries) LockAgentForDelegation(ctx context.Context, arg LockAgentForDe
 		&i.ServiceTier,
 		&i.ConversationStarters,
 		&i.ExecutionKind,
+		&i.ExternalProvider,
+		&i.ExternalHostID,
 	)
 	return i, err
 }

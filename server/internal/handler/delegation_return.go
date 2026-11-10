@@ -44,6 +44,12 @@ func (h *Handler) resolveDelegationAddress(r *http.Request, workspaceID, actorTy
 	case "task_token":
 		return delegation.ResolveManaged(r.Context(), h.Queries, workspaceID, actorID, r.Header.Get("X-Task-ID"))
 	case "external_agent":
+		// A session-bound credential is addressed by its own session, never by
+		// a header the caller chose. Legacy unbound tokens keep the explicit
+		// header so existing sessions keep working until they are reissued.
+		if sessionID, ok := externalActorSessionID(r); ok {
+			return delegation.ResolveExternal(r.Context(), h.Queries, workspaceID, actorID, util.UUIDToString(sessionID))
+		}
 		return delegation.ResolveExternal(r.Context(), h.Queries, workspaceID, actorID, r.Header.Get(ReturnSessionHeader))
 	default:
 		return delegation.Address{}, delegation.ErrReturnMissing

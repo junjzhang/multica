@@ -28,6 +28,10 @@ SET processing_status = CASE
 WHERE id = $3
   AND workspace_id = $4
   AND recipient_agent_id = $5
+  AND (
+    $6::uuid IS NULL
+    OR target_session_id = $6::uuid
+  )
 RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
 `
 
@@ -37,6 +41,7 @@ type AckAgentMailboxProcessingParams struct {
 	ID               pgtype.UUID `json:"id"`
 	WorkspaceID      pgtype.UUID `json:"workspace_id"`
 	RecipientAgentID pgtype.UUID `json:"recipient_agent_id"`
+	TargetSessionID  pgtype.UUID `json:"target_session_id"`
 }
 
 // Monotonic processing state: read can never undo handled, and handled is
@@ -49,6 +54,7 @@ func (q *Queries) AckAgentMailboxProcessing(ctx context.Context, arg AckAgentMai
 		arg.ID,
 		arg.WorkspaceID,
 		arg.RecipientAgentID,
+		arg.TargetSessionID,
 	)
 	var i AgentMailboxMessage
 	err := row.Scan(
@@ -838,21 +844,26 @@ WHERE recipient_agent_id = $1
   AND workspace_id = $2
   AND source_type = $3
   AND (
-    $4::timestamptz IS NULL
-    OR created_at > $4::timestamptz
+    $4::uuid IS NULL
+    OR target_session_id = $4::uuid
+  )
+  AND (
+    $5::timestamptz IS NULL
+    OR created_at > $5::timestamptz
     OR (
-        created_at = $4::timestamptz
-        AND id > $5::uuid
+        created_at = $5::timestamptz
+        AND id > $6::uuid
     )
   )
 ORDER BY created_at ASC, id ASC
-LIMIT $6
+LIMIT $7
 `
 
 type ListAgentMailboxMessagesParams struct {
 	RecipientAgentID pgtype.UUID        `json:"recipient_agent_id"`
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
 	SourceType       string             `json:"source_type"`
+	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
 	AfterCreatedAt   pgtype.Timestamptz `json:"after_created_at"`
 	AfterID          pgtype.UUID        `json:"after_id"`
 	PageLimit        int32              `json:"page_limit"`
@@ -869,6 +880,7 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 		arg.RecipientAgentID,
 		arg.WorkspaceID,
 		arg.SourceType,
+		arg.TargetSessionID,
 		arg.AfterCreatedAt,
 		arg.AfterID,
 		arg.PageLimit,
@@ -1057,7 +1069,7 @@ func (q *Queries) ListConsumedResultObligations(ctx context.Context, taskID pgty
 }
 
 const listIssueExternalParticipants = `-- name: ListIssueExternalParticipants :many
-SELECT a.id, a.workspace_id, a.name, a.avatar_url, a.runtime_mode, a.runtime_config, a.visibility, a.status, a.max_concurrent_tasks, a.owner_id, a.created_at, a.updated_at, a.description, a.runtime_id, a.instructions, a.archived_at, a.archived_by, a.custom_env, a.custom_args, a.mcp_config, a.model, a.thinking_level, a.composio_toolkit_allowlist, a.permission_mode, a.kind, a.system_key, a.disabled_runtime_skills, a.service_tier, a.conversation_starters, a.execution_kind FROM agent a
+SELECT a.id, a.workspace_id, a.name, a.avatar_url, a.runtime_mode, a.runtime_config, a.visibility, a.status, a.max_concurrent_tasks, a.owner_id, a.created_at, a.updated_at, a.description, a.runtime_id, a.instructions, a.archived_at, a.archived_by, a.custom_env, a.custom_args, a.mcp_config, a.model, a.thinking_level, a.composio_toolkit_allowlist, a.permission_mode, a.kind, a.system_key, a.disabled_runtime_skills, a.service_tier, a.conversation_starters, a.execution_kind, a.external_provider, a.external_host_id FROM agent a
 WHERE a.workspace_id = $1
   AND a.execution_kind = 'external'
   AND (
@@ -1138,6 +1150,8 @@ func (q *Queries) ListIssueExternalParticipants(ctx context.Context, arg ListIss
 			&i.ServiceTier,
 			&i.ConversationStarters,
 			&i.ExecutionKind,
+			&i.ExternalProvider,
+			&i.ExternalHostID,
 		); err != nil {
 			return nil, err
 		}

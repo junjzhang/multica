@@ -98,6 +98,11 @@ type createExternalAgentRequest struct {
 	Name            string               `json:"name"`
 	ExternalSession externalSessionInput `json:"external_session"`
 	PermissionMode  *string              `json:"permission_mode"`
+	// Template attaches a NEW host session to the host template keyed by
+	// (workspace, owner, provider, host instance) instead of minting one agent
+	// per session. Existing sessions are immutable: a repeat connect returns
+	// its original agent even when it is a legacy per-session agent.
+	Template bool `json:"template,omitempty"`
 }
 
 var externalSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
@@ -189,6 +194,18 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(req.Name)
 	if req.AgentID == "" && name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Template && req.AgentID != "" {
+		writeError(w, http.StatusBadRequest, "agent_id cannot be combined with template registration")
+		return
+	}
+	if req.Template && !h.cfg.ExternalAgentTemplatesEnabled {
+		// Template writes are a rollout switch, not a silent capability. A
+		// template-capable client must know it is talking to a server that
+		// has not opened them yet, so the write is refused before anything
+		// else is validated or created.
+		writeError(w, http.StatusBadRequest, "external agent templates are not enabled on this server")
 		return
 	}
 	if utf8.RuneCountInString(name) > maxExternalAgentNameLength {
@@ -310,6 +327,22 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The host template is resolved BEFORE the session transaction. A unique
+	// violation inside a transaction aborts it, and the losing side of a
+	// concurrent first connect must be able to re-read the winner's row in the
+	// same call; an auto-commit insert leaves the connection usable. The
+	// template row is an idempotent host identity, so it can safely outlive a
+	// session write that is later refused.
+	var resolvedTemplate db.Agent
+	templateCreated := false
+	if req.Template {
+		resolvedTemplate, templateCreated, err = h.resolveExternalTemplate(r.Context(), h.Queries, wsUUID, parseUUID(ownerID), session.Provider, session.HostID, name, permissionMode, visibility)
+		if err != nil {
+			h.writeExternalTemplateError(w, err)
+			return
+		}
+	}
+
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start external agent create")
@@ -340,7 +373,11 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created := targetAgent
-	if !created.ID.Valid {
+	if req.Template {
+		if !created.ID.Valid {
+			created = resolvedTemplate
+		}
+	} else if !created.ID.Valid {
 		created, err = qtx.CreateExternalAgent(r.Context(), db.CreateExternalAgentParams{
 			WorkspaceID:    wsUUID,
 			Name:           name,
@@ -391,7 +428,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create external session")
 		return
 	}
-	if permissionMode == "public_to" && !targetAgent.ID.Valid {
+	if permissionMode == "public_to" && !targetAgent.ID.Valid && (!req.Template || templateCreated) {
 		if err := replaceInvocationTargetsWithQueries(r.Context(), qtx, created.ID, parseUUID(ownerID), []targetSpec{{
 			targetType: invocationTargetWorkspace,
 			targetID:   wsUUID,
@@ -406,6 +443,7 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.agentToResponse(created)
+	resp.ExternalTemplate = externalTemplateToResponse(created)
 	resp.ExternalSession = externalSessionToResponse(createdSession)
 	enrichInvocationTargets := func(resp *AgentResponse) {
 		if err := h.enrichAgentResponseWithTargets(r.Context(), resp, created.ID); err != nil {
@@ -446,6 +484,7 @@ func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	resp := h.agentToResponse(agent)
+	resp.ExternalTemplate = externalTemplateToResponse(agent)
 	resp.ExternalSession = externalSessionToResponse(updatedSession)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, agent.ID); err != nil {
 		resp.InvocationTargets = []AgentInvocationTargetDTO{}
@@ -455,12 +494,18 @@ func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Requ
 
 type createExternalAgentTokenRequest struct {
 	ExpiresAt string `json:"expires_at"`
+	// ExternalSessionID names the exact registered session this credential
+	// acts for. It is required when the target agent has more than one live
+	// session; the single-session case may omit it because the server can prove
+	// the identity it names.
+	ExternalSessionID string `json:"external_session_id,omitempty"`
 }
 
 type createExternalAgentTokenResponse struct {
-	ID        string `json:"id"`
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	ID                string `json:"id"`
+	Token             string `json:"token"`
+	ExpiresAt         string `json:"expires_at"`
+	ExternalSessionID string `json:"external_session_id,omitempty"`
 }
 
 const maxExternalAgentTokenLifetime = 366 * 24 * time.Hour
@@ -496,6 +541,10 @@ func (h *Handler) CreateExternalAgentToken(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "expires_at is too far in the future")
 		return
 	}
+	sessionID, ok := h.resolveTokenSession(w, r, agent, req.ExternalSessionID)
+	if !ok {
+		return
+	}
 	raw, err := auth.GenerateExternalAgentToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
@@ -506,21 +555,23 @@ func (h *Handler) CreateExternalAgentToken(w http.ResponseWriter, r *http.Reques
 	// must not lend the admin's identity or invocation rights to the external
 	// session; the auth path re-checks the owner's membership every request.
 	created, err := h.Queries.CreateExternalAgentToken(r.Context(), db.CreateExternalAgentTokenParams{
-		ID:          dbid.NewV7(),
-		AgentID:     agent.ID,
-		WorkspaceID: agent.WorkspaceID,
-		OwnerUserID: agent.OwnerID,
-		TokenHash:   auth.HashToken(raw),
-		ExpiresAt:   pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
+		ID:                dbid.NewV7(),
+		AgentID:           agent.ID,
+		WorkspaceID:       agent.WorkspaceID,
+		OwnerUserID:       agent.OwnerID,
+		TokenHash:         auth.HashToken(raw),
+		ExpiresAt:         pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
+		ExternalSessionID: sessionID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create token")
 		return
 	}
 	writeJSON(w, http.StatusCreated, createExternalAgentTokenResponse{
-		ID:        uuidToString(created.ID),
-		Token:     raw,
-		ExpiresAt: timestampToString(created.ExpiresAt),
+		ID:                uuidToString(created.ID),
+		Token:             raw,
+		ExpiresAt:         timestampToString(created.ExpiresAt),
+		ExternalSessionID: uuidToString(created.ExternalSessionID),
 	})
 }
 

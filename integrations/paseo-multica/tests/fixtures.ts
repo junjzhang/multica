@@ -42,7 +42,7 @@ export async function makeHome(): Promise<string> {
 export class FakeApi implements MulticaApi {
   readonly registrations: RegisterExternalAgentInput[] = [];
   readonly credentialCalls: ApiCredential[] = [];
-  readonly tokensRequested: { agentId: string; expiresAt: string }[] = [];
+  readonly tokensRequested: { agentId: string; sessionId: string; expiresAt: string }[] = [];
   readonly revoked: { agentId: string; tokenId: string }[] = [];
   readonly verified: { agentId: string; token: string }[] = [];
   verifyCalls = 0;
@@ -52,6 +52,7 @@ export class FakeApi implements MulticaApi {
   revokeError: Error | null = null;
   private tokenSequence = 0;
   private readonly tokenSubjects = new Map<string, string>();
+  private readonly registeredSessions = new Map<string, string>();
 
   async registerExternalAgent(
     credential: ApiCredential,
@@ -60,17 +61,28 @@ export class FakeApi implements MulticaApi {
     this.credentialCalls.push(credential);
     if (this.registerError) throw this.registerError;
     this.registrations.push(input);
-    return { id: input.sessionId === SESSION_B ? AGENT_B : AGENT_A, name: input.name };
+    let registered = this.registeredSessions.get(input.sessionId);
+    if (!registered) {
+      registered = randomUUID();
+      this.registeredSessions.set(input.sessionId, registered);
+    }
+    return {
+      id: input.sessionId === SESSION_B ? AGENT_B : AGENT_A,
+      name: input.name,
+      sessionId: registered,
+      ...(input.template ? { templateId: randomUUID() } : {}),
+    };
   }
 
   async createExternalAgentToken(
     credential: ApiCredential,
     agentId: string,
+    externalSessionId: string,
     expiresAt: string,
   ): Promise<IssuedToken> {
     this.credentialCalls.push(credential);
     if (this.tokenError) throw this.tokenError;
-    this.tokensRequested.push({ agentId, expiresAt });
+    this.tokensRequested.push({ agentId, sessionId: externalSessionId, expiresAt });
     this.tokenSequence += 1;
     const token = this.tokenSequence === 1 ? EXTERNAL_TOKEN : `${EXTERNAL_TOKEN}-${this.tokenSequence}`;
     this.tokenSubjects.set(token, agentId);

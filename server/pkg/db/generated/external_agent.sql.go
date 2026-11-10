@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countExternalAgentSessions = `-- name: CountExternalAgentSessions :one
+SELECT count(*) FROM external_agent_session
+WHERE workspace_id = $1 AND agent_id = $2 AND revoked_at IS NULL
+`
+
+type CountExternalAgentSessionsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+}
+
+// The legacy-token gate needs the number of live sessions before it can decide
+// whether a session-less token names exactly one identity. Revoked sessions do
+// not count: they can no longer receive work.
+func (q *Queries) CountExternalAgentSessions(ctx context.Context, arg CountExternalAgentSessionsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countExternalAgentSessions, arg.WorkspaceID, arg.AgentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createExternalAgent = `-- name: CreateExternalAgent :one
 INSERT INTO agent (
     workspace_id, name, description, runtime_mode, runtime_config, visibility,
@@ -21,7 +41,7 @@ INSERT INTO agent (
     $4, 1, $5, '', '{}'::jsonb,
     '[]'::jsonb, NULL, 'external', 'user'
 )
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind, external_provider, external_host_id
 `
 
 type CreateExternalAgentParams struct {
@@ -77,6 +97,8 @@ func (q *Queries) CreateExternalAgent(ctx context.Context, arg CreateExternalAge
 		&i.ServiceTier,
 		&i.ConversationStarters,
 		&i.ExecutionKind,
+		&i.ExternalProvider,
+		&i.ExternalHostID,
 	)
 	return i, err
 }
@@ -91,7 +113,7 @@ INSERT INTO external_agent_session (
     $10
 )
 ON CONFLICT (workspace_id, owner_user_id, provider, host_id, session_id) DO NOTHING
-RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at
+RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at
 `
 
 type CreateExternalAgentSessionParams struct {
@@ -137,29 +159,111 @@ func (q *Queries) CreateExternalAgentSession(ctx context.Context, arg CreateExte
 		&i.DaemonID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const createExternalAgentTemplate = `-- name: CreateExternalAgentTemplate :one
+INSERT INTO agent (
+    workspace_id, name, description, runtime_mode, runtime_config, visibility,
+    permission_mode, max_concurrent_tasks, owner_id, instructions, custom_env,
+    custom_args, mcp_config, execution_kind, kind,
+    external_provider, external_host_id
+) VALUES (
+    $1, $2, '', 'local', '{}'::jsonb, $3,
+    $4, 1, $5, '', '{}'::jsonb,
+    '[]'::jsonb, NULL, 'external', 'user',
+    $6, $7
+)
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind, external_provider, external_host_id
+`
+
+type CreateExternalAgentTemplateParams struct {
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	Name             string      `json:"name"`
+	Visibility       string      `json:"visibility"`
+	PermissionMode   string      `json:"permission_mode"`
+	OwnerID          pgtype.UUID `json:"owner_id"`
+	ExternalProvider pgtype.Text `json:"external_provider"`
+	ExternalHostID   pgtype.Text `json:"external_host_id"`
+}
+
+// A template is the stable host identity: sessions of this host attach to it
+// instead of minting one agent each. The key columns are part of the unique
+// template index; callers that lose a concurrent insert re-read by key.
+func (q *Queries) CreateExternalAgentTemplate(ctx context.Context, arg CreateExternalAgentTemplateParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, createExternalAgentTemplate,
+		arg.WorkspaceID,
+		arg.Name,
+		arg.Visibility,
+		arg.PermissionMode,
+		arg.OwnerID,
+		arg.ExternalProvider,
+		arg.ExternalHostID,
+	)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.ThinkingLevel,
+		&i.ComposioToolkitAllowlist,
+		&i.PermissionMode,
+		&i.Kind,
+		&i.SystemKey,
+		&i.DisabledRuntimeSkills,
+		&i.ServiceTier,
+		&i.ConversationStarters,
+		&i.ExecutionKind,
+		&i.ExternalProvider,
+		&i.ExternalHostID,
 	)
 	return i, err
 }
 
 const createExternalAgentToken = `-- name: CreateExternalAgentToken :one
 INSERT INTO external_agent_token (
-    id, agent_id, workspace_id, owner_user_id, token_hash, expires_at
+    id, agent_id, workspace_id, owner_user_id, token_hash, expires_at,
+    external_session_id
 ) VALUES (
     COALESCE($1::uuid, gen_random_uuid()), $2, $3,
-    $4, $5, $6
+    $4, $5, $6,
+    $7
 )
-RETURNING id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at
+RETURNING id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at, external_session_id
 `
 
 type CreateExternalAgentTokenParams struct {
-	ID          pgtype.UUID        `json:"id"`
-	AgentID     pgtype.UUID        `json:"agent_id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
-	OwnerUserID pgtype.UUID        `json:"owner_user_id"`
-	TokenHash   string             `json:"token_hash"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID                pgtype.UUID        `json:"id"`
+	AgentID           pgtype.UUID        `json:"agent_id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID       pgtype.UUID        `json:"owner_user_id"`
+	TokenHash         string             `json:"token_hash"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
 }
 
+// external_session_id is the exact registered session the credential acts for.
+// Legacy tokens keep NULL; the auth path re-checks the session on every use.
 func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExternalAgentTokenParams) (ExternalAgentToken, error) {
 	row := q.db.QueryRow(ctx, createExternalAgentToken,
 		arg.ID,
@@ -168,6 +272,7 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 		arg.OwnerUserID,
 		arg.TokenHash,
 		arg.ExpiresAt,
+		arg.ExternalSessionID,
 	)
 	var i ExternalAgentToken
 	err := row.Scan(
@@ -179,12 +284,13 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.ExternalSessionID,
 	)
 	return i, err
 }
 
 const getExternalAgentSessionByAgentID = `-- name: GetExternalAgentSessionByAgentID :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session
 WHERE agent_id = $1
 ORDER BY created_at ASC, id ASC
 LIMIT 1
@@ -209,12 +315,13 @@ func (q *Queries) GetExternalAgentSessionByAgentID(ctx context.Context, agentID 
 		&i.DaemonID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const getExternalAgentSessionByID = `-- name: GetExternalAgentSessionByID :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session WHERE id = $1 AND workspace_id = $2
 `
 
 type GetExternalAgentSessionByIDParams struct {
@@ -238,12 +345,13 @@ func (q *Queries) GetExternalAgentSessionByID(ctx context.Context, arg GetExtern
 		&i.DaemonID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const getExternalAgentSessionByIdentity = `-- name: GetExternalAgentSessionByIdentity :one
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session
 WHERE workspace_id = $1
   AND owner_user_id = $2
   AND provider = $3
@@ -281,12 +389,73 @@ func (q *Queries) GetExternalAgentSessionByIdentity(ctx context.Context, arg Get
 		&i.DaemonID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getExternalAgentTemplateByKey = `-- name: GetExternalAgentTemplateByKey :one
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind, external_provider, external_host_id FROM agent
+WHERE workspace_id = $1
+  AND owner_id = $2
+  AND external_provider = $3
+  AND external_host_id = $4
+`
+
+type GetExternalAgentTemplateByKeyParams struct {
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	OwnerID          pgtype.UUID `json:"owner_id"`
+	ExternalProvider pgtype.Text `json:"external_provider"`
+	ExternalHostID   pgtype.Text `json:"external_host_id"`
+}
+
+func (q *Queries) GetExternalAgentTemplateByKey(ctx context.Context, arg GetExternalAgentTemplateByKeyParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, getExternalAgentTemplateByKey,
+		arg.WorkspaceID,
+		arg.OwnerID,
+		arg.ExternalProvider,
+		arg.ExternalHostID,
+	)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.ThinkingLevel,
+		&i.ComposioToolkitAllowlist,
+		&i.PermissionMode,
+		&i.Kind,
+		&i.SystemKey,
+		&i.DisabledRuntimeSkills,
+		&i.ServiceTier,
+		&i.ConversationStarters,
+		&i.ExecutionKind,
+		&i.ExternalProvider,
+		&i.ExternalHostID,
 	)
 	return i, err
 }
 
 const getExternalAgentTokenByHash = `-- name: GetExternalAgentTokenByHash :one
-SELECT id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at FROM external_agent_token
+SELECT id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at, external_session_id FROM external_agent_token
 WHERE token_hash = $1
   AND revoked_at IS NULL
   AND expires_at > now()
@@ -304,12 +473,13 @@ func (q *Queries) GetExternalAgentTokenByHash(ctx context.Context, tokenHash str
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.ExternalSessionID,
 	)
 	return i, err
 }
 
 const listExternalAgentSessionsByAgentIDs = `-- name: ListExternalAgentSessionsByAgentIDs :many
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE agent_id = ANY($1::uuid[])
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session WHERE agent_id = ANY($1::uuid[])
 `
 
 func (q *Queries) ListExternalAgentSessionsByAgentIDs(ctx context.Context, agentIds []pgtype.UUID) ([]ExternalAgentSession, error) {
@@ -334,6 +504,7 @@ func (q *Queries) ListExternalAgentSessionsByAgentIDs(ctx context.Context, agent
 			&i.DaemonID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -346,7 +517,7 @@ func (q *Queries) ListExternalAgentSessionsByAgentIDs(ctx context.Context, agent
 }
 
 const listExternalAgentSessionsByHostSession = `-- name: ListExternalAgentSessionsByHostSession :many
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session
 WHERE workspace_id = $1
   AND agent_id = $2
   AND session_id = $3
@@ -385,6 +556,7 @@ func (q *Queries) ListExternalAgentSessionsByHostSession(ctx context.Context, ar
 			&i.DaemonID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -397,7 +569,7 @@ func (q *Queries) ListExternalAgentSessionsByHostSession(ctx context.Context, ar
 }
 
 const listExternalAgentSessionsByIDs = `-- name: ListExternalAgentSessionsByIDs :many
-SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at FROM external_agent_session WHERE id = ANY($1::uuid[])
+SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session WHERE id = ANY($1::uuid[])
 `
 
 func (q *Queries) ListExternalAgentSessionsByIDs(ctx context.Context, ids []pgtype.UUID) ([]ExternalAgentSession, error) {
@@ -422,6 +594,7 @@ func (q *Queries) ListExternalAgentSessionsByIDs(ctx context.Context, ids []pgty
 			&i.DaemonID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -434,7 +607,7 @@ func (q *Queries) ListExternalAgentSessionsByIDs(ctx context.Context, ids []pgty
 }
 
 const listExternalAgentSessionsForRead = `-- name: ListExternalAgentSessionsForRead :many
-SELECT s.id, s.workspace_id, s.owner_user_id, s.agent_id, s.provider, s.host_id, s.session_id, s.display_name, s.url, s.daemon_id, s.created_at, s.updated_at,
+SELECT s.id, s.workspace_id, s.owner_user_id, s.agent_id, s.provider, s.host_id, s.session_id, s.display_name, s.url, s.daemon_id, s.created_at, s.updated_at, s.revoked_at,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
        EXISTS (
            SELECT 1 FROM member m
@@ -464,6 +637,7 @@ type ListExternalAgentSessionsForReadRow struct {
 	DaemonID      string             `json:"daemon_id"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
 	AgentArchived bool               `json:"agent_archived"`
 	OwnerIsMember bool               `json:"owner_is_member"`
 }
@@ -494,6 +668,7 @@ func (q *Queries) ListExternalAgentSessionsForRead(ctx context.Context, arg List
 			&i.DaemonID,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RevokedAt,
 			&i.AgentArchived,
 			&i.OwnerIsMember,
 		); err != nil {
@@ -514,7 +689,7 @@ WHERE id = $1
   AND agent_id = $2
   AND workspace_id = $3
   AND revoked_at IS NULL
-RETURNING id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at
+RETURNING id, agent_id, workspace_id, owner_user_id, token_hash, expires_at, revoked_at, created_at, external_session_id
 `
 
 type RevokeExternalAgentTokenParams struct {
@@ -535,6 +710,7 @@ func (q *Queries) RevokeExternalAgentToken(ctx context.Context, arg RevokeExtern
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.ExternalSessionID,
 	)
 	return i, err
 }
@@ -546,7 +722,7 @@ SET display_name = $1,
     daemon_id = $3,
     updated_at = now()
 WHERE id = $4 AND workspace_id = $5
-RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at
+RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at
 `
 
 type UpdateExternalAgentSessionProfileParams struct {
@@ -583,6 +759,7 @@ func (q *Queries) UpdateExternalAgentSessionProfile(ctx context.Context, arg Upd
 		&i.DaemonID,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }

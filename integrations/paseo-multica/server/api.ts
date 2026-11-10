@@ -15,11 +15,20 @@ export interface RegisterExternalAgentInput {
   displayName: string;
   url: string;
   daemonId: string;
+  /**
+   * Ask the server to attach a new session to the host template instead of
+   * minting one agent per session. Servers that have not opened template
+   * writes reject it; the caller falls back to legacy registration.
+   */
+  template?: boolean;
 }
 
 export interface ExternalAgentRegistration {
   id: string;
   name: string;
+  /** Registered session UUID the issued credential will act for. */
+  sessionId: string;
+  templateId?: string;
 }
 
 export interface IssuedToken {
@@ -36,6 +45,7 @@ export interface MulticaApi {
   createExternalAgentToken(
     credential: ApiCredential,
     agentId: string,
+    externalSessionId: string,
     expiresAt: string,
   ): Promise<IssuedToken>;
   revokeExternalAgentToken(credential: ApiCredential, agentId: string, tokenId: string): Promise<void>;
@@ -56,12 +66,15 @@ export class MulticaApiError extends Error {
 const agentResponseSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
+  external_session: z.object({ id: z.string() }).nullish(),
+  external_template: z.object({ id: z.string() }).nullish(),
 });
 
 const tokenResponseSchema = z.object({
   id: z.string(),
   token: z.string(),
   expires_at: z.string(),
+  external_session_id: z.string().optional(),
 });
 
 const MAX_ERROR_BODY = 500;
@@ -124,6 +137,7 @@ export function createMulticaApi(options: {
     async registerExternalAgent(credential, input) {
       const text = await request(credential, "POST", "/api/agents/external", credential.token, {
         name: input.name,
+        template: input.template === true ? true : undefined,
         external_session: {
           provider: "paseo",
           host_id: input.hostId,
@@ -134,23 +148,34 @@ export function createMulticaApi(options: {
         },
       });
       const parsed = agentResponseSchema.safeParse(parseJson(text));
-      if (!parsed.success || !isUuid(parsed.data.id)) {
+      const sessionId = parsed.success ? parsed.data.external_session?.id : undefined;
+      if (!parsed.success || !isUuid(parsed.data.id) || !sessionId || !isUuid(sessionId)) {
         throw new MulticaApiError(0, "Multica did not return a valid external agent registration.");
       }
-      return { id: parsed.data.id, name: parsed.data.name ?? input.name };
+      return {
+        id: parsed.data.id,
+        name: parsed.data.name ?? input.name,
+        sessionId,
+        ...(parsed.data.external_template?.id ? { templateId: parsed.data.external_template.id } : {}),
+      };
     },
 
-    async createExternalAgentToken(credential, agentId, expiresAt) {
+    async createExternalAgentToken(credential, agentId, externalSessionId, expiresAt) {
       const text = await request(
         credential,
         "POST",
         `/api/agents/${encodeURIComponent(agentId)}/tokens`,
         credential.token,
-        { expires_at: expiresAt },
+        { expires_at: expiresAt, external_session_id: externalSessionId },
       );
       const parsed = tokenResponseSchema.safeParse(parseJson(text));
       if (!parsed.success || !isUuid(parsed.data.id) || !parsed.data.token.startsWith("mea_")) {
         throw new MulticaApiError(0, "Multica did not return a valid external agent credential.");
+      }
+      // A credential for another session would defeat the session boundary the
+      // plugin exists to establish.
+      if (parsed.data.external_session_id && parsed.data.external_session_id !== externalSessionId) {
+        throw new MulticaApiError(0, "Multica bound the new credential to a different session.");
       }
       return { id: parsed.data.id, token: parsed.data.token, expiresAt: parsed.data.expires_at };
     },

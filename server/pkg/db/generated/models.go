@@ -55,6 +55,8 @@ type Agent struct {
 	ServiceTier           pgtype.Text `json:"service_tier"`
 	ConversationStarters  []byte      `json:"conversation_starters"`
 	ExecutionKind         string      `json:"execution_kind"`
+	ExternalProvider      pgtype.Text `json:"external_provider"`
+	ExternalHostID        pgtype.Text `json:"external_host_id"`
 }
 
 type AgentBuilderDraft struct {
@@ -812,6 +814,7 @@ type ExternalAgentSession struct {
 	DaemonID    string             `json:"daemon_id"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type ExternalAgentSessionBinding struct {
@@ -826,14 +829,15 @@ type ExternalAgentSessionBinding struct {
 }
 
 type ExternalAgentToken struct {
-	ID          pgtype.UUID        `json:"id"`
-	AgentID     pgtype.UUID        `json:"agent_id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
-	OwnerUserID pgtype.UUID        `json:"owner_user_id"`
-	TokenHash   string             `json:"token_hash"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID                pgtype.UUID        `json:"id"`
+	AgentID           pgtype.UUID        `json:"agent_id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID       pgtype.UUID        `json:"owner_user_id"`
+	TokenHash         string             `json:"token_hash"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt         pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
 }
 
 type Feedback struct {

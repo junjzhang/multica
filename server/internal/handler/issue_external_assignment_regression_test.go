@@ -94,6 +94,12 @@ func TestExternalAssignmentSnapshotReturnRace(t *testing.T) {
 					r.Header.Set("X-Actor-Source", "task_token")
 					r.Header.Set("X-Task-ID", task)
 				}
+				if source == "external_missing" {
+					// Model a legacy credential that is not bound to any session:
+					// without an explicit return session there is no provable
+					// address, so the dispatch must write nothing.
+					r.Header.Del(ActorSessionHeader)
+				}
 				w := httptest.NewRecorder()
 				if batch {
 					h.BatchUpdateIssues(w, r)
