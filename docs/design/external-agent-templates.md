@@ -93,15 +93,15 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 4. 创建子任务时显式加入父任务链，服务端验证父链与发起者权限，并记录根 ID。子任务的 assignee 与独立 Contract 不变，leader 不因此获得代交付/代验收权。单纯设置 parent 或 @另一个 squad 不改所属任务链；客串小队仍不能管理父任务状态。
 5. 默认队长调整只影响之后没有发起会话的新任务；现有领导根不随之漂移。成员资格撤销、模板归档导致现有 leader 不再有效，任务显示 unavailable，不能自动回退。
 
-托管 task token 新建或改派任务给 squad 一律拒绝，包含根任务、子任务、backlog、suppress_run、批量改派及工作流解析后实际移交给 squad 的操作；托管队长也没有例外。不能回退到默认队长把拒绝变成成功，不能用原始人类 originator 把 task token 当成人类请求。网页用户与服务端 Autopilot 调度属于无会话入口，仍按规则 2 解析默认队长；Autopilot 启动后的托管运行持有 task token，同样受禁令约束。
+托管 task token 新建或改派任务给 squad 一律拒绝，包含根任务、子任务、backlog、suppress_run、批量改派及工作流解析后实际移交给 squad 的操作；托管队长也没有例外。不能回退到默认队长把拒绝变成成功，不能用原始人类 originator 把 task token 当成人类请求。门禁依据真实调用者及已验证的原始请求来源，与 HTTP 入口名称无关。托管 task token 不能通过 QuickCreateIssue、创建/更新 squad 指派的 Autopilot 或手动 trigger/run-now 让服务端代为发起小队任务；即使 originator 有权限也拒绝。真正的人类请求及人类授权配置的定时/webhook 调度仍按规则 2 使用默认队长，调度不可消费托管调用者新建的 squad 配置；Autopilot 启动后的 task token 同样受禁令约束。
 
 已有小队任务中的托管成员仍可按原权限被派活、提交 Contract、普通评论及创建分配给 Agent 的子任务；这些操作不得隐式改成新的 squad 分配。小队的托管默认队长仍可执行已有小队任务、向成员 Agent 派发和代表本小队提交；禁止的是它再发起小队任务，而非禁止托管 Agent 当现有队长。系统恢复已有绑定、原运行续接、冻结回投、child_done 和已授权的既有唤醒不因此被禁止。鉴权应判定本次真实调用者和操作意图，不按“当前任务 assignee 是 squad”一刀切。
 
-同模板 A、B 可分别领导两个根任务；同一根当前只有一个 leader。保留 `(issue, dispatcher)` 与 `(workspace, agent, issue)` 约束：在 A 负责的任务上，B 不能独立委派或改变负责人，尝试派发返回 409，不能静默复用 A 的身份或回投。B 可按模板权限查看任务卡和发表普通评论；评论仅记录真实 `Agent + B 会话`，不改负责人/执行绑定，不创建派发、自动 assignee 唤醒或新的 accepted return，不改 A 的既有回投。评论创建、编辑和预览都遵守此边界：B 使用可执行的 @agent/@squad 请求派发时拒绝并提示改为普通评论或请求显式交接，不能借评论副作用绕过 D1。需要承担原责任时由人类显式交接；独立工作可另建任务或子任务。旧“一会话一 Agent”下同任务多会话独立委派不再无缝，这是用户已接受的 D1 乙取舍。
+同模板 A、B 可分别领导两个根任务；同一根当前只有一个 leader。保留 `(issue, dispatcher)` 与 `(workspace, agent, issue)` 约束：在 A 负责的任务上，B 不能独立委派或改变负责人，尝试派发返回 409，不能静默复用 A 的身份或回投。B 可按模板权限查看任务卡和发表普通评论；评论仅记录真实 `Agent + B 会话`，不改负责人/执行绑定，不创建派发、自动 assignee 唤醒或新的 accepted return，不改 A 的既有回投。人类 Inbox、卡片活动和 WebSocket 缓存更新仍可按原订阅规则呈现 B 的评论；这是被动通知，不是执行派发。A 可在任务卡读取评论；若宿主只能通过启动 turn 接收消息，则不向该宿主自动投递执行型消息，不能用通知名义启动运行。评论创建、编辑和预览都遵守此边界：B 使用可执行的 @agent/@squad 请求派发时拒绝并提示改为普通评论或请求显式交接，不能借评论副作用绕过 D1。需要承担原责任时由人类显式交接；独立工作可另建任务或子任务。旧“一会话一 Agent”下同任务多会话独立委派不再无缝，这是用户已接受的 D1 乙取舍。
 
 ### 托管发起门禁及现有流程冲突
 
-新增门禁位于服务端业务写入与 delegation/queue/Mailbox 义务创建之前，并在事务内按鉴权主体及解析后的目标复核。CLI 只提供前置提示，不能作为唯一防线。新建/改派以及新链 @squad 请求返回 HTTP 403、稳定错误码 `managed_squad_initiation_forbidden`，提示“托管智能体不能发起小队任务；请分配给具体智能体，或请人类/已接入的外部会话发起小队任务”。不建议换凭据重试。批量接口按现有逐项语义返回失败项与相同原因，拒绝项不产生任务、状态、负责人、关系、事件或派发变更；允许项不受影响。
+新增门禁位于服务端业务写入与 delegation/queue/Mailbox 义务创建之前，并在事务内按鉴权主体及解析后的目标复核。CLI 只提供前置提示，不能作为唯一防线。新建/改派以及新链 @squad 请求返回 HTTP 403、稳定错误码 `managed_squad_initiation_forbidden`，提示“托管智能体不能发起小队任务；请分配给具体智能体，或请人类/已接入的外部会话发起小队任务”。不建议换凭据重试。批量接口当前失败项静默跳过且响应只有 updated 计数，并无逐项错误结果。本方案选择：批量请求只要含托管发起到 squad 的项，就整批返回 403 和上述错误码/提示，不改响应成功形状、不新增逐项结果字段。实施时在批量写事务中锁定并解析所有目标及工作流结果，完整预检 D3，命中则整批回滚，不允许前几项先提交；预检与写入共享锁及权限快照，防止后续解析出 squad 才发现禁令。未命中 D3 的请求保留原 updated 计数与其他失败项跳过语义。旧客户端能按既有非 2xx 错误处理，新 CLI/UI 展示操作提示；不能以 200/updated=0 隐藏该拒绝。
 
 普通评论可以保存；真正的 @squad 新派发（含对已有任务另开小队协作链）在保存前拒绝整次评论写入，提示去掉可执行提及后再评论，避免部分派发。按已接受关系返回结果或已有成员汇报不等于新建任务链，不从 mention 文本重新推导授权；旧线程身份、源运行与冻结 return 是续接依据。评论预览/编辑沿用同一门禁，不能先保存再改出提及。不得通过直接 @默认队长并让其建 squad 子任务绕过门禁：目标队长后续的创建请求仍是 task token。
 
@@ -110,12 +110,15 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | 入口及基线事实 | 与用户定案的冲突及处理 |
 | --- | --- |
 | [CreateIssue 的 assignee 检查，issue.go:3411](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L3411)；[共享权限检查:4540](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L4540) | 当前按 originator 的调用权限放行 squad，未禁止 task token。新增、工作流解析后的创建及托管队长创建 squad 子任务均需明确拒绝；Agent 子任务照旧 |
-| [UpdateIssue:4238](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L4238)；[批量更新:5140](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L5140) | 当前明确改派及工作流 handoff 都复用调用权限。检查最终目标及操作意图，不能靠 suppress_run、先建无主任务再改派或批量路径绕过；普通更新已有 squad 任务不算新改派 |
+| [UpdateIssue:4238](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L4238)；[批量更新:5140](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L5140) | 当前明确改派及工作流 handoff 都复用调用权限，批量失败项静默跳过，[响应仅 updated 计数:5344](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L5344)。新 D3 命中时整批 403，事务内预检全部最终目标后才写，禁止部分提交；普通更新已有 squad 任务不算新改派 |
 | [评论 squad 解析，comment.go:3175](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/comment.go#L3175) | 当前解析默认队长后通过调用权限可创建新派发。托管新链 @squad 必须在新义务产生前拒绝；既有成员普通评论和已冻结结果回投保留 |
 | [小队触发，issue_trigger.go:152](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_trigger.go#L152)；[成员派发 briefing:49](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/squadbriefing/briefing.go#L49) | 基线明确把“Agent 给自己领导的 squad 分配”视为有效 group handoff。该行为与 D3 冲突，必须禁止；托管队长改为给具体成员 Agent 派活。briefing/CLI 帮助须同步此边界，不能再指导层层分派给 squad |
-| [网页 QuickCreateIssue，issue.go:2823](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L2823) | 当前网页选 squad 后先唤起默认托管队长，再由它创建 squad 任务，第二步会违反 D3。后续实现须将实际 squad 任务创建与绑定移至原人类请求授权下的服务端操作，再启动队长处理已存在任务；不能给 quick-create task token 开例外。切换前遗留此类尚未建任务的运行需停放并由人类通过新入口重新发起，幂等核对防止重复建单 |
-| [Autopilot create_issue 入队，autopilot.go:831](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L831) | 服务端调度创建并绑定小队任务可继续使用默认队长；若 run_only 或任务提示要求托管运行再建 squad 任务，后者受禁令约束，改用服务端 create_issue 模式或分配给具体 Agent。不得把 task token 的人类来源当豁免 |
+| [网页 QuickCreateIssue，issue.go:2823](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L2823) | 当前先让 Agent 从自然语言产生字段并建任务（[prompt.go:467](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/daemon/prompt.go#L467)）；不能在字段尚未产生时先建任务。QuickCreateIssue 也允许托管调用（[归因测试:104](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/managed_dispatch_attribution_test.go#L104)），故 task token 传 squad_id 必须在入队前拒绝。人类入口改为下述“仅产出字段 → 一次性服务端落库 → 正式队长运行”流程，通用创建 API 不豁免 |
+| [Autopilot create_issue 入队，autopilot.go:831](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L831) | 真正的人类或定时/webhook 调度创建并绑定小队任务可继续使用默认队长；若 run_only 或任务提示要求托管运行再建 squad 任务，后者受禁令约束，只能由人类改配 create_issue 或分配给具体 Agent。不得把 task token 的人类来源当豁免 |
+| [Autopilot acting-member:741](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L741)；[create:843](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L843)；[trigger:2365](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L2365) | 当前托管 Agent 可按 originator 权限创建自动化、改写配置并 run-now，因此“服务端入口”不是人类调用证明。托管调用者创建 squad 指派配置、更新当前或新目标为 squad 的配置、触发 squad 指派自动化均 403，不生成配置版本、运行或任务；不得先建 Agent 配置再改 squad 绕过。人类管理及已获人类授权的定时/webhook 调度保留 |
 | [现有 Agent 创建小队任务回归，issue_agent_create_e2e_test.go:91](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue_agent_create_e2e_test.go#L91) | 测试显式要求 task token 创建 squad 任务返回 201，与新规则冲突。实施时将该场景改为拒绝回归，另保留“人类创建小队任务 → 托管队长向成员 Agent 派发”的合法链路覆盖；不删除 originator 权限验证 |
+
+人类 quick-create 采用一次性服务器意图记录（复用该次 quick-create 运行的服务端持久上下文）：保存原人类、workspace、选定 squad、请求 ID、字段约束、解析运行 ID、到期时间及 pending/consumed 状态。Agent 仅返回结构化字段，不调用通用 issue create；服务端仅接受与这次解析运行绑定的结果，校验字段白名单、原请求目标及当前人类权限，禁止模型改换 squad/workspace/owner。只有原始人类请求已明确选择的 squad 才可落库，其他解析结果不能新增 squad 授权。随后在同一事务中 CAS 消费意图、创建任务和领导绑定、记录正式运行义务，重复结果返回同一任务，失败不半消费；权限撤销、意图过期、结果跨运行或缺原意图都拒绝。解析完成不会给其 task token 签发通用创建能力，也不能将任意 task token 调用包装成该回调。任务建好后才启动正式队长执行，原解析运行不充当新链发起者。旧 quick-create 缺一次性意图时停放并由人类新入口恢复，先核对是否已建任务以免重复。
 
 上述冲突按用户已定 D3 处理，无需重开默认队长方案。上线前需完成这些入口改造与拒绝/保留路径的成对验证，不能只改 UI 或文案就开放门禁。
 
@@ -130,7 +133,7 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | [系统 wakeup，issue_wakeup_system.go:343](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_wakeup_system.go#L343)；[父任务/stage 候选 SQL:60](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/pkg/db/queries/workspace_wakeup.sql#L60) | 查询候选与最终派发采用同一领导根；child_done、stage 屏障完成通知不得回到全局默认值 |
 | [rerun，task_lifecycle.go:386](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/task_lifecycle.go#L386)；[触发判断，issue_trigger.go:165](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_trigger.go#L165) | 系统恢复和既有执行续接使用原绑定，returns 保持快照；托管新建/改派的触发在前置门禁拒绝，不能转为默认队长 rerun |
 | [队长入队，issue.go:1166](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue.go#L1166)；[task.go:6221](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/task.go#L6221) | 区分被派活的 managed 执行者与发起方；拒绝托管新发起后，合法入口才解析主体并分 managed queue/external Mailbox；claim 重验 revision |
-| [自动化，autopilot.go:1477](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L1477) | 服务端自动化新任务使用默认值，配置外部接收会话并保存绑定；启动后的 task token 不得再发起 squad 任务，恢复已有任务不覆盖根 |
+| [自动化，autopilot.go:1477](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L1477) | 通过真实调用者门禁的人类或定时/webhook 自动化新任务使用默认值，配置外部接收会话并保存绑定；启动后的 task token 不得再发起 squad 任务，恢复已有任务不覆盖根 |
 | [名册，briefing.go:229](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/squadbriefing/briefing.go#L229) | “Leader (you)” 指当前任务 leader；默认队长单独标识。托管队长只能给具体 Agent 派活，不能建立 squad 子任务；worker roster 不混淆兄弟会话 |
 
 实现审查需搜索全部 `leader_id` / `LeaderID` 消费者，将剩余读取分类为任务级解析或纯默认配置展示；列表不是允许保留其他隐式回退的白名单。
@@ -161,7 +164,8 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | 入口 | 变更 |
 | --- | --- |
 | `session connect/status` | connect 按模板 key 解析或创建模板并注册实例；status 同时显示模板、会话及凭据绑定状态。保留禁止 managed connect、跨 profile 覆盖和 foreign context 覆盖的检查 |
-| `issue create/assign` | 继续使用 `--recipient-session-id`；小队发起者会话来自鉴权。managed create/assign 到 squad 返回可操作拒绝，批量逐项报因；人类无会话入口明确选外部默认队长会话；合法赋值与绑定原子化 |
+| `issue create/assign` | 继续使用 `--recipient-session-id`；小队发起者会话来自鉴权。managed create/assign 到 squad 返回可操作拒绝；批量含禁项整批 403，无部分写入，成功仍返回 updated；人类无会话入口明确选外部默认队长会话；合法赋值与绑定原子化 |
+| QuickCreate / Autopilot API | task token 经 quick-create 指定 squad、创建/更新 squad 自动化及 run-now 均拒绝；人类 quick-create 的字段解析结果仅供绑定原请求的一次性服务端落库，通用创建权限不扩大；合法人类和定时/webhook 默认队长路径保留 |
 | 交接 CLI/API | 增加任务主体 handoff 操作；不把普通 bind 或 assign 当作隐式 takeover。请求含 revision 与 idempotency key，响应含受影响合同和待回收通知 |
 | 注册 API | 复用 external 注册入口，新增显式模板模式/能力版本；返回原 Agent shape 加本次 registered session。旧客户端不能在新模板上签发宽泛 token |
 | Agent / sessions API | 保留原字段及单数 `external_session` 的兼容展示投影，新增模板标识、session count 与分页会话列表；所有执行入口仅使用显式会话字段 |
@@ -203,10 +207,11 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 | 同模板 A/B 在同任务独立委派，人类同模板/跨模板交接 | B 独立委派固定返回 409；跨模板结果接收保留原作者/return，仅产生一次新通知；Agent handoff 被拒绝 | delegation + handoff DB |
 | legacy 一 Agent 多会话、宽 token 轮换、同 uid 凭据暴露 | 未轮换禁止敏感写；轮换后 A token 不能操作 B；同 uid 共同信任域不承诺抵御凭据窃取，OS 沙箱不作为验收门禁 | 迁移 + 鉴权/宿主验收 |
 | 网页/自动化无发起会话 | managed 默认正常；external 缺显式会话停放，单在线会话也不偷选 | API + CLI |
-| managed task token 新建/改派 squad（根/子任务、backlog、suppress_run、批量、工作流最终目标） | 403 或逐项失败原因明确；无业务/绑定/return/queue/Mailbox 副作用，默认队长不作为回退；托管队长也拒绝 | handler + managed 分配 + DB |
+| managed task token 新建/改派 squad（根/子任务、backlog、suppress_run、批量、工作流最终目标） | 单项 403、批量含禁项整批 403（混合允许项也零写入），错误原因明确；无业务/绑定/return/queue/Mailbox 副作用，默认队长不作为回退；托管队长也拒绝 | handler + managed 分配 + DB |
 | 托管评论创建/编辑/预览中新链 @squad，普通成员汇报及合法 @Agent 派活 | 新链提及返回可操作拒绝，普通评论可保存，既有回投不变；成员执行/提交、Agent 子任务、已授权恢复继续工作 | comment + delegation + Contract |
 | B 在 A 任务卡查看、普通评论、编辑评论和试图添加派发提及 | 卡片及 API 均允许普通评论，审计作者为 B；负责人/执行绑定/accepted returns 不变，零派发/自动唤醒；可执行提及被拒绝 | comment DB + UI/E2E |
-| 网页快速创建、Autopilot create_issue 与启动后 task token 再建 squad | 人类/服务端先建并绑定，再唤起默认队长；后续托管新发起被拒绝，run_only 不豁免；旧 quick-create 停放后幂等恢复 | 服务端入口 + E2E |
+| 网页快速创建、Autopilot create_issue 与启动后 task token 再建 squad | 人类 quick-create 先解析字段、一次性服务端落库再正式运行；伪造/过期/重复结果及权限撤销可控，task token 直调 quick-create(squad) 拒绝；后续托管新发起与 run_only 不豁免，旧流程幂等恢复 | 服务端入口 + E2E |
+| 托管调用 Autopilot create/update/trigger，直接 squad 或先 Agent 再改 squad | 全部 403，零配置版本/运行/任务；真实人类、定时/webhook 调度仍默认队长，不能仅据 originator 放行 | Autopilot handler + 调度集成 |
 | 同根同时认领、分配与 handoff 竞态、handoff 与 submit/claim 竞态 | 单一胜者；旧 revision 拒绝；旧 pending 派发撤销不漏事务 | DB 并发测试 |
 | 默认 leader 改动、成员移除、leader 失联 | 已绑定任务不漂移；失效可见；只有显式交接改变主体 | 领导解析 + Contract |
 | 父/子合同、换会话后 revise、同模板异会话自验 | 正确 stale、独立验收；旧交付/作者/接受历史不改写，无自验逃逸 | Contract 状态矩阵 |
@@ -224,7 +229,7 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 | --- | --- |
 | D1 乙 | 每任务每模板一个活动地址。B 可按模板权限查看/普通评论，但不改变 A 的负责人、派发或回投；独立委派返回 409，接管须显式交接 |
 | D2 甲 | 接受凭据未泄露前提下的 API/会话隔离；同 uid 为共同信任域，不做 OS 级沙箱，不将强进程隔离作为上线门禁 |
-| D3 新方案 | 托管 Agent 不得发起小队任务，包括新建、改派及评论 @squad 新链；现有任务成员活动和 Agent 子任务保留，网页与 Autopilot 服务端入口仍用默认队长 |
+| D3 新方案 | 托管 Agent 不得发起小队任务，包括新建、改派及评论 @squad 新链；现有任务成员活动和 Agent 子任务保留，合法人类网页请求及已授权的 Autopilot 定时/webhook 调度仍用默认队长 |
 
 本轮没有新增待用户决策项。以下仍是实施边界或待验证事实，不表示已获实现、合入或生产操作授权：
 
