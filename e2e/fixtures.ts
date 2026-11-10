@@ -594,8 +594,8 @@ export class TestApiClient {
       );
       const userId = user.rows[0].id;
       const agent = await client.query<{ id: string }>(
-        "INSERT INTO agent(workspace_id,name,owner_id,runtime_mode) VALUES ($1,'Contract CLI executor',$2,'local') RETURNING id",
-        [this.workspaceId, userId],
+        "INSERT INTO agent(workspace_id,name,owner_id,runtime_mode) VALUES ($1,$3,$2,'local') RETURNING id",
+        [this.workspaceId, userId, `Contract CLI executor ${issueId}`],
       );
       const agentId = agent.rows[0].id;
       this.contractAgentIds.push(agentId);
@@ -652,17 +652,19 @@ export class TestApiClient {
     const token = `mea_${randomBytes(20).toString("hex")}`;
     const client = new pg.Client(DATABASE_URL);
     await client.connect();
+    let tokenId: string;
     try {
-      await client.query(
-        "INSERT INTO external_agent_token(agent_id,workspace_id,owner_user_id,token_hash,expires_at) SELECT id,workspace_id,owner_id,$2,now()+interval '10 minutes' FROM agent WHERE id=$1",
+      const credential = await client.query<{ id: string }>(
+        "INSERT INTO external_agent_token(agent_id,workspace_id,owner_user_id,token_hash,expires_at) SELECT id,workspace_id,owner_id,$2,now()+interval '10 minutes' FROM agent WHERE id=$1 RETURNING id",
         [fixture.agentId, createHash("sha256").update(token).digest("hex")],
       );
+      tokenId = credential.rows[0].id;
     } finally { await client.end(); }
     await this.updateIssue(issueId, {
       assignee_type: "squad", assignee_id: fixture.squadId,
       recipient_session_id: fixture.sessionId, suppress_run: true,
     });
-    return { ...fixture, token, serverUrl: API_BASE, taskId: undefined };
+    return { ...fixture, token, tokenId, serverUrl: API_BASE, taskId: undefined };
   }
 
   async updateSquadLeader(squadId: string, leaderId: string) {
