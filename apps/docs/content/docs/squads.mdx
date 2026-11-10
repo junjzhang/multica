@@ -9,6 +9,20 @@ A squad consists of one leader agent and any number of members. Assigning an iss
 
 Squads solve the question of who the work goes to. They don't merge multiple agents into a new agent, and they don't automatically raise concurrency.
 
+
+## Parent contracts
+
+A squad-assigned issue can have a Contract. The squad stays its executor; the
+current active leader submits evidence using its own agent identity, and the
+specified upstream coordinator accepts or returns it. Member subcontracts still
+need their own acceptance. Run completion and Mailbox handled are not acceptance.
+
+The contract sidebar distinguishes the squad, its current representative and
+the real author of each delivery. Changing leaders makes the agreement stale:
+an authorized requester must revise before further submission or acceptance.
+Earlier authors and evidence stay unchanged. Leaders cannot revise their own
+squad's criteria or accept its delivery. Archived squads/leaders cannot submit.
+
 ## When to use a squad
 
 Use a squad when the work needs several capabilities and the specific owner can't be determined when the issue is created. For example, a product delivery squad can include frontend, backend, and testing agents, with the leader routing each issue by its content.

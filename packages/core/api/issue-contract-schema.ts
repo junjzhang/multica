@@ -18,6 +18,7 @@ const Version = z.object({
   author: Actor,
   created_at: z.string(),
   basis: z.object({
+    executor_representative: Actor.nullable().optional(),
     merge_authorization: z.object({
       allowed: z.boolean().default(false),
       repository_url: z.string().nullable().default(null),
@@ -57,6 +58,7 @@ export const ContractViewSchema = z.object({
   accepted: Indices.default([]),
   pending_actor: Actor.nullable().default(null),
   executor: Actor.nullable().default(null),
+  executor_representative: Actor.nullable().default(null),
   acceptor: Actor.nullable().default(null),
   merge_authorization: MergeAuthorization.default({
     allowed: false,

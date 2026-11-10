@@ -19,6 +19,7 @@ describe("contract API boundary", () => {
       accepted: [],
       pending_actor: null,
       executor: null,
+      executor_representative: null,
       acceptor: null,
       merge_authorization: {
         allowed: false,
@@ -37,6 +38,7 @@ describe("contract API boundary", () => {
       { contract: { sequence: 1, versions: [] } },
       { contract: null, accepted: [-1] },
       { contract: null, can_review: "true" },
+      { contract: null, executor_representative: { type: "agent", id: 42 } },
     ]) {
       expect(
         parseWithFallback(raw, ContractViewSchema, null, {
@@ -44,5 +46,17 @@ describe("contract API boundary", () => {
         }),
       ).toBeNull();
     }
+  });
+  it("preserves squad responsibility separately from the real representative", () => {
+    const view = ContractViewSchema.parse({
+      contract: null,
+      executor: { type: "squad", id: "squad" },
+      executor_representative: { type: "agent", id: "leader" },
+      pending_actor: { type: "squad", id: "squad" },
+      can_submit: true,
+    });
+    expect(view.executor).toEqual({ type: "squad", id: "squad" });
+    expect(view.executor_representative).toEqual({ type: "agent", id: "leader" });
+    expect(view.pending_actor).toEqual(view.executor);
   });
 });

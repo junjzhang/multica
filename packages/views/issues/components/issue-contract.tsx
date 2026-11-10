@@ -261,6 +261,16 @@ function ContractSection({
                 {view.executor
                   ? identity(view.executor)
                   : t(($) => $.contract.unassigned)}
+                {view.executor?.type === "squad" && (
+                  <>
+                    <div className="text-muted-foreground">
+                      {t(($) => $.contract.representative)}
+                    </div>
+                    {view.executor_representative
+                      ? identity(view.executor_representative)
+                      : t(($) => $.contract.no_active_leader)}
+                  </>
+                )}
                 <div className="text-muted-foreground">
                   {t(($) => $.contract.acceptor)}
                 </div>
@@ -514,6 +524,9 @@ function ContractSection({
                         {t(($) => $.contract.version, { version: d.version })} ·{" "}
                         {t(($) => $.contract.evidence)}
                       </strong>
+                      <div className="text-muted-foreground">
+                        {t(($) => $.contract.submitted_by)}
+                      </div>
                       {identity(d.author)}
                       <p className="whitespace-pre-wrap break-words">
                         {d.evidence}

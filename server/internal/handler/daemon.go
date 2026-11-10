@@ -3180,6 +3180,13 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 			currentSnapshot.Version = 0
 		} else if hasContract {
 			currentSnapshot.ContractIssueRevision = issue.Revision
+			basis, err := contractBasis(r.Context(), h.Queries, issue)
+			if err != nil {
+				contractErr = err
+				currentSnapshot.Version = 0
+			} else {
+				currentSnapshot.ContractBasisSHA256 = sha256Hex(string(basis))
+			}
 		}
 		if encoded, err := json.Marshal(currentSnapshot); err != nil {
 			// A snapshot that cannot be encoded is simply not recorded; the

@@ -55,6 +55,7 @@ export class TestApiClient {
   private createdProjectIds: string[] = [];
   private seededIssueIds: string[] = [];
   private contractAgentIds: string[] = [];
+  private contractSquadIds: string[] = [];
   private externalSquadFixtures: { squadId: string; agentId: string; runtimeId: string }[] = [];
 
   async login(email: string, name: string) {
@@ -389,6 +390,7 @@ export class TestApiClient {
       }
       const squad = await client.query(`INSERT INTO squad (workspace_id,name,leader_id,creator_id,instructions) VALUES ($1,$2,$3,$4,'Browser integration squad instruction') RETURNING id`, [this.workspaceId, name, agentId, ownerId]);
       const squadId = squad.rows[0].id as string;
+      await client.query("INSERT INTO squad_member(squad_id,member_type,member_id,role) VALUES ($1,'agent',$2,'leader')", [squadId, agentId]);
       await client.query("COMMIT");
       this.externalSquadFixtures.push({ squadId, agentId, runtimeId: runtime.rows[0].id });
       return { squadId, agentId, sessionId, daemonId, workspaceId: this.workspaceId };
@@ -456,25 +458,14 @@ export class TestApiClient {
 
   /** Clean up all issues created during this test. */
   async cleanup() {
-    if (this.contractAgentIds.length) {
+    if (this.contractSquadIds.length) {
       const client = new pg.Client(DATABASE_URL);
       await client.connect();
       try {
-        await client.query(
-          "DELETE FROM task_token WHERE agent_id=ANY($1::uuid[])",
-          [this.contractAgentIds],
-        );
-        await client.query(
-          "DELETE FROM agent_task_queue WHERE agent_id=ANY($1::uuid[])",
-          [this.contractAgentIds],
-        );
-        await client.query("DELETE FROM agent WHERE id=ANY($1::uuid[])", [
-          this.contractAgentIds,
-        ]);
-      } finally {
-        await client.end();
-      }
-      this.contractAgentIds = [];
+        await client.query("DELETE FROM squad_member WHERE squad_id=ANY($1::uuid[])", [this.contractSquadIds]);
+        await client.query("DELETE FROM squad WHERE id=ANY($1::uuid[])", [this.contractSquadIds]);
+      } finally { await client.end(); }
+      this.contractSquadIds = [];
     }
     if (this.seededIssueIds.length > 0 && this.workspaceId) {
       const client = new pg.Client(DATABASE_URL);
@@ -502,7 +493,9 @@ export class TestApiClient {
       await client.connect();
       try {
         for (const fixture of this.externalSquadFixtures) {
+          await client.query("DELETE FROM squad_member WHERE squad_id=$1", [fixture.squadId]);
           await client.query("DELETE FROM squad WHERE id=$1", [fixture.squadId]);
+          await client.query("DELETE FROM external_agent_token WHERE agent_id=$1", [fixture.agentId]);
           await client.query("DELETE FROM external_agent_session_binding WHERE agent_id=$1", [fixture.agentId]);
           await client.query("DELETE FROM external_agent_session WHERE agent_id=$1", [fixture.agentId]);
           await client.query("DELETE FROM agent WHERE id=$1", [fixture.agentId]);
@@ -513,6 +506,26 @@ export class TestApiClient {
     }
     // Projects last: an issue delete leaves no project reference behind, and
     // dropping the project first would strand the issues in the list.
+    if (this.contractAgentIds.length) {
+      const client = new pg.Client(DATABASE_URL);
+      await client.connect();
+      try {
+        await client.query(
+          "DELETE FROM task_token WHERE agent_id=ANY($1::uuid[])",
+          [this.contractAgentIds],
+        );
+        await client.query(
+          "DELETE FROM agent_task_queue WHERE agent_id=ANY($1::uuid[])",
+          [this.contractAgentIds],
+        );
+        await client.query("DELETE FROM agent WHERE id=ANY($1::uuid[])", [
+          this.contractAgentIds,
+        ]);
+      } finally {
+        await client.end();
+      }
+      this.contractAgentIds = [];
+    }
     for (const id of this.createdProjectIds) {
       try {
         await this.deleteProject(id);
@@ -615,6 +628,49 @@ export class TestApiClient {
     } finally {
       await client.end();
     }
+  }
+
+  async contractSquadAgent(issueId: string) {
+    const actor = await this.contractAgent(issueId);
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      const squad = await client.query<{ id: string }>(
+        "INSERT INTO squad(workspace_id,name,leader_id,creator_id) SELECT $1,'Contract delivery squad',$2,owner_id FROM agent WHERE id=$2 RETURNING id",
+        [this.workspaceId, actor.agentId],
+      );
+      const squadId = squad.rows[0].id;
+      this.contractSquadIds.push(squadId);
+      await client.query("INSERT INTO squad_member(squad_id,member_type,member_id,role) VALUES ($1,'agent',$2,'leader')", [squadId, actor.agentId]);
+      await client.query("UPDATE issue SET assignee_type='squad',assignee_id=$2 WHERE id=$1", [issueId, squadId]);
+      return { ...actor, squadId };
+    } finally { await client.end(); }
+  }
+
+  async contractExternalSquadAgent(issueId: string) {
+    const fixture = await this.seedExternalSquad("External contract delivery squad");
+    const token = `mea_${randomBytes(20).toString("hex")}`;
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      await client.query(
+        "INSERT INTO external_agent_token(agent_id,workspace_id,owner_user_id,token_hash,expires_at) SELECT id,workspace_id,owner_id,$2,now()+interval '10 minutes' FROM agent WHERE id=$1",
+        [fixture.agentId, createHash("sha256").update(token).digest("hex")],
+      );
+    } finally { await client.end(); }
+    await this.updateIssue(issueId, {
+      assignee_type: "squad", assignee_id: fixture.squadId,
+      recipient_session_id: fixture.sessionId, suppress_run: true,
+    });
+    return { ...fixture, token, serverUrl: API_BASE, taskId: undefined };
+  }
+
+  async updateSquadLeader(squadId: string, leaderId: string) {
+    const response = await this.authedFetch(`/api/squads/${squadId}`, {
+      method: "PUT", body: JSON.stringify({ leader_id: leaderId }),
+    });
+    if (!response.ok) throw new Error(`update squad leader: ${response.status} ${await response.text()}`);
+    return response.json();
   }
 
   getEmail() {

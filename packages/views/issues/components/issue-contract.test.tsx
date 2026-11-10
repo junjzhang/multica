@@ -64,6 +64,7 @@ function view(role: "submit" | "review", version = 1): ContractView {
     stale: false,
     accepted: [],
     pending_actor: role === "submit" ? executor : acceptor,
+    executor_representative: null,
     executor,
     acceptor,
     merge_authorization: merge,
@@ -92,6 +93,26 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("contract draft recovery", () => {
+  it("distinguishes squad responsibility, current leader and historical submitter", async () => {
+    const current = view("review");
+    const squad = { type: "squad", id: "Delivery squad" };
+    current.executor = squad;
+    current.executor_representative = { type: "agent", id: "Current leader" };
+    current.contract!.versions[0]!.executor = squad;
+    current.contract!.deliveries[0]!.author = { type: "agent", id: "Original submitter" };
+    current.stale = true;
+    current.can_review = false;
+    apiMock.getIssueContract.mockResolvedValue(current);
+    renderContract();
+    expect(await screen.findByText("Squad representative")).toBeVisible();
+    expect(screen.getByText("Delivery squad")).toBeVisible();
+    expect(screen.getByText("Current leader")).toBeVisible();
+    await userEvent.click(screen.getByText("Version and delivery history"));
+    expect(screen.getByText("Submitted by")).toBeVisible();
+    expect(screen.getByText("Original submitter")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Accept selected" })).not.toBeInTheDocument();
+  });
+
   it("keeps the revision dialog inside the same lock as a review draft", async () => {
     let current = { ...view("review"), can_edit: true };
     apiMock.getIssueContract.mockImplementation(async () => current);

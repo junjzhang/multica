@@ -119,7 +119,17 @@ const squadParentStatusOwned = `6. **Own the parent issue status.** This issue i
    ` + "`" + `multica issue status <issue-id> in_review` + "`" + ` — this responsibility is
    itself the standing instruction that authorizes that change, so do it even
    when no comment asked you to. Leave ` + "`" + `done` + "`" + ` to a human reviewer or
-   existing integrations (for example a PR with close intent that merges).`
+   existing integrations (for example a PR with close intent that merges).
+   If this issue has a Contract, keep the squad as its executor. As the
+   current active leader, submit the overall delivery with your own Agent
+   identity using ` + "`" + `multica issue contract apply` + "`" + `. The specified upstream
+   acceptor decides acceptance; do not accept your own squad's delivery or
+   revise its criteria. Read ` + "`" + `executor_representative` + "`" + ` and the current version
+   first. A leader change makes the agreement stale until an authorized
+   requester revises it; old delivery authors, evidence and accepted return
+   addresses remain historical. Accept each child's independent Contract
+   separately before including its results in the overall delivery. Run
+   completion and Mailbox handled are not contract acceptance.`
 
 // squadParentStatusNotOwned is responsibility 6 for every other leader path:
 // an @squad mention on an issue owned by someone else (MUL-3724), and

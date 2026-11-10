@@ -21,13 +21,16 @@ func TestIssueContractMigrationsUpDownUpInIsolatedSchema(t *testing.T) {
 		assignee_type text,assignee_id uuid,coordinator_type text,coordinator_id uuid,
 		merge_allowed boolean DEFAULT false,merge_repository_url text,merge_target_branch text,
 		merge_granted_by uuid,merge_granted_at timestamptz,acceptance_criteria jsonb DEFAULT '[]');
+		CREATE TABLE squad (id uuid DEFAULT gen_random_uuid(),workspace_id uuid,leader_id uuid,archived_at timestamptz);
+		CREATE TABLE agent (id uuid DEFAULT gen_random_uuid(),workspace_id uuid,kind text DEFAULT 'user',archived_at timestamptz);
+		CREATE TABLE squad_member (id uuid DEFAULT gen_random_uuid(),squad_id uuid,member_type text,member_id uuid);
 		CREATE FUNCTION issue_effective_status(uuid,text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT $2';`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fx := testutil.New(pool, "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002")
 	for _, direction := range []string{"up", "down", "up"} {
-		versions := []string{"650_issue_contract", "651_issue_contract_unique", "652_issue_contract_completion", "653_contract_permission_maintenance"}
+		versions := []string{"650_issue_contract", "651_issue_contract_unique", "652_issue_contract_completion", "653_contract_permission_maintenance", "654_squad_contract_representative"}
 		if direction == "down" {
 			slices.Reverse(versions)
 		}
@@ -57,6 +60,17 @@ func TestIssueContractMigrationsUpDownUpInIsolatedSchema(t *testing.T) {
 		fx.QueryRow(t, "SELECT merge_allowed FROM issue WHERE id=$1", issue).Scan(&allowed)
 		if allowed {
 			t.Fatal("completed-issue permission revocation failed")
+		}
+		leader := fx.Insert(t, "agent", testutil.Cols{"workspace_id": fx.WorkspaceID})
+		replacement := fx.Insert(t, "agent", testutil.Cols{"workspace_id": fx.WorkspaceID})
+		squad := fx.Insert(t, "squad", testutil.Cols{"workspace_id": fx.WorkspaceID, "leader_id": leader})
+		fx.Insert(t, "squad_member", testutil.Cols{"squad_id": squad, "member_type": "agent", "member_id": leader})
+		fx.Insert(t, "squad_member", testutil.Cols{"squad_id": squad, "member_type": "agent", "member_id": replacement})
+		squadIssue := fx.Insert(t, "issue", testutil.Cols{"workspace_id": fx.WorkspaceID, "status": "in_progress", "assignee_type": "squad", "assignee_id": squad, "acceptance_criteria": []byte(`["verified"]`)})
+		fx.InsertNoID(t, "issue_contract", testutil.Cols{"issue_id": squadIssue, "workspace_id": fx.WorkspaceID, "data": testutil.Raw("jsonb_build_object('versions',jsonb_build_array(jsonb_build_object('number',1,'criteria',jsonb_build_array('verified'),'basis',(SELECT issue_contract_basis(i) FROM issue i WHERE i.id='" + squadIssue + "'::uuid))),'decisions','[{\"outcome\":\"accept\",\"version\":1,\"criteria\":[0]}]'::jsonb)")}, "issue_id=$1", squadIssue)
+		fx.Exec(t, "UPDATE squad SET leader_id=$2 WHERE id=$1", squad, replacement)
+		if _, err := pool.Exec(ctx, "UPDATE issue SET status='done' WHERE id=$1", squadIssue); err == nil {
+			t.Fatal("leader rotation reused acceptance through the database Done guard")
 		}
 	}
 }
