@@ -27,16 +27,17 @@ import (
 )
 
 type ContractView struct {
-	Contract           *issuecontract.State            `json:"contract"`
-	Stale              bool                            `json:"stale"`
-	Accepted           []int                           `json:"accepted"`
-	PendingActor       *issuecontract.Actor            `json:"pending_actor"`
-	Executor           *issuecontract.Actor            `json:"executor"`
-	Acceptor           *issuecontract.Actor            `json:"acceptor"`
-	CanEdit            bool                            `json:"can_edit"`
-	CanSubmit          bool                            `json:"can_submit"`
-	CanReview          bool                            `json:"can_review"`
-	MergeAuthorization IssueMergeAuthorizationResponse `json:"merge_authorization"`
+	Contract               *issuecontract.State            `json:"contract"`
+	Stale                  bool                            `json:"stale"`
+	Accepted               []int                           `json:"accepted"`
+	PendingActor           *issuecontract.Actor            `json:"pending_actor"`
+	Executor               *issuecontract.Actor            `json:"executor"`
+	ExecutorRepresentative *issuecontract.Actor            `json:"executor_representative"`
+	Acceptor               *issuecontract.Actor            `json:"acceptor"`
+	CanEdit                bool                            `json:"can_edit"`
+	CanSubmit              bool                            `json:"can_submit"`
+	CanReview              bool                            `json:"can_review"`
+	MergeAuthorization     IssueMergeAuthorizationResponse `json:"merge_authorization"`
 }
 
 type contractRequest struct {
@@ -78,6 +79,18 @@ func sameJSON(a, b []byte) bool {
 	return json.Unmarshal(a, &x) == nil && json.Unmarshal(b, &y) == nil && reflect.DeepEqual(x, y)
 }
 
+func contractRepresentative(basis json.RawMessage) *issuecontract.Actor {
+	var fields struct {
+		Representative *issuecontract.Actor `json:"executor_representative"`
+	}
+	_ = json.Unmarshal(basis, &fields)
+	return fields.Representative
+}
+
+func representsContractExecutor(actor, executor issuecontract.Actor, representative *issuecontract.Actor) bool {
+	return actor == executor || representative != nil && actor == *representative
+}
+
 func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State) (ContractView, error) {
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
 	actor := issuecontract.Actor{Type: actorType, ID: actorID}
@@ -90,15 +103,16 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	if issue.CoordinatorID.Valid {
 		view.Acceptor = &issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
 	}
+	basis, err := contractBasis(ctx, q, issue)
+	if err != nil {
+		return view, err
+	}
+	view.ExecutorRepresentative = contractRepresentative(basis)
 	v := state.Current()
 	if v == nil {
 		return view, nil
 	}
 	view.Contract = &state
-	basis, err := contractBasis(ctx, q, issue)
-	if err != nil {
-		return view, err
-	}
 	view.Stale = !sameJSON(v.Basis, basis)
 	if !view.Stale {
 		view.Accepted = state.Accepted()
@@ -112,10 +126,10 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	}
 	if state.Pending() != nil {
 		view.PendingActor = &v.Acceptor
-		view.CanReview = actor == v.Acceptor && actor != v.Executor
+		view.CanReview = actor == v.Acceptor && !representsContractExecutor(actor, v.Executor, view.ExecutorRepresentative) && actor != state.Pending().Author
 	} else {
 		view.PendingActor = &v.Executor
-		view.CanSubmit = actor == v.Executor
+		view.CanSubmit = representsContractExecutor(actor, v.Executor, view.ExecutorRepresentative)
 	}
 	return view, nil
 }
@@ -217,6 +231,18 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "issue changed; reload")
 		return
 	}
+	if issue.AssigneeType.String == "squad" {
+		// Serialize representative authority with leader changes and archival.
+		squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: issue.AssigneeID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			writeError(w, 409, "squad changed; reload")
+			return
+		}
+		if _, err := q.LockAgentForAutopilotAssignment(ctx, db.LockAgentForAutopilotAssignmentParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID}); err != nil {
+			writeError(w, 409, "squad leader changed; reload")
+			return
+		}
+	}
 	state, err := readContract(ctx, q, issue)
 	if err != nil {
 		writeError(w, 500, "load contract failed")
@@ -317,19 +343,28 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state *issuecontract.State, req contractRequest, actor issuecontract.Actor, effects *contractEffects) (string, error) {
 	now := time.Now().UTC()
 	v := state.Current()
+	basis, err := contractBasis(ctx, q, issue)
+	if err != nil {
+		return "", err
+	}
+	representative := contractRepresentative(basis)
 	if req.Action == "revise" {
 		if !h.canMaintainContract(ctx, r, q, issue, *state) {
 			return "", contractFail(403, "contract maintenance requires a verified original requester in scope; the executor cannot change its agreement")
 		}
 		executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
-		if actor == executor {
+		if representsContractExecutor(actor, executor, representative) {
 			return "", contractFail(403, "the executor cannot revise its own agreement")
 		}
 		acceptor := issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
-		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent") || executor == acceptor {
+		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent" && executor.Type != "squad") || representsContractExecutor(acceptor, executor, representative) {
 			return "", contractFail(400, "choose distinct executor and coordinator before creating a contract")
 		}
-		if _, _, msg := h.validateCoordinator(ctx, uuidToString(issue.WorkspaceID), IssueCoordinatorInput{Type: executor.Type, ID: executor.ID}); msg != "" {
+		if executor.Type == "squad" {
+			if representative == nil {
+				return "", contractFail(400, "choose an active squad with a current leader member")
+			}
+		} else if _, _, msg := h.validateCoordinator(ctx, uuidToString(issue.WorkspaceID), IssueCoordinatorInput{Type: executor.Type, ID: executor.ID}); msg != "" {
 			return "", contractFail(400, msg)
 		}
 		if _, _, msg := h.validateCoordinator(ctx, uuidToString(issue.WorkspaceID), IssueCoordinatorInput{Type: acceptor.Type, ID: acceptor.ID}); msg != "" {
@@ -344,10 +379,6 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 			}
 		}
 		criteria, _ := json.Marshal(req.Requirements)
-		basis, err := contractBasis(ctx, q, issue)
-		if err != nil {
-			return "", err
-		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(basis, &fields); err != nil {
 			return "", err
@@ -363,17 +394,13 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	if v == nil || req.Version != v.Number {
 		return "", contractFail(409, "delivery must reference the current contract version")
 	}
-	basis, err := contractBasis(ctx, q, issue)
-	if err != nil {
-		return "", err
-	}
 	if !sameJSON(v.Basis, basis) {
 		return "", contractFail(409, "responsibility, criteria or authorization changed; revise the contract")
 	}
 	pending := state.Pending()
 	switch req.Action {
 	case "submit":
-		if actor != v.Executor {
+		if !representsContractExecutor(actor, v.Executor, representative) {
 			return "", contractFail(403, "only the executor may submit delivery")
 		}
 		if pending != nil {
@@ -388,7 +415,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		state.Deliveries = append(state.Deliveries, issuecontract.Delivery{ID: req.ClientRequestID, Version: v.Number, Criteria: req.Criteria, Evidence: req.Evidence, ChildIDs: append([]string{}, req.ChildIDs...), Author: actor, CreatedAt: now})
 		return "in_review", nil
 	case "accept", "return":
-		if actor != v.Acceptor || actor == v.Executor {
+		if actor != v.Acceptor || representsContractExecutor(actor, v.Executor, representative) || pending != nil && actor == pending.Author {
 			return "", contractFail(403, "only the specified acceptor may decide delivery")
 		}
 		if pending == nil || pending.ID != req.DeliveryID {

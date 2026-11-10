@@ -19,8 +19,17 @@ func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *d
 	if actor == (issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}) {
 		return false
 	}
-	if version := state.Current(); version != nil && actor == version.Executor {
+	basis, err := contractBasis(ctx, q, issue)
+	if err != nil {
 		return false
+	}
+	if representative := contractRepresentative(basis); representative != nil && actor == *representative {
+		return false
+	}
+	for _, version := range state.Versions {
+		if representsContractExecutor(actor, version.Executor, contractRepresentative(version.Basis)) {
+			return false
+		}
 	}
 	if actor.Type == "member" {
 		return !isMachineCredentialActor(r)
