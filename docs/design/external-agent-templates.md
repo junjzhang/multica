@@ -106,14 +106,14 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 
 - 小队创建、默认队长更新及其他写入该字段的服务端入口，必须在提交前检查目标 Agent 的 workspace、`execution_kind=managed`、未归档及既有可管理/可调用条件；并确保默认队长是小队成员。与队长/Agent 状态变更加锁协调，错误时不留下成员或配置的部分写入。
 - 新建或设置外部默认队长返回明确 400 错误，例如 `default_leader_must_be_managed`，提示“默认队长必须选择托管智能体；外部会话可作为任务级队长”。UI/CLI 仅展示托管候选，服务端仍拒绝旧客户端或手工请求的外部值。
-- dispatch 读取默认配置时重复校验 execution_kind，存量外部值显示“需要选择托管默认队长”，阻止依赖默认配置的新派发；不自动选一个 Agent、不将最近会话补成默认队长。已验证的任务级外部 leader 不因此失效。托管类型与 runtime ready 是两个条件，不能仅以 runtime_bound 代替类型判断。
+- dispatch 读取默认配置时重复校验 execution_kind，存量外部值显示“需要选择托管默认队长”，阻止依赖默认配置的新派发；不自动选一个 Agent、不将最近会话补成默认队长。依赖该默认值的 Autopilot 暂停派发并显示“需要选择托管默认队长”，保留配置和既有运行/回投；人工迁移验证后才恢复，不静默补跑停派期间的触发。已验证的任务级外部 leader 不因此失效。托管类型与 runtime ready 是两个条件，不能仅以 runtime_bound 代替类型判断。
 - 默认队长更换不改既有领导根、历史作者或 accepted returns。Agent 归档/成员移除等造成既有任务 leader 失效时，仍走显式交接；不得通过更换默认值掩盖失效。若将来允许修改 Agent execution_kind，也必须维护默认队长约束，不能留下外部默认值。
 
 | 基线证据 | 本期设计影响 |
 | --- | --- |
 | [CreateSquad，squad.go:227](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/squad.go#L227)；[更新队长:410](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/squad.go#L410) | 基线验证 Agent 所属 workspace、可接入权限，并在更新时锁定 Agent，但未限制 execution_kind；需增加 managed 类型检查及原子成员维护。更新后现有运行时不可用处理保留，不将其误当作 external 类型校验 |
 | [Agent 创建小队任务测试:91](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue_agent_create_e2e_test.go#L91)；[小队触发:152](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_trigger.go#L152) | 基线允许托管创建小队任务，且将分配给自身领导的小队视为小队调度。保留合法成功场景及 originator 权限检查；任务级绑定记录所选默认队长，回投独立保留发起 run |
-| [QuickCreateIssue:2823](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L2823)；[字段解析提示词:467](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/daemon/prompt.go#L467) | 保留先由 Agent 解析字段再创建任务的流程。选 squad 时校验默认队长为 managed，实际建单时建立/复用正确领导根；不增加一次性意图记录或服务器代建的额外流程 |
+| [QuickCreateIssue:2862](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L2862)；[字段解析提示词:467](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/daemon/prompt.go#L467) | 保留先由 Agent 解析字段再创建任务的流程。选 squad 时校验默认队长为 managed，实际建单时建立/复用正确领导根；不增加一次性意图记录或服务器代建的额外流程 |
 | [Autopilot 默认队长解析:1477](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L1477) | 新任务使用有效的托管默认队长，已绑定任务恢复不漂移。Autopilot 管理、trigger 和 webhook 保留既有 acting-member 权限与凭据处理，不新增针对托管发起的拒绝、来源审计、停用或换密流程 |
 
 ### 统一队长解析的消费者清单
@@ -129,6 +129,8 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | [队长入队，issue.go:1166](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue.go#L1166)；[task.go:6221](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/task.go#L6221) | 区分执行者和发起方；托管发起的新任务用默认托管队长，外部发起的任务用该会话。按实际主体分 managed queue/external Mailbox，claim 重验 revision |
 | [自动化，autopilot.go:1477](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L1477) | 自动化新任务校验并绑定托管默认队长；启动后的 task token 可按原权限继续发起小队任务，其回投仍冻结到发起运行；恢复已有任务不覆盖根 |
 | [名册，briefing.go:229](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/squadbriefing/briefing.go#L229) | “Leader (you)” 指当前任务 leader；托管默认队长单独标识。允许向 Agent 或 squad 派发，向另一 squad 建子任务时使用目标默认队长；worker roster 不混淆兄弟会话 |
+
+[DeleteSquad 的 TransferSquadAssignees / TransferSquadAutopilotsToLeader（squad.go:501）](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/squad.go#L501) 也是默认队长消费者：不能以默认值覆盖既有任务级根。删除前若需迁移活动任务，必须按实际负责人显式交接并处理合同；未处理时阻止删除。自动化配置的目标迁移与既有运行/回投分别处理，不将配置改派当作在途任务接管。
 
 实现审查需搜索全部 `leader_id` / `LeaderID` 消费者，将剩余读取分类为任务级解析或纯默认配置展示；列表不是允许保留其他隐式回退的白名单。
 
@@ -179,16 +181,16 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 建议维护窗口切换新写入，不实施未授权的生产迁移。历史 Agent、session、任务、合同、Mailbox、return 与 wait 记录原样保留。
 
 1. 预检并演练：只读列出默认队长为 external 的小队及其成员、运行时、在途任务和合同引用，记录精确 ID；合同指出“开发协作试验队”的默认队长为 `0a3e07d0` 前缀，该信息来自任务输入，本次未重新盘点或修改生产。迁移时必须回读完整 ID，不能据前缀写入。枚举旧 Agent 的在途任务、未验收合同、pending/leased/unknown 消息、未处理结果、accepted returns、wait 和小队默认队长引用。输出可归档/不可归档及原因；不以 Agent offline 或单个 issue done 判定安全。
-2. 部署 additive schema 与兼容读取，保持模板写入关闭。创建索引失败或条件对象缺失时阻断开关，修复对象后重建无效索引，核对迁移记录与实际结构一致。
-3. 对存量外部默认队长，由有小队管理权限的人类明确选择同 workspace 的托管替代者；无合适候选就保持迁移待办并阻止依赖默认配置的新派发，不自动改写。改变默认值前，按可靠旧绑定证据保存既有在途任务的实际外部 leader/session 为任务级根，保留原成员资格、历史交付及冻结回投；证据不足则停放受影响任务，请人类显式交接，不能猜测会话。需适配新 basis 的活动合同由有权请求方 revise，旧版本和证据不改写。确认后通过正常受审计的配置更新设托管默认队长，再核对新任务用新默认、旧任务仍用原根。迁移每个小队单独记录操作者、前后值及验证结果，本任务不执行这些操作。
-4. 升级 server、CLI、插件、daemon 和写入 UI 的能力协议，先完成 legacy 多会话凭据更换、宽 token 吊销与会话校验；在测试 workspace 用两个新会话验证隔离与回投。不能更新的旧在途会话明确停放，当前活跃会话最后处理；旧版本写入新模板一律拒绝。
-5. 暂停新 external 注册/派发，备份数据库与原部署产物。核对旧在途责任后打开模板 connect；此前从未注册的新宿主会话挂新模板。模板初始授权须由 owner 明确选择，不自动汇总旧权限。
+2. 在维护窗口暂停受影响小队的默认入口和任务派发，并冻结其分配、合同写入及其他会改变路由的操作；覆盖网页/CLI、自动化、wakeup、queue/Mailbox producer 与 claimant，不能只停 external connect。已接受、leased 或 unknown 信封保留原目标和 receipt，不重新解释或盲目重发。在任何 schema 或业务写入之前备份数据库与原部署产物，再部署 additive schema 和服务端/SQL：所有任务级解析、Contract basis/representative、mention、wakeup、重跑等消费者必须已支持读取领导根，并验证没有旧版本写入者或消费者仍在运行。模板新写入保持关闭；新旧解析行为的切换在停派期间完成。索引无效或条件对象缺失时先修复并核对迁移记录，不能进入默认值迁移。
+3. 仅在第 2 步完成后，由有小队管理权限的人类为每个存量外部默认队长明确选择同 workspace 的托管替代者；无合适候选就保持该小队待迁移和停派，不自动选人。每个小队在一个事务内按与派发、合同和 runtime teardown 一致的全局锁序锁定 squad、相关 Agent、在途任务及绑定（锁冲突回滚重试，不引入反向等待）：重新核对默认值、目标权限和旧会话证据；为全部受影响在途任务保存原实际 leader/session 的任务级根，再更新默认值及成员配置。两者同事务提交，任一任务证据不足就整笔回滚、继续停派并请人类显式交接，不允许部分任务读根、另一部分回退到新默认。所有生产者/消费者须遵守同一停派屏障及锁定/版本复核，不让并发派发穿过写根与改默认之间。
+4. 逐小队验证：新默认必须为 managed；所有原在途任务仍由原 Agent/session 负责，Contract representative 读取同一个根，既有信封、作者和 accepted returns 不变。新 basis 导致活动合同 stale 时，由有权请求方 revise，历史版本和证据不改写；不是自动变成新默认队长代表。验证完成才解除该小队停派，恢复自动化由人类确认；记录操作者、前后值及结果。任一新解析路径未上线或验证失败，保持停派，不能退回仍实时读取全局默认值的旧消费者。此后升级其余 CLI、插件、daemon 和写入 UI 的会话能力，完成 legacy 多会话换凭据；不能更新的旧在途会话明确停放，当前活跃会话最后处理。本任务不执行迁移或配置变更。
+5. 核对旧在途责任及会话能力验证结果后打开模板 connect；此前从未注册的新宿主会话挂新模板。模板初始授权须由 owner 明确选择，不自动汇总旧权限。
 6. 已有宿主会话重复 connect 仍返回它的旧 Agent，不能将同一 immutable session 改挂模板。完成旧责任后，由 owner 在宿主创建新会话挂模板，再显式交接需要延续的未结任务。这保留“当前有在途会话最后处理”，也避免一个物理会话同时拥有两个可投递身份。
 7. 旧 Agent 无在途责任且已处理默认队长/成员引用后，提供归档预览，逐个由 owner 确认归档并吊销其旧 token。不删除历史或改作者。归档扫描与最终写入之间再次加锁复核，防止新派发插入；保留可追溯的旧→新模板提示关系只用于导航，不作权限或路由别名。
 
-旧 Contract 不批量重写：未交接的 legacy 任务按原 basis 版本继续；第一次显式交接进入新主体语义并 stale/revise。basis 生成需由任务是否已采用新绑定决定，不能仅新增 JSON 键就让所有历史合同突然 stale。legacy token 只能访问其旧 Agent，不能通过新 session 选择器进入模板任务；新模板无 legacy 宽权限回退。
+旧 Contract 不批量重写：未交接且未纳入领导根迁移的 legacy 任务按原 basis 版本继续；显式交接或经上述人工确认迁移到任务级根时，按新 basis 判定 stale/revise。basis 生成需由任务是否已采用新绑定决定，不能仅新增 JSON 键就让所有历史合同突然 stale。legacy token 只能访问其旧 Agent，不能通过新 session 选择器进入模板任务；新模板无 legacy 宽权限回退。
 
-回滚边界：首次新模板业务写之前，可关闭开关并退回旧二进制，保留 additive 表。首次新写之后禁止直接回旧写路径或执行 down 删除会话字段；停止新注册和派发、保留数据库及消息凭据，使用支持新模型的修复版本前滚，或在完整导出新增记录并经另行批准后进行恢复演练。历史备份恢复会丢失新增交付，不能作为“无损回滚”。当前文档没有授权执行任何一种生产恢复。
+回滚边界：首次任务级根、默认队长切换或新会话凭据等新语义写入之前，可在停派状态下关闭开关并退回旧二进制，保留 additive 表。任何上述写入之后，即使还未创建新模板，也禁止直接回旧的全局队长解析路径或执行 down 删除会话字段；停止新注册和派发、保留数据库及消息凭据，使用支持新模型的修复版本前滚，或在完整导出新增记录并经另行批准后进行恢复演练。历史备份恢复会丢失新增交付，不能作为“无损回滚”。当前文档没有授权执行任何一种生产恢复。
 
 ## 验收与实施拆分
 
@@ -205,7 +207,8 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 | 网页/自动化、托管发起或改派小队任务 | 新任务固定托管默认队长，托管发起 run 不抢队长，回投冻结到原运行；已有根恢复不改队长 | API + delegation + 调度 |
 | 托管队长创建 Agent/squad 子任务及 @squad 协作 | 既有权限成功路径保留；新建另一 squad 子任务使用目标托管默认队长，树形 parent 不强制继承上游根，子合同独立 | handler + managed E2E |
 | Squad 创建/更新提交外部默认队长（含旧客户端/API 绕过 UI） | 服务端明确拒绝且无部分成员/配置写入；managed 合法值可设置，external 仍可成为成员/任务级 leader | Squad handler + UI/CLI |
-| 存量默认队长 external，人工迁移前后并发派发 | 未选替代者不自动改写，新默认入口明确不可用；人工选择 managed 后新任务使用它，已绑定外部任务/回投不漂移；缺绑定证据停放待交接 | 迁移演练 + 并发 DB |
+| 存量默认队长 external，人工迁移前后并发派发 | 未选替代者不自动改写，新默认入口/Autopilot 暂停且可见；人工选择 managed 后新任务使用它，已绑定外部任务/回投不漂移；缺证据整笔回滚并停派待交接 | 迁移演练 + 并发 DB |
+| 旧 server/Contract 全局解析器仍在、写根与改默认之间注入派发、迁移中途失败 | 旧消费者未退出禁止迁移；默认值切换只在新解析器已上线且停派屏障下执行；写根+改默认同事务，无中间可见状态；Contract representative、wakeup/mention 仍命中原外部负责人，失败不部分迁移 | 维护窗口演练 + 并发 DB |
 | QuickCreate 字段解析建单、Autopilot 管理/trigger/调度 | 保留原有合法成功及权限拒绝用例，不把托管成功测试改成拒绝；不要求新增意图记录、trigger 审计/停用或凭据轮换 | 原入口回归 |
 | B 在 A 任务卡查看、普通评论、编辑评论和试图添加派发提及 | 卡片及 API 均允许普通评论，审计作者为 B；负责人/执行绑定/accepted returns 不变，零派发/自动唤醒；可执行提及被拒绝 | comment DB + UI/E2E |
 | 同根同时认领、分配与 handoff 竞态、handoff 与 submit/claim 竞态 | 单一胜者；旧 revision 拒绝；旧 pending 派发撤销不漏事务 | DB 并发测试 |
