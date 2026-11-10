@@ -40,22 +40,23 @@
 | 存储 | 新增或调整 | 不变量 |
 | --- | --- | --- |
 | `agent` | 可空 `external_provider`、`external_host_id`，两者都存在表示新模板；旧 Agent 保持空 | 模板唯一键为 `(workspace_id, owner_id, external_provider, external_host_id)`，仅约束模板行；不把会话标题放进 key |
-| `external_agent_session` | `last_seen_at`、`connection_state`、`revoked_at`；继续保存展示字段与 daemon 路由 | UUID、Agent、owner、provider、host、宿主 session 身份不可改写。在线是有时效的观测，过期显示 unknown/offline，不等同于有投递权限 |
-| `external_agent_token` | 可空 `external_session_id`；新签发必填，旧值空只供 legacy 身份按原边界使用 | 服务端校验会话属于 token 的 Agent/workspace/owner；模板不能签发无会话 token |
-| `issue` | 可空 `execution_session_id`；可空 `leadership_root_issue_id` | 外部 assignee 的当前执行会话是单一权威；托管 assignee 为空。小队任务与明确加入任务链的子任务引用同一领导根 |
-| `issue_leadership`（新增） | `workspace_id, root_issue_id, squad_id, leader_agent_id, leader_external_session_id, leader_source_task_id, revision, state` | 每根任务一行；external 有 registered session，managed 有真实来源 run（首次默认队长启动前可空），不伪造 external session |
-| `issue_leadership_event`（新增） | 根任务、前后 revision/主体、原因、真实操作人和会话、时间、请求 ID | 追加历史；当前领导记录可更新，历史交付与信封不可更新 |
+| `external_agent_session` | 新增 `revoked_at`；继续保存展示字段与 daemon 路由 | UUID、Agent、owner、provider、host、宿主 session 身份不可改写。在线状态由已授权 daemon 的宿主会话探测与观测时间推导，过期为 unknown；daemon 心跳或 claim 仅证明 worker 存活，不能单独证明宿主会话在线。不持久化第二份 connection state |
+| `external_agent_token` | 可空 `external_session_id`；新签发必填，legacy 空值受下述单会话门禁限制 | 服务端校验会话属于 token 的 Agent/workspace/owner；模板不能签发无会话 token |
+| `external_agent_session_binding` | 保留现有键，执行者写入口收窄到分配/交接 | 外部执行会话只存此处，Issue API 的 `execution_session` 从当前 assignee 的活动绑定投影，不再加重复列 |
+| `issue` | 可空 `leadership_root_issue_id`；根行增加 `leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision` | 小队任务与明确加入任务链的子任务引用同一根。根指针一跳且同 workspace，无环；external leader 有 registered session，managed leader 只绑定 Agent，不引入托管会话队长模型 |
+| 现有 activity | 增加 leadership handoff 事件 payload：根任务、前后 revision/主体、原因、真实操作人、时间、请求 ID | 追加历史，不另建 1:1 领导表或专用事件表。信封 ID、目标、payload、receipt 不改；pending 可撤销为终态 |
 | `issue_contract.data` | 当前 basis 增加执行会话、任务链领导 revision、representative 会话，以及外部 requester/acceptor 会话快照 | executor 的 type/id 继续兼容；delivery、decision 的 author 附会话。旧 JSON 不补造会话作者 |
 | 审计、comment、squad activity | 增加可空 `actor_session_id`，由鉴权层赋值 | 旧记录空表示未知，不按当前会话补齐 |
 
-`external_agent_session_binding` 继续用于非执行参与者的显式通知地址；对执行者的绑定只能由分配/交接事务维护，并必须等于 `issue.execution_session_id`，禁止再独立 bind 执行者。这是保留现有路由索引的受约束投影，不允许两个写入口各自决定执行归属。任务级 leader 的外部投递从领导根解析，不借用某个参与者的默认绑定。
+`external_agent_session_binding` 同时保存非执行参与者的显式通知地址。对当前执行者的绑定禁止通过普通 bind 修改，只有分配/交接可写；所有执行者读取都查该绑定。同一任务内同模板仍只有一个活动会话地址，这个限制的用户影响与备选方案见待决策 D1。任务级 leader 的外部投递从领导根解析，不借用参与者的默认绑定。
 
-模板 key 的权限命名空间包含 workspace 和 owner：同一主机上的不同用户不因主机名相同共享授权。provider 为接入方标识 `paseo`；host 使用该接入方稳定的服务器实例 ID，hostname 和展示别名可随时改。不同 provider、owner 或 workspace 永不自动合并。
+模板 key 的权限命名空间包含 workspace 和 owner：同一主机上的不同用户不因主机名相同共享授权。provider 为接入方标识 `paseo`；host 使用接入方服务器实例 ID，hostname 和展示别名可随时改。不同 provider、owner 或 workspace 永不自动合并。实例 ID 跨普通重启稳定是待实现阶段验证的假设，不是本文已证实的 Paseo 保证；若验证失败，暂停模板开关，先补稳定主机登记协议。
 
 - 同 key 并发首次 connect：一个事务创建模板与实例，唯一索引裁决，失败方回读同一模板；重复请求仍返回同一实例。
 - 主机改名不换模板；重装导致 host ID 变化则建新模板，显式交接任务。不能据 hostname 相同推断是原主机。
 - host ID 被克隆或复用无法仅靠字符串辨别；注册须由已授权插件/owner 与对应 daemon 验证。发现冲突停止注册并提示重新登记，不自动吸收旧会话。
 - 模板归档保留 key；再次 connect 提示管理员恢复或明确建立新主机身份，不静默复活授权。权限、skill 和小队资格不从多个旧 Agent 做并集。
+- 展示名必须满足现有 workspace 内名称唯一约束。默认 `Paseo · <host label>`，冲突时追加模板 ID 的短后缀并逐步加长直至唯一；名称和后缀不参与模板 key。主机改名不自动覆盖用户名称，显式改名发生冲突时返回可操作提示。
 
 表间关系由应用事务校验 workspace、owner、成员资格，无外键和级联。新增普通/唯一索引均用独立单语句 `CREATE [UNIQUE] INDEX CONCURRENTLY` 迁移；新表也不以内联 PRIMARY KEY 绕过索引规则，先并发唯一索引，再独立挂约束。可空旧行不参与模板唯一性。上线前检查重复 key、无效身份和索引有效性；条件对象后续 DDL 使用 `IF EXISTS` / `IF NOT EXISTS`。SQL 改动需 `make sqlc`。
 
@@ -66,6 +67,10 @@
 新插件 connect 返回模板 ID、registered session UUID、宿主 session ID 和会话专属 token。鉴权层清除所有客户端传入的内部身份头，由 token 派生 `Agent + actor_session_id`；CLI 的 `--return-session` 只做一致性校验，不能扩大主体。续签只能续当前会话，新增兄弟会话仍由已授权接入方注册。
 
 模板权限是操作的上限，会话绑定是额外约束。每次请求重查 token 到期/吊销、会话吊销、Agent 归档、owner 成员资格及现有调用权限；投递 claim 也重查。业务中不能只比较 Agent ID。
+
+本方案的 API 隔离保证以“会话凭据未泄露”为前提，覆盖伪造 session 参数、误路由及使用 A token 操作 B 的情况。它不防持有 B token 的进程：当前插件将凭据写入同 uid 可读的 0600 文件（[store.ts:108](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/integrations/paseo-multica/server/store.ts#L108)），CLI 可通过会话环境选择文件（[session_context.go:109](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/cmd/multica/session_context.go#L109)）。同账户恶意或失控进程可偷读兄弟 token，0600 不是会话沙箱。“不可冒充”是否要求抵御该威胁须由用户按 D2 定案；不能把 API 隔离宣传成进程隔离。
+
+legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会话时，保持 Agent/session ID 和历史不变，为每个实例重新签发 session-bound token，确认所有在途会话已更新后吊销旧宽 token。切换门禁拒绝此类宽 token 的会话敏感操作，不替用户选会话；任一在途会话无法更新则停放该 Agent，不能开启它的多会话新写入。单会话 legacy 空值 token 只允许服务器证明恰好一个原注册会话后按该身份使用；禁止继续追加第二会话，先升级凭据再注册。新模板始终无此 legacy 例外。
 
 | 操作 | 外部调用主体必须满足 |
 | --- | --- |
@@ -87,17 +92,36 @@
 4. 创建子任务时显式加入父任务链，服务端验证父链与发起者权限，并记录根 ID。子任务的 assignee 与独立 Contract 不变，leader 不因此获得代交付/代验收权。单纯设置 parent 或 @另一个 squad 不改所属任务链；客串小队仍不能管理父任务状态。
 5. 默认队长调整只影响之后没有发起会话的新任务；现有领导根不随之漂移。成员资格撤销、模板归档导致现有 leader 不再有效，任务显示 unavailable，不能自动回退。
 
-同模板 A、B 可分别领导两个根任务；同一根当前只有一个 leader。同一个任务已有 A 的 accepted return 时 B 不可新增第二个“同 Agent 当前返回”，必须显式交接，保留现有 `(issue, dispatcher)` 约束。无需为多会话设计广播或多个共同队长。
+托管 task token 发起新的小队任务时，建议保持现有托管语义：发起 run 是冻结回投的来源，不自动成为队长；没有既有领导根就按规则 2 选择默认队长。默认队长的后续 managed run 仍按 Agent 派发，真实 run 记录保留在现有运行表，不增加 `leader_source_task_id`。若托管调用只是恢复已绑定任务，仍使用原领导根。该解释与“发起会话即队长”的外部适用范围见待决策 D3。
+
+同模板 A、B 可分别领导两个根任务；同一根当前只有一个 leader。建议本期保留 `(issue, dispatcher)` 与 `(workspace, agent, issue)` 约束：同任务已有 A 的 accepted return 时 B 再独立委派返回 409，不能静默复用 A。B 可查看/评论（按模板权限），需要承担原责任则显式交接，独立工作可新建子任务。与旧的一会话一 Agent 相比，这会限制“新开会话在原任务继续委派”，并非无损兼容；D1 明确列出扩展会话键的备选，不将该取舍冒充用户已确认结论。
+
+### 统一队长解析的消费者清单
+
+建议统一 `ResolveIssueLeader(issue, squad)`：该 squad 与既有领导根相符时，只返回根绑定，失效则 unavailable；没有适用根才允许新入口解析默认队长并保存绑定。@客串 squad 不改原根，只建该次授权范围内的显式客串投递；其通知不授予父任务管理权限。以下是基线仍使用全局队长的读取点，必须连同前述分配、activity、Contract 一起改造，不能只改 briefing：
+
+| 消费者及基线证据 | 设计要求 |
+| --- | --- |
+| [评论 @小队投递，mailbox.go:491](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/mailbox.go#L491) | 提及解析、授权及 enqueue 都使用同一个任务 leader；不再用默认 Agent 比较后拒绝真实 leader |
+| [wakeup 权限，issue_wakeup.go:1450](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_wakeup.go#L1450) | 建规则与执行时校验任务 leader 和外部 session，旧队长不能靠模板相同修改规则 |
+| [系统 wakeup，issue_wakeup_system.go:343](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_wakeup_system.go#L343)；[父任务/stage 候选 SQL:60](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/pkg/db/queries/workspace_wakeup.sql#L60) | 查询候选与最终派发采用同一领导根；child_done、stage 屏障完成通知不得回到全局默认值 |
+| [rerun，task_lifecycle.go:386](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/task_lifecycle.go#L386)；[触发判断，issue_trigger.go:165](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue_trigger.go#L165) | 恢复原绑定，不重选默认队长；已接受 returns 保持原快照 |
+| [队长入队，issue.go:1166](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/issue.go#L1166)；[task.go:6221](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/task.go#L6221) | 先解析主体，再分 managed queue 与 external Mailbox；claim 重验绑定 revision，不把 external 排入托管队列 |
+| [自动化，autopilot.go:1477](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L1477) | 新任务才用默认值；配置外部接收会话并保存绑定，恢复已有任务不覆盖根 |
+| [名册，briefing.go:229](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/squadbriefing/briefing.go#L229) | “Leader (you)” 指当前任务 leader；默认队长单独标识。worker roster 不把兄弟会话误写成当前调用者 |
+
+实现审查需搜索全部 `leader_id` / `LeaderID` 消费者，将剩余读取分类为任务级解析或纯默认配置展示；列表不是允许保留其他隐式回退的白名单。
 
 ### 交接与 stale/revise
 
 失联是路由可用性，不等于权限撤销；A 短暂离线仍拥有任务。需要换 B 时使用专用 handoff 请求，带旧主体、目标 registered UUID、expected leadership/issue revision、原因和幂等请求 ID。
 
-- 有效旧会话可请求交给同模板会话；旧会话不可用时，由具有任务管理与目标调用权限的人类 owner/admin 恢复。跨模板更换还须检查新模板的小队成员资格，普通兄弟会话不得自行接管。
+- handoff 的生效操作限定人类 owner/admin，且须具有任务管理与目标调用权限；Agent 只能提出交接建议，不能调用生效接口。旧会话仍在线也不例外，避免新增机器凭据接管授权。跨模板更换还须检查新模板的小队成员资格，普通兄弟会话不得自行接管。
 - 锁定领导根、受影响任务、绑定及合同状态，按确定顺序验证版本、权限与目标。事务内更新当前主体与 revision，记录事件、撤销未开始的旧派发、生成新派发义务。消费者在执行前校验该 revision，旧队长后续写入拒绝。
-- 相关 Contract 的 basis 引用领导根 revision，交接后自然 stale；有权原请求方 revise 后新会话才 submit/accept。子任务合同中 requester/acceptor 也指向旧会话时同样 stale，但无关合同不批量改版。新 executor/leader 不获得 revise 自己标准的权限。
+- 相关 Contract 的 basis 引用领导根 revision，交接后自然 stale；有权请求方 revise 后新会话才 submit/accept。子任务合同中 requester/acceptor 也指向旧会话时同样 stale，但无关合同不批量改版。原外部 requester 会话已失联时，由现有 Contract 维护权限允许的人类维护者恢复；不要求已失联者上线。新 executor/leader 不获得 revise 自己标准的权限。
 - 已运行子任务继续保存原交付与回投；不因换队长重跑。已投递或 unknown 信封保留 ID、目标和 receipt；unknown 仍仅核验。已有在途运行须显式取消或收齐结果，不能把“撤销待派发”当作停止执行。
-- 交接列出需接收的已有结果和对应 return ID。通过现有显式 result takeover 机制向 B 建新通知，不修改旧返回、不自动继承 B 的其他上游链；未解决的 unknown 状态同时展示，不能宣称旧投递已撤回。
+- 交接列出需接收的已有结果和对应 return ID。现有 [result takeover 路由](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/cmd/server/router.go#L2089) 仅限人类；因此本方案 handoff 也保留此边界。同模板交接事务更新所选 dispatcher 的当前 return 版本，旧版本仍供已承接运行引用；已有结果通过同权限的 takeover 操作建新通知。两步分别幂等，UI 在结果通知完成前显示“交接已生效，历史结果待接收”，不能误报全部收齐。unknown 同时展示，不修改原信封，不继承 B 的其他上游链。
+- 跨模板（包括旧 Agent → 新模板）不能直接套用现有同 dispatcher takeover，需明确扩展人类结果接收操作：请求给出旧 return、精确结果 run、新模板/session、expected 版本及请求 ID；服务端检查人类对原/目标 Agent 的管理权限、任务访问及目标可用性。在事务中创建目标 dispatcher 的独立 return 关系与一次性结果通知，记录旧 return 为来源，不重写旧 dispatcher/作者，也不伪造新 Agent 曾经委派的历史。目标已有不同当前 return 则 conflict；不自动汇集其上游。后续新委派由新主体接受新关系；旧在途运行仍先履行原冻结回投，再由人类按具体结果显式接收。该 API 扩展和迁移演练完成前，不允许归档仍有旧义务的 Agent。
 - wait 的本地命令继续由原 daemon 持有；交接不搬进程，也不改已登记地址。新负责人可经授权显式取回已有结果，需取消时请求原 owner/daemon 操作，不能从兄弟会话借凭据取消。
 
 | 当前状态 | 事件 | 结果 |
@@ -134,7 +158,7 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 
 1. 预检并演练：枚举旧 Agent 的在途任务、未验收合同、pending/leased/unknown 消息、未处理结果、accepted returns、wait 和小队默认队长引用。输出可归档/不可归档及原因；不以 Agent offline 或单个 issue done 判定安全。
 2. 部署 additive schema 与兼容读取，保持模板写入关闭。创建索引失败或条件对象缺失时阻断开关，修复对象后重建无效索引，核对迁移记录与实际结构一致。
-3. 升级 server、CLI、插件、daemon 和写入 UI 的能力协议，先启用会话凭据验证；在测试 workspace 用两个新会话验证隔离与回投。旧版本写入新模板一律拒绝。
+3. 升级 server、CLI、插件、daemon 和写入 UI 的能力协议，先完成 legacy 多会话凭据更换、宽 token 吊销与会话校验；在测试 workspace 用两个新会话验证隔离与回投。不能更新的旧在途会话明确停放，当前活跃会话最后处理；旧版本写入新模板一律拒绝。
 4. 暂停新 external 注册/派发，备份数据库与原部署产物。核对旧在途责任后打开模板 connect；此前从未注册的新宿主会话挂新模板。模板初始授权须由 owner 明确选择，不自动汇总旧权限。
 5. 已有宿主会话重复 connect 仍返回它的旧 Agent，不能将同一 immutable session 改挂模板。完成旧责任后，由 owner 在宿主创建新会话挂模板，再显式交接需要延续的未结任务。这保留“当前有在途会话最后处理”，也避免一个物理会话同时拥有两个可投递身份。
 6. 旧 Agent 无在途责任且已处理默认队长/成员引用后，提供归档预览，逐个由 owner 确认归档并吊销其旧 token。不删除历史或改作者。归档扫描与最终写入之间再次加锁复核，防止新派发插入；保留可追溯的旧→新模板提示关系只用于导航，不作权限或路由别名。
@@ -152,7 +176,11 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 | 同主机两个新会话并发 connect、同会话重试、host 改名/重建、跨 owner/workspace | 复用正确模板，实例不重复，身份冲突不自动迁移 | 注册 handler + DB |
 | A token 携带 B 的 header、return/session UUID、Mailbox ID | list/ack、Contract、wait、activity、handoff 均拒绝越权；无副作用 | 鉴权与各边界回归 |
 | A/B 同模板分别发起两个 squad 根任务 | 各自成为队长、各自回投/提交；默认队长无权抢交；并发 claim 不互相占 Agent 槽 | 服务事务 + 投递 DB |
+| B 领导任务后 @小队、定时/系统 wakeup、rerun、子任务/stage 完成 | 所有入口解析 B，失联时明确失败；默认队长变更不接管；客串不改根 | trigger + wakeup + 队列回归 |
+| 同模板 A/B 在同任务独立委派，人类同模板/跨模板交接 | 按 D1 定案验证 409 或会话键隔离；跨模板结果接收保留原作者/return，仅产生一次新通知；Agent handoff 被拒绝 | delegation + handoff DB |
+| legacy 一 Agent 多会话、宽 token 轮换、同 uid 凭据暴露 | 未轮换禁止敏感写；轮换后 A token 不操作 B；按 D2 定案验证宿主隔离，不能用 0600 声称完成隔离 | 迁移 + 鉴权/宿主验收 |
 | 网页/自动化无发起会话 | managed 默认正常；external 缺显式会话停放，单在线会话也不偷选 | API + CLI |
+| managed task token 发起新小队任务或恢复旧任务 | 按 D3 定案，新任务采用默认队长且回投仍冻结到发起 run；恢复不重选队长 | managed 分配 + delegation |
 | 同根同时认领、分配与 handoff 竞态、handoff 与 submit/claim 竞态 | 单一胜者；旧 revision 拒绝；旧 pending 派发撤销不漏事务 | DB 并发测试 |
 | 默认 leader 改动、成员移除、leader 失联 | 已绑定任务不漂移；失效可见；只有显式交接改变主体 | 领导解析 + Contract |
 | 父/子合同、换会话后 revise、同模板异会话自验 | 正确 stale、独立验收；旧交付/作者/接受历史不改写，无自验逃逸 | Contract 状态矩阵 |
@@ -162,7 +190,17 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 
 实施按三个可审查切片推进：模板注册及会话凭据隔离；任务绑定/领导解析及 Contract、Mailbox、wait 全调用链；UI/迁移工具和维护窗口演练。第一个切片验证后再开放模板合并写入，避免先共享身份后补鉴权。实现阶段分别跑针对性 Go/DB、CLI/plugin 测试，共享前端检查及必要 E2E；移动端按其独立 AGENTS.md 验证。
 
-设计阶段已定方向没有发现必须推翻的技术障碍。以下边界建议随本文审阅定稿，不代表已获生产执行授权：
+## 待用户决策与边界
+
+模板/实例和外部任务级队长方向可落实，但以下三项不能从已定方向唯一推出。本文先给出推荐方案及影响；需要用户定案后才能派发相关实现，不将它们视为已授权改变验收标准。
+
+| 决策 | 选项、影响与建议 |
+| --- | --- |
+| D1：同模板多会话参与同一任务 | 甲：把 dispatcher return 与参与者 binding 的键扩展到 session，支持 A/B 独立委派；需要区分执行槽与参与者地址，并逐一改变去重、回投、Mailbox 和迁移规则。乙：本稿当前方案，保留每任务每模板一个活动地址，B 独立委派返回 409，需人类交接或另建子任务。建议本期乙，保持任务主体钉死并减小迁移面；代价是旧“一会话一 Agent”下同任务多会话委派不再无缝。用户若要求此场景不退化，应选甲并在实现前修订本节模型，不能只移除唯一索引 |
+| D2：“不可冒充”的威胁边界 | 甲：接受凭据未泄露前提下的 API/session 隔离，同 uid 宿主仍属共同信任域；乙：还要求抵御兄弟进程偷取凭据，须使用每会话 OS 身份/沙箱与不可跨读的凭据存储，或具备可验证调用来源的宿主 broker，不能只藏文件名。建议将乙作为不受信任会话共享模板的上线门禁；可信单 owner 场景是否先接受甲，由用户明确决定。本文未证明宿主具有乙能力，不承诺强隔离已解决 |
+| D3：托管发起者是否自动当队长 | 甲：保留托管 Agent 行为，发起 run 只提供回投，新小队任务采用默认队长；乙：将任务级会话队长扩展到 managed run，需新增其生命周期和恢复权限设计。建议本期甲，本文模型据此书写；用户若将“发起会话即队长”也用于 managed，需先定案乙，不静默扩大本期范围 |
+
+其余边界建议随本文审阅定稿，不代表已获生产执行授权：
 
 - host 的粒度采用 provider 实例 ID 而非物理机名；同一物理机重装后算新模板。若产品需要跨重装连续身份，应另行设计可信主机登记，不用 hostname 合并。
 - 不把已登记的旧宿主会话原地搬到模板；旧会话完成责任后用新宿主会话接续。若必须保留同一宿主上下文原地换身份，需要独立的一次性迁移协议，当前不做。
