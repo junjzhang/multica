@@ -980,8 +980,9 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		Outcome string `json:"outcome"` // action | no_action | failed
-		Reason  string `json:"reason"`  // short explanation from leader
+		MailboxID string `json:"mailbox_id,omitempty"`
+		Outcome   string `json:"outcome"` // action | no_action | failed
+		Reason    string `json:"reason"`  // short explanation from leader
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -990,6 +991,11 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 
 	if req.Outcome != "action" && req.Outcome != "no_action" && req.Outcome != "failed" {
 		writeError(w, http.StatusBadRequest, "outcome must be 'action', 'no_action', or 'failed'")
+		return
+	}
+
+	if req.MailboxID != "" || r.Header.Get("X-Actor-Source") == "external_agent" {
+		h.recordExternalSquadEvaluation(w, r, issue, req.MailboxID, req.Outcome, req.Reason)
 		return
 	}
 
@@ -1092,12 +1098,14 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	details, _ := json.Marshal(map[string]string{
-		"squad_id": uuidToString(squad.ID),
-		"task_id":  util.UUIDToString(taskUUID),
-		"outcome":  req.Outcome,
-		"reason":   req.Reason,
+	h.recordSquadEvaluation(w, r, issue, task.AgentID, map[string]string{
+		"squad_id": uuidToString(squad.ID), "task_id": uuidToString(taskUUID), "outcome": req.Outcome, "reason": req.Reason,
 	})
+}
+
+func (h *Handler) recordSquadEvaluation(w http.ResponseWriter, r *http.Request, issue db.Issue, agentID pgtype.UUID, proof map[string]string) {
+	actorID := uuidToString(agentID)
+	details, _ := json.Marshal(proof)
 
 	activity, err := h.Queries.CreateActivity(r.Context(), db.CreateActivityParams{
 		ID:          dbid.NewV7(),
@@ -1108,7 +1116,7 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 		// lookup matches actor_id against task.agent_id
 		// (service.HasSquadLeaderNoActionEvaluationForTask), so this column has
 		// to carry the task's agent for suppression to find the row at all.
-		ActorID: task.AgentID,
+		ActorID: agentID,
 		Action:  "squad_leader_evaluated",
 		Details: details,
 	})
@@ -1177,67 +1185,7 @@ func commentMentionsAnyone(content string) bool {
 // service.IssueService.WillEnqueueRun predicate (MUL-3375), shared by the issue
 // write paths and the preview endpoint. The former handler-local mirrors
 // (shouldEnqueueSquadLeaderOnAssign / isSquadLeaderReady) were removed to stop
-// the four-entry-point drift. The squad enqueue side effect still flows through
-// enqueueSquadLeaderTask below, which keeps the leader access gate and pending
-// dedup in one place.
-
-// enqueueSquadLeaderTask triggers the squad leader agent for an issue assigned
-// to a squad. Assign and backlog-promotion paths use this directly; comment
-// paths go through computeCommentAgentTriggers so preview and create share the
-// same trigger set.
-// It returns true only when a leader task was actually enqueued.
-func (h *Handler) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, authorType, authorID, handoffNote string) bool {
-	squad, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
-		ID:          issue.AssigneeID,
-		WorkspaceID: issue.WorkspaceID,
-	})
-	if err != nil {
-		return false
-	}
-
-	// The gate must judge the SAME top-of-chain human the enqueue path will
-	// persist on the leader task row, or it drifts: an agent-created issue that
-	// correctly inherits its originator (MUL-4305) would still be denied here
-	// if the gate used an empty originator. Member authors are their own
-	// originator; for agent/system-triggered assigns we resolve the originator
-	// exactly like EnqueueTaskForSquadLeader* does (via the issue's origin
-	// link). triggerCommentID is always empty on the assign/promote path, so we
-	// pass an invalid UUID to match. A still-unresolved originator leaves
-	// leaderOriginator empty, which correctly fails closed for member/team
-	// targets while a workspace target still admits the agent principal.
-	leaderOriginator := ""
-	if authorType == "member" {
-		leaderOriginator = authorID
-	} else {
-		leaderOriginator = uuidToString(h.TaskService.OriginatorForIssueTask(ctx, issue, pgtype.UUID{}))
-	}
-	if !h.canEnqueueSquadLeader(ctx, squad.LeaderID, authorType, authorID, leaderOriginator, uuidToString(issue.WorkspaceID)) {
-		return false
-	}
-
-	hasPending, err := h.Queries.HasPendingTaskForIssueAndAgent(ctx, db.HasPendingTaskForIssueAndAgentParams{
-		IssueID: issue.ID,
-		AgentID: squad.LeaderID,
-		// Key dedup on the reviewed head (TEN-356).
-		HeadSha: h.TaskService.ResolveIssueReviewSHAParam(ctx, issue.ID),
-	})
-	if err != nil || hasPending {
-		return false
-	}
-
-	// triggerCommentID is always empty on the assign/promote path; legacy
-	// handoff text rides its dedicated task column instead.
-	_ = triggerCommentID
-	// The member who performed the assign/promote is the accountable human for the
-	// leader run (MUL-4302 §4) — the same principal the gate above judged. An agent
-	// author is not a human, so only a member actor is threaded.
-	if _, err := h.TaskService.EnqueueTaskForSquadLeaderWithHandoff(ctx, issue, squad.LeaderID, squad.ID, handoffNote, memberActorUserID(authorType, authorID)); err != nil {
-		slog.Warn("enqueue squad leader task failed",
-			"issue_id", uuidToString(issue.ID),
-			"squad_id", uuidToString(squad.ID),
-			"leader_id", uuidToString(squad.LeaderID),
-			"error", err)
-		return false
-	}
-	return true
-}
+// the four-entry-point drift. Squad enqueue side effects flow through the
+// shared in-transaction helpers (IssueService.enqueueSquadLeaderTaskInTx and
+// Handler.enqueueAssignmentRunInTx), which keep the leader access gate, pending
+// dedup, and accepted-return link in one place.

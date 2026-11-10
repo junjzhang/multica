@@ -130,7 +130,7 @@ func TestProbeDshMulticaProfile(t *testing.T) {
 		path := dshProbeFixture(t, `exec sleep 30`, false)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if got := probeDshMulticaProfile(ctx, path); got != dshProbeUnavailable {
+		if got, _ := probeDshMulticaProfile(ctx, path); got != dshProbeUnavailable {
 			t.Fatalf("probeDshMulticaProfile() = %v, want %v", got, dshProbeUnavailable)
 		}
 	})
@@ -138,7 +138,7 @@ func TestProbeDshMulticaProfile(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := dshProbeFixture(t, tc.body, tc.manifest)
-			if got := probeDshMulticaProfile(context.Background(), path); got != tc.want {
+			if got, _ := probeDshMulticaProfile(context.Background(), path); got != tc.want {
 				t.Fatalf("probeDshMulticaProfile() = %v, want %v", got, tc.want)
 			}
 		})
@@ -166,7 +166,7 @@ func TestProbeDshMulticaProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			start := time.Now()
-			if got := probeDshMulticaProfile(context.Background(), path); got != dshProbeMissingProfile {
+			if got, _ := probeDshMulticaProfile(context.Background(), path); got != dshProbeMissingProfile {
 				t.Fatalf("probeDshMulticaProfile() = %v, want missing", got)
 			}
 			if time.Since(start) > time.Second {
@@ -197,7 +197,7 @@ func TestProbeDshMulticaProfile(t *testing.T) {
 		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if got := probeDshMulticaProfile(context.Background(), path); got != dshProbeUnavailable {
+		if got, _ := probeDshMulticaProfile(context.Background(), path); got != dshProbeUnavailable {
 			t.Fatalf("probeDshMulticaProfile() = %v, want unavailable", got)
 		}
 		if _, err := os.Stat(marker); err != nil {
@@ -544,5 +544,38 @@ func TestNewRuntimeVerdict_DshProfileCarriesAStructuredCause(t *testing.T) {
 	if demotableBuiltinProbeVerdict(builtinProbeIncompatibleProfile) {
 		t.Fatal("an incompatible profile can demote a live runtime; " +
 			"the daemon may be the stale side of that protocol skew")
+	}
+}
+
+func TestProbeBuiltinRuntime_DshRefusalExplainsProfileFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	originalTimeout := dshProbeTimeout
+	dshProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { dshProbeTimeout = originalTimeout })
+	path := dshProbeFixture(t, `printf '%s\n' 'Plugin @multica-ai/dsh-runtime is incompatible with dsh 0.2.1-rc.5; https://user:secret@registry.example/plugin' >&2
+exec sleep 30`, true)
+	d := &Daemon{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), agentVersions: map[string]string{}}
+	_, reason, verdict := d.probeBuiltinRuntime(context.Background(), "dsh", AgentEntry{Path: path, Command: "dsh"})
+	if !strings.Contains(reason, "is incompatible with dsh 0.2.1-rc.5") {
+		t.Fatalf("reason = %q, want DSH's compatibility refusal", reason)
+	}
+	if strings.Contains(reason, "user:secret") {
+		t.Fatalf("reason contains registry credentials: %q", reason)
+	}
+	if demotableBuiltinProbeVerdict(verdict) || verdict == builtinProbeOK {
+		t.Fatalf("verdict = %v, want an unavailable runtime without overwriting its profile", verdict)
+	}
+}
+
+func TestProbeDshMulticaProfile_StderrCannotSupplyProtocolFrames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	path := dshProbeFixture(t, dshProbeOKFrame+" >&2", true)
+	verdict, diagnostic := probeDshMulticaProfile(context.Background(), path)
+	if verdict != dshProbeUnavailable || diagnostic == "" {
+		t.Fatalf("probe = (%v, %q), want unavailable with stderr diagnostic", verdict, diagnostic)
 	}
 }

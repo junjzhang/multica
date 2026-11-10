@@ -428,6 +428,7 @@ export function onIssueUpdated(
     projectChanged?: boolean;
   } = {},
 ) {
+  qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "contract", issue.id] });
   // Look up the OLD parent + cached entity before mutating cache state, so we
   // can keep the parent's children cache in sync (powers the sub-issues list
   // shown on the parent issue page) and diff-fallback the change flags.

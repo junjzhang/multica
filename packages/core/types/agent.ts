@@ -27,6 +27,49 @@ export type AgentVisibility = "workspace" | "private";
 export type AgentPermissionMode = "private" | "public_to";
 
 /**
+ * Where an agent's turns execute. Missing means "managed" for older servers;
+ * an unknown value is kept as a string and must not be rendered as either
+ * kind (see agentExecutionKind).
+ */
+export type AgentExecutionKind = "managed" | "external";
+
+/**
+ * The concrete host session behind an external agent identity (WORK-9).
+ * `host_id` is the host/connection id, NOT a hostname; `session_id` is the
+ * host's agent id, NOT an underlying CLI thread id. `url` points at this exact
+ * session, and `daemon_id` names the Multica daemon that delivers to it.
+ */
+export interface ExternalSession {
+  id?: string;
+  provider: string;
+  host_id: string;
+  session_id: string;
+  display_name: string;
+  url: string | null;
+  daemon_id: string;
+}
+
+/**
+ * One registered session of an external agent. The read projection adds
+ * deliverability so the task view can explain an archived agent or an owner
+ * who left the workspace instead of silently offering an unreachable target.
+ */
+export interface AgentSessionSummary extends ExternalSession {
+  id: string;
+  deliverable: boolean;
+  unavailable_reason?: string;
+}
+
+/** The frozen wire shape returned when an explicit binding is saved. */
+export interface AgentSessionBinding {
+  id: string;
+  agent_id: string;
+  issue_id: string;
+  session_id: string;
+  created_at: string;
+}
+
+/**
  * A single invocation grant on an agent. `target_id` is `null` for the
  * workspace target (the grant covers every workspace member); it carries the
  * member / team id for the scoped grants.
@@ -300,6 +343,39 @@ export interface TaskCancellationActor {
   name?: string;
 }
 
+export interface ResultNotification {
+  return_id: string;
+  current_return_id?: string;
+  takeover_id?: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task" | "unknown";
+  delivery_id?: string;
+  handling_task_id?: string;
+  status:
+    | "pending"
+    | "queued"
+    | "deferred"
+    | "dispatched"
+    | "waiting_local_directory"
+    | "running"
+    | "received"
+    | "cancelled"
+    | "leased"
+    | "delivered"
+    | "failed"
+    | "refused"
+    | "unknown";
+  error?: string;
+}
+
+export interface AcceptedReturn {
+  return_id: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task";
+  source_task_id?: string;
+  external_session_id?: string;
+}
+
 export interface AgentTask {
   wakeup_id?: string;
   id: string;
@@ -329,6 +405,9 @@ export interface AgentTask {
   completed_at: string | null;
   result: unknown;
   error: string | null;
+  /** Undefined means unknown/unhydrated; [] means hydrated with no notifications. */
+  result_notifications?: ResultNotification[];
+  accepted_returns?: AcceptedReturn[];
   // Empty string when the task is not in a failed state (the backend uses
   // `omitempty`, so the field may also be missing on non-failed tasks).
   // Open string on the wire, not a closed enum: the backend's classifier
@@ -505,6 +584,14 @@ export interface Agent {
   runtime_bound?: boolean;
   /** Privacy-safe coarse liveness for a runtime hidden from the runtime list. */
   runtime_availability?: "online" | "unstable" | "offline";
+  /**
+   * Execution boundary (WORK-9). Older servers omit it; use
+   * agentExecutionKind so a missing value reads as managed and an unknown one
+   * is never executed or presented as external.
+   */
+  execution_kind?: AgentExecutionKind | string;
+  /** Set only for an external agent; managed agents never carry one. */
+  external_session?: ExternalSession | null;
   name: string;
   description: string;
   /** What this agent's owner wrote. For a system agent this holds only the

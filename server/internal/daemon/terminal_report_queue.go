@@ -43,6 +43,8 @@ const (
 // untouched and reported on every replay pass; downgrading must never delete a
 // payload merely because the older binary cannot decode it.
 type persistedTerminalTaskReport struct {
+	Generation            string    `json:"turn_generation,omitempty"`
+	KnownWaitIDs          string    `json:"known_wait_ids,omitempty"`
 	Version               int       `json:"version"`
 	CreatedAt             time.Time `json:"created_at"`
 	Kind                  string    `json:"kind"`
@@ -133,7 +135,8 @@ func persistedTerminalReport(report terminalTaskReport, createdAt time.Time) (pe
 		return persistedTerminalTaskReport{}, err
 	}
 	return persistedTerminalTaskReport{
-		Version:               terminalReportRecordVersion,
+		Version:    terminalReportRecordVersion,
+		Generation: report.generation, KnownWaitIDs: report.knownWaitIDs,
 		CreatedAt:             createdAt.UTC(),
 		Kind:                  kind,
 		TaskID:                report.taskID,
@@ -166,7 +169,8 @@ func (record persistedTerminalTaskReport) terminalReport() (terminalTaskReport, 
 		return terminalTaskReport{}, fmt.Errorf("unsupported terminal report kind %q", record.Kind)
 	}
 	return terminalTaskReport{
-		kind:                  kind,
+		kind:       kind,
+		generation: record.Generation, knownWaitIDs: record.KnownWaitIDs,
 		taskID:                record.TaskID,
 		output:                record.Output,
 		branchName:            record.BranchName,
@@ -216,7 +220,7 @@ func (s *terminalReportStore) enqueue(report terminalTaskReport) error {
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
-	name := terminalReportFileName(report.taskID)
+	name := terminalReportFileName(report.queueID())
 	path := filepath.Join(s.dir, name)
 	if existingBody, readErr := os.ReadFile(path); readErr == nil {
 		existing, decodeErr := decodePersistedTerminalReport(existingBody)
@@ -330,7 +334,7 @@ func (s *terminalReportStore) list() ([]pendingTerminalTaskReport, error) {
 			errs = append(errs, fmt.Errorf("validate %s: %w", entry.Name(), decodeErr))
 			continue
 		}
-		if want := terminalReportFileName(report.taskID); entry.Name() != want {
+		if want := terminalReportFileName(report.queueID()); entry.Name() != want {
 			errs = append(errs, fmt.Errorf("terminal report %s does not match task id", entry.Name()))
 			continue
 		}
@@ -368,7 +372,7 @@ func (s *terminalReportStore) recoverTempFiles(entries []os.DirEntry) error {
 			errs = append(errs, fmt.Errorf("validate interrupted terminal report %s: %w", name, err))
 			continue
 		}
-		targetName := terminalReportFileName(report.taskID)
+		targetName := terminalReportFileName(report.queueID())
 		wantPrefix := "." + strings.TrimSuffix(targetName, ".json") + "-"
 		if !strings.HasPrefix(name, wantPrefix) {
 			errs = append(errs, fmt.Errorf("interrupted terminal report %s does not match task id", name))
@@ -417,7 +421,7 @@ func (s *terminalReportStore) recoverTempFiles(entries []os.DirEntry) error {
 func (s *terminalReportStore) acknowledge(item pendingTerminalTaskReport) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if item.fileName != terminalReportFileName(item.report.taskID) {
+	if item.fileName != terminalReportFileName(item.report.queueID()) {
 		return errors.New("terminal report acknowledgement does not match task id")
 	}
 	path := filepath.Join(s.dir, item.fileName)
@@ -472,7 +476,7 @@ func (s *terminalReportStore) recordPermanentRejection(item pendingTerminalTaskR
 	if err != nil {
 		return false, fmt.Errorf("validate rejected terminal report: %w", err)
 	}
-	if item.fileName != terminalReportFileName(report.taskID) || report != item.report {
+	if item.fileName != terminalReportFileName(report.queueID()) || report != item.report {
 		return false, errors.New("rejected terminal report no longer matches queued payload")
 	}
 
@@ -735,7 +739,7 @@ func (d *Daemon) replayPendingTerminalReports(ctx context.Context) (pending, del
 				if ctx.Err() != nil {
 					continue
 				}
-				release, ok := d.beginTerminalReportDelivery(item.report.taskID)
+				release, ok := d.beginTerminalReportDelivery(item.report.queueID())
 				if !ok {
 					continue
 				}

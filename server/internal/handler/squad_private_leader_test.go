@@ -381,8 +381,8 @@ func TestChildDone_SquadPrivateLeader_AgentActorWakesLeader(t *testing.T) {
 	// depends on the completer being able to invoke the leader.
 	var workerTaskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id, session_id, work_dir, resource_control_required, session_pin_confirmed, session_pin_generation)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3, 'squad-leader-actor-session', '/work/squad-leader-actor', true, true, gen_random_uuid())
 		RETURNING id
 	`, workerAgentID, child.ID, memberID).Scan(&workerTaskID); err != nil {
 		t.Fatalf("create worker task: %v", err)
@@ -398,6 +398,7 @@ func TestChildDone_SquadPrivateLeader_AgentActorWakesLeader(t *testing.T) {
 	})
 	r.Header.Set("X-Agent-ID", workerAgentID)
 	r.Header.Set("X-Task-ID", workerTaskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", child.ID)
 	testHandler.UpdateIssue(w, r)
 	if w.Code != http.StatusOK {
@@ -461,8 +462,8 @@ func TestComment_SquadPrivateLeader_AgentActorAllowed(t *testing.T) {
 	// the private leader.
 	var taskID string
 	if err := testPool.QueryRow(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id)
-		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id, originator_user_id, accountable_user_id, session_id, work_dir, resource_control_required, session_pin_confirmed, session_pin_generation)
+		VALUES ($1, (SELECT runtime_id FROM agent WHERE id = $1), 'running', 0, $2, $3, $3, 'squad-private-leader-session', '/work/squad-private-leader', true, true, gen_random_uuid())
 		RETURNING id
 	`, otherAgentID, issueID, ownerID).Scan(&taskID); err != nil {
 		t.Fatalf("create agent task: %v", err)
@@ -478,6 +479,7 @@ func TestComment_SquadPrivateLeader_AgentActorAllowed(t *testing.T) {
 	})
 	r.Header.Set("X-Agent-ID", otherAgentID)
 	r.Header.Set("X-Task-ID", taskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 	r = withURLParam(r, "id", issueID)
 	testHandler.CreateComment(w, r)
 	if w.Code != http.StatusCreated {
