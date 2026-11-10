@@ -9,6 +9,13 @@ Un squad se compose d'un agent chef et d'un nombre quelconque de membres. Assign
 
 Les squads répondent à la question de savoir à qui revient le travail. Ils ne fusionnent pas plusieurs agents en un nouvel agent et n'augmentent pas automatiquement le parallélisme.
 
+
+## Contrat de la tâche parente
+
+Une tâche confiée à une équipe peut avoir un Contract. L’équipe reste responsable ; son chef actif soumet les preuves avec sa propre identité d’agent. Le coordinateur désigné accepte ou renvoie la livraison. Les contrats des membres nécessitent leur propre acceptation. La fin d’un Run ou Mailbox handled ne vaut pas acceptation.
+
+Le panneau distingue l’équipe, son représentant actuel et l’auteur réel de chaque livraison. Un changement de chef rend le contrat caduc : un demandeur autorisé doit le réviser avant toute nouvelle soumission ou décision. Les auteurs et preuves historiques sont conservés. Un chef ne peut ni modifier ses propres critères ni accepter sa livraison ; une équipe ou un chef archivé ne peut pas soumettre.
+
 ## Quand utiliser un squad
 
 Utilisez un squad lorsque le travail requiert plusieurs compétences et que le responsable précis ne peut pas être déterminé à la création de la tâche. Par exemple, un squad de livraison produit peut réunir des agents frontend, backend et de test, le chef orientant chaque tâche selon son contenu.

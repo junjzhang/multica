@@ -77,6 +77,84 @@ func (q *Queries) IssueHasContract(ctx context.Context, arg IssueHasContractPara
 	return column_1, err
 }
 
+const lockAgentForContract = `-- name: LockAgentForContract :one
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind FROM agent WHERE id=$1 AND workspace_id=$2 AND kind='user' FOR SHARE NOWAIT
+`
+
+type LockAgentForContractParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LockAgentForContract(ctx context.Context, arg LockAgentForContractParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, lockAgentForContract, arg.ID, arg.WorkspaceID)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.ThinkingLevel,
+		&i.ComposioToolkitAllowlist,
+		&i.PermissionMode,
+		&i.Kind,
+		&i.SystemKey,
+		&i.DisabledRuntimeSkills,
+		&i.ServiceTier,
+		&i.ConversationStarters,
+		&i.ExecutionKind,
+	)
+	return i, err
+}
+
+const lockSquadForContract = `-- name: LockSquadForContract :one
+SELECT id, workspace_id, name, description, leader_id, creator_id, created_at, updated_at, archived_at, archived_by, avatar_url, instructions FROM squad WHERE id=$1 AND workspace_id=$2 FOR SHARE NOWAIT
+`
+
+type LockSquadForContractParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Contract writes already hold their source task and issue. Do not wait on
+// a representative lock in the opposite order from assignment or teardown.
+func (q *Queries) LockSquadForContract(ctx context.Context, arg LockSquadForContractParams) (Squad, error) {
+	row := q.db.QueryRow(ctx, lockSquadForContract, arg.ID, arg.WorkspaceID)
+	var i Squad
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.Description,
+		&i.LeaderID,
+		&i.CreatorID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.AvatarUrl,
+		&i.Instructions,
+	)
+	return i, err
+}
+
 const saveIssueContract = `-- name: SaveIssueContract :exec
 INSERT INTO issue_contract (issue_id, workspace_id, data) VALUES ($1, $2, $3)
 ON CONFLICT (issue_id) DO UPDATE SET data = EXCLUDED.data

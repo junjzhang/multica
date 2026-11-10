@@ -24,11 +24,11 @@ import (
 //     and their silence would read as "unchanged";
 //   - the way a value is derived changes (a different hash, a different
 //     normalisation), because the same content would then compare as different.
-const issueSnapshotVersion = 2
+const issueSnapshotVersion = 3
 
 // Legacy issues compare only their title and description. Contracted issues
-// additionally track acceptance criteria and the native owner revision, which
-// advances for agreement, delivery, decision and permission changes. Status or
+// additionally track acceptance criteria, the native owner revision and the
+// live basis (including squad representatives). Status or
 // metadata bookkeeping on legacy issues does not invalidate the body cache.
 const (
 	issueFieldTitle       = "title"
@@ -52,6 +52,7 @@ type issueStateSnapshot struct {
 	DescriptionSHA256     string `json:"description_sha256"`
 	CriteriaSHA256        string `json:"criteria_sha256"`
 	ContractIssueRevision int64  `json:"contract_issue_revision"`
+	ContractBasisSHA256   string `json:"contract_basis_sha256"`
 }
 
 func sha256Hex(s string) string {
@@ -80,7 +81,7 @@ func (s issueStateSnapshot) changedFieldsSince(prev issueStateSnapshot) []string
 	if s.DescriptionSHA256 != prev.DescriptionSHA256 {
 		changed = append(changed, issueFieldDescription)
 	}
-	if s.CriteriaSHA256 != prev.CriteriaSHA256 || s.ContractIssueRevision != prev.ContractIssueRevision {
+	if s.CriteriaSHA256 != prev.CriteriaSHA256 || s.ContractIssueRevision != prev.ContractIssueRevision || s.ContractBasisSHA256 != prev.ContractBasisSHA256 {
 		changed = append(changed, issueFieldContract)
 	}
 	return changed

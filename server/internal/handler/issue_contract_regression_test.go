@@ -111,6 +111,43 @@ func TestContractClaimDetectsNoteOnlyRevision(t *testing.T) {
 	}
 }
 
+func TestContractSquadClaimDetectsRepresentativeChangeWithoutIssueRevision(t *testing.T) {
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Squad contract snapshot runtime")
+	agent, issue := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Squad snapshot leader")
+	squad := dbfx.Squad(t, "Snapshot squad", agent)
+	dbfx.SquadMember(t, squad, "agent", agent)
+	dbfx.Exec(t, "UPDATE issue SET assignee_type='squad',assignee_id=$2,coordinator_type='member',coordinator_id=$3 WHERE id=$1", issue, squad, testUserID)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	contractCall(t, issue, definition(0), "").Want(200)
+	row, err := testHandler.Queries.GetIssue(ctx, parseUUID(issue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	basis, err := contractBasis(ctx, testHandler.Queries, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := buildIssueStateSnapshot(row)
+	snapshot.ContractIssueRevision = row.Revision
+	snapshot.ContractBasisSHA256 = sha256Hex(string(basis))
+	raw, _ := json.Marshal(snapshot)
+	seedPriorRunWithSnapshot(t, agent, runtimeID, issue, string(raw))
+	replacement := dbfx.Agent(t, "Replacement snapshot leader", runtimeID)
+	dbfx.SquadMember(t, squad, "agent", replacement)
+	dbfx.Exec(t, "UPDATE squad SET leader_id=$2 WHERE id=$1", squad, replacement)
+	var revision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+	if revision != row.Revision {
+		t.Fatal("fixture changed issue revision, masking the representative comparison")
+	}
+	createCommentTriggeredClaimTask(t, ctx, agent, runtimeID, issue, nil)
+	response := claimCommentTask(t, runtimeID, "squad-contract-snapshot-change")
+	if !response.Task.IssueStateDeltaKnown || strings.Join(response.Task.IssueChangedFields, ",") != "contract" {
+		t.Fatalf("representative change waived the issue read: %+v", response.Task)
+	}
+}
+
 func TestContractWakeupActorAndSource(t *testing.T) {
 	for _, kind := range []string{"member", "external", "managed"} {
 		t.Run(kind, func(t *testing.T) {

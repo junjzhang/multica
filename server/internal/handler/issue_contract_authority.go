@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/multica-ai/multica/server/internal/delegation"
@@ -13,7 +14,7 @@ import (
 // Contract maintenance belongs to the original requester, never a mutable
 // coordinator or a return address. The note records agreement; it grants no API
 // capability. Human membership and dedicated merge grants keep their own gates.
-func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State) bool {
+func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State, basis json.RawMessage) bool {
 	t, id := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
 	actor := issuecontract.Actor{Type: t, ID: id}
 	if actor == (issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}) {
@@ -21,6 +22,14 @@ func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *d
 	}
 	if version := state.Current(); version != nil && actor == version.Executor {
 		return false
+	}
+	if representative := contractRepresentative(basis); representative != nil && actor == *representative {
+		return false
+	}
+	for _, version := range state.Versions {
+		if representative := contractRepresentative(version.Basis); representative != nil && actor == *representative {
+			return false
+		}
 	}
 	if actor.Type == "member" {
 		return !isMachineCredentialActor(r)

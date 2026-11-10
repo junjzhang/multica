@@ -15,6 +15,27 @@ and decide acceptance when explicitly named as acceptor. Executor and acceptor m
 The versioned authorization_note records agreed scope; it is not a machine execution grant. It cannot grant API access, merge or deployment rights, or bypass dedicated permission checks. Structured merge policy always comes from the native issue field.
 This adds no authority to change merge policy or delegation return routing.
 
+Squads can be executors. The current active leader member represents the squad
+using its real Agent identity, without changing the issue assignee. The live
+`executor_representative` comes from the same SQL basis used by the completion
+guard. A delivery's `author` remains the authenticated Agent, never a squad
+credential. Current and versioned squad representatives cannot maintain their
+own agreement, even if they are its original creator. A representative cannot
+also accept the squad's delivery. Squad acceptors are not introduced.
+
+Changing the leader, archiving the squad/leader, or losing leader membership
+makes the contract stale. The authorized requester must revise before any new
+submission or decision, including a decision about a pending older delivery.
+History and fixed return addresses are not rewritten; new versions inherit no
+acceptance. Restored claims compare the live basis as well as issue revision,
+because a squad change does not update the issue row.
+
+Squad contract writes lock the squad and leader with `FOR SHARE NOWAIT` after
+the existing task/issue locks. Contention returns 409 before any write. This
+keeps leader and archive authority stable through commit without waiting in
+the opposite order from runtime teardown (Agent then task). Retry after reload;
+failed requests do not consume a sequence or idempotency key.
+
 `issue.acceptance_criteria` owns the current criteria. A single issue-scoped
 contract record stores immutable version snapshots and append-only submissions
 and decisions. Snapshots retain the identities and merge policy they applied to;
