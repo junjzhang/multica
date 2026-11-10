@@ -95,17 +95,17 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
 	actor := issuecontract.Actor{Type: actorType, ID: actorID}
 	executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+	basis, err := contractBasis(ctx, q, issue)
+	if err != nil {
+		return ContractView{}, err
+	}
 	active := issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) != "cancelled" && !issue.TriageState.Valid
-	view := ContractView{Accepted: []int{}, CanEdit: active && h.canMaintainContract(ctx, r, q, issue, state), MergeAuthorization: mergeAuthorizationResponse(issue)}
+	view := ContractView{Accepted: []int{}, CanEdit: active && h.canMaintainContract(ctx, r, q, issue, state, basis), MergeAuthorization: mergeAuthorizationResponse(issue)}
 	if issue.AssigneeID.Valid {
 		view.Executor = &executor
 	}
 	if issue.CoordinatorID.Valid {
 		view.Acceptor = &issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
-	}
-	basis, err := contractBasis(ctx, q, issue)
-	if err != nil {
-		return view, err
 	}
 	view.ExecutorRepresentative = contractRepresentative(basis)
 	v := state.Current()
@@ -232,14 +232,15 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if issue.AssigneeType.String == "squad" {
-		// Serialize representative authority with leader changes and archival.
-		squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: issue.AssigneeID, WorkspaceID: issue.WorkspaceID})
+		// NOWAIT preserves archive/leader protection without waiting in the
+		// opposite order from runtime teardown's Agent-to-task locks.
+		squad, err := q.LockSquadForContract(ctx, db.LockSquadForContractParams{ID: issue.AssigneeID, WorkspaceID: issue.WorkspaceID})
 		if err != nil {
-			writeError(w, 409, "squad changed; reload")
+			writeError(w, 409, "squad is changing; reload before retrying")
 			return
 		}
-		if _, err := q.LockAgentForAutopilotAssignment(ctx, db.LockAgentForAutopilotAssignmentParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID}); err != nil {
-			writeError(w, 409, "squad leader changed; reload")
+		if _, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID}); err != nil {
+			writeError(w, 409, "squad leader is changing; reload before retrying")
 			return
 		}
 	}
@@ -349,7 +350,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	}
 	representative := contractRepresentative(basis)
 	if req.Action == "revise" {
-		if !h.canMaintainContract(ctx, r, q, issue, *state) {
+		if !h.canMaintainContract(ctx, r, q, issue, *state, basis) {
 			return "", contractFail(403, "contract maintenance requires a verified original requester in scope; the executor cannot change its agreement")
 		}
 		executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
