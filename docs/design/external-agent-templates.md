@@ -93,7 +93,7 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 4. 创建子任务时显式加入父任务链，服务端验证父链与发起者权限，并记录根 ID。子任务的 assignee 与独立 Contract 不变，leader 不因此获得代交付/代验收权。单纯设置 parent 或 @另一个 squad 不改所属任务链；客串小队仍不能管理父任务状态。
 5. 默认队长调整只影响之后没有发起会话的新任务；现有领导根不随之漂移。成员资格撤销、模板归档导致现有 leader 不再有效，任务显示 unavailable，不能自动回退。
 
-托管 task token 新建或改派任务给 squad 一律拒绝，包含根任务、子任务、backlog、suppress_run、批量改派及工作流解析后实际移交给 squad 的操作；托管队长也没有例外。不能回退到默认队长把拒绝变成成功，不能用原始人类 originator 把 task token 当成人类请求。门禁依据真实调用者及已验证的原始请求来源，与 HTTP 入口名称无关。托管 task token 不能通过 QuickCreateIssue、创建/更新 squad 指派的 Autopilot 或手动 trigger/run-now 让服务端代为发起小队任务；即使 originator 有权限也拒绝。真正的人类请求及人类授权配置的定时/webhook 调度仍按规则 2 使用默认队长，调度不可消费托管调用者新建的 squad 配置；Autopilot 启动后的 task token 同样受禁令约束。
+托管 task token 新建或改派任务给 squad 一律拒绝，包含根任务、子任务、backlog、suppress_run、批量改派及工作流解析后实际移交给 squad 的操作；托管队长也没有例外。不能回退到默认队长把拒绝变成成功，不能用原始人类 originator 把 task token 当成人类请求。门禁依据真实调用者及已验证的原始请求来源，与 HTTP 入口名称无关。托管 task token 不能通过 QuickCreateIssue、创建/更新 squad 指派的 Autopilot 或手动 trigger/run-now 让服务端代为发起小队任务；即使 originator 有权限也拒绝。对 squad 自动化的门禁同时覆盖所有能改变触发条件、发布/启用触发器或取得触发凭据的控制入口：托管调用者新增、修改、启用 trigger，轮换 webhook token/signing secret，或借复制、发布、恢复配置产生等效能力，都返回 403；不能只拦 run-now。所有托管读取响应（详情、列表、trigger/版本及嵌套投影）均脱敏 squad 自动化的 webhook token/path/URL 与 signing secret，即使其 originator 可写也不例外。真正的人类请求及具有可验证人类授权来源的定时/webhook 调度仍按规则 2 使用默认队长，调度不可消费托管调用者新建的 squad 配置；Autopilot 启动后的 task token 同样受禁令约束。
 
 已有小队任务中的托管成员仍可按原权限被派活、提交 Contract、普通评论及创建分配给 Agent 的子任务；这些操作不得隐式改成新的 squad 分配。小队的托管默认队长仍可执行已有小队任务、向成员 Agent 派发和代表本小队提交；禁止的是它再发起小队任务，而非禁止托管 Agent 当现有队长。系统恢复已有绑定、原运行续接、冻结回投、child_done 和已授权的既有唤醒不因此被禁止。鉴权应判定本次真实调用者和操作意图，不按“当前任务 assignee 是 squad”一刀切。
 
@@ -116,9 +116,12 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | [网页 QuickCreateIssue，issue.go:2823](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue.go#L2823) | 当前先让 Agent 从自然语言产生字段并建任务（[prompt.go:467](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/daemon/prompt.go#L467)）；不能在字段尚未产生时先建任务。QuickCreateIssue 也允许托管调用（[归因测试:104](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/managed_dispatch_attribution_test.go#L104)），故 task token 传 squad_id 必须在入队前拒绝。人类入口改为下述“仅产出字段 → 一次性服务端落库 → 正式队长运行”流程，通用创建 API 不豁免 |
 | [Autopilot create_issue 入队，autopilot.go:831](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/service/autopilot.go#L831) | 真正的人类或定时/webhook 调度创建并绑定小队任务可继续使用默认队长；若 run_only 或任务提示要求托管运行再建 squad 任务，后者受禁令约束，只能由人类改配 create_issue 或分配给具体 Agent。不得把 task token 的人类来源当豁免 |
 | [Autopilot acting-member:741](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L741)；[create:843](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L843)；[trigger:2365](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L2365) | 当前托管 Agent 可按 originator 权限创建自动化、改写配置并 run-now，因此“服务端入口”不是人类调用证明。托管调用者创建 squad 指派配置、更新当前或新目标为 squad 的配置、触发 squad 指派自动化均 403，不生成配置版本、运行或任务；不得先建 Agent 配置再改 squad 绕过。人类管理及已获人类授权的定时/webhook 调度保留 |
+| [trigger 创建:1514](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L1514)、[修改:1876](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L1876)、[凭据轮换:2122](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L2122)；[详情脱敏:523](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/autopilot.go#L523)；[公开 webhook:1530](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/cmd/server/router.go#L1530) | 基线 trigger 管理也按 acting originator 放行，且可写者能取得明文 webhook 凭据；公开 webhook 用 URL token 即可触发。托管给已有 squad 自动化加定时 trigger 或取出 token 再调用 webhook 都是 D3 绕路。必须拒绝其 trigger 增改/启用/轮换（含 signing secret），所有读取投影对托管主体脱敏；调度只消费真实人类授权的 trigger，不能仅凭 created_by 是人类 UUID 判定 |
 | [现有 Agent 创建小队任务回归，issue_agent_create_e2e_test.go:91](https://github.com/junjzhang/multica/blob/20c43e5d153aef6f37f55a9d4c3b1957eadbd885/server/internal/handler/issue_agent_create_e2e_test.go#L91) | 测试显式要求 task token 创建 squad 任务返回 201，与新规则冲突。实施时将该场景改为拒绝回归，另保留“人类创建小队任务 → 托管队长向成员 Agent 派发”的合法链路覆盖；不删除 originator 权限验证 |
 
 人类 quick-create 采用一次性服务器意图记录（复用该次 quick-create 运行的服务端持久上下文）：保存原人类、workspace、选定 squad、请求 ID、字段约束、解析运行 ID、到期时间及 pending/consumed 状态。Agent 仅返回结构化字段，不调用通用 issue create；服务端仅接受与这次解析运行绑定的结果，校验字段白名单、原请求目标及当前人类权限，禁止模型改换 squad/workspace/owner。只有原始人类请求已明确选择的 squad 才可落库，其他解析结果不能新增 squad 授权。随后在同一事务中 CAS 消费意图、创建任务和领导绑定、记录正式运行义务，重复结果返回同一任务，失败不半消费；权限撤销、意图过期、结果跨运行或缺原意图都拒绝。解析完成不会给其 task token 签发通用创建能力，也不能将任意 task token 调用包装成该回调。任务建好后才启动正式队长执行，原解析运行不充当新链发起者。旧 quick-create 缺一次性意图时停放并由人类新入口恢复，先核对是否已建任务以免重复。
+
+trigger 授权来源必须持久记录真实 actor type/ID、来源运行（若有）、人类授权事件与配置版本；不能只记录映射后的 originator。人类创建或重新确认的 trigger 才能用于 squad 调度，分派时再次检查当前授权与配置版本。存量 trigger 若只能看出 created_by、不能证明真实人类授权，则停用并请求人类确认后再启用；不猜成“人类授权”。切换至新门禁时轮换曾向托管主体暴露或无法证明未暴露的 squad webhook token/signing secret，使旧地址失效；从 Agent 指派改成 squad 时也需人类确认 trigger 并轮换旧凭据，不能让托管先获取 Agent webhook 再等待目标升级。轮换不改写历史运行/回投，记录与通知新地址由人类管理流程完成。凭据之后遭窃仍属于 D2 已声明的共同信任域边界，本方案不承诺 OS 级防窃取。
 
 上述冲突按用户已定 D3 处理，无需重开默认队长方案。上线前需完成这些入口改造与拒绝/保留路径的成对验证，不能只改 UI 或文案就开放门禁。
 
@@ -166,6 +169,7 @@ legacy 也不能笼统沿用宽 token：预检发现一个旧 Agent 注册多会
 | `session connect/status` | connect 按模板 key 解析或创建模板并注册实例；status 同时显示模板、会话及凭据绑定状态。保留禁止 managed connect、跨 profile 覆盖和 foreign context 覆盖的检查 |
 | `issue create/assign` | 继续使用 `--recipient-session-id`；小队发起者会话来自鉴权。managed create/assign 到 squad 返回可操作拒绝；批量含禁项整批 403，无部分写入，成功仍返回 updated；人类无会话入口明确选外部默认队长会话；合法赋值与绑定原子化 |
 | QuickCreate / Autopilot API | task token 经 quick-create 指定 squad、创建/更新 squad 自动化及 run-now 均拒绝；人类 quick-create 的字段解析结果仅供绑定原请求的一次性服务端落库，通用创建权限不扩大；合法人类和定时/webhook 默认队长路径保留 |
+| Autopilot trigger / secrets API | squad 自动化的托管 trigger 增改/启用/轮换（含 signing secret）均 403，所有读取投影的 webhook token/path/URL/secret 脱敏；基于真实 actor 的人类授权来源决定定时/webhook 是否可调度，存量未知来源停用待确认 |
 | 交接 CLI/API | 增加任务主体 handoff 操作；不把普通 bind 或 assign 当作隐式 takeover。请求含 revision 与 idempotency key，响应含受影响合同和待回收通知 |
 | 注册 API | 复用 external 注册入口，新增显式模板模式/能力版本；返回原 Agent shape 加本次 registered session。旧客户端不能在新模板上签发宽泛 token |
 | Agent / sessions API | 保留原字段及单数 `external_session` 的兼容展示投影，新增模板标识、session count 与分页会话列表；所有执行入口仅使用显式会话字段 |
@@ -183,7 +187,7 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 
 建议维护窗口切换新写入，不实施未授权的生产迁移。历史 Agent、session、任务、合同、Mailbox、return 与 wait 记录原样保留。
 
-1. 预检并演练：枚举旧 Agent 的在途任务、未验收合同、pending/leased/unknown 消息、未处理结果、accepted returns、wait 和小队默认队长引用。输出可归档/不可归档及原因；不以 Agent offline 或单个 issue done 判定安全。
+1. 预检并演练：检查 squad 自动化 trigger 的真实授权来源、是否曾暴露凭据及从 Agent 改派后的凭据状态；不能证明的 trigger 停用待人类确认，记录轮换清单。枚举旧 Agent 的在途任务、未验收合同、pending/leased/unknown 消息、未处理结果、accepted returns、wait 和小队默认队长引用。输出可归档/不可归档及原因；不以 Agent offline 或单个 issue done 判定安全。
 2. 部署 additive schema 与兼容读取，保持模板写入关闭。创建索引失败或条件对象缺失时阻断开关，修复对象后重建无效索引，核对迁移记录与实际结构一致。
 3. 升级 server、CLI、插件、daemon 和写入 UI 的能力协议，先完成 legacy 多会话凭据更换、宽 token 吊销与会话校验；在测试 workspace 用两个新会话验证隔离与回投。不能更新的旧在途会话明确停放，当前活跃会话最后处理；旧版本写入新模板一律拒绝。
 4. 暂停新 external 注册/派发，备份数据库与原部署产物。核对旧在途责任后打开模板 connect；此前从未注册的新宿主会话挂新模板。模板初始授权须由 owner 明确选择，不自动汇总旧权限。
@@ -212,6 +216,8 @@ API 响应用共享 zod schema + `parseWithFallback`，移动端使用自己的�
 | B 在 A 任务卡查看、普通评论、编辑评论和试图添加派发提及 | 卡片及 API 均允许普通评论，审计作者为 B；负责人/执行绑定/accepted returns 不变，零派发/自动唤醒；可执行提及被拒绝 | comment DB + UI/E2E |
 | 网页快速创建、Autopilot create_issue 与启动后 task token 再建 squad | 人类 quick-create 先解析字段、一次性服务端落库再正式运行；伪造/过期/重复结果及权限撤销可控，task token 直调 quick-create(squad) 拒绝；后续托管新发起与 run_only 不豁免，旧流程幂等恢复 | 服务端入口 + E2E |
 | 托管调用 Autopilot create/update/trigger，直接 squad 或先 Agent 再改 squad | 全部 403，零配置版本/运行/任务；真实人类、定时/webhook 调度仍默认队长，不能仅据 originator 放行 | Autopilot handler + 调度集成 |
+| 托管对人类已建 squad 自动化增改/启用定时或 webhook trigger、轮换 token/signing secret、读取详情/列表/版本 | 写操作 403 且零配置/运行副作用，所有读取无 token/path/URL/secret；originator 可写也不能豁免 | trigger handler + 响应脱敏 |
+| 存量 trigger 来源未知、已暴露 webhook、Agent → squad 目标升级 | 未证实人类授权者停用，确认/换密后才能调度；旧 token 失效；合法人类授权定时/webhook 正常，历史回投不变 | 迁移演练 + webhook/调度 |
 | 同根同时认领、分配与 handoff 竞态、handoff 与 submit/claim 竞态 | 单一胜者；旧 revision 拒绝；旧 pending 派发撤销不漏事务 | DB 并发测试 |
 | 默认 leader 改动、成员移除、leader 失联 | 已绑定任务不漂移；失效可见；只有显式交接改变主体 | 领导解析 + Contract |
 | 父/子合同、换会话后 revise、同模板异会话自验 | 正确 stale、独立验收；旧交付/作者/接受历史不改写，无自验逃逸 | Contract 状态矩阵 |
