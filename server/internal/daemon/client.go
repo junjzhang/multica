@@ -94,9 +94,11 @@ func isRuntimeNotFoundError(err error) bool {
 
 // Client handles HTTP communication with the Multica server daemon API.
 type Client struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	backgroundWaitIDs func() []string
+	baseURL           string
+	token             string
+	client            *http.Client
+	mailboxDaemonID   string
 
 	// bundleClient downloads skill bundles. Unlike client it carries no fixed
 	// Timeout: bundles can be large and slow on jittery links, so the caller
@@ -214,6 +216,8 @@ func daemonCommonCapabilities() []string {
 		protocol.DaemonCapabilityPlatformSkillV1,
 		protocol.DaemonCapabilityCheckoutKeepsWorkV1,
 		protocol.DaemonCapabilityJoinedWakeupsV1,
+		protocol.DaemonCapabilityDelegationResultsV1,
+		protocol.DaemonCapabilityManagedWaitV1,
 	}
 }
 
@@ -422,7 +426,7 @@ func (c *Client) ResolveSkillBundle(ctx context.Context, runtimeID, taskID strin
 	}
 	var stats TransferStats
 	path := fmt.Sprintf("/api/daemon/runtimes/%s/tasks/%s/skill-bundles/resolve", runtimeID, taskID)
-	if err := c.postJSONViaWithRetry(ctx, c.bundleClient, path, map[string]any{
+	if err := c.postJSONViaWithRetry(ctx, c.bundleClient, path, nil, map[string]any{
 		"skills": []SkillRefData{ref},
 	}, &resp, skillBundleResolveRetrySchedule, &stats); err != nil {
 		return SkillData{}, stats, err
@@ -476,6 +480,7 @@ const (
 )
 
 var errStartClaimRejected = errors.New("task start claim rejected")
+var errStartClaimCancelled = errors.New("task start claim cancelled")
 
 func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...string) (bool, error) {
 	var negotiated bool
@@ -518,6 +523,13 @@ func (c *Client) StartTask(ctx context.Context, task Task, capabilities ...strin
 	}, decodeResponse, startTaskRetrySchedule)
 	var reqErr *requestError
 	if errors.As(err, &reqErr) && reqErr.StatusCode == http.StatusConflict {
+		var rejection struct {
+			CancelledClaim bool `json:"cancelled_claim"`
+		}
+		if json.Unmarshal([]byte(reqErr.Body), &rejection) == nil && rejection.CancelledClaim {
+			return false, fmt.Errorf("%w: %w: %w", errStartClaimRejected, errStartClaimCancelled, err)
+		}
+
 		return false, fmt.Errorf("%w: %w", errStartClaimRejected, err)
 	}
 	return err == nil && negotiated, err
@@ -540,6 +552,8 @@ func (c *Client) MarkTaskWaitingLocalDirectory(ctx context.Context, taskID, reas
 
 // TaskCancelAck is the payload of the daemon's cancel acknowledgement.
 type TaskCancelAck struct {
+	RuntimeID    string
+	DispatchedAt string
 	// BranchName: a cancelled worktree task has already finalized — its
 	// partial work is committed to a branch in the user's repo. The cancel
 	// path discards the rest of the result, so this ack is the only channel
@@ -573,6 +587,10 @@ type TaskCancelAck struct {
 // The server never overwrites already-recorded values, so replays are safe.
 func (c *Client) AckTaskCancelled(ctx context.Context, taskID string, ack TaskCancelAck) error {
 	body := map[string]any{}
+	if ack.RuntimeID != "" || ack.DispatchedAt != "" {
+		body["runtime_id"], body["dispatched_at"] = ack.RuntimeID, ack.DispatchedAt
+	}
+
 	if ack.BranchName != "" {
 		body["branch_name"] = ack.BranchName
 	}
@@ -631,6 +649,7 @@ func (c *Client) CompleteTask(ctx context.Context, taskID, output, branchName, s
 
 func (c *Client) completeTaskWithRetrySchedule(ctx context.Context, taskID, output, branchName, sessionID, workDir string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"output": output}
+	addTaskTurn(ctx, body)
 	if branchName != "" {
 		body["branch_name"] = branchName
 	}
@@ -667,6 +686,7 @@ func (c *Client) FailTask(ctx context.Context, taskID, errMsg, sessionID, workDi
 
 func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, sessionID, workDir, branchName, failureReason string, sessionRolloutMissing bool, retiredSessionID, durableWorkDir string, schedule []time.Duration) error {
 	body := map[string]any{"error": errMsg}
+	addTaskTurn(ctx, body)
 	if sessionID != "" {
 		body["session_id"] = sessionID
 	}
@@ -696,25 +716,34 @@ func (c *Client) failTaskWithRetrySchedule(ctx context.Context, taskID, errMsg, 
 
 // PinTaskSession persists the agent's session_id and work_dir on the task
 // row mid-flight so a daemon crash doesn't lose the resume pointer.
-func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir string) error {
+func (c *Client) PinTaskSession(ctx context.Context, taskID, sessionID, workDir, generation string) error {
 	if sessionID == "" && workDir == "" {
 		return nil
 	}
-	body := map[string]any{}
-	if sessionID != "" {
-		body["session_id"] = sessionID
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), protocol.SessionPinRequest{SessionID: sessionID, WorkDir: workDir, Generation: generation}, nil)
+}
+
+func (c *Client) InvalidateTaskSession(ctx context.Context, taskID, generation, nextGeneration string) error {
+	var acknowledgement protocol.SessionPinAcknowledgement
+	err := c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), protocol.SessionPinRequest{Generation: generation, NextGeneration: nextGeneration}, &acknowledgement)
+	if err != nil {
+		return err
 	}
-	if workDir != "" {
-		body["work_dir"] = workDir
+	if acknowledgement.Generation != nextGeneration {
+		return errors.New("session pin invalidation was not acknowledged")
 	}
-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/tasks/%s/session", taskID), body, nil)
+	return nil
 }
 
 // RecoverOrphans tells the server to fail any dispatched/running tasks the
 // previous daemon process for this runtime left behind. The server will
 // auto-retry eligible tasks.
 func (c *Client) RecoverOrphans(ctx context.Context, runtimeID string) error {
-	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/recover-orphans", runtimeID), map[string]any{}, nil)
+	body := map[string]any{}
+	if c.backgroundWaitIDs != nil {
+		body["background_wait_ids"] = c.backgroundWaitIDs()
+	}
+	return c.postJSON(ctx, fmt.Sprintf("/api/daemon/runtimes/%s/recover-orphans", runtimeID), body, nil)
 }
 
 // GetTaskStatus returns the current status of a task. Used by the daemon to
@@ -1019,8 +1048,15 @@ func (c *Client) GetAutopilotRunGCCheck(ctx context.Context, runID string) (*Aut
 // Quick-create tasks have no separate parent record, so GC keys directly on
 // the task itself.
 type TaskGCStatus struct {
-	Status      string    `json:"status"`
-	CompletedAt time.Time `json:"completed_at"`
+	DurableWorkDir          *string                           `json:"durable_work_dir"`
+	ResourceControlRequired bool                              `json:"resource_control_required"`
+	TerminalReportedAt      *time.Time                        `json:"terminal_reported_at"`
+	ResourceIdentity        *protocol.ManagedResourceAddress  `json:"resource_identity"`
+	ResourcesRetained       *bool                             `json:"resources_retained"`
+	RetentionReason         string                            `json:"retention_reason"`
+	ProtectedResources      []protocol.ManagedResourceAddress `json:"protected_resources"`
+	Status                  string                            `json:"status"`
+	CompletedAt             time.Time                         `json:"completed_at"`
 }
 
 // GetTaskGCCheck returns the status of an agent task for GC decisions.
@@ -1234,13 +1270,13 @@ func isTransientError(err error) bool {
 // idempotent success (see service/task.go), so a duplicate replay from a
 // retry is safe even if the server's prior response was lost in transit.
 func (c *Client) postJSONWithRetry(ctx context.Context, path string, reqBody any, respBody any, schedule []time.Duration) error {
-	return c.postJSONViaWithRetry(ctx, c.client, path, reqBody, respBody, schedule, nil)
+	return c.postJSONViaWithRetry(ctx, c.client, path, nil, reqBody, respBody, schedule, nil)
 }
 
 // postJSONViaWithRetry is postJSONWithRetry over an explicit http.Client, so
 // large-body endpoints can run on bundleClient (deadline from ctx) while the
 // control-plane keeps its fixed 30s client.
-func (c *Client) postJSONViaWithRetry(ctx context.Context, httpClient *http.Client, path string, reqBody any, respBody any, schedule []time.Duration, stats *TransferStats) error {
+func (c *Client) postJSONViaWithRetry(ctx context.Context, httpClient *http.Client, path string, headers http.Header, reqBody any, respBody any, schedule []time.Duration, stats *TransferStats) error {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -1249,7 +1285,7 @@ func (c *Client) postJSONViaWithRetry(ctx context.Context, httpClient *http.Clie
 			}
 			return err
 		}
-		err := c.postJSONViaObserved(ctx, httpClient, path, reqBody, respBody, stats)
+		err := c.postJSONViaObserved(ctx, httpClient, path, headers, reqBody, respBody, stats)
 		if err == nil {
 			return nil
 		}
@@ -1267,7 +1303,13 @@ func (c *Client) postJSONViaWithRetry(ctx context.Context, httpClient *http.Clie
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, reqBody any, respBody any) error {
-	return c.postJSONVia(ctx, c.client, path, reqBody, respBody)
+	return c.postJSONVia(ctx, c.client, path, nil, reqBody, respBody)
+}
+
+// postJSONWithHeaders is postJSON with additional request headers. The
+// workspace-scoped daemon mailbox routes use it to select X-Workspace-ID.
+func (c *Client) postJSONWithHeaders(ctx context.Context, path string, headers http.Header, reqBody, respBody any) error {
+	return c.postJSONVia(ctx, c.client, path, headers, reqBody, respBody)
 }
 
 // responseDecoder customizes successful-response decoding inside each attempt.
@@ -1278,15 +1320,15 @@ type responseDecoder func(io.Reader) error
 // c.bundleClient (deadline from ctx) for large skill-bundle downloads.
 // respBody can be a JSON destination or a responseDecoder that decodes a
 // successful response inside each attempt, before retry decisions are made.
-func (c *Client) postJSONVia(ctx context.Context, httpClient *http.Client, path string, reqBody any, respBody any) error {
-	return c.postJSONViaObserved(ctx, httpClient, path, reqBody, respBody, nil)
+func (c *Client) postJSONVia(ctx context.Context, httpClient *http.Client, path string, headers http.Header, reqBody any, respBody any) error {
+	return c.postJSONViaObserved(ctx, httpClient, path, headers, reqBody, respBody, nil)
 }
 
 // postJSONViaObserved is postJSONVia that additionally records what the attempt
 // moved into stats (nil to skip). Callers use it to tell "the link never
 // produced a response" apart from "the body arrived too slowly to finish" —
 // see TransferStats.
-func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Client, path string, reqBody any, respBody any, stats *TransferStats) error {
+func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Client, path string, headers http.Header, reqBody any, respBody any, stats *TransferStats) error {
 	var body io.Reader
 	if reqBody != nil {
 		data, err := json.Marshal(reqBody)
@@ -1305,6 +1347,11 @@ func (c *Client) postJSONViaObserved(ctx context.Context, httpClient *http.Clien
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	c.setIdentityHeaders(req)
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

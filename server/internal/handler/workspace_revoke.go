@@ -110,6 +110,17 @@ func (h *Handler) revokeAndRemoveMember(ctx context.Context, workspaceID, userID
 		for i, a := range result.ArchivedAgents {
 			archivedAgentIDs[i] = a.ID
 		}
+		// The archive and the withdrawal of these agents' unaccepted
+		// notifications commit together: revocation must not leave a
+		// notification claimable for an agent that is already gone.
+		if len(archivedAgentIDs) > 0 {
+			if _, err = qtx.WithdrawAgentDeliveries(ctx, db.WithdrawAgentDeliveriesParams{
+				AgentIds: archivedAgentIDs,
+				Reason:   pgtype.Text{String: "Agent archived before the notification was accepted", Valid: true},
+			}); err != nil {
+				return empty, err
+			}
+		}
 		result.CancelledTasks, err = qtx.CancelAgentTasksByRuntimeOrAgent(ctx, db.CancelAgentTasksByRuntimeOrAgentParams{
 			RuntimeIds: runtimeIDs,
 			AgentIds:   archivedAgentIDs,

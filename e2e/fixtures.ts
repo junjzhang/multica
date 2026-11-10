@@ -6,6 +6,7 @@
 
 import "./env";
 import pg from "pg";
+import { createHash, randomBytes } from "node:crypto";
 
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
@@ -53,6 +54,8 @@ export class TestApiClient {
   private createdIssueIds: string[] = [];
   private createdProjectIds: string[] = [];
   private seededIssueIds: string[] = [];
+  private contractAgentIds: string[] = [];
+  private externalSquadFixtures: { squadId: string; agentId: string; runtimeId: string }[] = [];
 
   async login(email: string, name: string) {
     const client = new pg.Client(DATABASE_URL);
@@ -363,6 +366,38 @@ export class TestApiClient {
     }
   }
 
+  /** Isolated host fixture; it never starts a real agent or a daemon. */
+  async seedExternalSquad(name: string, options: { sessions?: boolean } = {}) {
+    if (!this.workspaceId || !this.email) throw new Error("Select a workspace before seeding a squad");
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      await client.query("BEGIN");
+      const owner = await client.query('SELECT id FROM "user" WHERE email=$1', [this.email]);
+      const ownerId = owner.rows[0].id;
+      const daemonId = `isolated-${crypto.randomUUID()}`;
+      const runtime = await client.query(`INSERT INTO agent_runtime (workspace_id, name, runtime_mode, provider, status, owner_id, daemon_id, last_seen_at)
+        VALUES ($1,$2,'local','handler_test_runtime','online',$3,$4,now()) RETURNING id`, [this.workspaceId, name, ownerId, daemonId]);
+      const agent = await client.query(`INSERT INTO agent (workspace_id,name,runtime_mode,execution_kind,owner_id) VALUES ($1,$2,'cloud','external',$3) RETURNING id`, [this.workspaceId, name+" leader", ownerId]);
+      const agentId = agent.rows[0].id as string;
+      let sessionId: string | undefined;
+      if (options.sessions !== false) {
+        const session = await client.query(`INSERT INTO external_agent_session (workspace_id,agent_id,owner_user_id,provider,host_id,session_id,display_name,daemon_id)
+        VALUES ($1,$2,$3,'paseo','isolated-host','chosen-host-session','Chosen receipt session',$4),
+               ($1,$2,$3,'paseo','another-host','never-select-this-session','Other session','other-daemon') RETURNING id`, [this.workspaceId, agentId, ownerId, daemonId]);
+        sessionId = session.rows[0].id as string;
+      }
+      const squad = await client.query(`INSERT INTO squad (workspace_id,name,leader_id,creator_id,instructions) VALUES ($1,$2,$3,$4,'Browser integration squad instruction') RETURNING id`, [this.workspaceId, name, agentId, ownerId]);
+      const squadId = squad.rows[0].id as string;
+      await client.query("COMMIT");
+      this.externalSquadFixtures.push({ squadId, agentId, runtimeId: runtime.rows[0].id });
+      return { squadId, agentId, sessionId, daemonId, workspaceId: this.workspaceId };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { await client.end(); }
+  }
+
   /** Adds an existing user to this client's workspace and returns the member id. */
   async addMemberByEmail(email: string, role: "admin" | "member" = "member"): Promise<string> {
     if (!this.workspaceId) throw new Error("Cannot add a member before a workspace is selected");
@@ -421,6 +456,26 @@ export class TestApiClient {
 
   /** Clean up all issues created during this test. */
   async cleanup() {
+    if (this.contractAgentIds.length) {
+      const client = new pg.Client(DATABASE_URL);
+      await client.connect();
+      try {
+        await client.query(
+          "DELETE FROM task_token WHERE agent_id=ANY($1::uuid[])",
+          [this.contractAgentIds],
+        );
+        await client.query(
+          "DELETE FROM agent_task_queue WHERE agent_id=ANY($1::uuid[])",
+          [this.contractAgentIds],
+        );
+        await client.query("DELETE FROM agent WHERE id=ANY($1::uuid[])", [
+          this.contractAgentIds,
+        ]);
+      } finally {
+        await client.end();
+      }
+      this.contractAgentIds = [];
+    }
     if (this.seededIssueIds.length > 0 && this.workspaceId) {
       const client = new pg.Client(DATABASE_URL);
       await client.connect();
@@ -442,6 +497,20 @@ export class TestApiClient {
       }
     }
     this.createdIssueIds = [];
+    if (this.externalSquadFixtures.length > 0) {
+      const client = new pg.Client(DATABASE_URL);
+      await client.connect();
+      try {
+        for (const fixture of this.externalSquadFixtures) {
+          await client.query("DELETE FROM squad WHERE id=$1", [fixture.squadId]);
+          await client.query("DELETE FROM external_agent_session_binding WHERE agent_id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM external_agent_session WHERE agent_id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM agent WHERE id=$1", [fixture.agentId]);
+          await client.query("DELETE FROM agent_runtime WHERE id=$1", [fixture.runtimeId]);
+        }
+      } finally { await client.end(); }
+      this.externalSquadFixtures = [];
+    }
     // Projects last: an issue delete leaves no project reference behind, and
     // dropping the project first would strand the issues in the list.
     for (const id of this.createdProjectIds) {
@@ -456,6 +525,96 @@ export class TestApiClient {
 
   getToken() {
     return this.token;
+  }
+
+  async contractMember(email: string, name: string) {
+    if (!this.workspaceId)
+      throw new Error("Contract fixtures require a workspace");
+    const executor = new TestApiClient();
+    await executor.login(email, name);
+    await executor.markUserOnboarded();
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      const user = await client.query<{ id: string }>(
+        'SELECT id FROM "user" WHERE email=$1',
+        [email],
+      );
+      const userId = user.rows[0].id;
+      await client.query(
+        "INSERT INTO member (workspace_id,user_id,role) VALUES ($1,$2,'member') ON CONFLICT (workspace_id,user_id) DO NOTHING",
+        [this.workspaceId, userId],
+      );
+      executor.workspaceId = this.workspaceId;
+      executor.workspaceSlug = this.workspaceSlug;
+      return { api: executor, userId };
+    } finally {
+      await client.end();
+    }
+  }
+
+  async applyContract(issueId: string, request: Record<string, unknown>) {
+    const res = await this.authedFetch(`/api/issues/${issueId}/contract`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+    if (!res.ok)
+      throw new Error(`contract request: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  async getIssue(id: string) {
+    const response = await this.authedFetch(`/api/issues/${id}`);
+    if (!response.ok) throw new Error(`get issue failed: ${response.status}`);
+    return response.json();
+  }
+
+  async contractAgent(issueId: string) {
+    if (!this.workspaceId || !this.email)
+      throw new Error("Contract fixtures require a workspace");
+    const client = new pg.Client(DATABASE_URL);
+    await client.connect();
+    try {
+      const user = await client.query<{ id: string }>(
+        'SELECT id FROM "user" WHERE email=$1',
+        [this.email],
+      );
+      const userId = user.rows[0].id;
+      const agent = await client.query<{ id: string }>(
+        "INSERT INTO agent(workspace_id,name,owner_id,runtime_mode) VALUES ($1,'Contract CLI executor',$2,'local') RETURNING id",
+        [this.workspaceId, userId],
+      );
+      const agentId = agent.rows[0].id;
+      this.contractAgentIds.push(agentId);
+      const task = await client.query<{ id: string }>(
+        "INSERT INTO agent_task_queue(agent_id,issue_id,status,completed_at) VALUES ($1,$2,'completed',now()) RETURNING id",
+        [agentId, issueId],
+      );
+      const token = `mat_${randomBytes(20).toString("hex")}`;
+      await client.query(
+        "INSERT INTO task_token(token_hash,task_id,agent_id,workspace_id,user_id,expires_at) VALUES ($1,$2,$3,$4,$5,now()+interval '10 minutes')",
+        [
+          createHash("sha256").update(token).digest("hex"),
+          task.rows[0].id,
+          agentId,
+          this.workspaceId,
+          userId,
+        ],
+      );
+      await client.query(
+        "UPDATE issue SET assignee_type='agent',assignee_id=$2 WHERE id=$1",
+        [issueId, agentId],
+      );
+      return {
+        agentId,
+        taskId: task.rows[0].id,
+        token,
+        workspaceId: this.workspaceId,
+        serverUrl: API_BASE,
+      };
+    } finally {
+      await client.end();
+    }
   }
 
   getEmail() {

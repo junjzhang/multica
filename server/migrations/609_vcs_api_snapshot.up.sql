@@ -1,0 +1,5 @@
+ALTER TABLE IF EXISTS vcs_pull_request
+    ADD COLUMN IF NOT EXISTS api_snapshot JSONB NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS snapshot_fetched_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS snapshot_refresh_after TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS snapshot_error BOOLEAN NOT NULL DEFAULT false;

@@ -243,6 +243,16 @@ func DaemonAuth(queries *db.Queries, patCache *auth.PATCache, daemonCache *auth.
 				return
 			}
 
+			// An external-agent mailbox credential is a human-owned machine
+			// credential for comment/mailbox traffic only. It must never reach
+			// daemon task claiming, runtime control or registration, so it is
+			// rejected here instead of falling through to the JWT parser.
+			if strings.HasPrefix(tokenString, auth.ExternalAgentTokenPrefix) {
+				slog.Warn("daemon_auth: external agent token rejected", "path", r.URL.Path)
+				writeError(w, http.StatusForbidden, "external agent credentials cannot access daemon endpoints")
+				return
+			}
+
 			// Fallback: PAT tokens ("mul_" prefix).
 			if strings.HasPrefix(tokenString, "mul_") {
 				hash := auth.HashToken(tokenString)

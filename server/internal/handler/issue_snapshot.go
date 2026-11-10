@@ -24,41 +24,16 @@ import (
 //     and their silence would read as "unchanged";
 //   - the way a value is derived changes (a different hash, a different
 //     normalisation), because the same content would then compare as different.
-//
-// REMOVING a field does not qualify and must not bump: the remaining fields are
-// still present in old rows and still mean the same thing, so the comparison
-// stays correct and the extra key is simply ignored. Dropping status (MUL-7344
-// review) is that case, which is why this is still 1 even though rows written
-// by the previous shape already exist.
-const issueSnapshotVersion = 1
+const issueSnapshotVersion = 2
 
-// Compared field names, in the fixed order they are reported.
-//
-// The set answers exactly one question — "must the agent re-read the issue
-// BODY?" — so only title and description qualify. They are the task itself, and
-// nothing but a read can deliver them.
-//
-// Everything else is excluded because the per-turn message already carries the
-// current value, or because changing it does not change the agent's work:
-//
-//   - status: shipped as a current value on every claim, so the agent learns it
-//     without a read. Comparing it was a mistake measured, not argued: the
-//     workflow has the agent set in_progress and in_review on its OWN runs, so
-//     its own bookkeeping counted as "changed" and reported a body re-read that
-//     nothing in the body justified. Replaying this issue's 21 follow-ups, that
-//     alone cut "unchanged" from 17 to 4. "Somebody intervened" is still
-//     visible — the agent compares the shipped status against what it last set.
-//   - assignee: shipped as a current value; "is this mine now" needs no compare.
-//   - priority: only a read reveals it, but it does not change what the agent
-//     does.
-//
-// The agent is told exactly this set was compared, so a field absent here must
-// never be implied to have been checked: status, assignee, priority, labels,
-// parent, due date, stage, project and metadata are all out of scope, and an
-// issue whose ONLY change is one of them is reported as unchanged.
+// Legacy issues compare only their title and description. Contracted issues
+// additionally track acceptance criteria and the native owner revision, which
+// advances for agreement, delivery, decision and permission changes. Status or
+// metadata bookkeeping on legacy issues does not invalidate the body cache.
 const (
 	issueFieldTitle       = "title"
 	issueFieldDescription = "description"
+	issueFieldContract    = "contract"
 )
 
 // issueStateSnapshot is the comparison key for one claim's view of an issue.
@@ -72,9 +47,11 @@ const (
 // fields, read straight off the issue row — they were never sourced from here,
 // so dropping status from the comparison did not affect them.
 type issueStateSnapshot struct {
-	Version           int    `json:"v"`
-	TitleSHA256       string `json:"title_sha256"`
-	DescriptionSHA256 string `json:"description_sha256"`
+	Version               int    `json:"v"`
+	TitleSHA256           string `json:"title_sha256"`
+	DescriptionSHA256     string `json:"description_sha256"`
+	CriteriaSHA256        string `json:"criteria_sha256"`
+	ContractIssueRevision int64  `json:"contract_issue_revision"`
 }
 
 func sha256Hex(s string) string {
@@ -88,6 +65,7 @@ func buildIssueStateSnapshot(issue db.Issue) issueStateSnapshot {
 		Version:           issueSnapshotVersion,
 		TitleSHA256:       sha256Hex(issue.Title),
 		DescriptionSHA256: sha256Hex(issue.Description.String),
+		CriteriaSHA256:    sha256Hex(string(issue.AcceptanceCriteria)),
 	}
 }
 
@@ -101,6 +79,9 @@ func (s issueStateSnapshot) changedFieldsSince(prev issueStateSnapshot) []string
 	}
 	if s.DescriptionSHA256 != prev.DescriptionSHA256 {
 		changed = append(changed, issueFieldDescription)
+	}
+	if s.CriteriaSHA256 != prev.CriteriaSHA256 || s.ContractIssueRevision != prev.ContractIssueRevision {
+		changed = append(changed, issueFieldContract)
 	}
 	return changed
 }

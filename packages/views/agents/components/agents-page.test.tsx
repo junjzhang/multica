@@ -348,3 +348,54 @@ describe("AgentsPage docs link", () => {
     ).toHaveAttribute("href", "https://multica.ai/docs/fr/agents");
   });
 });
+
+describe("AgentsPage execution identity", () => {
+  const externalAgent = makeAgent({
+    id: "a-external",
+    name: "External Reviewer",
+    runtime_id: "",
+    runtime_bound: false,
+    execution_kind: "external",
+    external_session: {
+      provider: "paseo",
+      host_id: "server-1",
+      session_id: "paseo-agent-1",
+      display_name: "Review session",
+      url: "paseo://h/server-1/agent/paseo-agent-1",
+      daemon_id: "daemon-1",
+    },
+  });
+
+  it("presents an external session instead of the managed missing-runtime error", async () => {
+    mocks.agents = [externalAgent];
+    mocks.viewState.sortField = "name";
+    renderPage();
+
+    expect(await screen.findByText("External Reviewer")).toBeInTheDocument();
+    expect(screen.getByText("External")).toBeInTheDocument();
+    expect(screen.getByText("Review session")).toBeInTheDocument();
+    expect(screen.queryByText("Needs a runtime")).not.toBeInTheDocument();
+  });
+
+  it("keeps the real missing-runtime signal for a managed agent without one", async () => {
+    mocks.agents = [
+      makeAgent({ id: "a-unbound", name: "Unbound Agent", runtime_id: "", runtime_bound: false }),
+    ];
+    mocks.viewState.sortField = "name";
+    renderPage();
+
+    expect(await screen.findByText("Unbound Agent")).toBeInTheDocument();
+    // Status and runtime cells both carry the real repair signal.
+    expect(screen.getAllByText("Needs a runtime").length).toBeGreaterThan(0);
+  });
+
+  it("does not offer a runtime for an unknown execution kind", async () => {
+    mocks.agents = [makeAgent({ id: "a-unknown", name: "Future Agent", execution_kind: "future_kind" })];
+    mocks.viewState.sortField = "name";
+    renderPage();
+
+    expect(await screen.findByText("Future Agent")).toBeInTheDocument();
+    expect(screen.getByText("Unsupported execution type")).toBeInTheDocument();
+    expect(screen.queryByText("Needs a runtime")).not.toBeInTheDocument();
+  });
+});

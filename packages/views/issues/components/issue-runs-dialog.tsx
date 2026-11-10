@@ -41,6 +41,7 @@ import { RunCumulativeChart } from "./issue-runs-cumulative-chart";
 import { canRetryRun, RetryRunButton } from "./retry-run-button";
 import { RunTriggerLabel } from "./run-trigger-label";
 import { useStatusLabel, useTriggerText } from "./task-run-labels";
+import { ResultNotifications } from "./result-notifications";
 
 // The issue's runs laid out in time — the surface the execution log's header
 // and cost bars open.
@@ -948,12 +949,12 @@ function RunListRow({ run, issueId }: { run: TimelineRun; issueId: string }) {
           />
         </span>
       </div>
-      {expanded && <RunDetails id={detailsId} run={run} reason={reason} />}
+      {expanded && <RunDetails id={detailsId} run={run} reason={reason} issueId={issueId} />}
     </div>
   );
 }
 
-function RunDetails({ id, run, reason }: { id: string; run: TimelineRun; reason: string | null }) {
+function RunDetails({ id, run, reason, issueId }: { id: string; run: TimelineRun; reason: string | null; issueId: string }) {
   const { t } = useT("issues");
   const locale = useLocale();
   const partLabel = useCostPartLabel();
@@ -1045,6 +1046,7 @@ function RunDetails({ id, run, reason }: { id: string; run: TimelineRun; reason:
           </>
         )}
       </dl>
+      <ResultNotifications notifications={run.task.result_notifications} task={run.task} issueId={issueId} />
     </div>
   );
 }

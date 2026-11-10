@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
 import type { AgentTask, TaskUsage } from "@multica/core/types";
 import { useCustomPricingStore } from "@multica/core/runtimes/custom-pricing-store";
 import { renderWithI18n } from "../../test/i18n";
@@ -390,6 +391,34 @@ describe("IssueRunsDialog", () => {
     const details = document.getElementById(toggle.getAttribute("aria-controls")!)!;
     expect(within(details).getByText("claude-opus-5")).toBeInTheDocument();
     expect(within(details).getByText("Total")).toBeInTheDocument();
+  });
+
+  it("keeps a completed result separate from a refused notification in expanded details", async () => {
+    const user = userEvent.setup();
+    open([makeTask({
+      result: { output: "Finished artifact" },
+      result_notifications: [{
+        return_id: "return-1",
+        recipient_agent_id: "leader-1",
+        kind: "managed_task",
+        status: "refused",
+        error: "Original session unavailable",
+      }],
+    })]);
+    expect(screen.queryByRole("region", { name: "Result notifications" })).not.toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Run details" });
+    await waitFor(() => expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true));
+    act(() => toggle.focus());
+    expect(toggle).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const details = document.getElementById(toggle.getAttribute("aria-controls")!)!;
+    expect(within(details).getByText("Completed")).toBeInTheDocument();
+    const notifications = within(details).getByRole("region", { name: "Result notifications" });
+    expect(within(notifications).getByText("Lambda")).toBeInTheDocument();
+    expect(within(notifications).getByText("Cannot deliver")).toBeInTheDocument();
+    expect(within(notifications).getByText("Original session unavailable")).toBeInTheDocument();
+    expect(within(notifications).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("names a wakeup run by its rule, not as a quote", () => {

@@ -19,11 +19,23 @@ const (
 // teardown. Adding a table requires an explicit ownership decision here; the
 // handler deletion graph must then implement that decision before CI passes.
 var workspaceDeletionManifest = map[string]workspaceDeleteAction{
+	"issue_contract":                     workspaceDelete,
 	"cloud_agent_connection":             workspaceDelete,
 	"activity_log":                       workspaceDelete,
 	"agent":                              workspaceDelete,
 	"agent_builder_draft":                workspaceDelete,
 	"agent_invocation_target":            workspaceDelete,
+	"agent_mailbox_message":              workspaceDelete,
+	"external_agent_session":             workspaceDelete,
+	"external_agent_session_binding":     workspaceDelete,
+	"issue_delegation_return":            workspaceDelete,
+	"delegation_result_takeover":         workspaceDelete,
+	"comment_delegation_return":          workspaceDelete,
+	"comment_dispatch_obligation":        workspaceDelete,
+	"issue_assignment_delegation":        workspaceDelete,
+	"issue_assignment_delegation_return": workspaceDelete,
+	"agent_task_delegation_return":       workspaceDelete,
+	"external_agent_token":               workspaceDelete,
 	"agent_runtime":                      workspaceDelete,
 	"agent_skill":                        workspaceDelete,
 	"agent_task_queue":                   workspaceDelete,
