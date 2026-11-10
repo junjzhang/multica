@@ -15,13 +15,17 @@ func (h *Handler) recordExternalSquadEvaluation(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusForbidden, "mailbox evaluations require the connected external agent identity")
 		return
 	}
+	actorSession, ok := h.requireExternalActorSession(w, r)
+	if !ok {
+		return
+	}
 	id, ok := parseUUIDOrBadRequest(w, mailboxID, "mailbox_id (use --mailbox-id from the delivered request)")
 	if !ok {
 		return
 	}
 	message, err := h.Queries.GetAgentMailboxMessage(r.Context(), db.GetAgentMailboxMessageParams{ID: id, WorkspaceID: issue.WorkspaceID})
-	if err != nil || uuidToString(message.RecipientAgentID) != r.Header.Get("X-Agent-ID") {
-		writeError(w, http.StatusForbidden, "mailbox request does not belong to this agent")
+	if err != nil || uuidToString(message.RecipientAgentID) != r.Header.Get("X-Agent-ID") || message.TargetSessionID != actorSession {
+		writeError(w, http.StatusForbidden, "mailbox request does not belong to this session")
 		return
 	}
 	var payload protocol.ExternalIssueRequest

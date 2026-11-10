@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  ApiCredential,
-  ExternalAgentRegistration,
-  IssuedToken,
-  MulticaApi,
-  RegisterExternalAgentInput,
+import {
+  MulticaApiError,
+  type ApiCredential,
+  type ExternalAgentRegistration,
+  type IssuedToken,
+  type MulticaApi,
+  type RegisterExternalAgentInput,
 } from "../server/api";
 import type { PaseoHostAdapter } from "../server/host";
 import type { SessionContext } from "../shared/session";
@@ -42,16 +43,19 @@ export async function makeHome(): Promise<string> {
 export class FakeApi implements MulticaApi {
   readonly registrations: RegisterExternalAgentInput[] = [];
   readonly credentialCalls: ApiCredential[] = [];
-  readonly tokensRequested: { agentId: string; expiresAt: string }[] = [];
+  readonly tokensRequested: { agentId: string; sessionId: string; expiresAt: string }[] = [];
   readonly revoked: { agentId: string; tokenId: string }[] = [];
   readonly verified: { agentId: string; token: string }[] = [];
   verifyCalls = 0;
   verifyResult: "subject" | "invalid" | "throw" = "subject";
   registerError: Error | null = null;
+  /** Models a server whose template-write switch is still closed. */
+  templateDisabled = false;
   tokenError: Error | null = null;
   revokeError: Error | null = null;
   private tokenSequence = 0;
   private readonly tokenSubjects = new Map<string, string>();
+  private readonly registeredSessions = new Map<string, string>();
 
   async registerExternalAgent(
     credential: ApiCredential,
@@ -59,18 +63,36 @@ export class FakeApi implements MulticaApi {
   ): Promise<ExternalAgentRegistration> {
     this.credentialCalls.push(credential);
     if (this.registerError) throw this.registerError;
+    if (input.template && this.templateDisabled) {
+      throw new MulticaApiError(
+        400,
+        'Multica API POST /api/agents/external returned 400: {"code":"external_agent_templates_disabled","error":"external agent templates are not enabled on this server"}',
+        "external_agent_templates_disabled",
+      );
+    }
     this.registrations.push(input);
-    return { id: input.sessionId === SESSION_B ? AGENT_B : AGENT_A, name: input.name };
+    let registered = this.registeredSessions.get(input.sessionId);
+    if (!registered) {
+      registered = randomUUID();
+      this.registeredSessions.set(input.sessionId, registered);
+    }
+    return {
+      id: input.sessionId === SESSION_B ? AGENT_B : AGENT_A,
+      name: input.name,
+      sessionId: registered,
+      ...(input.template ? { templateId: randomUUID() } : {}),
+    };
   }
 
   async createExternalAgentToken(
     credential: ApiCredential,
     agentId: string,
+    externalSessionId: string,
     expiresAt: string,
   ): Promise<IssuedToken> {
     this.credentialCalls.push(credential);
     if (this.tokenError) throw this.tokenError;
-    this.tokensRequested.push({ agentId, expiresAt });
+    this.tokensRequested.push({ agentId, sessionId: externalSessionId, expiresAt });
     this.tokenSequence += 1;
     const token = this.tokenSequence === 1 ? EXTERNAL_TOKEN : `${EXTERNAL_TOKEN}-${this.tokenSequence}`;
     this.tokenSubjects.set(token, agentId);

@@ -170,7 +170,24 @@ func externalAgentRequest(t *testing.T, agentID, method, path string, body any) 
 	req := newRequest(method, path, body)
 	req.Header.Set("X-Actor-Source", "external_agent")
 	req.Header.Set("X-Agent-ID", agentID)
+	// A session credential acts as exactly one registered session. The real
+	// auth middleware stamps this from the token; this helper models the same
+	// request shape for handlers that are exercised directly.
+	req.Header.Set("X-Actor-Session-ID", oldestExternalSessionID(t, agentID))
 	return req
+}
+
+// oldestExternalSessionID is the session a session-bound credential for this
+// agent would name when the test does not care which one: the oldest live
+// session, matching the auth path's single-session rule.
+func oldestExternalSessionID(t *testing.T, agentID string) string {
+	t.Helper()
+	var sessionID string
+	if err := testPool.QueryRow(t.Context(), `SELECT id FROM external_agent_session
+		WHERE agent_id = $1 AND revoked_at IS NULL ORDER BY created_at ASC, id ASC LIMIT 1`, agentID).Scan(&sessionID); err != nil {
+		t.Fatalf("load oldest external session for %s: %v", agentID, err)
+	}
+	return sessionID
 }
 
 // Editing a comment whose sender has since rebound must replay the original

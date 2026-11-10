@@ -153,6 +153,14 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var actorSession pgtype.UUID
+	if isExternalAgentActor(r) {
+		id, ok := h.requireExternalActorSession(w, r)
+		if !ok {
+			return
+		}
+		actorSession = id
+	}
 	sourceType := r.URL.Query().Get("kind")
 	if sourceType == "" {
 		sourceType = "comment"
@@ -197,6 +205,7 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		RecipientAgentID: agent.ID,
 		SourceType:       sourceType,
 		WorkspaceID:      agent.WorkspaceID,
+		TargetSessionID:  actorSession,
 		AfterCreatedAt:   afterCreated,
 		AfterID:          afterID,
 		PageLimit:        int32(limit),
@@ -287,6 +296,14 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "managed result consumption requires the receiving task credential")
 		return
 	}
+	var actorSession pgtype.UUID
+	if isExternalAgentActor(r) {
+		id, ok := h.requireExternalActorSession(w, r)
+		if !ok {
+			return
+		}
+		actorSession = id
+	}
 	var req ackMailboxProcessingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -308,6 +325,7 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		ID:               messageID,
 		WorkspaceID:      agent.WorkspaceID,
 		RecipientAgentID: agent.ID,
+		TargetSessionID:  actorSession,
 		State:            req.State,
 	}, callerID)
 	if err != nil {

@@ -143,13 +143,16 @@ type AgentResponse struct {
 	// Null for managed agents. host_id is the Paseo server/connection id (not
 	// a hostname) and session_id is the Paseo agent id (not the underlying
 	// Codex thread id).
-	ExternalSession       *ExternalSessionResponse `json:"external_session"`
-	Skills                []AgentSkillSummary      `json:"skills"`
-	DisabledRuntimeSkills []DisabledRuntimeSkill   `json:"disabled_runtime_skills"`
-	CreatedAt             string                   `json:"created_at"`
-	UpdatedAt             string                   `json:"updated_at"`
-	ArchivedAt            *string                  `json:"archived_at"`
-	ArchivedBy            *string                  `json:"archived_by"`
+	ExternalSession *ExternalSessionResponse `json:"external_session"`
+	// ExternalTemplate is the host identity this session belongs to. Null for
+	// legacy per-session agents and managed agents; old clients ignore it.
+	ExternalTemplate      *ExternalAgentTemplateResponse `json:"external_template"`
+	Skills                []AgentSkillSummary            `json:"skills"`
+	DisabledRuntimeSkills []DisabledRuntimeSkill         `json:"disabled_runtime_skills"`
+	CreatedAt             string                         `json:"created_at"`
+	UpdatedAt             string                         `json:"updated_at"`
+	ArchivedAt            *string                        `json:"archived_at"`
+	ArchivedBy            *string                        `json:"archived_by"`
 }
 
 // runtimeConfigGatewayTokenMask is the placeholder the API substitutes for
@@ -251,6 +254,7 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 		OwnerID:                  uuidToPtr(a.OwnerID),
 		ExecutionKind:            executionKind,
 		ExternalSession:          nil,
+		ExternalTemplate:         externalTemplateToResponse(a),
 		Skills:                   []AgentSkillSummary{},
 		DisabledRuntimeSkills:    decodeDisabledRuntimeSkills(a.DisabledRuntimeSkills),
 		CreatedAt:                timestampToString(a.CreatedAt),

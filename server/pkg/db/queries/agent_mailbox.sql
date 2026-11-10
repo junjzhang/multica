@@ -82,6 +82,10 @@ WHERE recipient_agent_id = @recipient_agent_id
   AND workspace_id = @workspace_id
   AND source_type = @source_type
   AND (
+    sqlc.narg('target_session_id')::uuid IS NULL
+    OR target_session_id = sqlc.narg('target_session_id')::uuid
+  )
+  AND (
     sqlc.narg('after_created_at')::timestamptz IS NULL
     OR created_at > sqlc.narg('after_created_at')::timestamptz
     OR (
@@ -316,6 +320,10 @@ SET processing_status = CASE
 WHERE id = @id
   AND workspace_id = @workspace_id
   AND recipient_agent_id = @recipient_agent_id
+  AND (
+    sqlc.narg('target_session_id')::uuid IS NULL
+    OR target_session_id = sqlc.narg('target_session_id')::uuid
+  )
 RETURNING *;
 
 -- name: ListIssueMailboxDeliveries :many

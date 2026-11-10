@@ -90,14 +90,28 @@ type sessionRemoteReport struct {
 	HostID        string `json:"host_id,omitempty"`
 	SessionID     string `json:"session_id,omitempty"`
 	DaemonID      string `json:"daemon_id,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// Template is the host identity this session belongs to. Empty for a
+	// legacy per-session agent, which has no template.
+	TemplateID       string `json:"template_id,omitempty"`
+	TemplateName     string `json:"template_name,omitempty"`
+	TemplateProvider string `json:"template_provider,omitempty"`
+	TemplateHostID   string `json:"template_host_id,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 // sessionAgentResponse is the part of GET /api/agents/{id} this command reads.
 type sessionAgentResponse struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	ExecutionKind string `json:"execution_kind"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	ExecutionKind    string                `json:"execution_kind"`
+	ExternalTemplate *sessionAgentTemplate `json:"external_template"`
+}
+
+type sessionAgentTemplate struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	HostID   string `json:"host_id"`
+	Name     string `json:"name"`
 }
 
 type sessionRegisteredAddress struct {
@@ -116,7 +130,8 @@ func runSessionStatus(cmd *cobra.Command, _ []string) error {
 	report.Error = safeSessionDiagnostic(report.Error)
 	if report.Remote != nil {
 		for _, text := range []*string{&report.Remote.Error, &report.Remote.AgentName, &report.Remote.ExecutionKind,
-			&report.Remote.Provider, &report.Remote.HostID, &report.Remote.SessionID, &report.Remote.DaemonID} {
+			&report.Remote.Provider, &report.Remote.HostID, &report.Remote.SessionID, &report.Remote.DaemonID,
+			&report.Remote.TemplateName, &report.Remote.TemplateProvider, &report.Remote.TemplateHostID} {
 			*text = safeSessionDiagnostic(*text)
 		}
 	}
@@ -235,6 +250,12 @@ func verifySessionBinding(parent context.Context, binding *externalSessionContex
 	}
 	report.AgentName = agent.Name
 	report.ExecutionKind = agent.ExecutionKind
+	if agent.ExternalTemplate != nil {
+		report.TemplateID = agent.ExternalTemplate.ID
+		report.TemplateName = agent.ExternalTemplate.Name
+		report.TemplateProvider = agent.ExternalTemplate.Provider
+		report.TemplateHostID = agent.ExternalTemplate.HostID
+	}
 	switch {
 	case agent.ID != binding.AgentID:
 		report.Error = fmt.Sprintf("server returned agent %s, not the recorded %s", agent.ID, binding.AgentID)
@@ -319,6 +340,9 @@ func printSessionStatus(report sessionStatusReport) {
 	}
 	if report.Remote != nil && report.Remote.Checked {
 		fmt.Printf("Remote:       checked (agent %s, %s)\n", report.Remote.AgentName, report.Remote.ExecutionKind)
+		if report.Remote.TemplateID != "" {
+			fmt.Printf("Template:     %s (%s %s)\n", report.Remote.TemplateName, report.Remote.TemplateProvider, report.Remote.TemplateHostID)
+		}
 	}
 	if report.Error != "" {
 		fmt.Printf("Problem:      %s\n", strings.TrimSpace(report.Error))

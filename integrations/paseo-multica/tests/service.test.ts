@@ -170,6 +170,26 @@ describe("session service", () => {
     expect(await readFile(contextPath(home, SESSION_B), "utf8")).not.toContain(AGENT_A);
   });
 
+  it("falls back to per-session registration when templates are disabled", async () => {
+    const { api, service } = await setup();
+    api.templateDisabled = true;
+
+    const a = await service.connect(SESSION_A);
+    const b = await service.connect(SESSION_B);
+
+    expect(a.state).toBe("connected");
+    expect(b.state).toBe("connected");
+    expect(api.registrations).toHaveLength(2);
+    for (const entry of api.registrations) {
+      expect(entry.template).toBe(false);
+      expect(entry.templateName).toBeUndefined();
+      // The legacy name is the one the previous plugin version used, so a
+      // second session of the same host never collides with the template name.
+      expect(entry.name).toBe("Workstation · Fix the build");
+    }
+    expect(api.tokensRequested).toHaveLength(2);
+  });
+
   it("repairs an expired credential only through explicit connect", async () => {
     const { home, api, service } = await setup();
     const expired = makeContext({ expires_at: new Date(NOW.getTime() - 60_000).toISOString() });

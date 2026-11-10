@@ -200,6 +200,13 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "contract actions require a concrete agent identity")
 		return
 	}
+	// A contract write is session-sensitive: a template credential must name
+	// the session it acts for. Binding a contract version/author to that exact
+	// session is slice 2; this slice refuses credentials that name no session
+	// at all.
+	if _, ok := h.requireExternalActorSession(w, r); !ok {
+		return
+	}
 	raw, _ := json.Marshal(struct {
 		Request contractRequest
 		Actor   issuecontract.Actor

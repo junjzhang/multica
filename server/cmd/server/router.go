@@ -433,6 +433,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		DisableWorkspaceCreation:       os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
 		WorkspaceCreationAllowedEmails: splitAndTrim(os.Getenv("WORKSPACE_CREATION_ALLOWED_EMAILS")),
 		VCSIntegrationEnabled:          os.Getenv("MULTICA_VCS_INTEGRATION_ENABLED") == "true",
+		ExternalAgentTemplatesEnabled:  os.Getenv("MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED") == "true",
 		PublicURL:                      strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PUBLIC_URL")), "/"),
 		AppURL:                         appURLFromEnv(),
 		TrustedProxies:                 parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
@@ -2310,6 +2311,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// external agent. Raw token is returned once, hash only.
 					r.With(handler.RequireHumanActor).Post("/tokens", h.CreateExternalAgentToken)
 					r.With(handler.RequireHumanActor).Delete("/tokens/{tokenId}", h.RevokeExternalAgentToken)
+					// Revoke one registered host session. The agent keeps its
+					// other sessions and history; credentials bound to the
+					// revoked session stop authenticating immediately.
+					r.With(handler.RequireHumanActor).Delete("/sessions/{sessionId}", h.RevokeExternalAgentSession)
 					// Explicit (issue -> session) target for this external
 					// agent. Producers resolve it before enqueueing; a
 					// rebind never retargets an existing delivery.

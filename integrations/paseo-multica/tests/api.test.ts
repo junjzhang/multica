@@ -11,6 +11,7 @@ interface Recorded {
   body: string;
 }
 
+const SESSION_REGISTERED = randomUUID();
 const servers: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -60,12 +61,14 @@ describe("Multica API client", () => {
   it("registers an external session with the owner credential", async () => {
     const { credential, calls } = await startServer((_request, response) => {
       response.writeHead(201, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ id: AGENT_A, name: "Workstation · Fix the build", execution_kind: "external" }));
+      response.end(JSON.stringify({ id: AGENT_A, name: "Workstation · Fix the build", execution_kind: "external", external_session: { id: randomUUID() }, external_template: null }));
     });
     const api = createMulticaApi();
 
     const result = await api.registerExternalAgent(credential, {
       name: "Workstation · Fix the build",
+      template: true,
+      templateName: "Paseo · Workstation",
       hostId: "srv_workstation",
       sessionId: "paseo-session-a",
       displayName: "Fix the build",
@@ -74,12 +77,15 @@ describe("Multica API client", () => {
     });
 
     expect(result.id).toBe(AGENT_A);
+    expect(result.sessionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.url).toBe("/api/agents/external");
     expect(calls[0]?.headers.authorization).toBe(`Bearer ${OWNER_TOKEN}`);
     expect(calls[0]?.headers["x-workspace-id"]).toBe(WORKSPACE_ID);
     expect(JSON.parse(calls[0]?.body ?? "{}")).toMatchObject({
       name: "Workstation · Fix the build",
+      template: true,
+      template_name: "Paseo · Workstation",
       external_session: {
         provider: "paseo",
         host_id: "srv_workstation",
@@ -106,10 +112,10 @@ describe("Multica API client", () => {
     });
     const api = createMulticaApi();
 
-    const issued = await api.createExternalAgentToken(credential, AGENT_A, "2027-01-01T00:00:00Z");
+    const issued = await api.createExternalAgentToken(credential, AGENT_A, SESSION_REGISTERED, "2027-01-01T00:00:00Z");
     expect(issued).toEqual({ id: tokenId, token: EXTERNAL_TOKEN, expiresAt: "2027-01-01T00:00:00Z" });
     expect(calls[0]?.url).toBe(`/api/agents/${AGENT_A}/tokens`);
-    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ expires_at: "2027-01-01T00:00:00Z" });
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({ expires_at: "2027-01-01T00:00:00Z", external_session_id: SESSION_REGISTERED });
 
     await api.revokeExternalAgentToken(credential, AGENT_A, tokenId);
     expect(calls[1]?.method).toBe("DELETE");
@@ -194,7 +200,7 @@ describe("Multica API client", () => {
     });
     const api = createMulticaApi();
 
-    await expect(api.createExternalAgentToken(credential, AGENT_A, "2027-01-01T00:00:00Z")).rejects.toThrow(
+    await expect(api.createExternalAgentToken(credential, AGENT_A, SESSION_REGISTERED, "2027-01-01T00:00:00Z")).rejects.toThrow(
       /valid external agent credential/,
     );
   });

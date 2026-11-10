@@ -49,7 +49,14 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 		writeJSON(w, 200, address)
 		return
 	}
-	address, err := delegation.ResolveExternal(r.Context(), h.Queries, wsID, agentID, r.Header.Get(ReturnSessionHeader))
+	// The credential's bound session is the wait's registered address. The
+	// X-Return-Session header is only a consistency parameter and was already
+	// compared against it by the auth middleware.
+	sessionUUID, ok := h.requireExternalActorSession(w, r)
+	if !ok {
+		return
+	}
+	address, err := delegation.ResolveExternal(r.Context(), h.Queries, wsID, agentID, uuidToString(sessionUUID))
 	if err != nil {
 		writeError(w, http.StatusForbidden, "return session is unavailable")
 		return

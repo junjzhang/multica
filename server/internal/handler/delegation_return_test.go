@@ -342,9 +342,14 @@ func TestCreateDelegatedIssueByExternalDispatcherWithoutSessionCreatesNothing(t 
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	dispatcher, sessionID, _ := externalAgentFixture(t, "Delegation External Missing", "delegation-daemon")
-	ownerID := ""
-	_ = testPool.QueryRow(context.Background(), `SELECT owner_user_id FROM external_agent_session WHERE id = $1`, sessionID).Scan(&ownerID)
+	dispatcher, _, ownerID := externalAgentFixture(t, "Delegation External Missing", "delegation-daemon")
+	// A legacy unbound credential over an agent with several sessions has no
+	// provable address: without an explicit return session it must not guess
+	// one of its siblings.
+	dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id": testWorkspaceID, "agent_id": dispatcher, "owner_user_id": ownerID,
+		"provider": "paseo", "host_id": "delegation-missing-second", "session_id": "delegation-missing-second-session", "daemon_id": "delegation-daemon",
+	})
 	token := externalTokenFixture(t, dispatcher, ownerID, time.Now().Add(time.Hour))
 	target, _ := executableTarget(t, "external-missing")
 	title := fmt.Sprintf("external missing delegation %d", time.Now().UnixNano())
@@ -375,8 +380,10 @@ func TestCreateDelegatedIssueByExternalDispatcherRejectsForeignSession(t *testin
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), http.MethodPost, "/api/issues", createIssueBody(title, target), nil, func(r *http.Request) {
 		r.Header.Set(ReturnSessionHeader, otherSession)
 	})
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	// The credential is bound to its own session, so naming another session is
+	// refused at the auth boundary before the handler can write anything.
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
 	}
 	if _, ok := issueIDByTitle(t, title); ok {
 		t.Fatal("foreign-address delegation created an issue")

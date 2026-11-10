@@ -1,7 +1,14 @@
 import type { StatusView } from "../shared/contracts";
 import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
-import { createMulticaApi, type ApiCredential, type MulticaApi, type RegisterExternalAgentInput } from "./api";
+import {
+  createMulticaApi,
+  MulticaApiError,
+  type ApiCredential,
+  type MulticaApi,
+  type ExternalAgentRegistration,
+  type RegisterExternalAgentInput,
+} from "./api";
 import { resolveHostSession, type HostSession, type PaseoHostAdapter } from "./host";
 import { ConfigurationError, loadOwnerProfile, type OwnerProfile } from "./owner-profile";
 import {
@@ -183,7 +190,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         );
       }
 
-      const registration = await api.registerExternalAgent(ownerCredential(owner), registrationFor(host, config.daemonId));
+      const registration = await registerSession(api, ownerCredential(owner), host, config.daemonId);
       if (existing.status === "ok" && existing.context.agent_id !== registration.id) {
         throw new ConfigurationError(
           "Multica returned a different agent identity for this session. Refusing to overwrite the existing binding.",
@@ -193,6 +200,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       const issued = await api.createExternalAgentToken(
         ownerCredential(owner),
         registration.id,
+        registration.sessionId,
         new Date(now().getTime() + tokenTtlMs).toISOString(),
       );
       const context: SessionContext = {
@@ -362,15 +370,47 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
 
 function registrationFor(host: HostSession, daemonId: string): RegisterExternalAgentInput {
   const displayName = truncate(host.title?.trim() || host.sessionId, 200);
+  // name stays the per-session name: a legacy server (or a server with
+  // template writes still closed) ignores template/template_name and would
+  // otherwise collide on the second session of one host.
   const name = truncate(`${host.hostLabel || "Paseo"} · ${displayName}`, 120);
+  const templateName = truncate(`Paseo · ${host.hostLabel || host.hostId}`, 120);
   return {
     name,
+    templateName,
     hostId: host.hostId,
     sessionId: host.sessionId,
     displayName,
     url: returnAddress({ host_id: host.hostId, session_id: host.sessionId }),
     daemonId,
+    template: true,
   };
+}
+
+/**
+ * Registers the session under its host template, falling back to the legacy
+ * one-agent-per-session registration while the server has not opened template
+ * writes. Only the explicit "not enabled" rejection triggers the fallback: any
+ * other failure is reported instead of being retried against a different
+ * identity shape.
+ */
+async function registerSession(
+  api: MulticaApi,
+  credential: ApiCredential,
+  host: HostSession,
+  daemonId: string,
+): Promise<ExternalAgentRegistration> {
+  const input = registrationFor(host, daemonId);
+  try {
+    return await api.registerExternalAgent(credential, input);
+  } catch (error) {
+    // The server tags this rejection with a stable code; prose is not a
+    // contract. Only this documented rollout gate falls back to legacy.
+    if (error instanceof MulticaApiError && error.code === "external_agent_templates_disabled") {
+      return api.registerExternalAgent(credential, { ...input, template: false, templateName: undefined });
+    }
+    throw error;
+  }
 }
 
 function truncate(value: string, max: number): string {

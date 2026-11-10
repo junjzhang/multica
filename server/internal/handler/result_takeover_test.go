@@ -384,7 +384,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 		t.Fatal(err)
 	}
 	requireTaskReturns(t, uuidToString(retry.ID), f.address, inherited)
-	bToken := externalTokenFixture(t, uuidToString(f.address.DispatcherAgentID), f.owner, time.Now().Add(time.Hour))
+	bToken := externalSessionTokenFixture(t, uuidToString(f.address.DispatcherAgentID), bSession, f.owner, time.Now().Add(time.Hour))
 	explicit := serveAuthenticated(t, bToken, http.HandlerFunc(testHandler.RerunIssue), "POST", path, body, params, func(r *http.Request) { r.Header.Set(ReturnSessionHeader, bSession) })
 	if explicit.Code != 202 {
 		t.Fatalf("explicit B rerun %d %s", explicit.Code, explicit.Body.String())

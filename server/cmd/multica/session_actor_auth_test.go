@@ -82,19 +82,19 @@ func newActorBindingEnv(t *testing.T) *actorBindingEnv {
 		"owner_id": ownerID, "execution_kind": "external", "visibility": "workspace", "permission_mode": "public_to",
 	})
 	sessionA := fmt.Sprintf("paseo-session-a-%d", suffix)
-	f.Insert(t, "external_agent_session", testutil.Cols{
+	sessionAID := f.Insert(t, "external_agent_session", testutil.Cols{
 		"workspace_id": workspaceID, "owner_user_id": ownerID, "agent_id": agentA,
 		"provider": "paseo", "host_id": "host-a", "session_id": sessionA,
 		"display_name": "Actor A", "daemon_id": "daemon-a",
 	})
 	sessionB := fmt.Sprintf("paseo-session-b-%d", suffix)
-	f.Insert(t, "external_agent_session", testutil.Cols{
+	sessionBID := f.Insert(t, "external_agent_session", testutil.Cols{
 		"workspace_id": workspaceID, "owner_user_id": ownerID, "agent_id": agentB,
 		"provider": "paseo", "host_id": "host-b", "session_id": sessionB,
 		"display_name": "Actor B", "daemon_id": "daemon-b",
 	})
-	tokenA, _ := mintActorToken(t, f, agentA, ownerID, workspaceID)
-	tokenB, tokenBID := mintActorToken(t, f, agentB, ownerID, workspaceID)
+	tokenA, _ := mintActorToken(t, f, agentA, sessionAID, ownerID, workspaceID)
+	tokenB, tokenBID := mintActorToken(t, f, agentB, sessionBID, ownerID, workspaceID)
 
 	issueID := f.Issue(t, "Actor binding issue")
 	f.Cleanup(t, `DELETE FROM activity_log WHERE issue_id = $1`, issueID)
@@ -133,7 +133,10 @@ func newActorBindingEnv(t *testing.T) *actorBindingEnv {
 	return env
 }
 
-func mintActorToken(t *testing.T, f *testutil.Fixture, agentID, ownerID, workspaceID string) (string, string) {
+// mintActorToken binds the credential to one registered session, the same
+// shape the plugin now requests. A wide unbound credential is exactly what a
+// multi-session agent must not be able to use.
+func mintActorToken(t *testing.T, f *testutil.Fixture, agentID, sessionID, ownerID, workspaceID string) (string, string) {
 	t.Helper()
 	raw, err := auth.GenerateExternalAgentToken()
 	if err != nil {
@@ -142,6 +145,7 @@ func mintActorToken(t *testing.T, f *testutil.Fixture, agentID, ownerID, workspa
 	tokenID := f.Insert(t, "external_agent_token", testutil.Cols{
 		"agent_id": agentID, "workspace_id": workspaceID, "owner_user_id": ownerID,
 		"token_hash": auth.HashToken(raw), "expires_at": time.Now().Add(time.Hour),
+		"external_session_id": sessionID,
 	})
 	return raw, tokenID
 }

@@ -206,6 +206,48 @@ func TestRunAgentTokenCreateSavesSecretWithoutPrintingIt(t *testing.T) {
 	}
 }
 
+func TestRunAgentTokenCreateBindsExternalSession(t *testing.T) {
+	const secret = "mea_bound_secret_token"
+	const session = "0199a0b1-3333-7333-8333-333333333333"
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/agents/agent-1/tokens" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "token-1", "token": secret, "expires_at": "2027-01-01T00:00:00Z",
+			"external_session_id": session,
+		})
+	}))
+	defer srv.Close()
+	setAgentExternalTestEnv(t, srv.URL)
+
+	cmd := newAgentTokenCreateTestCmd()
+	_ = cmd.Flags().Set("expires-at", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	_ = cmd.Flags().Set("external-session", session)
+	_ = cmd.Flags().Set("save-to", "token.json")
+	if _, err := captureStdout(t, func() error { return runAgentTokenCreate(cmd, []string{"agent-1"}) }); err != nil {
+		t.Fatalf("runAgentTokenCreate: %v", err)
+	}
+	if body["external_session_id"] != session {
+		t.Fatalf("request external_session_id = %v, want %s", body["external_session_id"], session)
+	}
+	data, err := os.ReadFile("token.json")
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["external_session_id"] != session {
+		t.Fatalf("saved token file = %v", saved)
+	}
+}
+
 func TestRunAgentTokenCreateRequiresExplicitSink(t *testing.T) {
 	cmd := newAgentTokenCreateTestCmd()
 	_ = cmd.Flags().Set("expires-at", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
