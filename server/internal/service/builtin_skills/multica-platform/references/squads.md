@@ -45,8 +45,10 @@ Squad-routed work runs through the squad's `leader_id` agent. Consequences:
 A squad-assigned issue may have a Contract. Keep its executor as the squad;
 `executor_representative` identifies the current active leader who can submit
 using its own authenticated Agent identity. The specified upstream coordinator
-accepts or returns the overall delivery. Neither a leader nor an ordinary squad
-member may revise its own squad agreement or accept its own delivery.
+accepts or returns the overall delivery. Squad membership alone grants no
+contract authority. Maintenance follows the existing workspace-member or verified
+original-requester rules, excluding current and versioned representatives.
+A representative cannot accept its own squad's delivery.
 
 Read the current version and capabilities with `multica issue contract get`.
 Leader changes invalidate the basis: an authorized requester must revise before
