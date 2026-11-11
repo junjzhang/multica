@@ -41,7 +41,14 @@ WITH refs AS (
   SELECT 'messages', m.recipient_agent_id, m.id::text FROM agent_mailbox_message m
    WHERE m.delivery_status IN ('pending','leased','unknown') AND m.withdrawn_at IS NULL
   UNION ALL
-  SELECT 'returns', r.dispatcher_agent_id, r.id::text FROM issue_delegation_return r WHERE r.is_current
+  SELECT 'returns', r.dispatcher_agent_id, r.id::text
+   FROM issue_delegation_return r JOIN issue i ON i.id = r.issue_id
+   WHERE r.is_current
+     AND (i.status NOT IN ('done','cancelled') OR EXISTS (
+       SELECT 1 FROM agent_mailbox_message m
+       WHERE m.source_type = 'delegation_result' AND m.processing_status <> 'handled'
+         AND m.withdrawn_at IS NULL
+         AND m.payload->>'delegation_return_id' = r.id::text))
   UNION ALL
   SELECT 'assigned', i.assignee_id, i.id::text FROM issue i
    WHERE i.assignee_type = 'agent' AND i.status NOT IN ('done','cancelled')
@@ -64,9 +71,16 @@ ORDER BY a.id, r.code;
 SELECT id, agent_id, workspace_id FROM external_agent_token
 WHERE external_session_id IS NULL AND revoked_at IS NULL;
 
--- Contracts that still name an external executor or representative.
-SELECT issue_id FROM issue_contract
-WHERE data::text LIKE '%"type":"agent"%' AND data::text LIKE '%"execution_kind"%';
+-- Contracts that still name an external executor, acceptor or squad
+-- representative. The executed basis has no execution_kind field, so resolve
+-- each named actor against agent.execution_kind instead.
+SELECT c.issue_id, a.id AS agent_id, a.name, a.execution_kind
+FROM issue_contract c
+JOIN agent a ON a.id IN (
+    NULLIF(c.data->'versions'->-1->'executor'->>'id','')::uuid,
+    NULLIF(c.data->'versions'->-1->'acceptor'->>'id','')::uuid,
+    NULLIF(c.data->'versions'->-1->'basis'->'executor_representative'->>'id','')::uuid)
+WHERE a.execution_kind = 'external';
 ```
 
 Classify every hit as migrate, hand off, or leave with its owner. A host session
@@ -85,6 +99,17 @@ notifications the archive withdraws:
 `unverified_messages`, `current_returns`, `assigned_issues`,
 `task_leaderships`, `coordinated_issues`, `squad_default_leader`,
 `squad_memberships`, and the non-blocking `pending_messages`.
+
+- `current_returns` counts an accepted return relationship only while its issue
+  is open or a result it produced is still unhandled. A closed issue keeps the
+  current row for history but is not an archive obligation.
+- `pending_messages` lists exactly the rows the archive transaction withdraws
+  (delivery target set). Legacy rows with no target are preserved untouched and
+  are not reported as withdrawn.
+- `unaccepted_contracts` matches the executor, the acceptor and the squad
+  `executor_representative` of the current version.
+- Archiving an external Agent is a human owner/admin action; machine credentials
+  are refused even when they can manage the Agent.
 
 ## Backup
 
@@ -118,7 +143,9 @@ Only after step 4:
    agent and the open tasks; re-check the target is managed, active and callable;
    store the existing leaders as task-level roots before replacing the default.
    Any failed evidence check rolls the whole squad back and the squad stays
-   stopped for explicit handoff.
+   stopped for explicit handoff. No tool ships for this step in slice 3: it is a
+   reviewed one-off script run by a human with squad management permission, and
+   this slice's rehearsal did not perform a default-leader replacement.
 2. Verify the read projection: `GET /api/squads/{id}` has no
    `default_leader_unavailable_reason`, and the squad UI shows a managed leader.
 3. Turn `MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED` on for one backend and verify
