@@ -53,4 +53,25 @@ describe("session route reads", () => {
       { id: "session-1", deliverable: false },
     ]);
   });
+
+  it("sends an explicit page window and reads the server total", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      sessions: [{ id: "session-1", deliverable: true }],
+      total: 12,
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+    await expect(client.listAgentSessionsPage("agent-1", { limit: 5, offset: 0 })).resolves.toMatchObject({
+      sessions: [{ id: "session-1" }],
+      total: 12,
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/agents/agent-1/sessions?limit=5&offset=0");
+  });
+
+  it("falls back to the page length when an older server omits the total", async () => {
+    const client = clientReturning({ sessions: [{ id: "session-1" }, { id: "session-2" }] });
+    await expect(client.listAgentSessionsPage("agent-1", { limit: 5 })).resolves.toMatchObject({
+      total: 2,
+    });
+  });
 });

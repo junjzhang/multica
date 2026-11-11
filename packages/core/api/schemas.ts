@@ -1287,6 +1287,19 @@ const ExecutionKindSchema = z.unknown().transform((value): string | undefined =>
  * managed behavior: a missing execution_kind means managed, and a present but
  * unrecognized one stays non-executable.
  */
+/**
+ * The host identity an external session belongs to. A template is one Agent
+ * row; its sessions are registered addresses. Absent for legacy per-session
+ * external agents and for managed agents, so clients keep the old rendering
+ * until a template actually exists.
+ */
+export const ExternalAgentTemplateSchema = z.object({
+  id: z.string().default(""),
+  provider: z.string().default(""),
+  host_id: z.string().default(""),
+  name: z.string().default(""),
+}).loose();
+
 export const AgentSchema = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),
@@ -1295,6 +1308,8 @@ export const AgentSchema = z.object({
   runtime_availability: z.enum(["online", "unstable", "offline"]).optional().catch(undefined),
   execution_kind: ExecutionKindSchema,
   external_session: ExternalSessionSchema.nullable().optional().catch(undefined),
+  external_template: ExternalAgentTemplateSchema.nullable().optional().catch(undefined),
+  external_session_count: z.number().int().nonnegative().optional().catch(undefined),
   name: z.string().default(""),
   description: z.string().default(""),
   instructions: z.string().default(""),
@@ -1375,7 +1390,10 @@ export const AgentSessionSummarySchema = ExternalSessionSchema.extend({
 
 /** Drop one malformed session without hiding the agent's other sessions. */
 export const AgentSessionListResponseSchema = z
-  .object({ sessions: z.array(z.unknown()) })
+  .object({
+    sessions: z.array(z.unknown()),
+    total: z.number().int().nonnegative().optional().catch(undefined),
+  })
   .loose()
   .transform((value, ctx) => {
     const sessions = value.sessions.flatMap((item) => {
@@ -1386,8 +1404,30 @@ export const AgentSessionListResponseSchema = z
       ctx.addIssue({ code: "custom", message: "No valid registered sessions in response", path: ["sessions"] });
       return z.NEVER;
     }
-    return { sessions };
+    return { sessions, total: value.total };
   });
+
+export const AgentArchiveBlockerSchema = z.object({
+  code: z.string(),
+  blocking: z.boolean().default(false).catch(false),
+  count: z.number().int().nonnegative().default(0).catch(0),
+  sample_ids: z.array(z.string()).default([]).catch([]),
+}).loose();
+
+/**
+ * The external-agent archive preview. A malformed response must fail closed:
+ * the UI withholds confirmation and the server re-checks anyway.
+ */
+export const AgentArchivePreflightSchema = z.object({
+  agent_id: z.string().default(""),
+  archivable: z.boolean().default(false).catch(false),
+  blockers: z.array(z.unknown()).transform((items) =>
+    items.flatMap((item) => {
+      const parsed = AgentArchiveBlockerSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  ),
+}).loose();
 
 export const AgentSessionBindingSchema = z.object({
   id: z.string(),
@@ -1637,9 +1677,11 @@ export const CommentSubIssueTaskResponseSchema = z.object({
 
 export const IssueSchema = z.object({
   leadership_root_issue_id: z.string().optional().catch(undefined),
+  leadership_squad_id: z.string().optional().catch(undefined),
   leader_agent_id: z.string().optional().catch(undefined),
   leader_external_session_id: z.string().optional().catch(undefined),
   leadership_revision: z.number().int().nonnegative().optional().catch(undefined),
+  leadership_root_revision: z.number().int().nonnegative().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),
@@ -1716,6 +1758,29 @@ export const IssueSchema = z.object({
     .optional().catch(undefined),
   mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
   external_session_bindings: z.array(z.unknown()).pipe(IssueSessionBindingListSchema).optional().catch(undefined),
+}).loose();
+
+/**
+ * Result of an explicit task-leader handoff. Additive projections (stale
+ * contracts, advanced returns) degrade independently: a malformed list must
+ * not hide a handoff the server already committed.
+ */
+export const IssueLeadershipHandoffResponseSchema = z.object({
+  root_issue_id: z.string(),
+  revision: z.number().int().nonnegative().default(0),
+  issue_revision: z.number().int().nonnegative().default(0),
+  stale_contract_ids: z.array(z.string()).optional().catch(undefined),
+  advanced_returns: z
+    .array(
+      z.object({
+        issue_id: z.string(),
+        previous_return_id: z.string().optional().catch(undefined),
+        current_return_id: z.string().optional().catch(undefined),
+      }).loose(),
+    )
+    .optional()
+    .catch(undefined),
+  historical_results: z.string().optional().catch(undefined),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

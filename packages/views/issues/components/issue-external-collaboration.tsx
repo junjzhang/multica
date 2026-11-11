@@ -11,6 +11,7 @@ import { useT, useTimeAgo } from "../../i18n";
 import { AgentExecutionStatus, ExternalAgentCard } from "./agent-execution-identity";
 import { AgentIssueSessionBinding } from "./agent-issue-session-binding";
 import { ExternalSessionLink } from "./external-session-link";
+import { TaskLeaderHandoff } from "./task-leader-handoff";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -124,7 +125,29 @@ export function IssueExternalCollaboration({
       ? participants.find((agent) => agent.id === coordinator.id) ?? agentsById.get(coordinator.id) ?? null
       : null;
 
-  if (!coordinator && externalAgents.length === 0 && deliveries.length === 0) return null;
+  // The task-chain leader is the responsible subject for this issue. It is
+  // read from the issue's own leadership pointer, never from the squad's
+  // global default, so a later default change cannot relabel history.
+  const leaderAgent = issue.leader_agent_id
+    ? participants.find((agent) => agent.id === issue.leader_agent_id) ??
+      agentsById.get(issue.leader_agent_id) ??
+      null
+    : null;
+  const leaderBinding = leaderAgent ? bindingFor(leaderAgent.id) : undefined;
+  const leaderSession =
+    leaderBinding?.session && leaderBinding.session.id === issue.leader_external_session_id
+      ? leaderBinding.session
+      : null;
+  const leaderIsExternal = leaderAgent !== null && agentExecutionKind(leaderAgent) === "external";
+
+  if (
+    !coordinator &&
+    externalAgents.length === 0 &&
+    deliveries.length === 0 &&
+    !issue.leadership_root_issue_id
+  ) {
+    return null;
+  }
 
   return (
     <div className="space-y-3">
@@ -132,6 +155,49 @@ export function IssueExternalCollaboration({
         <Users className="size-3" />
         {t(($) => $.detail.external_section_title)}
       </div>
+
+      {issue.leadership_root_issue_id && (
+        <div className="space-y-1.5 pl-2">
+          <div className="text-micro font-medium text-muted-foreground">
+            {t(($) => $.detail.task_leader)}
+          </div>
+          {leaderAgent ? (
+            leaderIsExternal ? (
+              <ExternalAgentCard
+                agent={leaderAgent}
+                ownerName={leaderAgent.owner_id ? getMemberName(leaderAgent.owner_id) : null}
+                showSession={false}
+              />
+            ) : (
+              <div className="flex min-w-0 items-center gap-2">
+                <ActorAvatar actorType="agent" actorId={leaderAgent.id} size="sm" enableHoverCard />
+                <span className="truncate text-caption font-medium">{leaderAgent.name}</span>
+              </div>
+            )
+          ) : (
+            <p className="text-micro text-destructive">
+              {t(($) => $.detail.task_leader_unavailable)}
+            </p>
+          )}
+          {leaderAgent && leaderIsExternal && (
+            leaderSession ? (
+              <div className="pl-8">
+                <ExternalSessionLink
+                  session={leaderSession}
+                  templateName={leaderAgent.external_template?.name}
+                />
+              </div>
+            ) : (
+              <p className="pl-8 text-micro text-muted-foreground">
+                {t(($) => $.detail.task_leader_session_unknown)}
+              </p>
+            )
+          )}
+          <div className="pl-2">
+            <TaskLeaderHandoff issue={issue} />
+          </div>
+        </div>
+      )}
 
       {coordinator && (
         <div className="space-y-1.5 pl-2">
@@ -195,6 +261,12 @@ export function IssueExternalCollaboration({
             );
           })}
         </div>
+      )}
+
+      {issue.leader_external_session_id && externalAgents.length > 0 && (
+        <p className="pl-2 text-micro text-muted-foreground">
+          {t(($) => $.detail.sibling_session_note)}
+        </p>
       )}
 
       {deliveries.length > 0 && (

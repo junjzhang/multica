@@ -121,6 +121,50 @@ describe("AgentSchema WORK-9 fields", () => {
     expect(malformed.external_session?.id).toBeUndefined();
     expect(malformed.external_session?.session_id).toBe("agent-1");
   });
+
+  it("carries the host template while an older response without it keeps legacy rendering", () => {
+    const templated = AgentSchema.parse({
+      ...externalAgent,
+      external_template: {
+        id: "agent-1",
+        provider: "paseo",
+        host_id: "server-1",
+        name: "Paseo · VM-29-118",
+      },
+      external_session_count: 3,
+    });
+    expect(templated.external_template?.name).toBe("Paseo · VM-29-118");
+    expect(templated.external_session_count).toBe(3);
+
+    // The template switch off / an older backend: absent fields stay absent
+    // instead of synthesizing a template or a zero count.
+    const legacy = AgentSchema.parse(externalAgent);
+    expect(legacy.external_template).toBeUndefined();
+    expect(legacy.external_session_count).toBeUndefined();
+
+    // A malformed additive value must not hide the agent.
+    const malformed = AgentSchema.parse({
+      ...externalAgent,
+      external_template: "paseo",
+      external_session_count: -1,
+    });
+    expect(malformed.id).toBe("agent-1");
+    expect(malformed.external_template).toBeUndefined();
+    expect(malformed.external_session_count).toBeUndefined();
+  });
+
+  it("keeps the server session total and tolerates older pages without one", () => {
+    const page = AgentSessionListResponseSchema.parse({
+      sessions: [{ id: "session-1", ...externalSession }],
+      total: 7,
+    });
+    expect(page.total).toBe(7);
+
+    const legacy = AgentSessionListResponseSchema.parse({
+      sessions: [{ id: "session-1", ...externalSession }],
+    });
+    expect(legacy.total).toBeUndefined();
+  });
 });
 
 describe("IssueSchema external collaboration projection", () => {

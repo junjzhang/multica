@@ -99,7 +99,8 @@
     "members": "Membres",
     "created_by": "Créé par",
     "created": "Créé",
-    "updated": "Mis à jour"
+    "updated": "Mis à jour",
+    "default_leader_migration": "Le chef par défaut doit être un agent géré ; choisissez-en un avant toute nouvelle délégation."
   },
   "toasts": {
     "member_added": "Membre ajouté",

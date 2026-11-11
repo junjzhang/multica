@@ -247,6 +247,22 @@ export interface IssueSessionBinding {
 
 export interface Issue {
   contract?: ContractView;
+  /**
+   * Task-level leadership root (WORK-269). Only squad task chains carry one;
+   * absent on older servers and on ordinary issues, so readers must treat it
+   * as "no task leader" rather than rebuild a global default.
+   */
+  leadership_root_issue_id?: string;
+  /** The squad whose roster owns the task chain, when it has a root. */
+  leadership_squad_id?: string;
+  /** The agent currently responsible for the task chain, when it has a root. */
+  leader_agent_id?: string;
+  /** Set only when the current task leader is an external host session. */
+  leader_external_session_id?: string;
+  /** Monotonic leadership revision; a handoff increments it. */
+  leadership_revision?: number;
+  /** The root issue's own revision, the CAS value a handoff must present. */
+  leadership_root_revision?: number;
   id: string;
   workspace_id: string;
   number: number;
@@ -326,4 +342,39 @@ export interface Issue {
   mailbox_deliveries?: MailboxMessage[];
   /** Active targets for future notifications, one per external agent. */
   external_session_bindings?: IssueSessionBinding[];
+}
+
+/** Parameters for an explicit task-leader handoff. */
+export interface IssueLeadershipHandoffRequest {
+  client_request_id: string;
+  /** The root's leadership revision the caller saw. */
+  expected_revision: number;
+  /** The root issue's own revision the caller saw. */
+  expected_issue_revision: number;
+  previous_agent_id: string;
+  previous_session_id?: string;
+  agent_id: string;
+  /** Required for an external target, omitted for a managed one. */
+  session_id?: string;
+  reason: string;
+}
+
+export interface IssueLeadershipAdvancedReturn {
+  issue_id: string;
+  previous_return_id?: string;
+  current_return_id?: string;
+}
+
+/**
+ * Result of one handoff. Contracts listed here are now stale (the acceptor
+ * side must revise them); earlier results stay with the previous leader and
+ * need an explicit result takeover.
+ */
+export interface IssueLeadershipHandoffResponse {
+  root_issue_id: string;
+  revision: number;
+  issue_revision: number;
+  stale_contract_ids: string[];
+  advanced_returns: IssueLeadershipAdvancedReturn[];
+  historical_results: string;
 }

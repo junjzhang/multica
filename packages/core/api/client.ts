@@ -16,6 +16,8 @@ import type {
   MoveIssueRequest,
   UpdateIssueRequest,
   IssueDuplicates,
+  IssueLeadershipHandoffRequest,
+  IssueLeadershipHandoffResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
   SearchIssuesResponse,
@@ -35,6 +37,8 @@ import type {
   IssueTableRowsRequest,
   IssueTableRowsResponse,
   Agent,
+  AgentArchivePreflight,
+  AgentSessionPage,
   AgentSessionSummary,
   AgentSessionBinding,
   IssueSessionBinding,
@@ -345,7 +349,9 @@ import {
   ListIssuesResponseSchema,
   CreateIssueResponseSchema,
   IssueSchema,
+  IssueLeadershipHandoffResponseSchema,
   AgentTaskSchema,
+  AgentArchivePreflightSchema,
   SourceContextPreviewSchema,
   CommentSubIssueTaskResponseSchema,
   ListWebhookDeliveriesResponseSchema,
@@ -1903,6 +1909,30 @@ export class ApiClient {
     return parsed;
   }
 
+  /**
+   * Explicit task-leader handoff. The server resolves the leadership root and
+   * checks previous/revision CAS; an external target must carry its registered
+   * session, a managed target none.
+   */
+  async handoffIssueLeadership(issueId: string, data: IssueLeadershipHandoffRequest): Promise<IssueLeadershipHandoffResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/leadership/handoff`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<IssueLeadershipHandoffResponse | null>(raw, IssueLeadershipHandoffResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/leadership/handoff",
+    });
+    if (!parsed || !parsed.root_issue_id) {
+      throw new Error("The server did not confirm this task-leader handoff.");
+    }
+    return {
+      ...parsed,
+      stale_contract_ids: parsed.stale_contract_ids ?? [],
+      advanced_returns: parsed.advanced_returns ?? [],
+      historical_results: parsed.historical_results ?? "",
+    };
+  }
+
   async getAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}`);
   }
@@ -1918,6 +1948,29 @@ export class ApiClient {
     );
     if (!parsed) throw new Error("Invalid session list response");
     return parsed.sessions;
+  }
+  /**
+   * One page of an agent's registered sessions. The agents list expands a
+   * template row lazily, so the page size is bounded here and the total is the
+   * server's, not the page's.
+   */
+  async listAgentSessionsPage(
+    agentId: string,
+    params: { limit?: number; offset?: number } = {},
+  ): Promise<AgentSessionPage> {
+    const search = new URLSearchParams();
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    if (params.offset !== undefined) search.set("offset", String(params.offset));
+    const query = search.size > 0 ? `?${search.toString()}` : "";
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions${query}`);
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[]; total?: number } | null>(
+      raw,
+      AgentSessionListResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return { sessions: parsed.sessions, total: parsed.total ?? parsed.sessions.length };
   }
 
   /** The exact active (agent, issue) target. Null means no binding, not failure. */
@@ -2090,6 +2143,21 @@ export class ApiClient {
 
   async archiveAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}/archive`, { method: "POST" });
+  }
+
+  /**
+   * Read-only archive preview for an external agent. Throws ApiError with
+   * status 404 on a server that predates the endpoint; callers treat that as
+   * "no preview available" and keep the previous confirm flow.
+   */
+  async getAgentArchivePreflight(id: string): Promise<AgentArchivePreflight> {
+    const raw = await this.fetch<unknown>(`/api/agents/${id}/archive-preflight`);
+    return parseWithFallback<AgentArchivePreflight>(
+      raw,
+      AgentArchivePreflightSchema,
+      { agent_id: id, archivable: false, blockers: [] },
+      { endpoint: "GET /api/agents/{id}/archive-preflight" },
+    );
   }
 
   /**

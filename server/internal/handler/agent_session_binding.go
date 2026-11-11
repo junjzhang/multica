@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -245,7 +246,34 @@ func (h *Handler) ListAgentSessions(w http.ResponseWriter, r *http.Request) {
 			UnavailableReason: reason,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	total := len(sessions)
+	// Absent limit keeps the pre-pagination contract: every session. A caller
+	// that asks for a page gets one bounded page plus the true total.
+	limit, offset := total, 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed <= 0 || parsed > 100 {
+			writeError(w, http.StatusBadRequest, "limit must be an integer between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = parsed
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions[offset:end], "total": total})
 }
 
 // GetAgentSessionBinding reads the exact active (workspace, agent, issue)

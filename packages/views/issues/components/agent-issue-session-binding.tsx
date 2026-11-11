@@ -112,7 +112,11 @@ export function AgentIssueSessionBinding({
         </p>
       ) : binding?.session ? (
         <div className="space-y-1">
-          <ExternalSessionLink session={binding.session} detailed />
+          <ExternalSessionLink
+            session={binding.session}
+            detailed
+            templateName={agent.external_template?.name}
+          />
           {!binding.deliverable && reason && (
             <p className="text-micro text-destructive">{reason}</p>
           )}

@@ -612,7 +612,28 @@ func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, s
 }
 
 func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previous, actorType, actorID string) {
-	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+	resp := h.issueResponseForEvent(ctx, issue)
 	h.fillStatusCategory(ctx, issue.WorkspaceID, &resp)
 	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous})
+}
+
+// publishExecutorHandoffChange publishes an explicit external executor handoff
+// as an assignee change. Subscriber, activity and notification listeners all
+// key off assignee_changed and prev_assignee_*: a handoff that only published
+// the new issue left the new executor without the assignment subscription and
+// notification the ordinary assignment path grants. A same-agent session
+// handoff keeps the assignee unchanged and therefore emits no such flag.
+func (h *Handler) publishExecutorHandoffChange(ctx context.Context, updated, previous db.Issue, actorType, actorID string) {
+	resp := h.issueResponseForEvent(ctx, updated)
+	h.fillStatusCategory(ctx, updated.WorkspaceID, &resp)
+	assigneeChanged := previous.AssigneeType.String != updated.AssigneeType.String ||
+		uuidToString(previous.AssigneeID) != uuidToString(updated.AssigneeID)
+	h.publish(protocol.EventIssueUpdated, uuidToString(updated.WorkspaceID), actorType, actorID, map[string]any{
+		"issue":              resp,
+		"assignee_changed":   assigneeChanged,
+		"prev_assignee_type": textToPtr(previous.AssigneeType),
+		"prev_assignee_id":   uuidToPtr(previous.AssigneeID),
+		"status_changed":     previous.Status != updated.Status,
+		"prev_status":        previous.Status,
+	})
 }

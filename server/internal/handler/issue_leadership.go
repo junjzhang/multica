@@ -31,6 +31,38 @@ type leadershipRequest struct {
 	Reason                string `json:"reason"`
 }
 
+// projectTaskLeader fills the task-leader fields from the chain root. Subtasks
+// carry only the leadership root pointer; the leader columns live on the root,
+// so a response built from the subtask row alone would read "unavailable".
+func (h *Handler) projectTaskLeader(ctx context.Context, issue db.Issue, resp *IssueResponse) {
+	if resp == nil || resp.LeaderAgentID != "" || !issue.LeadershipRootIssueID.Valid {
+		return
+	}
+	root, err := h.Queries.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{
+		ID:          issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil {
+		return
+	}
+	resp.LeadershipRootIssueID = uuidToString(root.ID)
+	resp.LeadershipSquadID = uuidToString(root.LeadershipSquadID)
+	resp.LeaderAgentID = uuidToString(root.LeaderAgentID)
+	resp.LeaderExternalSessionID = uuidToString(root.LeaderExternalSessionID)
+	resp.LeadershipRevision = root.LeadershipRevision
+	resp.LeadershipRootRevision = root.Revision
+}
+
+// issueResponseForEvent renders the issue embedded in an issue:updated event.
+// Every issue:updated payload goes through it: a subtask row carries only the
+// leadership root pointer, so without the projection the event would patch the
+// detail cache with a row whose leader is empty and drop the chain's leader.
+func (h *Handler) issueResponseForEvent(ctx context.Context, issue db.Issue) IssueResponse {
+	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+	h.projectTaskLeader(ctx, issue, &resp)
+	return resp
+}
+
 func (h *Handler) ClaimIssueLeadership(w http.ResponseWriter, r *http.Request) {
 	r = h.withWakeupActor(r)
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
@@ -426,7 +458,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 	if queued.ID.Valid {
 		h.TaskService.NotifyTaskEnqueued(ctx, queued)
 	}
-	h.publishIssueChange(ctx, updated, issue.Status, "member", requestUserID(r))
+	h.publishExecutorHandoffChange(ctx, updated, issue, "member", requestUserID(r))
 	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.ID))
 	writeJSON(w, 200, response)
 }

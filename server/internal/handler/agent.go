@@ -146,13 +146,17 @@ type AgentResponse struct {
 	ExternalSession *ExternalSessionResponse `json:"external_session"`
 	// ExternalTemplate is the host identity this session belongs to. Null for
 	// legacy per-session agents and managed agents; old clients ignore it.
-	ExternalTemplate      *ExternalAgentTemplateResponse `json:"external_template"`
-	Skills                []AgentSkillSummary            `json:"skills"`
-	DisabledRuntimeSkills []DisabledRuntimeSkill         `json:"disabled_runtime_skills"`
-	CreatedAt             string                         `json:"created_at"`
-	UpdatedAt             string                         `json:"updated_at"`
-	ArchivedAt            *string                        `json:"archived_at"`
-	ArchivedBy            *string                        `json:"archived_by"`
+	ExternalTemplate *ExternalAgentTemplateResponse `json:"external_template"`
+	// ExternalSessionCount is how many registered host sessions this agent
+	// owns. Undefined (0) on responses that do not load sessions; the agents
+	// list uses it to offer the expandable session view.
+	ExternalSessionCount  int                    `json:"external_session_count,omitempty"`
+	Skills                []AgentSkillSummary    `json:"skills"`
+	DisabledRuntimeSkills []DisabledRuntimeSkill `json:"disabled_runtime_skills"`
+	CreatedAt             string                 `json:"created_at"`
+	UpdatedAt             string                 `json:"updated_at"`
+	ArchivedAt            *string                `json:"archived_at"`
+	ArchivedBy            *string                `json:"archived_by"`
 }
 
 // runtimeConfigGatewayTokenMask is the placeholder the API substitutes for
@@ -1230,7 +1234,7 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 			agentIDs = append(agentIDs, a.ID)
 		}
 	}
-	externalSessions := h.externalSessionsByAgent(r.Context(), agentIDs)
+	externalSessions, externalSessionCounts := h.externalSessionsByAgent(r.Context(), agentIDs)
 	visible := make([]AgentResponse, 0, len(agents))
 	for _, a := range agents {
 		targets := targetsByAgent[uuidToString(a.ID)]
@@ -1241,6 +1245,7 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		resp := h.agentToResponse(a)
 		resp.ExternalSession = externalSessions[resp.ID]
+		resp.ExternalSessionCount = externalSessionCounts[resp.ID]
 		// The map is keyed by runtime, and active + archived agents may share one.
 		// Keep the archived guard here as well as in the loader so an active sibling
 		// cannot leak its projection onto an archived response.
@@ -2765,6 +2770,13 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An external agent's archive is gated by its reference preflight and
+	// revokes its credentials; managed agents keep the existing behavior.
+	if agent.ExecutionKind == "external" {
+		h.archiveExternalAgent(w, r, agent)
+		return
+	}
+
 	userID := requestUserID(r)
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {
@@ -2807,22 +2819,7 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 	// the cancel committed could never be repaired. Chat tasks publish
 	// task:cancelled after commit for chat lifecycle consumers; the aggregate
 	// agent:archived event below remains unchanged.
-	if _, err := h.TaskService.CancelTasksForArchivedAgent(r.Context(), agent.ID); err != nil {
-		slog.Warn("cancel agent tasks on archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
-	}
-
-	wsID := uuidToString(archived.WorkspaceID)
-	slog.Info("agent archived", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", wsID)...)
-	resp := h.agentToResponse(archived)
-	if err := h.attachAgentSkills(r.Context(), &resp, archived.ID); err != nil {
-		slog.Warn("load agent skills after archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
-		writeError(w, http.StatusInternalServerError, "failed to load agent skills")
-		return
-	}
-	actorType, actorID := h.resolveActor(r, userID, wsID)
-	h.publish(protocol.EventAgentArchived, wsID, actorType, actorID, map[string]any{"agent": broadcastAgentResponse(resp)})
-	redactAgentResponseForActor(&resp, actorType)
-	writeJSON(w, http.StatusOK, resp)
+	h.completeAgentArchive(w, r, archived)
 }
 
 func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {

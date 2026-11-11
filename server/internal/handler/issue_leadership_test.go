@@ -12,6 +12,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -305,5 +306,134 @@ func TestTaskExternalExecutorHandoffPreservesHistoryAndStalesContract(t *testing
 	authenticatedContractCall(t, issue, submit, f.tokenB).Want(200)
 	if n := dbfx.Count(t, "SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='executor_handoff'", issue); n != 1 {
 		t.Fatalf("direct handoff audit rows=%d", n)
+	}
+}
+
+// A handoff that moves the executor to a different agent is an assignment
+// change: subscriber, activity and notification listeners only run for
+// assignee_changed, so the event must carry it and the previous assignee.
+func TestExternalExecutorHandoffPublishesAssigneeTransition(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	issue := dbfx.Issue(t, "Executor handoff to a different agent", testutil.Cols{"assignee_type": "agent", "assignee_id": f.agent})
+	bindExternalSession(t, f.agent, f.a, issue)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	var revision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+	target := dbfx.Agent(t, "Managed handoff target", testRuntimeID)
+	h := *testHandler
+	h.Bus = events.New()
+	updates := make(chan events.Event, 4)
+	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
+	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: target, Reason: "Move the responsible executor to a managed agent"}
+	testutil.Call(t, h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+	if len(updates) != 1 {
+		t.Fatalf("executor handoff published %d issue updates", len(updates))
+	}
+	payload := (<-updates).Payload.(map[string]any)
+	if changed, _ := payload["assignee_changed"].(bool); !changed {
+		t.Fatal("executor handoff did not publish assignee_changed; new executor misses subscription and notification")
+	}
+	prevID, _ := payload["prev_assignee_id"].(*string)
+	prevType, _ := payload["prev_assignee_type"].(*string)
+	if prevID == nil || *prevID != f.agent || prevType == nil || *prevType != "agent" {
+		t.Fatalf("handoff lost the previous assignee: type=%v id=%v", prevType, prevID)
+	}
+	response := payload["issue"].(IssueResponse)
+	if response.AssigneeID == nil || *response.AssigneeID != target {
+		t.Fatalf("handoff event carries assignee %v, want %s", response.AssigneeID, target)
+	}
+}
+
+// A subtask carries only the leadership root pointer; the leader columns live
+// on the root row. The detail response must project them from the root instead
+// of reporting the task leader unavailable for every child issue.
+func TestTaskLeadershipChildIssueProjectsRootLeader(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	root := f.create(t, f.tokenA)
+	child := dbfx.Issue(t, "Child of a task chain", testutil.Cols{
+		"parent_issue_id":          root,
+		"leadership_root_issue_id": root,
+		"leadership_squad_id":      f.squad,
+		"assignee_type":            "squad",
+		"assignee_id":              f.squad,
+	})
+
+	var resp IssueResponse
+	testutil.Call(t, testHandler.GetIssue, withURLParam(
+		newRequest(http.MethodGet, "/api/issues/"+child, nil), "id", child)).Want(200).JSON(&resp)
+	if resp.LeaderAgentID != f.agent || resp.LeaderExternalSessionID != f.a {
+		t.Fatalf("child leader = %q/%q, want %q/%q", resp.LeaderAgentID, resp.LeaderExternalSessionID, f.agent, f.a)
+	}
+	if resp.LeadershipRootIssueID != root {
+		t.Fatalf("child leadership root = %q, want %q", resp.LeadershipRootIssueID, root)
+	}
+	if resp.LeadershipSquadID != f.squad {
+		t.Fatalf("child leadership squad = %q, want %q", resp.LeadershipSquadID, f.squad)
+	}
+	var rootRevision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", root).Scan(&rootRevision)
+	if resp.LeadershipRootRevision != rootRevision {
+		t.Fatalf("child root revision = %d, want %d", resp.LeadershipRootRevision, rootRevision)
+	}
+}
+
+// A subtask row carries only the leadership root pointer, so every issue:updated
+// payload must project the leader from the root before it leaves the server.
+// Without the projection the client's shallow cache merge drops the leader and
+// replaces the root revision with the subtask's own revision.
+func TestTaskLeadershipChildBroadcastProjectsRootLeader(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	root := f.create(t, f.tokenA)
+	child := dbfx.Issue(t, "Child of a task chain", testutil.Cols{
+		"parent_issue_id":          root,
+		"leadership_root_issue_id": root,
+		"leadership_squad_id":      f.squad,
+		"assignee_type":            "squad",
+		"assignee_id":              f.squad,
+	})
+	row, err := testHandler.Queries.GetIssueInWorkspace(t.Context(), db.GetIssueInWorkspaceParams{
+		ID:          parseUUID(child),
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	var rootRevision, childRevision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", root).Scan(&rootRevision)
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", child).Scan(&childRevision)
+
+	// The raw row must not report its own revision as the chain's root revision.
+	unprojected := issueToResponse(row, "WORK")
+	if unprojected.LeadershipRootRevision != 0 || unprojected.LeaderAgentID != "" {
+		t.Fatalf("raw subtask row carries unprojected leadership fields: root revision %d, leader %q",
+			unprojected.LeadershipRootRevision, unprojected.LeaderAgentID)
+	}
+
+	h := *testHandler
+	h.Bus = events.New()
+	updates := make(chan events.Event, 4)
+	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
+	h.publishIssueChange(t.Context(), row, row.Status, "member", f.owner)
+
+	var event events.Event
+	select {
+	case event = <-updates:
+	default:
+		t.Fatal("child change published no issue:updated event")
+	}
+	payload, ok := event.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload = %T, want map[string]any", event.Payload)
+	}
+	resp, ok := payload["issue"].(IssueResponse)
+	if !ok {
+		t.Fatalf("payload issue = %T, want IssueResponse", payload["issue"])
+	}
+	if resp.LeaderAgentID != f.agent || resp.LeaderExternalSessionID != f.a {
+		t.Fatalf("child broadcast leader = %q/%q, want %q/%q", resp.LeaderAgentID, resp.LeaderExternalSessionID, f.agent, f.a)
+	}
+	if resp.LeadershipRootRevision != rootRevision {
+		t.Fatalf("child broadcast root revision = %d, want %d (child revision %d)",
+			resp.LeadershipRootRevision, rootRevision, childRevision)
 	}
 }

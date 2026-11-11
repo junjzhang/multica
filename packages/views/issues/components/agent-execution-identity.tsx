@@ -45,6 +45,7 @@ export function AgentExecutionStatus({
       <ExternalSessionLink
         session={agent.external_session}
         detailed={detailed}
+        templateName={agent.external_template?.name}
         className={className}
       />
     );

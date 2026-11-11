@@ -287,7 +287,7 @@ func (h *Handler) CreateSquad(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	q := h.Queries.WithTx(tx)
 	// Validate leader is an agent in this workspace.
-	leaderAgent, err := q.LockAgentForAutopilotAssignment(r.Context(), db.LockAgentForAutopilotAssignmentParams{
+	leaderAgent, err := q.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 		ID:          leaderUUID,
 		WorkspaceID: wsUUID,
 	})
@@ -450,7 +450,7 @@ func (h *Handler) UpdateSquad(w http.ResponseWriter, r *http.Request) {
 		// Stabilize runtime_id through commit. Runtime teardown takes FOR UPDATE
 		// on this row and follows the same Agent→Autopilot lock order, so
 		// whichever operation starts first produces a complete result.
-		newLeader, err := qtx.LockAgentForAutopilotAssignment(r.Context(), db.LockAgentForAutopilotAssignmentParams{
+		newLeader, err := qtx.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 			ID:          lid,
 			WorkspaceID: wsUUID,
 		})
@@ -898,7 +898,26 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sm, err := h.Queries.AddSquadMember(r.Context(), db.AddSquadMemberParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to add squad member")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	queries := h.Queries.WithTx(tx)
+	if req.MemberType == "agent" {
+		// Re-read the agent under the shared reference lock: archive holds
+		// FOR UPDATE on this row, so an Agent archived after the validation
+		// above is refused here instead of becoming a stranded membership.
+		agent, err := queries.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
+			ID: memberUUID, WorkspaceID: wsUUID,
+		})
+		if err != nil || agent.ArchivedAt.Valid {
+			writeError(w, http.StatusConflict, "agent was archived; reload the squad member list")
+			return
+		}
+	}
+	sm, err := queries.AddSquadMember(r.Context(), db.AddSquadMemberParams{
 		SquadID:    squad.ID,
 		MemberType: req.MemberType,
 		MemberID:   memberUUID,
@@ -909,6 +928,10 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "member already in squad")
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "failed to add squad member")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add squad member")
 		return
 	}

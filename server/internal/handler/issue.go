@@ -44,9 +44,11 @@ import (
 // IssueResponse is the JSON response for an issue.
 type IssueResponse struct {
 	LeadershipRootIssueID   string `json:"leadership_root_issue_id,omitempty"`
+	LeadershipSquadID       string `json:"leadership_squad_id,omitempty"`
 	LeaderAgentID           string `json:"leader_agent_id,omitempty"`
 	LeaderExternalSessionID string `json:"leader_external_session_id,omitempty"`
 	LeadershipRevision      int64  `json:"leadership_revision,omitempty"`
+	LeadershipRootRevision  int64  `json:"leadership_root_revision,omitempty"`
 
 	ID          string  `json:"id"`
 	WorkspaceID string  `json:"workspace_id"`
@@ -585,8 +587,17 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 	if issuestatus.IsBuiltIn(i.Status) {
 		statusCategory = i.Status
 	}
+	// Only the chain root carries the root revision. A subtask's own revision
+	// is not the root's, so subtask rows leave the field empty: detail
+	// responses fill it from the root in projectTaskLeader, and every
+	// issue:updated payload goes through issueResponseForEvent for the same
+	// projection. A raw subtask row must never report its own revision here.
+	leadershipRootRevision := int64(0)
+	if i.LeadershipRootIssueID.Valid && i.LeadershipRootIssueID == i.ID {
+		leadershipRootRevision = i.Revision
+	}
 	return IssueResponse{
-		LeadershipRootIssueID: uuidToString(i.LeadershipRootIssueID), LeaderAgentID: uuidToString(i.LeaderAgentID), LeaderExternalSessionID: uuidToString(i.LeaderExternalSessionID), LeadershipRevision: i.LeadershipRevision,
+		LeadershipRootIssueID: uuidToString(i.LeadershipRootIssueID), LeadershipSquadID: uuidToString(i.LeadershipSquadID), LeaderAgentID: uuidToString(i.LeaderAgentID), LeaderExternalSessionID: uuidToString(i.LeaderExternalSessionID), LeadershipRevision: i.LeadershipRevision, LeadershipRootRevision: leadershipRootRevision,
 		ID:                 uuidToString(i.ID),
 		WorkspaceID:        uuidToString(i.WorkspaceID),
 		Number:             i.Number,
@@ -2597,6 +2608,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
 	h.projectIssueExternalState(r.Context(), issue, &resp)
 	state, contractErr := readContract(r.Context(), h.Queries, issue)
@@ -3713,6 +3725,10 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project not found in this workspace")
 		return
 	}
+	if errors.Is(err, service.ErrCoordinatorAgentArchived) {
+		writeError(w, http.StatusConflict, "coordinator agent was archived; choose another coordinator")
+		return
+	}
 	if errors.Is(err, service.ErrIssueLabelNotFound) {
 		writeError(w, http.StatusBadRequest, "one or more labels not found in this workspace")
 		return
@@ -3742,6 +3758,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	slog.Info("issue created", append(logger.RequestAttrs(r), "issue_id", uuidToString(issue.ID), "title", issue.Title, "status", issue.Status, "workspace_id", workspaceID)...)
 
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	fillCreated(&resp)
 	h.projectIssueExternalState(r.Context(), issue, &resp)
 	resp.Attachments = buildAttachmentResponses(res.Attachments)
@@ -4308,6 +4325,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	var assignmentAttr attribution.Result
 	assignmentTaskInserted := false
 	afterIssueWrite := func(tx pgx.Tx, q *db.Queries, previous, issue db.Issue) error {
+		if _, present := rawFields["coordinator"]; present {
+			if err := lockCoordinatorAgent(r.Context(), q, issue); err != nil {
+				return err
+			}
+		}
 		if previous.ID.Valid {
 			prevIssue = previous
 			prospectiveExplicitAssigneeChanged = (touchedType || touchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
@@ -4391,6 +4413,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrCoordinatorAgentArchived) {
+			writeError(w, http.StatusConflict, "coordinator agent was archived; choose another coordinator")
+			return
+		}
 		if derr := asDelegationReturnError(err); derr != nil {
 			writeDelegationReturnError(w, derr)
 			return
@@ -4421,6 +4447,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	slog.Info("issue updated", append(logger.RequestAttrs(r), "issue_id", id, "workspace_id", workspaceID)...)
 	h.recordIssueExternalUpdateActivity(r.Context(), prevIssue, issue, actorType, actorID)
 
@@ -4855,7 +4882,7 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 // detached children and duplicates whose original was deleted.
 func (h *Handler) publishIssueSnapshots(ctx context.Context, issues []db.Issue, actorType, actorID string) {
 	for _, issue := range issues {
-		response := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+		response := h.issueResponseForEvent(ctx, issue)
 		h.fillStatusCategory(ctx, issue.WorkspaceID, &response)
 		h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": response})
 	}
@@ -4868,7 +4895,7 @@ func (h *Handler) publishIssueSnapshots(ctx context.Context, issues []db.Issue, 
 func (h *Handler) publishClearedDuplicates(ctx context.Context, cleared []clearedDuplicate, actorType, actorID string) {
 	for _, c := range cleared {
 		prefix := h.getIssuePrefix(ctx, c.Issue.WorkspaceID)
-		response := issueToResponse(c.Issue, prefix)
+		response := h.issueResponseForEvent(ctx, c.Issue)
 		h.fillStatusCategory(ctx, c.Issue.WorkspaceID, &response)
 		h.publish(protocol.EventIssueUpdated, uuidToString(c.Issue.WorkspaceID), actorType, actorID, map[string]any{
 			"issue":                        response,
@@ -5305,8 +5332,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
-		resp := issueToResponse(issue, prefix)
+		resp := h.issueResponseForEvent(r.Context(), issue)
 		h.advanceRunStep(r.Context(), callerRun, prevIssue, issue)
 
 		fillBatch(&resp)
