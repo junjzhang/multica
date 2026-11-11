@@ -46,9 +46,11 @@ func (h *Handler) projectTaskLeader(ctx context.Context, issue db.Issue, resp *I
 		return
 	}
 	resp.LeadershipRootIssueID = uuidToString(root.ID)
+	resp.LeadershipSquadID = uuidToString(root.LeadershipSquadID)
 	resp.LeaderAgentID = uuidToString(root.LeaderAgentID)
 	resp.LeaderExternalSessionID = uuidToString(root.LeaderExternalSessionID)
 	resp.LeadershipRevision = root.LeadershipRevision
+	resp.LeadershipRootRevision = root.Revision
 }
 
 func (h *Handler) ClaimIssueLeadership(w http.ResponseWriter, r *http.Request) {

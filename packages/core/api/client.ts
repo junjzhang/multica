@@ -16,6 +16,8 @@ import type {
   MoveIssueRequest,
   UpdateIssueRequest,
   IssueDuplicates,
+  IssueLeadershipHandoffRequest,
+  IssueLeadershipHandoffResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
   SearchIssuesResponse,
@@ -347,6 +349,7 @@ import {
   ListIssuesResponseSchema,
   CreateIssueResponseSchema,
   IssueSchema,
+  IssueLeadershipHandoffResponseSchema,
   AgentTaskSchema,
   AgentArchivePreflightSchema,
   SourceContextPreviewSchema,
@@ -1904,6 +1907,30 @@ export class ApiClient {
       throw new Error("The server did not confirm this result takeover.");
     }
     return parsed;
+  }
+
+  /**
+   * Explicit task-leader handoff. The server resolves the leadership root and
+   * checks previous/revision CAS; an external target must carry its registered
+   * session, a managed target none.
+   */
+  async handoffIssueLeadership(issueId: string, data: IssueLeadershipHandoffRequest): Promise<IssueLeadershipHandoffResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/leadership/handoff`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<IssueLeadershipHandoffResponse | null>(raw, IssueLeadershipHandoffResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/leadership/handoff",
+    });
+    if (!parsed || !parsed.root_issue_id) {
+      throw new Error("The server did not confirm this task-leader handoff.");
+    }
+    return {
+      ...parsed,
+      stale_contract_ids: parsed.stale_contract_ids ?? [],
+      advanced_returns: parsed.advanced_returns ?? [],
+      historical_results: parsed.historical_results ?? "",
+    };
   }
 
   async getAgent(id: string): Promise<Agent> {

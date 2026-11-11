@@ -44,9 +44,11 @@ import (
 // IssueResponse is the JSON response for an issue.
 type IssueResponse struct {
 	LeadershipRootIssueID   string `json:"leadership_root_issue_id,omitempty"`
+	LeadershipSquadID       string `json:"leadership_squad_id,omitempty"`
 	LeaderAgentID           string `json:"leader_agent_id,omitempty"`
 	LeaderExternalSessionID string `json:"leader_external_session_id,omitempty"`
 	LeadershipRevision      int64  `json:"leadership_revision,omitempty"`
+	LeadershipRootRevision  int64  `json:"leadership_root_revision,omitempty"`
 
 	ID          string  `json:"id"`
 	WorkspaceID string  `json:"workspace_id"`
@@ -585,8 +587,14 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 	if issuestatus.IsBuiltIn(i.Status) {
 		statusCategory = i.Status
 	}
+	// Only leaders carry a root revision; on a child it is the root row's
+	// revision under the same name, filled by projectTaskLeader.
+	leadershipRootRevision := int64(0)
+	if i.LeadershipRootIssueID.Valid {
+		leadershipRootRevision = i.Revision
+	}
 	return IssueResponse{
-		LeadershipRootIssueID: uuidToString(i.LeadershipRootIssueID), LeaderAgentID: uuidToString(i.LeaderAgentID), LeaderExternalSessionID: uuidToString(i.LeaderExternalSessionID), LeadershipRevision: i.LeadershipRevision,
+		LeadershipRootIssueID: uuidToString(i.LeadershipRootIssueID), LeadershipSquadID: uuidToString(i.LeadershipSquadID), LeaderAgentID: uuidToString(i.LeaderAgentID), LeaderExternalSessionID: uuidToString(i.LeaderExternalSessionID), LeadershipRevision: i.LeadershipRevision, LeadershipRootRevision: leadershipRootRevision,
 		ID:                 uuidToString(i.ID),
 		WorkspaceID:        uuidToString(i.WorkspaceID),
 		Number:             i.Number,

@@ -1677,9 +1677,11 @@ export const CommentSubIssueTaskResponseSchema = z.object({
 
 export const IssueSchema = z.object({
   leadership_root_issue_id: z.string().optional().catch(undefined),
+  leadership_squad_id: z.string().optional().catch(undefined),
   leader_agent_id: z.string().optional().catch(undefined),
   leader_external_session_id: z.string().optional().catch(undefined),
   leadership_revision: z.number().int().nonnegative().optional().catch(undefined),
+  leadership_root_revision: z.number().int().nonnegative().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),
@@ -1756,6 +1758,29 @@ export const IssueSchema = z.object({
     .optional().catch(undefined),
   mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
   external_session_bindings: z.array(z.unknown()).pipe(IssueSessionBindingListSchema).optional().catch(undefined),
+}).loose();
+
+/**
+ * Result of an explicit task-leader handoff. Additive projections (stale
+ * contracts, advanced returns) degrade independently: a malformed list must
+ * not hide a handoff the server already committed.
+ */
+export const IssueLeadershipHandoffResponseSchema = z.object({
+  root_issue_id: z.string(),
+  revision: z.number().int().nonnegative().default(0),
+  issue_revision: z.number().int().nonnegative().default(0),
+  stale_contract_ids: z.array(z.string()).optional().catch(undefined),
+  advanced_returns: z
+    .array(
+      z.object({
+        issue_id: z.string(),
+        previous_return_id: z.string().optional().catch(undefined),
+        current_return_id: z.string().optional().catch(undefined),
+      }).loose(),
+    )
+    .optional()
+    .catch(undefined),
+  historical_results: z.string().optional().catch(undefined),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

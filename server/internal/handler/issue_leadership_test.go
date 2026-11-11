@@ -366,4 +366,12 @@ func TestTaskLeadershipChildIssueProjectsRootLeader(t *testing.T) {
 	if resp.LeadershipRootIssueID != root {
 		t.Fatalf("child leadership root = %q, want %q", resp.LeadershipRootIssueID, root)
 	}
+	if resp.LeadershipSquadID != f.squad {
+		t.Fatalf("child leadership squad = %q, want %q", resp.LeadershipSquadID, f.squad)
+	}
+	var rootRevision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", root).Scan(&rootRevision)
+	if resp.LeadershipRootRevision != rootRevision {
+		t.Fatalf("child root revision = %d, want %d", resp.LeadershipRootRevision, rootRevision)
+	}
 }
