@@ -2,14 +2,29 @@
 
 A private Paseo directory plugin that binds the current Paseo conversation to
 Multica as its own external agent. It is intentionally smaller than a task
-board: three composer commands, one read-only status panel, and one operator
-settings screen.
+board: three composer commands, one read-only status panel, one delivery card
+in the timeline, and one operator settings screen.
 
 ```text
 /multica connect      register this conversation, mint its external credential
 /multica status       show the binding, return address, and current validity
 /multica disconnect   revoke this binding's credential and remove local context
 ```
+
+## Delivery card
+
+A mailbox delivery reaches the session as one ordinary user message. The
+plugin registers a timeline transformer for user messages and replaces a
+recognized Multica delivery with a card: the task identifier and title, the
+delivery kind, and a link to the task. The delivered prompt is never
+rewritten, and stays available under the card's raw details together with the
+mailbox, issue, and comment IDs.
+
+The daemon renders the readable part of that prompt from optional
+`issue_identifier`, `issue_title`, and `issue_url` payload fields. Anything
+this plugin does not fully recognize therefore renders exactly as it arrived:
+a message from a daemon that predates those fields, a message that is still
+streaming, a prompt missing one of its stable IDs, and ordinary conversation.
 
 ## What it reuses
 

@@ -1,7 +1,10 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { STATUS_PANEL_ID, runMulticaCommand, type SessionContract } from "./shared/commands";
 import { connectSession, type StatusView } from "./shared/contracts";
+import { DELIVERY_ITEM_KIND, DELIVERY_ITEM_VERSION, deliveryDataSchema } from "./shared/delivery";
 import { ConnectionSettingsScreen } from "./client/settings-screen";
+import { DeliveryCard } from "./client/delivery-card";
+import { deliveryTransformer } from "./client/timeline";
 import { StatusPanel } from "./client/status-panel";
 
 export default function contribute(client: PluginClientContext) {
@@ -40,5 +43,17 @@ export default function contribute(client: PluginClientContext) {
     Component: ConnectionSettingsScreen,
   });
 
-  return () => {};
+  const cleanup = [
+    client.addTimelineTransformer(deliveryTransformer),
+    client.addTimelineRenderer({
+      kind: DELIVERY_ITEM_KIND,
+      version: DELIVERY_ITEM_VERSION,
+      schema: deliveryDataSchema,
+      Component: DeliveryCard,
+    }),
+  ];
+
+  return () => {
+    for (const remove of cleanup) void remove();
+  };
 }
