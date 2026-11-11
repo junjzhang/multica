@@ -47,7 +47,7 @@ WITH refs AS (
     WHERE r.dispatcher_agent_id = $1
       AND r.is_current
       AND (
-          i.status NOT IN ('done', 'cancelled')
+          issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
           OR EXISTS (
               SELECT 1 FROM agent_mailbox_message m
               WHERE m.recipient_agent_id = $1

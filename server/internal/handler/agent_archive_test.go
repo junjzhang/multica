@@ -344,6 +344,37 @@ func TestExternalAgentArchiveReturnObligationNarrowsAfterClose(t *testing.T) {
 	}
 }
 
+// A workspace custom status whose category is done closes the issue the same
+// way the built-in done does. The return obligation must narrow for it too, or
+// every dispatcher whose tasks finish on that status stays unarchivable.
+func TestExternalAgentArchiveReturnObligationHonorsCustomDoneStatus(t *testing.T) {
+	agent, session, _ := externalAgentFixture(t, "Archive custom done", "return-custom-daemon")
+	statusKey := "shipped_" + uuidToString(dbid.NewV7())[:8]
+	statusID := dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID,
+		"key":          statusKey,
+		"name":         "Shipped",
+		"category":     "done",
+		"color":        "#123456",
+	})
+	dbfx.Cleanup(t, "DELETE FROM issue_status WHERE id=$1", statusID)
+	issue := dbfx.Issue(t, "Custom closed return issue")
+	dbfx.Exec(t, "UPDATE issue SET status=$2 WHERE id=$1", issue, statusKey)
+	dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
+		"workspace_id":        testWorkspaceID,
+		"issue_id":            issue,
+		"dispatcher_agent_id": agent,
+		"return_kind":         "external_session",
+		"external_session_id": session,
+		"is_current":          true,
+	})
+
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable {
+		t.Fatalf("custom done status still blocks the return: %d %+v %s", code, resp, body)
+	}
+}
+
 // The archive revokes credentials and is confirmed by a human owner. A machine
 // credential that can manage the Agent must not archive it.
 func TestExternalAgentArchiveRequiresHumanActor(t *testing.T) {
