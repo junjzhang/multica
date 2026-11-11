@@ -173,7 +173,7 @@ func TestTaskLeadershipHandoffIsExplicitAndStalesContract(t *testing.T) {
 	var revision int64
 	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
 	req := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Human explicitly changes the responsible session"}
-	path := "/api/issues/" + issue + "/leadership/handoff"
+	path := "/api/issues/" + issue + "/task-leader/handoff"
 	rec := serveAuthenticated(t, f.tokenA, http.HandlerFunc(testHandler.HandoffIssueLeadership), http.MethodPost, path, req, map[string]string{"id": issue}, nil)
 	if rec.Code != 403 {
 		t.Fatalf("machine handoff: %d", rec.Code)
