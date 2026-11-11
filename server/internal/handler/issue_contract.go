@@ -16,7 +16,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -446,9 +445,9 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	}
 	h.broadcastCancelledWakeups(ctx, issue.WorkspaceID, append(cancelled, effects.cancelled...))
 	h.recordIssueActivity(ctx, updated, actor.Type, actor.ID, "issue_contract_"+req.Action, map[string]any{"sequence": state.Sequence, "version": state.Current().Number})
-	h.publishContractIssue(ctx, updated, issue.Status, actor)
+	h.publishIssueChange(ctx, updated, issue.Status, actor.Type, actor.ID)
 	for _, child := range effects.children {
-		h.publishContractIssue(ctx, child, "in_review", actor)
+		h.publishIssueChange(ctx, child, "in_review", actor.Type, actor.ID)
 	}
 	view, err := h.contractView(ctx, r, h.Queries, updated, state)
 	if err != nil {
@@ -612,9 +611,8 @@ func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, s
 	return nil
 }
 
-func (h *Handler) publishContractIssue(ctx context.Context, issue db.Issue, previous string, actor issuecontract.Actor) {
+func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previous, actorType, actorID string) {
 	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
 	h.fillStatusCategory(ctx, issue.WorkspaceID, &resp)
-	h.Bus.Publish(events.Event{Type: protocol.EventIssueUpdated, WorkspaceID: uuidToString(issue.WorkspaceID), ActorType: actor.Type, ActorID: actor.ID,
-		Payload: map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous}})
+	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous})
 }

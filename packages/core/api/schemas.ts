@@ -1426,7 +1426,7 @@ export const AgentSessionBindingResponseSchema = z
   .loose();
 
 export const CommentSchema = z.object({
-actor_session_id:z.string().optional().catch(undefined),
+  actor_session_id: z.string().optional().catch(undefined),
   id: z.string(),
   issue_id: z.string(),
   author_type: z.string(),
@@ -2654,7 +2654,7 @@ const SquadMemberPreviewSchema = z.object({
 }).loose();
 
 export const SquadSchema = z.object({
- default_leader_unavailable_reason:z.string().optional().catch(undefined),
+  default_leader_unavailable_reason: z.string().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   name: z.string(),

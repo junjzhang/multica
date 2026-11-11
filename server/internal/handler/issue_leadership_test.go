@@ -9,9 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/pkg/dbid"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 type leadershipFixture struct{ agent, a, b, owner, squad, defaultLeader, tokenA, tokenB string }
@@ -278,9 +280,21 @@ func TestTaskExternalExecutorHandoffPreservesHistoryAndStalesContract(t *testing
 	contractCall(t, issue, definition(0), "").Want(200)
 	var revision int64
 	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+	h := *testHandler
+	h.Bus = events.New()
+	updates := make(chan events.Event, 4)
+	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
 	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Recover direct executor through explicit human handoff"}
 	for range 2 {
-		testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+		testutil.Call(t, h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+	}
+	if len(updates) != 1 {
+		t.Fatalf("idempotent handoff published %d issue updates", len(updates))
+	}
+	event := <-updates
+	response := event.Payload.(map[string]any)["issue"].(IssueResponse)
+	if event.WorkspaceID != testWorkspaceID || event.ActorType != "member" || response.ID != issue || response.Revision != revision+1 {
+		t.Fatalf("handoff published the wrong issue update: %+v", event)
 	}
 	submit := contractRequest{Action: "submit", Version: 1, ExpectedSequence: 1, ClientRequestID: uuidToString(dbid.NewV7()), Criteria: []int{0}, Evidence: "Direct executor evidence"}
 	authenticatedContractCall(t, issue, submit, f.tokenA).Want(409)

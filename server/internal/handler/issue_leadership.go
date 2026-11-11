@@ -147,6 +147,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	r = r.WithContext(withWakeupHandedTo(r.Context(), uuidToString(agentID)))
 	raw, _ := json.Marshal(req)
 	sum := sha256.Sum256(raw)
 	digest := hex.EncodeToString(sum[:])
@@ -298,6 +299,8 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	if queued.ID.Valid {
 		h.TaskService.NotifyTaskEnqueued(r.Context(), queued)
 	}
+	h.publishIssueChange(r.Context(), updated, root.Status, "member", requestUserID(r))
+	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.ID))
 	writeJSON(w, 200, response)
 }
 
@@ -423,6 +426,8 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 	if queued.ID.Valid {
 		h.TaskService.NotifyTaskEnqueued(ctx, queued)
 	}
+	h.publishIssueChange(ctx, updated, issue.Status, "member", requestUserID(r))
+	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.ID))
 	writeJSON(w, 200, response)
 }
 
