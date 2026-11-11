@@ -11,6 +11,7 @@ import { useT, useTimeAgo } from "../../i18n";
 import { AgentExecutionStatus, ExternalAgentCard } from "./agent-execution-identity";
 import { AgentIssueSessionBinding } from "./agent-issue-session-binding";
 import { ExternalSessionLink } from "./external-session-link";
+import { TaskLeaderHandoff } from "./task-leader-handoff";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -192,6 +193,9 @@ export function IssueExternalCollaboration({
               </p>
             )
           )}
+          <div className="pl-2">
+            <TaskLeaderHandoff issue={issue} />
+          </div>
         </div>
       )}
 

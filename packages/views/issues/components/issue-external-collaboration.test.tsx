@@ -13,9 +13,17 @@ const permissions = vi.hoisted(() => ({ canManage: true }));
 const apiMock = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
   bindAgentSession: vi.fn(),
+  listAgents: vi.fn().mockResolvedValue([]),
+  listSquadMembers: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@multica/core/permissions", () => ({
+  useCurrentMember: () => ({
+    userId: "user-1",
+    role: "owner",
+    member: null,
+    isLoading: false,
+  }),
   useAgentPermissions: () => ({
     canEdit: {
       allowed: permissions.canManage,
@@ -38,7 +46,10 @@ vi.mock("@multica/core/workspace/hooks", () => ({
   }),
 }));
 
-vi.mock("@multica/core/api", () => ({ api: apiMock }));
+vi.mock("@multica/core/api", async (original) => ({
+  ...(await original<typeof import("@multica/core/api")>()),
+  api: apiMock,
+}));
 
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: () => <span data-testid="avatar" />,
