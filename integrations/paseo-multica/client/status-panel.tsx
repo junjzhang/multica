@@ -3,6 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
 import { statusSession, type StatusView } from "../shared/contracts";
+import { SessionTasksSection } from "./session-tasks";
 
 const STATE_LABEL: Record<StatusView["state"], string> = {
   connected: "Connected",
@@ -34,6 +35,7 @@ export function StatusPanel({ agentId }: PluginAgentPanelProps) {
   }, [load]);
 
   return (
+    <>
     <SettingsSection
       title="Multica connection"
       info="This session's Multica identity is private to this Paseo host. Use /multica connect, /multica status, or /multica disconnect in the composer."
@@ -58,5 +60,7 @@ export function StatusPanel({ agentId }: PluginAgentPanelProps) {
         <SettingsRow label="Action needed" hint={view.reason} error={view.reason} />
       ) : null}
     </SettingsSection>
+    <SessionTasksSection agentId={agentId} />
+    </>
   );
 }

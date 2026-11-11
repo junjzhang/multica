@@ -179,7 +179,7 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	}
 	var handling db.AgentTaskQueue
 	if address.ReturnKind == string(delegation.KindExternalSession) {
-		err = materializeExternalResult(ctx, q, outcome, address, agent)
+		err = materializeExternalResult(ctx, q, outcome, address, agent, issue, s.AppURL)
 	} else if sourceErr != nil {
 		if !errors.Is(sourceErr, pgx.ErrNoRows) {
 			return false, false, sourceErr
@@ -207,7 +207,7 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	return true, false, nil
 }
 
-func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent) error {
+func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, issue db.Issue, appURL string) error {
 	if agent.ExecutionKind != "external" {
 		return resultRefusal("recipient_kind_changed")
 	}
@@ -222,7 +222,7 @@ func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.Ag
 		return resultRefusal("external_session_owner_changed")
 	}
 	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(address.ID))
-	payload, err := json.Marshal(map[string]string{"result_task_id": util.UUIDToString(outcome.ID), "delegation_return_id": util.UUIDToString(address.ID), "issue_id": util.UUIDToString(address.IssueID), "outcome": outcome.Status})
+	payload, err := json.Marshal(delegationResultPayload(outcome, address, ResolveDeliveryDisplay(ctx, q, issue, appURL)))
 	if err != nil {
 		return err
 	}
@@ -242,6 +242,26 @@ func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.Ag
 		return err
 	}
 	return q.SetDelegationResultDelivery(ctx, db.SetDelegationResultDeliveryParams{TaskID: outcome.ID, DelegationReturnID: address.ID, DeliveryID: deliveryID})
+}
+
+// delegationResultPayload keeps the stable result references and adds the
+// reader-facing task context the daemon renders ahead of them. Field names
+// match the other external deliveries; a resolution miss only omits lines.
+func delegationResultPayload(outcome db.AgentTaskQueue, address db.IssueDelegationReturn, display DeliveryDisplay) map[string]any {
+	payload := map[string]any{
+		"result_task_id":       util.UUIDToString(outcome.ID),
+		"delegation_return_id": util.UUIDToString(address.ID),
+		"issue_id":             util.UUIDToString(address.IssueID),
+		"outcome":              outcome.Status,
+	}
+	if display.Identifier != "" || display.Title != "" {
+		payload["issue_identifier"] = display.Identifier
+		payload["issue_title"] = display.Title
+	}
+	if display.URL != "" {
+		payload["issue_url"] = display.URL
+	}
+	return payload
 }
 
 func StrictResultProviderSupported(provider string) bool {

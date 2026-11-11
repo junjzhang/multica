@@ -368,6 +368,9 @@ func TestDelegationResultExternalUsesAcceptedSession(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
 	}
+	previousAppURL := testHandler.TaskService.AppURL
+	testHandler.TaskService.AppURL = "https://app.example.test"
+	t.Cleanup(func() { testHandler.TaskService.AppURL = previousAppURL })
 	ctx := context.Background()
 	dispatcher, sessionID, _ := externalAgentFixture(t, "result external", "result-external-daemon")
 	var ownerID, hostSession string
@@ -412,7 +415,13 @@ func TestDelegationResultExternalUsesAcceptedSession(t *testing.T) {
 		if delivered.Kind != "delegation_result" || delivered.Refs.IssueID != issueID || payload["result_task_id"] != uuidToString(result.ID) || payload["outcome"] != "completed" {
 			t.Fatalf("host did not receive exact outcome references: %+v", payload)
 		}
-		t.Logf("fake host received kind=%s result_task_id=%s issue_id=%s outcome=%s", delivered.Kind, payload["result_task_id"], payload["issue_id"], payload["outcome"])
+		var number int32
+		dbfx.QueryRow(t, `SELECT number FROM issue WHERE id=$1`, issueID).Scan(&number)
+		identifier := fmt.Sprintf("HAN-%d", number)
+		if payload["issue_identifier"] != identifier || payload["issue_title"] != title || payload["issue_url"] != "https://app.example.test/handler-tests/issues/"+identifier {
+			t.Fatalf("delegation result display context = %+v, want %s / %q / link", payload, identifier, title)
+		}
+		t.Logf("fake host received kind=%s result_task_id=%s issue_id=%s outcome=%s task=%s", delivered.Kind, payload["result_task_id"], payload["issue_id"], payload["outcome"], payload["issue_identifier"])
 	default:
 		t.Fatal("real delivery claim/worker never reached fake host")
 	}

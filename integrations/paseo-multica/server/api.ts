@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { redactSecrets } from "../shared/redaction";
 import { isUuid } from "../shared/session";
+import { sessionTasksWireSchema, type SessionTasksWire } from "../shared/tasks";
 
 export interface ApiCredential {
   serverUrl: string;
@@ -56,6 +57,8 @@ export interface MulticaApi {
   revokeExternalAgentToken(credential: ApiCredential, agentId: string, tokenId: string): Promise<void>;
   /** A live external credential for this exact agent is the only "valid" answer. */
   verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid">;
+  /** Read-only "this session's tasks" projection; scoped by the credential. */
+  listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire>;
 }
 
 export class MulticaApiError extends Error {
@@ -198,6 +201,20 @@ export function createMulticaApi(options: {
         `/api/agents/${encodeURIComponent(agentId)}/tokens/${encodeURIComponent(tokenId)}`,
         credential.token,
       );
+    },
+
+    async listSessionTasks(credential, agentId) {
+      const text = await request(
+        credential,
+        "GET",
+        `/api/agents/${encodeURIComponent(agentId)}/session-tasks`,
+        credential.token,
+      );
+      const parsed = sessionTasksWireSchema.safeParse(parseJson(text));
+      if (!parsed.success) {
+        throw new MulticaApiError(0, "Multica did not return a valid session task summary.");
+      }
+      return parsed.data;
     },
 
     async verifyExternalAgentToken(credential, agentId) {

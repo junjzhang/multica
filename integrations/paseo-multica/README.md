@@ -2,14 +2,52 @@
 
 A private Paseo directory plugin that binds the current Paseo conversation to
 Multica as its own external agent. It is intentionally smaller than a task
-board: three composer commands, one read-only status panel, and one operator
-settings screen.
+board: three composer commands, one composer pill summarizing this session's
+tasks, one read-only panel (connection status plus those tasks), one delivery
+card in the timeline, and one operator settings screen.
 
 ```text
 /multica connect      register this conversation, mint its external credential
 /multica status       show the binding, return address, and current validity
 /multica disconnect   revoke this binding's credential and remove local context
 ```
+
+## Delivery card
+
+A mailbox delivery reaches the session as one ordinary user message. The
+plugin registers a timeline transformer for user messages and replaces a
+recognized Multica delivery with a card: the task identifier and title, the
+delivery kind, and a link to the task. The delivered prompt is never
+rewritten, and stays available under the card's raw details together with the
+mailbox, issue, and comment IDs.
+
+The daemon renders the readable part of that prompt from optional
+`issue_identifier`, `issue_title`, and `issue_url` payload fields. Anything
+this plugin does not fully recognize therefore renders exactly as it arrived:
+a message from a daemon that predates those fields, a message that is still
+streaming, a prompt missing one of its stable IDs, and ordinary conversation.
+
+## Session tasks
+
+Every Paseo agent on the host gets one Multica composer pill. For a connected
+session the pill summarizes three Multica obligations, and the Multica panel
+lists them with status and task links:
+
+- owned: issues the session's agent executes or leads as task leader;
+- waiting for acceptance: contracts whose current version names the agent as
+  acceptor while a delivery is still undecided;
+- returns pending: delegations this session dispatched through an accepted
+  return address whose result has not come back yet.
+
+The data comes from the read-only `GET /api/agents/{id}/session-tasks`
+projection, scoped to the credential's own agent and requiring a session-bound
+`mea_` credential. Owned and acceptance lists are agent-scoped because an
+external agent registers one session per conversation; a multi-session agent
+would need a session-scoped projection. Everything outside that happy path degrades to an
+explanation instead of an error: a session with no local binding, an unreadable
+context, an expired or revoked credential, a legacy token whose agent has no
+registered session, a server that does not expose the projection, and a
+network failure all keep the composer usable and leave the counts off.
 
 ## What it reuses
 

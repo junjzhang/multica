@@ -726,7 +726,7 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 		AssigneeType: assigneeType, AssigneeID: assigneeID, RecipientSessionID: input.RecipientSessionID, DelegationCreatedBy: util.UUIDToString(userID), CreatorType: "member", CreatorID: userID,
 		ParentIssueID: capture.SourceIssueID, ProjectID: projectID, StartDate: startDate, DueDate: dueDate,
 		AttachmentIDs: attachmentIDs, LabelIDs: labelIDs, Properties: properties, Stage: stage,
-		AllowDuplicate: input.AllowDuplicate, SourceContext: &capture,
+		AllowDuplicate: input.AllowDuplicate, SourceContext: &capture, DeliveryAppURL: h.cfg.AppURL,
 	}, service.IssueCreateOpts{
 		CanInvokeTarget: func(ctx context.Context, agent db.Agent) bool {
 			return h.canInvokeAgent(ctx, agent, "member", util.UUIDToString(userID), util.UUIDToString(userID), util.UUIDToString(workspaceID))

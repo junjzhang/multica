@@ -63,5 +63,5 @@ func (h *Handler) externalAssignmentInTx(r *http.Request, q *db.Queries, issue d
 	if target.Agent.ID.Valid && !h.canInvokeAgent(r.Context(), target.Agent, actorType, actorID, h.invokeOriginatorFromRequest(r, actorType, actorID), uuidToString(issue.WorkspaceID)) {
 		return &service.RecipientSessionError{Message: "you do not have permission to assign work to this executor", Forbidden: true}
 	}
-	return service.ExternalAssignment(r.Context(), q, issue, target, sessionID, dispatch && issue.Status != "backlog" && !issue.TriageState.Valid, actorType, actorID, requestUserID(r))
+	return service.ExternalAssignment(r.Context(), q, issue, target, sessionID, dispatch && issue.Status != "backlog" && !issue.TriageState.Valid, actorType, actorID, requestUserID(r), h.cfg.AppURL)
 }

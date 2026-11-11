@@ -505,6 +505,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			return out, loadErr
 		}
 		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID)}
+		if display := service.ResolveDeliveryDisplay(ctx, q, issue, h.cfg.AppURL); display.Identifier != "" || display.Title != "" {
+			payload.IssueIdentifier, payload.IssueTitle, payload.IssueURL = display.Identifier, display.Title, display.URL
+		}
 		if target.TargetType == "squad" {
 			squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: parseUUID(target.TargetID), WorkspaceID: issue.WorkspaceID})
 			leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)

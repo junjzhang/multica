@@ -12,6 +12,7 @@ import {
 } from "../server/api";
 import type { PaseoHostAdapter } from "../server/host";
 import type { SessionContext } from "../shared/session";
+import type { SessionTasksWire } from "../shared/tasks";
 
 export const OWNER_TOKEN = "mul_owner_token_must_never_leak_0123456789";
 export const EXTERNAL_TOKEN = "mea_external_token_must_never_leak_0123456789";
@@ -105,6 +106,16 @@ export class FakeApi implements MulticaApi {
     this.revoked.push({ agentId, tokenId });
   }
 
+  readonly tasksCalls: { agentId: string; token: string }[] = [];
+  tasksResult: SessionTasksWire | Error = makeTasksWire();
+
+  async listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire> {
+    this.credentialCalls.push(credential);
+    this.tasksCalls.push({ agentId, token: credential.token });
+    if (this.tasksResult instanceof Error) throw this.tasksResult;
+    return this.tasksResult;
+  }
+
   async verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid"> {
     this.verifyCalls += 1;
     this.verified.push({ agentId, token: credential.token });
@@ -142,6 +153,49 @@ export function fakeHost(options: FakeHostOptions = {}): PaseoHostAdapter {
       if (!exists) return null;
       return { agent: { id: reportedId ?? agentId, title, archivedAt } };
     },
+  };
+}
+
+export function makeTasksWire(overrides: Partial<SessionTasksWire> = {}): SessionTasksWire {
+  return {
+    agent_id: AGENT_A,
+    session_id: randomUUID(),
+    workspace_id: WORKSPACE_ID,
+    owned: [
+      {
+        issue_id: "0199a0b1-4444-7444-8444-444444444444",
+        identifier: "WORK-1",
+        title: "Owned task",
+        status: "in_progress",
+        status_category: "started",
+        url: "https://app.multica.example/acme/issues/WORK-1",
+        role: "executor",
+        updated_at: "2026-10-26T11:00:00Z",
+      },
+    ],
+    accepting: [
+      {
+        issue_id: "0199a0b1-5555-7555-8555-555555555555",
+        identifier: "WORK-2",
+        title: "Awaiting my acceptance",
+        status: "in_review",
+        status_category: "started",
+        role: "acceptor",
+      },
+    ],
+    returning: [
+      {
+        issue_id: "0199a0b1-6666-7666-8666-666666666666",
+        title: "Delegation return",
+        status: "todo",
+        status_category: "unstarted",
+        role: "return",
+        accepted_at: "2026-10-26T10:00:00Z",
+        task_status: "running",
+      },
+    ],
+    truncated: false,
+    ...overrides,
   };
 }
 
