@@ -33,6 +33,7 @@ import { useScrollToTopOnChange } from "@/lib/use-scroll-to-top-on-change";
 import { THEME } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { isAgentRuntimeBound } from "@/lib/is-agent-runtime-bound";
+import { isExternalExecutionAgent } from "@/lib/external-assignee";
 import { useT } from "@/lib/i18n";
 
 const AVATAR_SIZE = 36;
@@ -154,18 +155,18 @@ export function AssigneePickerBody({ value, query, onChange }: Props) {
       }}
       renderItem={({ item }) => {
         const externalAgent =
-          item.kind === "agent" && item.agent.execution_kind === "external";
+          item.kind === "agent" && isExternalExecutionAgent(item.agent);
         const needsRuntime =
           (item.kind === "agent" && !isAgentRuntimeBound(item.agent)) ||
           (item.kind === "squad" &&
             !runnableAgentIds.has(item.squad.leader_id));
         return (
           <Pressable
-          disabled={needsRuntime}
+          disabled={needsRuntime || externalAgent}
           onPress={() => select(item)}
           className={cn(
             "flex-row items-center gap-3 px-4 py-3 active:bg-secondary",
-            needsRuntime && "opacity-50",
+            (needsRuntime || externalAgent) && "opacity-50",
           )}
         >
           {item.kind === "unassigned" ? (

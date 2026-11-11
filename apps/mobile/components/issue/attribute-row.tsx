@@ -33,6 +33,11 @@ import { AttributeChip } from "./attribute-chip";
 import { useActorLookup } from "@/data/use-actor-name";
 import { findProject, projectListOptions } from "@/data/queries/projects";
 import { agentListOptions } from "@/data/queries/agents";
+import {
+  boundExternalSession,
+  externalAssigneeAgent,
+  externalAssigneeChipLabel,
+} from "@/lib/external-assignee";
 import { useWorkspaceStore } from "@/data/workspace-store";
 import { PRIORITY_LABEL as PRIORITY_FULL_LABEL } from "@/lib/issue-status";
 import { useIssueStatuses } from "@/lib/use-issue-statuses";
@@ -103,18 +108,18 @@ export function AttributeRow({ issue }: { issue: Issue }) {
   // concrete "template › session" identity read-only: choosing a session and
   // dispatching stay on web/desktop until that flow ships here.
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const externalAssignee = useMemo(() => {
-    if (issue.assignee_type !== "agent" || !issue.assignee_id) return null;
-    const agent = agents.find((candidate) => candidate.id === issue.assignee_id);
-    if (!agent || agent.execution_kind !== "external") return null;
-    return agent;
-  }, [agents, issue.assignee_type, issue.assignee_id]);
+  const externalAssignee = useMemo(
+    () => externalAssigneeAgent(issue, agents),
+    [issue, agents],
+  );
+  // The session must come from this issue's binding, never from the Agent's
+  // display projection (which picks one arbitrary session).
   const externalAssigneeLabel = externalAssignee
-    ? `${externalAssignee.external_template?.name ?? externalAssignee.name} › ${
-        externalAssignee.external_session?.display_name ||
-        externalAssignee.external_session?.session_id ||
-        t("picker.external_session_unknown")
-      }`
+    ? externalAssigneeChipLabel(
+        externalAssignee,
+        boundExternalSession(issue, externalAssignee.id),
+        t("picker.external_session_unknown"),
+      )
     : null;
 
   const labels = issue.labels ?? [];
