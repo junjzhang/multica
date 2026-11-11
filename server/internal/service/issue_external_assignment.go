@@ -41,7 +41,7 @@ func ResolveAssignmentTarget(ctx context.Context, q *db.Queries, issue db.Issue)
 	default:
 		return AssignmentTarget{}, nil
 	}
-	agent, err := q.LockAgentForAutopilotAssignment(ctx, db.LockAgentForAutopilotAssignmentParams{ID: id, WorkspaceID: issue.WorkspaceID})
+	agent, err := q.LockAgentForSharedWrite(ctx, db.LockAgentForSharedWriteParams{ID: id, WorkspaceID: issue.WorkspaceID})
 	if err != nil || agent.ArchivedAt.Valid {
 		return AssignmentTarget{}, &RecipientSessionError{Message: "assignment agent is unavailable"}
 	}

@@ -28,6 +28,7 @@ WITH refs AS (
     FROM agent_mailbox_message m
     WHERE m.recipient_agent_id = $1
       AND m.delivery_status = 'pending'
+      AND m.target_session_id IS NOT NULL
       AND m.withdrawn_at IS NULL
     UNION ALL
     SELECT 'unverified_messages', m.id::text
@@ -36,10 +37,26 @@ WITH refs AS (
       AND m.delivery_status IN ('leased', 'unknown')
       AND m.withdrawn_at IS NULL
     UNION ALL
+    -- A current return is a standing obligation only while its issue is open
+    -- or a result it produced is still unhandled. Nothing clears is_current for
+    -- a closed issue, so treating every current row as blocking would make any
+    -- agent that ever dispatched unarchivable.
     SELECT 'current_returns', r.id::text
     FROM issue_delegation_return r
+    JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
     WHERE r.dispatcher_agent_id = $1
       AND r.is_current
+      AND (
+          i.status NOT IN ('done', 'cancelled')
+          OR EXISTS (
+              SELECT 1 FROM agent_mailbox_message m
+              WHERE m.recipient_agent_id = $1
+                AND m.source_type = 'delegation_result'
+                AND m.payload->>'delegation_return_id' = r.id::text
+                AND m.processing_status <> 'handled'
+                AND m.withdrawn_at IS NULL
+          )
+      )
     UNION ALL
     SELECT 'squad_default_leader', s.id::text
     FROM squad s
@@ -152,7 +169,7 @@ type LockAgentForArchiveParams struct {
 // share these queries so the preview a human approved is the same set the
 // write re-checks under a lock.
 // FOR UPDATE serializes the archive with assignment/dispatch paths that take
-// the same row (LockAgentForAutopilotAssignment uses FOR SHARE), so a new
+// the same row (LockAgentForSharedWrite uses FOR SHARE), so a new
 // reference either lands before the final check or is refused after the
 // archive commits.
 func (q *Queries) LockAgentForArchive(ctx context.Context, arg LockAgentForArchiveParams) (Agent, error) {

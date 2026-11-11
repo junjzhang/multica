@@ -342,3 +342,28 @@ func TestExternalExecutorHandoffPublishesAssigneeTransition(t *testing.T) {
 		t.Fatalf("handoff event carries assignee %v, want %s", response.AssigneeID, target)
 	}
 }
+
+// A subtask carries only the leadership root pointer; the leader columns live
+// on the root row. The detail response must project them from the root instead
+// of reporting the task leader unavailable for every child issue.
+func TestTaskLeadershipChildIssueProjectsRootLeader(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	root := f.create(t, f.tokenA)
+	child := dbfx.Issue(t, "Child of a task chain", testutil.Cols{
+		"parent_issue_id":          root,
+		"leadership_root_issue_id": root,
+		"leadership_squad_id":      f.squad,
+		"assignee_type":            "squad",
+		"assignee_id":              f.squad,
+	})
+
+	var resp IssueResponse
+	testutil.Call(t, testHandler.GetIssue, withURLParam(
+		newRequest(http.MethodGet, "/api/issues/"+child, nil), "id", child)).Want(200).JSON(&resp)
+	if resp.LeaderAgentID != f.agent || resp.LeaderExternalSessionID != f.a {
+		t.Fatalf("child leader = %q/%q, want %q/%q", resp.LeaderAgentID, resp.LeaderExternalSessionID, f.agent, f.a)
+	}
+	if resp.LeadershipRootIssueID != root {
+		t.Fatalf("child leadership root = %q, want %q", resp.LeadershipRootIssueID, root)
+	}
+}

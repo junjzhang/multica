@@ -36,6 +36,11 @@ func blockersByCode(blockers []ArchiveBlocker) map[string]ArchiveBlocker {
 
 func insertArchiveContract(t *testing.T, issue, executor, acceptor string) {
 	t.Helper()
+	insertArchiveContractWith(t, issue, executor, acceptor, map[string]any{})
+}
+
+func insertArchiveContractWith(t *testing.T, issue, executor, acceptor string, basis map[string]any) {
+	t.Helper()
 	state := map[string]any{
 		"sequence": 1,
 		"versions": []map[string]any{{
@@ -46,7 +51,7 @@ func insertArchiveContract(t *testing.T, issue, executor, acceptor string) {
 			"criteria":           []string{"criterion"},
 			"executor":           map[string]any{"type": "agent", "id": executor},
 			"acceptor":           map[string]any{"type": "agent", "id": acceptor},
-			"basis":              map[string]any{},
+			"basis":              basis,
 			"author":             map[string]any{"type": "member", "id": testUserID},
 			"created_at":         "2026-01-01T00:00:00Z",
 		}},
@@ -263,5 +268,162 @@ func TestExternalAgentArchiveSerializesWithNewAssignment(t *testing.T) {
 	// it now holds, not silently committed.
 	if codes["archive"] != http.StatusConflict || codes["assign"] != http.StatusOK {
 		t.Fatalf("losing archive did not report a conflict: %v", codes)
+	}
+}
+
+// A contract may reference the agent only as the squad execution
+// representative. Basis is the whole contract document, so the representative
+// must be decoded from its own field, not from an actor map.
+func TestExternalAgentArchiveSeesContractRepresentative(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive representative", "representative-daemon")
+	other := dbfx.Agent(t, "Representative contract executor", testRuntimeID)
+	squad := dbfx.Squad(t, "Representative contract squad", other)
+	issue := dbfx.Issue(t, "Archive representative contract")
+	insertArchiveContractWith(t, issue, other, other, map[string]any{
+		"executor":                map[string]any{"type": "squad", "id": squad},
+		"criteria":                []string{"criterion"},
+		"executor_representative": map[string]any{"type": "agent", "id": agent},
+	})
+
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK {
+		t.Fatalf("preflight: %d %s", code, body)
+	}
+	blocker, ok := blockersByCode(resp.Blockers)["unaccepted_contracts"]
+	if resp.Archivable || !ok || blocker.Count != 1 || !blocker.Blocking {
+		t.Fatalf("representative-only contract not reported: %+v", resp.Blockers)
+	}
+}
+
+// A current return relationship is only an obligation while its issue is open
+// or a result it produced is still unhandled. Nothing clears is_current for a
+// closed issue, so the count alone would block every dispatcher forever.
+func TestExternalAgentArchiveReturnObligationNarrowsAfterClose(t *testing.T) {
+	agent, session, _ := externalAgentFixture(t, "Archive return", "return-daemon")
+	issue := dbfx.Issue(t, "Closed return issue")
+	dbfx.Exec(t, "UPDATE issue SET status='done' WHERE id=$1", issue)
+	returnID := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
+		"workspace_id":        testWorkspaceID,
+		"issue_id":            issue,
+		"dispatcher_agent_id": agent,
+		"return_kind":         "external_session",
+		"external_session_id": session,
+		"is_current":          true,
+	})
+
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable {
+		t.Fatalf("closed issue without results still blocks: %d %+v %s", code, resp, body)
+	}
+
+	result := dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{
+		"workspace_id":       testWorkspaceID,
+		"recipient_agent_id": agent,
+		"recipient_type":     "agent",
+		"target_session_id":  session,
+		"source_type":        "delegation_result",
+		"source_key":         "result:" + returnID,
+		"kind":               "delegation_result",
+		"payload":            testutil.Raw("'{\"delegation_return_id\":\"" + returnID + "\"}'::jsonb"),
+		"delivery_status":    "delivered",
+		"processing_status":  "unread",
+	})
+	code, resp, body = archivePreflightCall(t, agent)
+	if code != http.StatusOK {
+		t.Fatalf("preflight with unhandled result: %d %s", code, body)
+	}
+	blocker, ok := blockersByCode(resp.Blockers)["current_returns"]
+	if resp.Archivable || !ok || blocker.Count != 1 || !blocker.Blocking {
+		t.Fatalf("unhandled result should block the return: %+v", resp.Blockers)
+	}
+
+	dbfx.Exec(t, "UPDATE agent_mailbox_message SET processing_status='handled' WHERE id=$1", result)
+	code, resp, body = archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable {
+		t.Fatalf("handled result should leave no obligation: %d %+v %s", code, resp, body)
+	}
+}
+
+// The archive revokes credentials and is confirmed by a human owner. A machine
+// credential that can manage the Agent must not archive it.
+func TestExternalAgentArchiveRequiresHumanActor(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive human gate", "human-gate-daemon")
+	req := newRequest(http.MethodPost, "/api/agents/"+agent+"/archive", nil)
+	req.Header.Set("X-Actor-Source", "external_agent")
+
+	testutil.Call(t, testHandler.ArchiveAgent, withURLParam(req, "id", agent)).Want(http.StatusForbidden)
+	if n := dbfx.Count(t, "SELECT count(*) FROM agent WHERE id=$1 AND archived_at IS NULL", agent); n != 1 {
+		t.Fatal("machine credential archived the agent")
+	}
+}
+
+// A pending notification is only reported as "withdrawn" when the archive
+// transaction actually withdraws it. Legacy rows without a delivery target are
+// consumed by processing_status and stay untouched.
+func TestExternalAgentArchiveOnlyReportsWithdrawnNotifications(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive pending scope", "pending-scope-daemon")
+	legacy := dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{
+		"workspace_id":       testWorkspaceID,
+		"recipient_agent_id": agent,
+		"recipient_type":     "agent",
+		"source_type":        "ci_run",
+		"source_key":         "archive:legacy:" + uuidToString(dbid.NewV7()),
+		"kind":               "ci_terminal",
+		"payload":            testutil.Raw("'{\"run_id\":\"legacy\"}'::jsonb"),
+		"delivery_status":    "pending",
+		"last_error":         "legacy delivery has no registered external session",
+	})
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable {
+		t.Fatalf("untargeted pending row should not claim a withdrawal: %d %+v %s", code, resp, body)
+	}
+	if _, ok := blockersByCode(resp.Blockers)["pending_messages"]; ok {
+		t.Fatalf("untargeted pending row reported as withdrawable: %+v", resp.Blockers)
+	}
+	testutil.Call(t, testHandler.ArchiveAgent, withURLParam(
+		newRequest(http.MethodPost, "/api/agents/"+agent+"/archive", nil), "id", agent)).Want(http.StatusOK)
+	var withdrawn bool
+	dbfx.QueryRow(t, "SELECT withdrawn_at IS NOT NULL FROM agent_mailbox_message WHERE id=$1", legacy).Scan(&withdrawn)
+	if withdrawn {
+		t.Fatal("archive claimed to withdraw a legacy row it leaves pending")
+	}
+}
+
+// The coordinator write path takes the Agent reference lock, so an Agent
+// archived before the write is refused instead of becoming a stranded
+// coordinator.
+func TestExternalAgentArchiveBlocksNewCoordinator(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive coordinator", "coordinator-daemon")
+	issue := dbfx.Issue(t, "Coordinator target")
+	coordinator := map[string]any{"coordinator": map[string]any{"type": "agent", "id": agent}}
+	dbfx.Exec(t, "UPDATE agent SET archived_at=now() WHERE id=$1", agent)
+
+	testutil.Call(t, testHandler.UpdateIssue, withURLParam(
+		newRequest(http.MethodPut, "/api/issues/"+issue, coordinator), "id", issue)).Want(http.StatusConflict)
+	if n := dbfx.Count(t, "SELECT count(*) FROM issue WHERE id=$1 AND coordinator_id=$2", issue, agent); n != 0 {
+		t.Fatal("archived agent became the issue coordinator")
+	}
+
+	created := map[string]any{"title": "Coordinator create", "coordinator": map[string]any{"type": "agent", "id": agent}}
+	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", created)).Want(http.StatusConflict)
+	if n := dbfx.Count(t, "SELECT count(*) FROM issue WHERE title='Coordinator create'"); n != 0 {
+		t.Fatal("create stored an archived coordinator")
+	}
+}
+
+// Adding a squad member takes the same lock, so a squad membership cannot land
+// behind the archive's final reference scan.
+func TestExternalAgentArchiveBlocksNewSquadMember(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive squad member", "squad-member-daemon")
+	leader := dbfx.Agent(t, "Squad member managed leader", testRuntimeID)
+	squad := dbfx.Squad(t, "Squad member archive squad", leader)
+	dbfx.Exec(t, "UPDATE agent SET archived_at=now() WHERE id=$1", agent)
+
+	testutil.Call(t, testHandler.AddSquadMember, squadScopeReq("", http.MethodPost, "/api/squads/"+squad+"/members", map[string]any{
+		"member_type": "agent",
+		"member_id":   agent,
+	}, map[string]string{"id": squad})).Want(http.StatusConflict)
+	if n := dbfx.Count(t, "SELECT count(*) FROM squad_member WHERE squad_id=$1 AND member_type='agent' AND member_id=$2", squad, agent); n != 0 {
+		t.Fatal("archived agent became a squad member")
 	}
 }

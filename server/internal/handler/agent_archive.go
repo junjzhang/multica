@@ -118,16 +118,20 @@ func (h *Handler) agentArchiveBlockers(ctx context.Context, q *db.Queries, agent
 	return blockers, nil
 }
 
+// contractReferencesAgent matches the actors the current contract version
+// names. Basis is a full document (criteria, merge authorization, leadership),
+// not an actor map, so only the representative field is decoded here.
 func contractReferencesAgent(version *issuecontract.Version, agentID string) bool {
 	if version.Executor.ID == agentID || version.Acceptor.ID == agentID {
 		return true
 	}
-	var basis map[string]issuecontract.Actor
+	var basis struct {
+		ExecutorRepresentative *issuecontract.Actor `json:"executor_representative"`
+	}
 	if err := json.Unmarshal(version.Basis, &basis); err != nil {
 		return false
 	}
-	representative, ok := basis["executor_representative"]
-	return ok && representative.ID == agentID
+	return basis.ExecutorRepresentative != nil && basis.ExecutorRepresentative.ID == agentID
 }
 
 func blockingArchiveBlockers(blockers []ArchiveBlocker) []ArchiveBlocker {
@@ -177,6 +181,12 @@ func (h *Handler) ArchiveAgentPreflight(w http.ResponseWriter, r *http.Request) 
 // seen) or is refused after the archive commits by the existing archived-agent
 // checks in the assignment and delivery paths.
 func (h *Handler) archiveExternalAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) {
+	// Archiving revokes every credential and is confirmed one Agent at a time
+	// by a human owner. Machine credentials keep running, but cannot archive.
+	if isMachineCredentialActor(r) {
+		writeError(w, http.StatusForbidden, "archiving an external agent requires a human owner or admin")
+		return
+	}
 	userID := requestUserID(r)
 	tx, err := h.TxStarter.Begin(r.Context())
 	if err != nil {

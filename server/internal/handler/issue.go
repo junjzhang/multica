@@ -2597,6 +2597,7 @@ func (h *Handler) GetIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	h.fillStatusCategory(r.Context(), issue.WorkspaceID, &resp)
 	h.projectIssueExternalState(r.Context(), issue, &resp)
 	state, contractErr := readContract(r.Context(), h.Queries, issue)
@@ -3713,6 +3714,10 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project not found in this workspace")
 		return
 	}
+	if errors.Is(err, service.ErrCoordinatorAgentArchived) {
+		writeError(w, http.StatusConflict, "coordinator agent was archived; choose another coordinator")
+		return
+	}
 	if errors.Is(err, service.ErrIssueLabelNotFound) {
 		writeError(w, http.StatusBadRequest, "one or more labels not found in this workspace")
 		return
@@ -3742,6 +3747,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	slog.Info("issue created", append(logger.RequestAttrs(r), "issue_id", uuidToString(issue.ID), "title", issue.Title, "status", issue.Status, "workspace_id", workspaceID)...)
 
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	fillCreated(&resp)
 	h.projectIssueExternalState(r.Context(), issue, &resp)
 	resp.Attachments = buildAttachmentResponses(res.Attachments)
@@ -4308,6 +4314,11 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	var assignmentAttr attribution.Result
 	assignmentTaskInserted := false
 	afterIssueWrite := func(tx pgx.Tx, q *db.Queries, previous, issue db.Issue) error {
+		if _, present := rawFields["coordinator"]; present {
+			if err := lockCoordinatorAgent(r.Context(), q, issue); err != nil {
+				return err
+			}
+		}
 		if previous.ID.Valid {
 			prevIssue = previous
 			prospectiveExplicitAssigneeChanged = (touchedType || touchedID) && (previous.AssigneeType != issue.AssigneeType || previous.AssigneeID != issue.AssigneeID)
@@ -4391,6 +4402,10 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
+		if errors.Is(err, service.ErrCoordinatorAgentArchived) {
+			writeError(w, http.StatusConflict, "coordinator agent was archived; choose another coordinator")
+			return
+		}
 		if derr := asDelegationReturnError(err); derr != nil {
 			writeDelegationReturnError(w, derr)
 			return
@@ -4421,6 +4436,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 
 	prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
 	resp := issueToResponse(issue, prefix)
+	h.projectTaskLeader(r.Context(), issue, &resp)
 	slog.Info("issue updated", append(logger.RequestAttrs(r), "issue_id", id, "workspace_id", workspaceID)...)
 	h.recordIssueExternalUpdateActivity(r.Context(), prevIssue, issue, actorType, actorID)
 

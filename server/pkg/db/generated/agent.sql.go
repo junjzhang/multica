@@ -7133,28 +7133,27 @@ func (q *Queries) ListWorkspaceWorkingAgents(ctx context.Context, arg ListWorksp
 	return items, nil
 }
 
-const lockAgentForAutopilotAssignment = `-- name: LockAgentForAutopilotAssignment :one
+const lockAgentForSharedWrite = `-- name: LockAgentForSharedWrite :one
 SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, thinking_level, composio_toolkit_allowlist, permission_mode, kind, system_key, disabled_runtime_skills, service_tier, conversation_starters, execution_kind, external_provider, external_host_id FROM agent
 WHERE id = $1 AND workspace_id = $2 AND kind = 'user'
 FOR SHARE
 `
 
-type LockAgentForAutopilotAssignmentParams struct {
+type LockAgentForSharedWriteParams struct {
 	ID          pgtype.UUID `json:"id"`
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-// Serializes creating, retargeting, or resuming an active Autopilot with
-// Runtime teardown. Teardown takes FOR UPDATE on this same Agent row before it
-// clears runtime_id and pauses matching Autopilots. FOR SHARE also stabilizes
-// runtime_id and archived_at against concurrent ordinary Agent updates. The
-// shared lock makes the
-// two outcomes exhaustive:
-//   - assignment commits first, then teardown sees and pauses it; or
-//   - teardown commits first, then assignment re-reads runtime_id=NULL and
-//     rejects the active Autopilot.
-func (q *Queries) LockAgentForAutopilotAssignment(ctx context.Context, arg LockAgentForAutopilotAssignmentParams) (Agent, error) {
-	row := q.db.QueryRow(ctx, lockAgentForAutopilotAssignment, arg.ID, arg.WorkspaceID)
+// The shared lock every write that stores an Agent reference or route takes:
+// assignment and Autopilot creation, contract basis, task leadership, issue
+// coordinator and squad membership. Archive holds FOR UPDATE on the same row,
+// so a reference either commits before the archive's final scan or reads
+// archived_at and is refused. Teardown takes the same row FOR UPDATE before it
+// clears runtime_id, which makes assignment-versus-teardown exhaustive:
+//   - assignment commits first, then teardown sees it; or
+//   - teardown commits first, then the assignment re-reads runtime_id=NULL.
+func (q *Queries) LockAgentForSharedWrite(ctx context.Context, arg LockAgentForSharedWriteParams) (Agent, error) {
+	row := q.db.QueryRow(ctx, lockAgentForSharedWrite, arg.ID, arg.WorkspaceID)
 	var i Agent
 	err := row.Scan(
 		&i.ID,

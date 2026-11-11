@@ -1807,7 +1807,7 @@ func (h *Handler) validateAutopilotAssigneeForSave(
 ) bool {
 	switch assigneeType {
 	case "agent":
-		agent, err := q.LockAgentForAutopilotAssignment(r.Context(), db.LockAgentForAutopilotAssignmentParams{
+		agent, err := q.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 			ID:          assigneeID,
 			WorkspaceID: workspaceID,
 		})
@@ -1843,7 +1843,7 @@ func (h *Handler) validateAutopilotAssigneeForSave(
 			writeError(w, http.StatusUnprocessableEntity, "squad is archived; pick a different squad")
 			return false
 		}
-		leader, err := q.LockAgentForAutopilotAssignment(r.Context(), db.LockAgentForAutopilotAssignmentParams{
+		leader, err := q.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 			ID:          squad.LeaderID,
 			WorkspaceID: workspaceID,
 		})

@@ -188,6 +188,11 @@ var ErrProjectNotFound = errors.New("project not found in this workspace")
 // label set. Callers translate this into their transport's 400.
 var ErrIssueLabelNotFound = errors.New("issue label not found in this workspace")
 
+// ErrCoordinatorAgentArchived signals that the requested coordinator Agent was
+// archived between the handler's validation and the create write. The create
+// fails rather than storing an unreachable coordinator.
+var ErrCoordinatorAgentArchived = errors.New("coordinator agent was archived")
+
 // ErrIssuePropertiesTooLarge is the existing row-level 16KB properties-bag
 // constraint surfaced as a client error. The same database constraint applies
 // to standalone PUT and atomic create writes.
@@ -407,6 +412,25 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	if !coordinatorType.Valid && !coordinatorID.Valid && p.CreatorID.Valid {
 		coordinatorType = pgtype.Text{String: p.CreatorType, Valid: true}
 		coordinatorID = p.CreatorID
+	}
+	// An explicitly supplied coordinator is a stored Agent reference. Re-read it
+	// under the shared lock so an archive cannot commit between the handler's
+	// validation and this write. The default creator-as-coordinator is the acting
+	// run itself and keeps the existing delegation checks.
+	if p.CoordinatorType.String == "agent" && p.CoordinatorID.Valid {
+		coordinator, err := qtx.LockAgentForSharedWrite(ctx, db.LockAgentForSharedWriteParams{
+			ID:          p.CoordinatorID,
+			WorkspaceID: p.WorkspaceID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return IssueCreateResult{}, ErrCoordinatorAgentArchived
+		}
+		if err != nil {
+			return IssueCreateResult{}, fmt.Errorf("lock coordinator agent: %w", err)
+		}
+		if coordinator.ArchivedAt.Valid {
+			return IssueCreateResult{}, ErrCoordinatorAgentArchived
+		}
 	}
 	if p.OriginType.Valid {
 		issue, err = qtx.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{

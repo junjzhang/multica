@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -75,6 +76,26 @@ func (h *Handler) validateCoordinator(ctx context.Context, workspaceID string, i
 	default:
 		return pgtype.Text{}, pgtype.UUID{}, "coordinator.type must be 'member' or 'agent'"
 	}
+}
+
+// lockCoordinatorAgent rejects an archived coordinator under the shared Agent
+// reference lock. It runs inside the writing issue transaction, so an archive
+// cannot commit between the handler's validation and this write.
+func lockCoordinatorAgent(ctx context.Context, q *db.Queries, issue db.Issue) error {
+	if issue.CoordinatorType.String != "agent" || !issue.CoordinatorID.Valid {
+		return nil
+	}
+	agent, err := q.LockAgentForSharedWrite(ctx, db.LockAgentForSharedWriteParams{
+		ID:          issue.CoordinatorID,
+		WorkspaceID: issue.WorkspaceID,
+	})
+	if err != nil {
+		return service.ErrCoordinatorAgentArchived
+	}
+	if agent.ArchivedAt.Valid {
+		return service.ErrCoordinatorAgentArchived
+	}
+	return nil
 }
 
 // validateMergeAuthorization validates the stored policy. This fork has no
