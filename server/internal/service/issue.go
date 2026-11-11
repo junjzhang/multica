@@ -64,14 +64,17 @@ func NewIssueService(q *db.Queries, tx TxStarter, bus *events.Bus, ac analytics.
 // to IssueService.Create. The handler owns the parsing step that turns its
 // request payload into this struct; the service stays transport-agnostic.
 type IssueCreateParams struct {
-	WorkspaceID           pgtype.UUID
-	Title                 string
-	Description           pgtype.Text
-	Status                string
-	Priority              string
-	AssigneeType          pgtype.Text
-	AssigneeID            pgtype.UUID
-	RecipientSessionID    *string
+	WorkspaceID        pgtype.UUID
+	Title              string
+	Description        pgtype.Text
+	Status             string
+	Priority           string
+	AssigneeType       pgtype.Text
+	AssigneeID         pgtype.UUID
+	RecipientSessionID *string
+	// DeliveryAppURL is the public web app origin copied into an external
+	// assignment prompt as a browser link. Empty keeps the prompt ID-only.
+	DeliveryAppURL        string
 	LeadershipRootIssueID pgtype.UUID
 	CreatorSessionID      pgtype.UUID
 	CreatorType           string // "agent" or "member"
@@ -642,7 +645,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	}
 	external := target.Agent.ExecutionKind == "external"
 	dispatchExternal := opts.AssignedAgentRunFireAt.IsZero() && issue.Status != "backlog" && !issue.TriageState.Valid
-	if err := ExternalAssignment(ctx, qtx, issue, target, p.RecipientSessionID, dispatchExternal, p.CreatorType, actorID, p.DelegationCreatedBy); err != nil {
+	if err := ExternalAssignment(ctx, qtx, issue, target, p.RecipientSessionID, dispatchExternal, p.CreatorType, actorID, p.DelegationCreatedBy, p.DeliveryAppURL); err != nil {
 		return IssueCreateResult{}, err
 	}
 	delegatedTaskInserted := false

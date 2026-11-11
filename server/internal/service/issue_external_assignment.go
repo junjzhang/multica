@@ -59,7 +59,11 @@ func (e *RecipientSessionError) Error() string { return e.Message }
 // ExternalAssignment persists the recipient binding and launch obligation in
 // the issue transaction. Parked assignments may record a validated binding but
 // never require one. No managed task is created for an external target.
-func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, target AssignmentTarget, sessionID *string, dispatch bool, actorType, actorID, createdBy string) error {
+//
+// appURL is the deployment's public web app origin, used only to put a
+// browser link into the recipient's prompt. Empty means the prompt keeps its
+// ID-only shape.
+func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, target AssignmentTarget, sessionID *string, dispatch bool, actorType, actorID, createdBy, appURL string) error {
 	if target.Agent.ExecutionKind != "external" {
 		if sessionID != nil {
 			return &RecipientSessionError{Message: "recipient_session_id applies only to an external agent or external squad leader"}
@@ -120,6 +124,9 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	// assigning the same agent again after another owner is a new event.
 	key := fmt.Sprintf("assignment:%s:%d:agent:%s", issueID, issue.Revision, agentID)
 	payload := protocol.ExternalIssueRequest{Schema: "issue_assignment.v1", IssueID: issueID}
+	if display := ResolveDeliveryDisplay(ctx, q, issue, appURL); display.Identifier != "" || display.Title != "" {
+		payload.IssueIdentifier, payload.IssueTitle, payload.IssueURL = display.Identifier, display.Title, display.URL
+	}
 	if target.Squad != nil {
 		payload.SquadID = util.UUIDToString(target.Squad.ID)
 		payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, *target.Squad, true)

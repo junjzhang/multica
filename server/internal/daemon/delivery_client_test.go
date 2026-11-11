@@ -109,6 +109,7 @@ func TestClaimDeliveriesMapsStoredRowAndRendersCommentEnvelope(t *testing.T) {
 	}
 
 	want := "Multica has a request for this session.\n" +
+		"Kind: comment mention (comment_mention)\n" +
 		"Mailbox ID: delivery-comment-1\n" +
 		"Workspace ID: workspace-row\n" +
 		"Issue ID: issue-1\n" +

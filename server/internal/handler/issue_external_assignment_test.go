@@ -66,7 +66,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ExternalAssignment(context.Background(), testHandler.Queries, stored, target, nil, true, "agent", agent, owner); err != nil {
+	if err := service.ExternalAssignment(context.Background(), testHandler.Queries, stored, target, nil, true, "agent", agent, owner, ""); err != nil {
 		t.Fatal(err)
 	}
 	if n := countRows(t, `SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1`, issue.ID); n != 1 {

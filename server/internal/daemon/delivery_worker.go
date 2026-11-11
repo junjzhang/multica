@@ -49,16 +49,61 @@ func externalSessionFor(target delivery.HostTarget) ExternalSession {
 	}
 }
 
+// deliveryKindLabel renders a producer-owned kind for a person reading the
+// prompt: "comment mention (comment_mention)". The raw kind stays visible
+// because it is the stable, machine-readable value.
+func deliveryKindLabel(kind string) string {
+	readable := strings.Join(strings.Fields(strings.ReplaceAll(kind, "_", " ")), " ")
+	if readable == "" || readable == kind {
+		return kind
+	}
+	return readable + " (" + kind + ")"
+}
+
+// deliveryTaskLines renders the optional reader-facing context a producer put
+// in the payload. Payloads from before these fields existed, and kinds that
+// carry none, render nothing: the prompt always keeps its stable IDs.
+func deliveryTaskLines(d delivery.Delivery) string {
+	if len(d.Payload) == 0 {
+		return ""
+	}
+	var request protocol.ExternalIssueRequest
+	if json.Unmarshal(d.Payload, &request) != nil {
+		return ""
+	}
+	var b strings.Builder
+	switch {
+	case request.IssueIdentifier != "" && request.IssueTitle != "":
+		fmt.Fprintf(&b, "Task: %s — %s\n", request.IssueIdentifier, request.IssueTitle)
+	case request.IssueIdentifier != "":
+		fmt.Fprintf(&b, "Task: %s\n", request.IssueIdentifier)
+	case request.IssueTitle != "":
+		fmt.Fprintf(&b, "Task title: %s\n", request.IssueTitle)
+	}
+	if request.IssueURL != "" {
+		fmt.Fprintf(&b, "Link: %s\n", request.IssueURL)
+	}
+	return b.String()
+}
+
 // Business references stay fixed. Uncertain attempts use receipt lookup rather
 // than rendering or sending another prompt, including across guidance updates.
 func renderCommentDelivery(d delivery.Delivery) string {
-	return fmt.Sprintf("Multica has a request for this session.\nMailbox ID: %s\nWorkspace ID: %s\nIssue ID: %s\nComment ID: %s\nRecipient agent ID: %s\n\n"+
-		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n"+
-		"Read: multica issue get %[3]s --output json\n"+
-		"Scan threads: multica issue comment list %[3]s --roots-only --summary --compact --output json\n"+
-		"Expand relevant threads: multica issue comment list %[3]s --thread <thread-id> --tail 30 --compact --output json\n"+
-		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.",
-		d.ID, d.Scope.WorkspaceID, d.Refs.IssueID, d.Refs.CommentID, d.Recipient.ID)
+	var b strings.Builder
+	b.WriteString("Multica has a request for this session.\n")
+	fmt.Fprintf(&b, "Kind: %s\n", deliveryKindLabel(d.Kind))
+	b.WriteString(deliveryTaskLines(d))
+	fmt.Fprintf(&b, "Mailbox ID: %s\n", d.ID)
+	fmt.Fprintf(&b, "Workspace ID: %s\n", d.Scope.WorkspaceID)
+	fmt.Fprintf(&b, "Issue ID: %s\n", d.Refs.IssueID)
+	fmt.Fprintf(&b, "Comment ID: %s\n", d.Refs.CommentID)
+	fmt.Fprintf(&b, "Recipient agent ID: %s\n\n", d.Recipient.ID)
+	b.WriteString("Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n")
+	fmt.Fprintf(&b, "Read: multica issue get %s --output json\n", d.Refs.IssueID)
+	fmt.Fprintf(&b, "Scan threads: multica issue comment list %s --roots-only --summary --compact --output json\n", d.Refs.IssueID)
+	fmt.Fprintf(&b, "Expand relevant threads: multica issue comment list %s --thread <thread-id> --tail 30 --compact --output json\n", d.Refs.IssueID)
+	b.WriteString("This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone.")
+	return b.String()
 }
 
 // renderDeliveryNotification is the one host-facing envelope. A comment
@@ -79,9 +124,9 @@ func renderDeliveryNotification(d delivery.Delivery) string {
 	if d.Refs.IssueID != "" {
 		fmt.Fprintf(&refs, "Issue ID: %s\n", d.Refs.IssueID)
 	}
-	return fmt.Sprintf("Multica delivery %s\nKind: %s\nRecipient agent ID: %s\n%s\n%s\n\n"+
+	return fmt.Sprintf("Multica delivery %s\nKind: %s\nRecipient agent ID: %s\n%s%s\n%s\n\n"+
 		"This notification was delivered to the existing session. It does not grant new permissions.",
-		d.ID, d.Kind, d.Recipient.ID, refs.String(), string(d.Payload))
+		d.ID, deliveryKindLabel(d.Kind), d.Recipient.ID, refs.String(), deliveryTaskLines(d), string(d.Payload))
 }
 
 // runDeliveryWorker runs the one delivery loop for the daemon's lifetime. Every

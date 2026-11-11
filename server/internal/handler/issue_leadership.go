@@ -260,7 +260,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 		if sessionID.Valid {
 			recipient = &req.SessionID
 		}
-		if err = service.ExternalAssignment(r.Context(), q, updated, target, recipient, true, "member", requestUserID(r), requestUserID(r)); err != nil {
+		if err = service.ExternalAssignment(r.Context(), q, updated, target, recipient, true, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
 			writeError(w, 409, err.Error())
 			return
 		}
@@ -391,7 +391,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 		if sessionID.Valid {
 			recipient = &req.SessionID
 		}
-		if err = service.ExternalAssignment(ctx, q, updated, service.AssignmentTarget{Agent: target}, recipient, true, "member", requestUserID(r), requestUserID(r)); err != nil {
+		if err = service.ExternalAssignment(ctx, q, updated, service.AssignmentTarget{Agent: target}, recipient, true, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
 			writeError(w, 409, err.Error())
 			return
 		}

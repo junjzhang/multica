@@ -3663,6 +3663,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 		DelegationReturn:    delegationReturn,
 		DelegationCreatedBy: delegationCreatedBy,
+		DeliveryAppURL:      h.cfg.AppURL,
 		DispatchAttribution: h.dispatchAttributionFromRequest(r, creatorType, actualCreatorID),
 	}, service.IssueCreateOpts{
 		CanInvokeTarget: func(ctx context.Context, agent db.Agent) bool {
