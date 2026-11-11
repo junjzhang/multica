@@ -2305,6 +2305,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAgent)
 					r.Put("/", h.UpdateAgent)
+					// Read-only archive preview for an external agent: every
+					// in-flight reference that must be resolved first, plus the
+					// notifications the archive itself would withdraw.
+					r.Get("/archive-preflight", h.ArchiveAgentPreflight)
 					r.Post("/archive", h.ArchiveAgent)
 					r.Post("/restore", h.RestoreAgent)
 					r.Post("/cancel-tasks", h.CancelAgentTasks)

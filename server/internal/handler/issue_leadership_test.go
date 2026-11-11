@@ -307,3 +307,38 @@ func TestTaskExternalExecutorHandoffPreservesHistoryAndStalesContract(t *testing
 		t.Fatalf("direct handoff audit rows=%d", n)
 	}
 }
+
+// A handoff that moves the executor to a different agent is an assignment
+// change: subscriber, activity and notification listeners only run for
+// assignee_changed, so the event must carry it and the previous assignee.
+func TestExternalExecutorHandoffPublishesAssigneeTransition(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	issue := dbfx.Issue(t, "Executor handoff to a different agent", testutil.Cols{"assignee_type": "agent", "assignee_id": f.agent})
+	bindExternalSession(t, f.agent, f.a, issue)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	var revision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+	target := dbfx.Agent(t, "Managed handoff target", testRuntimeID)
+	h := *testHandler
+	h.Bus = events.New()
+	updates := make(chan events.Event, 4)
+	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
+	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: target, Reason: "Move the responsible executor to a managed agent"}
+	testutil.Call(t, h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+	if len(updates) != 1 {
+		t.Fatalf("executor handoff published %d issue updates", len(updates))
+	}
+	payload := (<-updates).Payload.(map[string]any)
+	if changed, _ := payload["assignee_changed"].(bool); !changed {
+		t.Fatal("executor handoff did not publish assignee_changed; new executor misses subscription and notification")
+	}
+	prevID, _ := payload["prev_assignee_id"].(*string)
+	prevType, _ := payload["prev_assignee_type"].(*string)
+	if prevID == nil || *prevID != f.agent || prevType == nil || *prevType != "agent" {
+		t.Fatalf("handoff lost the previous assignee: type=%v id=%v", prevType, prevID)
+	}
+	response := payload["issue"].(IssueResponse)
+	if response.AssigneeID == nil || *response.AssigneeID != target {
+		t.Fatalf("handoff event carries assignee %v, want %s", response.AssigneeID, target)
+	}
+}

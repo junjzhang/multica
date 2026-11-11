@@ -170,11 +170,12 @@ func (h *Handler) projectIssueExternalState(ctx context.Context, issue db.Issue,
 		for _, a := range participants {
 			ids = append(ids, a.ID)
 		}
-		sessions := h.externalSessionsByAgent(ctx, ids)
+		sessions, sessionCounts := h.externalSessionsByAgent(ctx, ids)
 		out := make([]AgentResponse, 0, len(participants))
 		for _, a := range participants {
 			ar := h.agentToResponse(a)
 			ar.ExternalSession = sessions[ar.ID]
+			ar.ExternalSessionCount = sessionCounts[ar.ID]
 			out = append(out, ar)
 		}
 		resp.ExternalParticipants = &out

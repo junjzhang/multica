@@ -426,7 +426,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 	if queued.ID.Valid {
 		h.TaskService.NotifyTaskEnqueued(ctx, queued)
 	}
-	h.publishIssueChange(ctx, updated, issue.Status, "member", requestUserID(r))
+	h.publishExecutorHandoffChange(ctx, updated, issue, "member", requestUserID(r))
 	h.publishMailboxChanged(updated.WorkspaceID, uuidToString(updated.ID))
 	writeJSON(w, 200, response)
 }

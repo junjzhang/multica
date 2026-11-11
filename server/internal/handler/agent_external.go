@@ -51,19 +51,22 @@ func externalSessionToResponse(s db.ExternalAgentSession) *ExternalSessionRespon
 // one query. A read failure degrades to no session detail rather than failing
 // the whole agent list; the identity still resolves as external through
 // execution_kind.
-func (h *Handler) externalSessionsByAgent(ctx context.Context, agentIDs []pgtype.UUID) map[string]*ExternalSessionResponse {
+func (h *Handler) externalSessionsByAgent(ctx context.Context, agentIDs []pgtype.UUID) (map[string]*ExternalSessionResponse, map[string]int) {
 	out := map[string]*ExternalSessionResponse{}
+	counts := map[string]int{}
 	if len(agentIDs) == 0 {
-		return out
+		return out, counts
 	}
 	rows, err := h.Queries.ListExternalAgentSessionsByAgentIDs(ctx, agentIDs)
 	if err != nil {
-		return out
+		return out, counts
 	}
 	for _, row := range rows {
-		out[uuidToString(row.AgentID)] = externalSessionToResponse(row)
+		agentID := uuidToString(row.AgentID)
+		out[agentID] = externalSessionToResponse(row)
+		counts[agentID]++
 	}
-	return out
+	return out, counts
 }
 
 // attachExternalSession enriches one response. Used by detail/create/update
@@ -72,11 +75,12 @@ func (h *Handler) attachExternalSession(ctx context.Context, resp *AgentResponse
 	if resp == nil || resp.ExecutionKind != "external" {
 		return
 	}
-	session, err := h.Queries.GetExternalAgentSessionByAgentID(ctx, parseUUID(resp.ID))
-	if err != nil {
-		return
+	if session, err := h.Queries.GetExternalAgentSessionByAgentID(ctx, parseUUID(resp.ID)); err == nil {
+		resp.ExternalSession = externalSessionToResponse(session)
 	}
-	resp.ExternalSession = externalSessionToResponse(session)
+	if rows, err := h.Queries.ListExternalAgentSessionsByAgentIDs(ctx, []pgtype.UUID{parseUUID(resp.ID)}); err == nil {
+		resp.ExternalSessionCount = len(rows)
+	}
 }
 
 // externalSessionInput is the request half of the frozen external_session DTO.
