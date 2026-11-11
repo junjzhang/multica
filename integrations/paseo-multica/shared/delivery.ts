@@ -145,3 +145,14 @@ function finalize(data: DeliveryData): DeliveryData | null {
   const parsed = deliveryDataSchema.safeParse(data);
   return parsed.success ? parsed.data : null;
 }
+/**
+ * Fences arbitrary delivered text so a Markdown renderer shows it byte for
+ * byte. A fence longer than any backtick run in the text cannot be closed by
+ * the text itself; <thread-id> style fragments therefore stay literal.
+ */
+export function fencedRaw(text: string): string {
+  const runs = text.match(/`+/g) ?? [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return fence + "\n" + text + "\n" + fence;
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -34,8 +35,8 @@ type SessionTaskItem struct {
 }
 
 // SessionTasksResponse groups the three obligations of the credential's agent:
-// work it owns, deliveries waiting for its acceptance, and accepted
-// delegations whose result it still owes.
+// work it owns, deliveries waiting for its acceptance, and delegations it
+// accepted a return address for whose result has not come back yet.
 type SessionTasksResponse struct {
 	AgentID     string            `json:"agent_id"`
 	SessionID   string            `json:"session_id,omitempty"`
@@ -62,7 +63,8 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := h.requireExternalActorSession(w, r); !ok {
+	sessionID, ok := h.requireExternalActorSession(w, r)
+	if !ok {
 		return
 	}
 	workspace, err := h.Queries.GetWorkspace(r.Context(), agent.WorkspaceID)
@@ -88,7 +90,7 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load acceptance work")
 		return
 	}
-	returning, returningCut, err := h.sessionReturnItems(r, projection, agent)
+	returning, returningCut, err := h.sessionReturnItems(r, projection, agent, sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load pending returns")
 		return
@@ -96,14 +98,12 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 
 	response := SessionTasksResponse{
 		AgentID:     uuidToString(agent.ID),
+		SessionID:   uuidToString(sessionID),
 		WorkspaceID: uuidToString(workspace.ID),
 		Owned:       owned,
 		Accepting:   accepting,
 		Returning:   returning,
 		Truncated:   ownedCut || acceptingCut || returningCut,
-	}
-	if sid, ok := externalActorSessionID(r); ok {
-		response.SessionID = uuidToString(sid)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -212,24 +212,22 @@ func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjectio
 	return items, len(rows) == sessionTaskLimit, nil
 }
 
-func (h *Handler) sessionReturnItems(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
-	rows, err := h.Queries.ListSessionReturnObligations(r.Context(), db.ListSessionReturnObligationsParams{
-		WorkspaceID: agent.WorkspaceID,
-		AgentID:     agent.ID,
-		RowLimit:    sessionTaskLimit,
+// sessionReturnItems lists the accepted return addresses this session
+// dispatched and whose result has not come back. The return row is keyed by
+// (issue, dispatcher), so one issue contributes at most one item.
+func (h *Handler) sessionReturnItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
+	rows, err := h.Queries.ListSessionPendingDelegationReturns(r.Context(), db.ListSessionPendingDelegationReturnsParams{
+		WorkspaceID:       agent.WorkspaceID,
+		AgentID:           agent.ID,
+		ExternalSessionID: sessionID,
+		RowLimit:          sessionTaskLimit,
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	items := make([]SessionTaskItem, 0, len(rows))
-	seen := map[string]bool{}
 	for _, row := range rows {
-		issueID := uuidToString(row.IssueID)
-		if seen[issueID] {
-			continue
-		}
-		seen[issueID] = true
-		item := p.item(issueID, row.Number, row.Title, row.IssueStatus)
+		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.IssueStatus)
 		item.Role = "return"
 		item.UpdatedAt = timestampToString(row.IssueUpdatedAt)
 		item.AcceptedAt = timestampToString(row.AcceptedAt)

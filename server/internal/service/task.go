@@ -49,6 +49,9 @@ type TaskService struct {
 	TxStarter TxStarter
 	Hub       *realtime.Hub
 	Bus       *events.Bus
+	// AppURL is the browser application origin copied into delivery prompts.
+	// Empty degrades to identifier and title only.
+	AppURL string
 	Analytics analytics.Client
 	Metrics   *obsmetrics.BusinessMetrics
 	Wakeup    TaskWakeupNotifier

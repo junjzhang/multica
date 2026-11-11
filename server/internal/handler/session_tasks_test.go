@@ -164,39 +164,58 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	}
 	insertIssueContract(t, reassignedIssue, reassignedVersions, []map[string]any{pendingDelivery(2, dispatcherID)}, nil)
 
-	// Accepted delegation whose result has not come back yet.
+	// Accepted delegation returns this session dispatched and still waits on.
+	// The return row names the dispatcher, not the worker; an external agent
+	// never owns an agent_task_queue row in production.
+	workerAgent := dbfx.Agent(t, "Session Tasks Worker "+suffix, testRuntimeID)
+	dispatchReturn := func(issueID, dispatcher, externalSession string) string {
+		return dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
+			"workspace_id":        testWorkspaceID,
+			"issue_id":            issueID,
+			"dispatcher_agent_id": dispatcher,
+			"return_kind":         "external_session",
+			"external_session_id": externalSession,
+		})
+	}
 	returnIssue := dbfx.Issue(t, "session tasks return "+suffix)
-	acceptedReturn := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
-		"workspace_id":        testWorkspaceID,
-		"issue_id":            returnIssue,
-		"dispatcher_agent_id": dispatcherID,
-		"return_kind":         "external_session",
-		"external_session_id": dispatcherSession,
-	})
-	returnTask := dbfx.Task(t, agentID, testutil.Cols{"issue_id": returnIssue, "status": "running", "runtime_id": testRuntimeID})
+	acceptedReturn := dispatchReturn(returnIssue, agentID, sessionID)
+	returnTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnIssue, "status": "running", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", returnTask, acceptedReturn)
-	// A second accepted return on the same issue arrives from another
-	// dispatcher; the panel shows the issue once.
-	secondReturn := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
-		"workspace_id":        testWorkspaceID,
-		"issue_id":            returnIssue,
-		"dispatcher_agent_id": ownerID,
-		"return_kind":         "external_session",
-		"external_session_id": sessionID,
-	})
-	secondTask := dbfx.Task(t, agentID, testutil.Cols{"issue_id": returnIssue, "status": "queued", "runtime_id": testRuntimeID})
-	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", secondTask, secondReturn)
-	// Returned: the result was materialized, so the obligation is done.
+	// Accepted with no worker run yet: still pending.
+	acceptedIssue := dbfx.Issue(t, "session tasks accepted "+suffix)
+	dispatchReturn(acceptedIssue, agentID, sessionID)
+	// Returned: the latest run materialized its result.
 	returnedIssue := dbfx.Issue(t, "session tasks returned "+suffix)
-	returnedReturn := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
-		"workspace_id":        testWorkspaceID,
-		"issue_id":            returnedIssue,
-		"dispatcher_agent_id": dispatcherID,
-		"return_kind":         "external_session",
-		"external_session_id": dispatcherSession,
-	})
-	returnedTask := dbfx.Task(t, agentID, testutil.Cols{"issue_id": returnedIssue, "status": "completed", "runtime_id": testRuntimeID})
+	returnedReturn := dispatchReturn(returnedIssue, agentID, sessionID)
+	returnedTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnedIssue, "status": "completed", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, materialized_at) VALUES ($1, $2, now())", returnedTask, returnedReturn)
+	// A follow-up dispatch on the same accepted address makes it pending
+	// again: the latest run has not returned its result.
+	reopenedIssue := dbfx.Issue(t, "session tasks reopened "+suffix)
+	reopenedReturn := dispatchReturn(reopenedIssue, agentID, sessionID)
+	oldTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": reopenedIssue, "status": "completed", "runtime_id": testRuntimeID})
+	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, materialized_at) VALUES ($1, $2, now())", oldTask, reopenedReturn)
+	followUpTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": reopenedIssue, "status": "queued", "runtime_id": testRuntimeID})
+	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", followUpTask, reopenedReturn)
+	// Another session of the same agent has its own accepted address.
+	otherSession := dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id":  testWorkspaceID,
+		"owner_user_id": ownerID,
+		"agent_id":      agentID,
+		"provider":      "paseo",
+		"host_id":       "return-host-" + suffix,
+		"session_id":    "return-session-" + suffix,
+		"display_name":  "Return peer",
+		"daemon_id":     "daemon-return-peer",
+	})
+	otherSessionIssue := dbfx.Issue(t, "session tasks other session "+suffix)
+	dispatchReturn(otherSessionIssue, agentID, otherSession)
+	// Another dispatcher has its own list.
+	otherDispatcherIssue := dbfx.Issue(t, "session tasks other dispatcher "+suffix)
+	dispatchReturn(otherDispatcherIssue, dispatcherID, dispatcherSession)
+	// A cancelled issue can never materialize its result.
+	cancelledIssue := dbfx.Issue(t, "session tasks cancelled "+suffix, testutil.Cols{"status": "cancelled"})
+	dispatchReturn(cancelledIssue, agentID, sessionID)
 
 	code, resp := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, true, sessionID))
 	if code != http.StatusOK {
@@ -243,11 +262,29 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 		t.Fatalf("contract whose current acceptor moved appeared: %+v", resp.Accepting)
 	}
 
-	if len(resp.Returning) != 1 || resp.Returning[0].IssueID != returnIssue {
-		t.Fatalf("returning = %+v, want the one pending issue once", resp.Returning)
+	returningByIssue := map[string]SessionTaskItem{}
+	for _, item := range resp.Returning {
+		returningByIssue[item.IssueID] = item
 	}
-	if resp.Returning[0].Role != "return" || resp.Returning[0].TaskStatus == "" || resp.Returning[0].AcceptedAt == "" {
-		t.Fatalf("returning item = %+v, want role, task status and accepted time", resp.Returning[0])
+	if len(resp.Returning) != 3 {
+		t.Fatalf("returning = %+v, want the three pending issues", resp.Returning)
+	}
+	for _, want := range []string{returnIssue, acceptedIssue, reopenedIssue} {
+		if _, ok := returningByIssue[want]; !ok {
+			t.Fatalf("returning %s missing: %+v", want, resp.Returning)
+		}
+	}
+	for _, unwanted := range []string{returnedIssue, otherSessionIssue, otherDispatcherIssue, cancelledIssue} {
+		if _, ok := returningByIssue[unwanted]; ok {
+			t.Fatalf("returning includes %s: %+v", unwanted, resp.Returning)
+		}
+	}
+	pending := returningByIssue[returnIssue]
+	if pending.Role != "return" || pending.TaskStatus != "running" || pending.AcceptedAt == "" {
+		t.Fatalf("returning item = %+v, want role, task status and accepted time", pending)
+	}
+	if reopened := returningByIssue[reopenedIssue]; reopened.TaskStatus != "queued" {
+		t.Fatalf("reopened returning item = %+v, want the follow-up run status", reopened)
 	}
 
 	// Even the workspace owner cannot read an agent's session summary through

@@ -36,8 +36,8 @@ lists them with status and task links:
 - owned: issues the session's agent executes or leads as task leader;
 - waiting for acceptance: contracts whose current version names the agent as
   acceptor while a delivery is still undecided;
-- returns pending: delegations the agent accepted as a worker whose result has
-  not been returned yet.
+- returns pending: delegations this session dispatched through an accepted
+  return address whose result has not come back yet.
 
 The data comes from the read-only `GET /api/agents/{id}/session-tasks`
 projection, scoped to the credential's own agent and requiring a session-bound

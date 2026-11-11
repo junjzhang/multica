@@ -48,7 +48,7 @@ export function SessionTasksSection({ agentId }: Pick<PluginAgentPanelProps, "ag
   return (
     <SettingsSection
       title="This session's tasks"
-      info="Read-only Multica work for this session: tasks you own as executor or leader, deliveries waiting for your acceptance, and accepted delegations whose result you still owe."
+      info="Read-only Multica work for this session: tasks you own as executor or leader, deliveries waiting for your acceptance, and delegations you dispatched whose result has not come back."
     >
       {loading ? (
         <SettingsCard>
@@ -72,7 +72,7 @@ export function SessionTasksSection({ agentId }: Pick<PluginAgentPanelProps, "ag
             <SettingsRow label="Counts" hint={countsLabel(view)} />
             <SettingsRow label="Session" hint={view.sessionId ?? "—"} />
             {view.truncated ? (
-              <SettingsRow label="Showing the first 50 items of each list" />
+              <SettingsRow label="Showing the first 50 items of each list; a list may therefore be incomplete." />
             ) : null}
           </SettingsCard>
           {TASK_GROUPS.map((group) => (

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { deliveryDataSchema, DELIVERY_ITEM_KIND, DELIVERY_ITEM_VERSION, parseDelivery } from "../shared/delivery";
+import {
+  deliveryDataSchema,
+  DELIVERY_ITEM_KIND,
+  DELIVERY_ITEM_VERSION,
+  fencedRaw,
+  parseDelivery,
+} from "../shared/delivery";
 import { deliveryTransformer } from "../client/timeline";
 
 // Byte-for-byte copy of the envelope the daemon renders for a comment
@@ -133,5 +139,20 @@ describe("deliveryTransformer", () => {
 
   it("leaves a message it cannot parse untouched", () => {
     expect(transform("hello there", "complete")).toBeUndefined();
+  });
+});
+describe("raw detail rendering", () => {
+  it("fences the delivered prompt so markdown keeps angle-bracket fragments literal", () => {
+    const fenced = fencedRaw(COMMENT_DELIVERY);
+    expect(fenced.startsWith("```\n")).toBe(true);
+    expect(fenced.endsWith("\n```")).toBe(true);
+    expect(fenced.slice(4, -4)).toBe(COMMENT_DELIVERY);
+  });
+
+  it("uses a fence longer than any backtick run in the text", () => {
+    const raw = "a ``` b ```` c";
+    const fenced = fencedRaw(raw);
+    expect(fenced.startsWith("`````\n")).toBe(true);
+    expect(fenced.slice(6, -6)).toBe(raw);
   });
 });

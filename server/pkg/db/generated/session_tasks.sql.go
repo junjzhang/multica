@@ -101,8 +101,8 @@ type ListSessionOwnedIssuesRow struct {
 }
 
 // Read projections for the Paseo session task panel. Each read is scoped to
-// one workspace and one agent; callers authorize the agent against the
-// credential before these run. Limits keep a single panel read bounded.
+// one workspace and one agent/session; callers authorize the credential before
+// these run. Limits keep a single panel read bounded.
 // Issues this agent owns as executor (assignee) or as task leader of the
 // leadership root. Custom statuses are filtered by their effective behavior so
 // a workspace-defined done status does not leave finished work on the panel.
@@ -133,63 +133,76 @@ func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwn
 	return items, nil
 }
 
-const listSessionReturnObligations = `-- name: ListSessionReturnObligations :many
+const listSessionPendingDelegationReturns = `-- name: ListSessionPendingDelegationReturns :many
 SELECT r.id AS delegation_return_id, r.issue_id, r.created_at AS accepted_at,
-       t.id AS task_id, t.status AS task_status,
-       i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at
-FROM agent_task_delegation_return l
-JOIN agent_task_queue t ON t.id = l.task_id
-JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+       i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
+       COALESCE(latest.task_status, '')::text AS task_status
+FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
+LEFT JOIN LATERAL (
+    SELECT t.status AS task_status, l.materialized_at
+    FROM agent_task_delegation_return l
+    JOIN agent_task_queue t ON t.id = l.task_id
+    WHERE l.delegation_return_id = r.id AND l.takeover_id IS NULL
+    ORDER BY t.created_at DESC, t.id DESC
+    LIMIT 1
+) latest ON true
 WHERE r.workspace_id = $1
-  AND t.agent_id = $2
-  AND l.takeover_id IS NULL
-  AND l.materialized_at IS NULL
-  AND t.status NOT IN ('completed', 'failed', 'cancelled')
+  AND r.dispatcher_agent_id = $2
+  AND r.external_session_id = $3
+  AND r.is_current
+  AND issue_effective_status(i.workspace_id, i.status) <> 'cancelled'
+  AND (latest.task_status IS NULL OR latest.materialized_at IS NULL)
 ORDER BY r.created_at DESC, r.id
-LIMIT $3::int
+LIMIT $4::int
 `
 
-type ListSessionReturnObligationsParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	AgentID     pgtype.UUID `json:"agent_id"`
-	RowLimit    int32       `json:"row_limit"`
+type ListSessionPendingDelegationReturnsParams struct {
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	AgentID           pgtype.UUID `json:"agent_id"`
+	ExternalSessionID pgtype.UUID `json:"external_session_id"`
+	RowLimit          int32       `json:"row_limit"`
 }
 
-type ListSessionReturnObligationsRow struct {
+type ListSessionPendingDelegationReturnsRow struct {
 	DelegationReturnID pgtype.UUID        `json:"delegation_return_id"`
 	IssueID            pgtype.UUID        `json:"issue_id"`
 	AcceptedAt         pgtype.Timestamptz `json:"accepted_at"`
-	TaskID             pgtype.UUID        `json:"task_id"`
-	TaskStatus         string             `json:"task_status"`
 	Number             int32              `json:"number"`
 	Title              string             `json:"title"`
 	IssueStatus        string             `json:"issue_status"`
 	IssueUpdatedAt     pgtype.Timestamptz `json:"issue_updated_at"`
+	TaskStatus         string             `json:"task_status"`
 }
 
-// Delegations this agent accepted as a worker: the run carries an accepted
-// return relationship that has not produced its result yet. A materialized
-// result (or a terminal run) leaves the list.
-func (q *Queries) ListSessionReturnObligations(ctx context.Context, arg ListSessionReturnObligationsParams) ([]ListSessionReturnObligationsRow, error) {
-	rows, err := q.db.Query(ctx, listSessionReturnObligations, arg.WorkspaceID, arg.AgentID, arg.RowLimit)
+// Accepted delegation returns this session dispatched and is still waiting on.
+// The return row is the dispatcher's accepted address for one issue, so each
+// issue contributes at most one item. A delegation is "returned" once the
+// latest run carrying that address has materialized its result; a retry or a
+// follow-up dispatch makes it pending again.
+func (q *Queries) ListSessionPendingDelegationReturns(ctx context.Context, arg ListSessionPendingDelegationReturnsParams) ([]ListSessionPendingDelegationReturnsRow, error) {
+	rows, err := q.db.Query(ctx, listSessionPendingDelegationReturns,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.ExternalSessionID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListSessionReturnObligationsRow{}
+	items := []ListSessionPendingDelegationReturnsRow{}
 	for rows.Next() {
-		var i ListSessionReturnObligationsRow
+		var i ListSessionPendingDelegationReturnsRow
 		if err := rows.Scan(
 			&i.DelegationReturnID,
 			&i.IssueID,
 			&i.AcceptedAt,
-			&i.TaskID,
-			&i.TaskStatus,
 			&i.Number,
 			&i.Title,
 			&i.IssueStatus,
 			&i.IssueUpdatedAt,
+			&i.TaskStatus,
 		); err != nil {
 			return nil, err
 		}

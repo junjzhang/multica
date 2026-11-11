@@ -7,7 +7,7 @@ import {
   SettingsRow,
 } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
-import type { DeliveryData } from "../shared/delivery";
+import { fencedRaw, type DeliveryData } from "../shared/delivery";
 
 /**
  * One Multica delivery rendered as a card. The card shows what the delivery is
@@ -37,7 +37,7 @@ export function DeliveryCard({ item }: PluginTimelineItemProps<DeliveryData>) {
       />
       {expanded ? (
         <SettingsRow label="Delivered prompt">
-          <Markdown>{delivery.raw}</Markdown>
+          <Markdown>{fencedRaw(delivery.raw)}</Markdown>
         </SettingsRow>
       ) : null}
     </SettingsCard>
