@@ -247,6 +247,18 @@ export interface IssueSessionBinding {
 
 export interface Issue {
   contract?: ContractView;
+  /**
+   * Task-level leadership root (WORK-269). Only squad task chains carry one;
+   * absent on older servers and on ordinary issues, so readers must treat it
+   * as "no task leader" rather than rebuild a global default.
+   */
+  leadership_root_issue_id?: string;
+  /** The agent currently responsible for the task chain, when it has a root. */
+  leader_agent_id?: string;
+  /** Set only when the current task leader is an external host session. */
+  leader_external_session_id?: string;
+  /** Monotonic leadership revision; a handoff increments it. */
+  leadership_revision?: number;
   id: string;
   workspace_id: string;
   number: number;

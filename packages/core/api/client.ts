@@ -35,6 +35,8 @@ import type {
   IssueTableRowsRequest,
   IssueTableRowsResponse,
   Agent,
+  AgentArchivePreflight,
+  AgentSessionPage,
   AgentSessionSummary,
   AgentSessionBinding,
   IssueSessionBinding,
@@ -346,6 +348,7 @@ import {
   CreateIssueResponseSchema,
   IssueSchema,
   AgentTaskSchema,
+  AgentArchivePreflightSchema,
   SourceContextPreviewSchema,
   CommentSubIssueTaskResponseSchema,
   ListWebhookDeliveriesResponseSchema,
@@ -1919,6 +1922,29 @@ export class ApiClient {
     if (!parsed) throw new Error("Invalid session list response");
     return parsed.sessions;
   }
+  /**
+   * One page of an agent's registered sessions. The agents list expands a
+   * template row lazily, so the page size is bounded here and the total is the
+   * server's, not the page's.
+   */
+  async listAgentSessionsPage(
+    agentId: string,
+    params: { limit?: number; offset?: number } = {},
+  ): Promise<AgentSessionPage> {
+    const search = new URLSearchParams();
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    if (params.offset !== undefined) search.set("offset", String(params.offset));
+    const query = search.size > 0 ? `?${search.toString()}` : "";
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions${query}`);
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[]; total?: number } | null>(
+      raw,
+      AgentSessionListResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return { sessions: parsed.sessions, total: parsed.total ?? parsed.sessions.length };
+  }
 
   /** The exact active (agent, issue) target. Null means no binding, not failure. */
   async getAgentIssueSessionBinding(
@@ -2090,6 +2116,21 @@ export class ApiClient {
 
   async archiveAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}/archive`, { method: "POST" });
+  }
+
+  /**
+   * Read-only archive preview for an external agent. Throws ApiError with
+   * status 404 on a server that predates the endpoint; callers treat that as
+   * "no preview available" and keep the previous confirm flow.
+   */
+  async getAgentArchivePreflight(id: string): Promise<AgentArchivePreflight> {
+    const raw = await this.fetch<unknown>(`/api/agents/${id}/archive-preflight`);
+    return parseWithFallback<AgentArchivePreflight>(
+      raw,
+      AgentArchivePreflightSchema,
+      { agent_id: id, archivable: false, blockers: [] },
+      { endpoint: "GET /api/agents/{id}/archive-preflight" },
+    );
   }
 
   /**
