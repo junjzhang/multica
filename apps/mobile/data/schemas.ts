@@ -634,6 +634,33 @@ export const AgentSchema: z.ZodType<Agent> = z.object({
   workspace_id: z.string().default(""),
   runtime_id: z.string().default(""),
   runtime_bound: z.boolean().optional(),
+  // WORK-269: external execution is a template plus its registered host
+  // sessions. Mobile reads the first session for a read-only label and never
+  // offers session selection or dispatch for it.
+  execution_kind: z.string().optional(),
+  external_session: z
+    .object({
+      id: z.string().optional(),
+      provider: z.string().default(""),
+      host_id: z.string().default(""),
+      session_id: z.string().default(""),
+      display_name: z.string().default(""),
+      url: z.string().nullable().default(null),
+      daemon_id: z.string().default(""),
+    })
+    .loose()
+    .nullable()
+    .optional(),
+  external_template: z
+    .object({
+      id: z.string().default(""),
+      provider: z.string().default(""),
+      host_id: z.string().default(""),
+      name: z.string().default(""),
+    })
+    .loose()
+    .nullable()
+    .optional(),
   name: z.string().default(""),
   description: z.string().default(""),
   instructions: z.string().default(""),

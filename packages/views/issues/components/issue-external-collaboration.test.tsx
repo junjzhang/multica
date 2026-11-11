@@ -204,6 +204,37 @@ describe("IssueExternalCollaboration", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("names the task leader as template › session from the issue binding", () => {
+    const templated: Agent = {
+      ...externalAgent,
+      external_template: {
+        id: "agent-1",
+        provider: "paseo",
+        host_id: "server-1",
+        name: "Paseo · VM-29-118",
+      },
+    };
+    renderCollaboration(
+      <IssueExternalCollaboration
+        issue={issue({
+          leadership_root_issue_id: "issue-1",
+          leader_agent_id: "agent-1",
+          leader_external_session_id: "session-bound",
+          leadership_revision: 2,
+          external_participants: [templated],
+          external_session_bindings: [binding("agent-1", boundSession)],
+        })}
+        agents={[templated]}
+      />,
+    );
+
+    expect(screen.getByText("Task leader")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Paseo · VM-29-118 › Issue route").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText(/requires an explicit handoff/)).toBeInTheDocument();
+  });
+
   it("shows the issue binding instead of the agent's single detail session", () => {
     renderCollaboration(
       <IssueExternalCollaboration

@@ -69,6 +69,7 @@ vi.mock("@tanstack/react-query", () => ({
     return { data: [], isLoading: false, isPending: false };
   },
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
+  queryOptions: <T,>(options: T) => options,
 }));
 
 // The list virtualizes; render every row so DOM order reflects sort order.
@@ -387,6 +388,32 @@ describe("AgentsPage execution identity", () => {
     expect(await screen.findByText("Unbound Agent")).toBeInTheDocument();
     // Status and runtime cells both carry the real repair signal.
     expect(screen.getAllByText("Needs a runtime").length).toBeGreaterThan(0);
+  });
+
+  it("expands sessions only for a templated agent and keeps legacy rows unchanged", async () => {
+    const templated = makeAgent({
+      id: "a-template",
+      name: "Paseo Template",
+      runtime_id: "",
+      runtime_bound: false,
+      execution_kind: "external",
+      external_template: {
+        id: "a-template",
+        provider: "paseo",
+        host_id: "server-1",
+        name: "Paseo · VM-29-118",
+      },
+      external_session_count: 2,
+    });
+    mocks.agents = [templated, externalAgent];
+    mocks.viewState.sortField = "name";
+    renderPage();
+
+    expect(await screen.findByText("Paseo Template")).toBeInTheDocument();
+    expect(screen.getByText("External Reviewer")).toBeInTheDocument();
+    // The template row offers the session expansion; the legacy external
+    // agent (template switch off / older backend) keeps its old row.
+    expect(screen.getAllByRole("button", { name: "Sessions" })).toHaveLength(1);
   });
 
   it("does not offer a runtime for an unknown execution kind", async () => {

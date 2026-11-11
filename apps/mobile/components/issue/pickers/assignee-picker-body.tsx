@@ -153,6 +153,8 @@ export function AssigneePickerBody({ value, query, onChange }: Props) {
         return `s:${row.squad.id}`;
       }}
       renderItem={({ item }) => {
+        const externalAgent =
+          item.kind === "agent" && item.agent.execution_kind === "external";
         const needsRuntime =
           (item.kind === "agent" && !isAgentRuntimeBound(item.agent)) ||
           (item.kind === "squad" &&
@@ -199,9 +201,11 @@ export function AssigneePickerBody({ value, query, onChange }: Props) {
               the same row. Members carry no tag (they're the default actor). */}
           {item.kind === "agent" ? (
             <Text className="text-sm text-muted-foreground">
-              {isAgentRuntimeBound(item.agent)
-                ? t("picker.agent")
-                : t("picker.needs_runtime")}
+              {externalAgent
+                ? t("picker.external_read_only")
+                : isAgentRuntimeBound(item.agent)
+                  ? t("picker.agent")
+                  : t("picker.needs_runtime")}
             </Text>
           ) : item.kind === "squad" ? (
             <Text className="text-sm text-muted-foreground">

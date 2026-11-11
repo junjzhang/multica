@@ -74,6 +74,7 @@ import {
 } from "../../layout/collection-page";
 import { availabilityConfig } from "../presence";
 import { AgentRowActions } from "./agent-row-actions";
+import { AgentSessionsPopover } from "./agent-sessions-popover";
 import {
   AgentListToolbar,
   countActiveFilterDimensions,
@@ -403,6 +404,12 @@ function NameCell({ row }: { row: AgentListRow }) {
               {t(($) => $.row.you)}
             </span>
           )}
+          {!isArchived &&
+            (agent.external_template ||
+              (agentExecutionKind(agent) === "external" &&
+                (agent.external_session_count ?? 0) > 1)) && (
+              <AgentSessionsPopover agent={agent} />
+            )}
         </div>
         {agent.description ? (
           <div className="mt-0.5 truncate text-caption text-muted-foreground">

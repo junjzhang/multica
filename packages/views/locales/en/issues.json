@@ -552,7 +552,11 @@
     "project_directory_path_copied_with_branch": "Project directory path copied — work is on {{branch}}",
     "workdir_path_copy_failed": "Failed to copy workdir path",
     "workdir_path_unavailable": "No local workdir yet — issue has not been run by a local agent",
-    "pull_requests_empty_title": "No linked pull requests."
+    "pull_requests_empty_title": "No linked pull requests.",
+    "task_leader": "Task leader",
+    "task_leader_unavailable": "Task leader unavailable",
+    "task_leader_session_unknown": "Session unknown",
+    "sibling_session_note": "Other sessions of this template may comment here. Dispatching or taking over requires an explicit handoff."
   },
   "timeline": {
     "loading": "Loading..."
