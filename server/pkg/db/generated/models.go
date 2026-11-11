@@ -12,14 +12,15 @@ import (
 )
 
 type ActivityLog struct {
-	ID          pgtype.UUID        `json:"id"`
-	WorkspaceID pgtype.UUID        `json:"workspace_id"`
-	IssueID     pgtype.UUID        `json:"issue_id"`
-	ActorType   pgtype.Text        `json:"actor_type"`
-	ActorID     pgtype.UUID        `json:"actor_id"`
-	Action      string             `json:"action"`
-	Details     []byte             `json:"details"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	ActorType      pgtype.Text        `json:"actor_type"`
+	ActorID        pgtype.UUID        `json:"actor_id"`
+	Action         string             `json:"action"`
+	Details        []byte             `json:"details"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ActorSessionID pgtype.UUID        `json:"actor_session_id"`
 }
 
 type Agent struct {
@@ -77,35 +78,37 @@ type AgentInvocationTarget struct {
 }
 
 type AgentMailboxMessage struct {
-	ID               pgtype.UUID        `json:"id"`
-	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
-	IssueID          pgtype.UUID        `json:"issue_id"`
-	CommentID        pgtype.UUID        `json:"comment_id"`
-	RecipientAgentID pgtype.UUID        `json:"recipient_agent_id"`
-	SourceSessionID  pgtype.UUID        `json:"source_session_id"`
-	SenderType       pgtype.Text        `json:"sender_type"`
-	SenderID         pgtype.UUID        `json:"sender_id"`
-	DeliveryStatus   string             `json:"delivery_status"`
-	ProcessingStatus string             `json:"processing_status"`
-	LeaseTokenHash   pgtype.Text        `json:"lease_token_hash"`
-	LeaseOwner       pgtype.Text        `json:"lease_owner"`
-	LeaseExpiresAt   pgtype.Timestamptz `json:"lease_expires_at"`
-	Attempts         int32              `json:"attempts"`
-	NextAttemptAt    pgtype.Timestamptz `json:"next_attempt_at"`
-	DeliveredAt      pgtype.Timestamptz `json:"delivered_at"`
-	HostReceipt      pgtype.Text        `json:"host_receipt"`
-	LastError        pgtype.Text        `json:"last_error"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
-	SourceType       string             `json:"source_type"`
-	SourceKey        pgtype.Text        `json:"source_key"`
-	Kind             string             `json:"kind"`
-	RecipientType    string             `json:"recipient_type"`
-	Payload          []byte             `json:"payload"`
-	TargetSessionID  pgtype.UUID        `json:"target_session_id"`
-	NotificationKey  pgtype.Text        `json:"notification_key"`
-	WithdrawnAt      pgtype.Timestamptz `json:"withdrawn_at"`
-	HandledByTaskID  pgtype.UUID        `json:"handled_by_task_id"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	IssueID               pgtype.UUID        `json:"issue_id"`
+	CommentID             pgtype.UUID        `json:"comment_id"`
+	RecipientAgentID      pgtype.UUID        `json:"recipient_agent_id"`
+	SourceSessionID       pgtype.UUID        `json:"source_session_id"`
+	SenderType            pgtype.Text        `json:"sender_type"`
+	SenderID              pgtype.UUID        `json:"sender_id"`
+	DeliveryStatus        string             `json:"delivery_status"`
+	ProcessingStatus      string             `json:"processing_status"`
+	LeaseTokenHash        pgtype.Text        `json:"lease_token_hash"`
+	LeaseOwner            pgtype.Text        `json:"lease_owner"`
+	LeaseExpiresAt        pgtype.Timestamptz `json:"lease_expires_at"`
+	Attempts              int32              `json:"attempts"`
+	NextAttemptAt         pgtype.Timestamptz `json:"next_attempt_at"`
+	DeliveredAt           pgtype.Timestamptz `json:"delivered_at"`
+	HostReceipt           pgtype.Text        `json:"host_receipt"`
+	LastError             pgtype.Text        `json:"last_error"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	SourceType            string             `json:"source_type"`
+	SourceKey             pgtype.Text        `json:"source_key"`
+	Kind                  string             `json:"kind"`
+	RecipientType         string             `json:"recipient_type"`
+	Payload               []byte             `json:"payload"`
+	TargetSessionID       pgtype.UUID        `json:"target_session_id"`
+	NotificationKey       pgtype.Text        `json:"notification_key"`
+	WithdrawnAt           pgtype.Timestamptz `json:"withdrawn_at"`
+	HandledByTaskID       pgtype.UUID        `json:"handled_by_task_id"`
+	LeadershipRootIssueID pgtype.UUID        `json:"leadership_root_issue_id"`
+	LeadershipRevision    pgtype.Int8        `json:"leadership_revision"`
 }
 
 type AgentMcpServer struct {
@@ -233,6 +236,8 @@ type AgentTaskQueue struct {
 	TerminalReportedAt        pgtype.Timestamptz `json:"terminal_reported_at"`
 	SessionPinConfirmed       bool               `json:"session_pin_confirmed"`
 	SessionPinGeneration      pgtype.UUID        `json:"session_pin_generation"`
+	LeadershipRootIssueID     pgtype.UUID        `json:"leadership_root_issue_id"`
+	LeadershipRevision        pgtype.Int8        `json:"leadership_revision"`
 }
 
 type AgentToLabel struct {
@@ -676,6 +681,7 @@ type Comment struct {
 	DeletedAt                pgtype.Timestamptz `json:"deleted_at"`
 	SuppressedAgentIds       []pgtype.UUID      `json:"suppressed_agent_ids"`
 	ExternalOriginatorUserID pgtype.UUID        `json:"external_originator_user_id"`
+	ActorSessionID           pgtype.UUID        `json:"actor_session_id"`
 }
 
 type CommentDelegationReturn struct {
@@ -967,43 +973,51 @@ type InstanceTelemetryState struct {
 }
 
 type Issue struct {
-	ID                 pgtype.UUID        `json:"id"`
-	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
-	Title              string             `json:"title"`
-	Description        pgtype.Text        `json:"description"`
-	Status             string             `json:"status"`
-	Priority           string             `json:"priority"`
-	AssigneeType       pgtype.Text        `json:"assignee_type"`
-	AssigneeID         pgtype.UUID        `json:"assignee_id"`
-	CreatorType        string             `json:"creator_type"`
-	CreatorID          pgtype.UUID        `json:"creator_id"`
-	ParentIssueID      pgtype.UUID        `json:"parent_issue_id"`
-	AcceptanceCriteria []byte             `json:"acceptance_criteria"`
-	ContextRefs        []byte             `json:"context_refs"`
-	Position           float64            `json:"position"`
-	DueDate            pgtype.Date        `json:"due_date"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
-	Number             int32              `json:"number"`
-	ProjectID          pgtype.UUID        `json:"project_id"`
-	OriginType         pgtype.Text        `json:"origin_type"`
-	OriginID           pgtype.UUID        `json:"origin_id"`
-	FirstExecutedAt    pgtype.Timestamptz `json:"first_executed_at"`
-	StartDate          pgtype.Date        `json:"start_date"`
-	Metadata           []byte             `json:"metadata"`
-	Stage              pgtype.Int4        `json:"stage"`
-	Properties         []byte             `json:"properties"`
-	Revision           int64              `json:"revision"`
-	LastActivityAt     pgtype.Timestamptz `json:"last_activity_at"`
-	TriageState        pgtype.Text        `json:"triage_state"`
-	DuplicateOfIssueID pgtype.UUID        `json:"duplicate_of_issue_id"`
-	CoordinatorType    pgtype.Text        `json:"coordinator_type"`
-	CoordinatorID      pgtype.UUID        `json:"coordinator_id"`
-	MergeAllowed       bool               `json:"merge_allowed"`
-	MergeRepositoryUrl pgtype.Text        `json:"merge_repository_url"`
-	MergeTargetBranch  pgtype.Text        `json:"merge_target_branch"`
-	MergeGrantedBy     pgtype.UUID        `json:"merge_granted_by"`
-	MergeGrantedAt     pgtype.Timestamptz `json:"merge_granted_at"`
+	ID                        pgtype.UUID        `json:"id"`
+	WorkspaceID               pgtype.UUID        `json:"workspace_id"`
+	Title                     string             `json:"title"`
+	Description               pgtype.Text        `json:"description"`
+	Status                    string             `json:"status"`
+	Priority                  string             `json:"priority"`
+	AssigneeType              pgtype.Text        `json:"assignee_type"`
+	AssigneeID                pgtype.UUID        `json:"assignee_id"`
+	CreatorType               string             `json:"creator_type"`
+	CreatorID                 pgtype.UUID        `json:"creator_id"`
+	ParentIssueID             pgtype.UUID        `json:"parent_issue_id"`
+	AcceptanceCriteria        []byte             `json:"acceptance_criteria"`
+	ContextRefs               []byte             `json:"context_refs"`
+	Position                  float64            `json:"position"`
+	DueDate                   pgtype.Date        `json:"due_date"`
+	CreatedAt                 pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                 pgtype.Timestamptz `json:"updated_at"`
+	Number                    int32              `json:"number"`
+	ProjectID                 pgtype.UUID        `json:"project_id"`
+	OriginType                pgtype.Text        `json:"origin_type"`
+	OriginID                  pgtype.UUID        `json:"origin_id"`
+	FirstExecutedAt           pgtype.Timestamptz `json:"first_executed_at"`
+	StartDate                 pgtype.Date        `json:"start_date"`
+	Metadata                  []byte             `json:"metadata"`
+	Stage                     pgtype.Int4        `json:"stage"`
+	Properties                []byte             `json:"properties"`
+	Revision                  int64              `json:"revision"`
+	LastActivityAt            pgtype.Timestamptz `json:"last_activity_at"`
+	TriageState               pgtype.Text        `json:"triage_state"`
+	DuplicateOfIssueID        pgtype.UUID        `json:"duplicate_of_issue_id"`
+	CoordinatorType           pgtype.Text        `json:"coordinator_type"`
+	CoordinatorID             pgtype.UUID        `json:"coordinator_id"`
+	MergeAllowed              bool               `json:"merge_allowed"`
+	MergeRepositoryUrl        pgtype.Text        `json:"merge_repository_url"`
+	MergeTargetBranch         pgtype.Text        `json:"merge_target_branch"`
+	MergeGrantedBy            pgtype.UUID        `json:"merge_granted_by"`
+	MergeGrantedAt            pgtype.Timestamptz `json:"merge_granted_at"`
+	LeadershipRootIssueID     pgtype.UUID        `json:"leadership_root_issue_id"`
+	LeadershipSquadID         pgtype.UUID        `json:"leadership_squad_id"`
+	LeaderAgentID             pgtype.UUID        `json:"leader_agent_id"`
+	LeaderExternalSessionID   pgtype.UUID        `json:"leader_external_session_id"`
+	LeadershipRevision        int64              `json:"leadership_revision"`
+	CreatorSessionID          pgtype.UUID        `json:"creator_session_id"`
+	SessionSemantics          bool               `json:"session_semantics"`
+	RequesterLeadershipRootID pgtype.UUID        `json:"requester_leadership_root_id"`
 }
 
 type IssueAssignmentDelegation struct {
@@ -1225,43 +1239,46 @@ type IssueViewPreference struct {
 }
 
 type IssueWakeup struct {
-	ID              pgtype.UUID        `json:"id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	IssueID         pgtype.UUID        `json:"issue_id"`
-	AgentID         pgtype.UUID        `json:"agent_id"`
-	CreatedBy       pgtype.UUID        `json:"created_by"`
-	SourceTaskID    pgtype.UUID        `json:"source_task_id"`
-	ParentCommentID pgtype.UUID        `json:"parent_comment_id"`
-	Instruction     string             `json:"instruction"`
-	Kind            string             `json:"kind"`
-	Mode            string             `json:"mode"`
-	EventTypes      []string           `json:"event_types"`
-	FilterAgentID   pgtype.UUID        `json:"filter_agent_id"`
-	FilterTaskID    pgtype.UUID        `json:"filter_task_id"`
-	IntervalSeconds pgtype.Int8        `json:"interval_seconds"`
-	CronExpression  pgtype.Text        `json:"cron_expression"`
-	Timezone        string             `json:"timezone"`
-	NextFireAt      pgtype.Timestamptz `json:"next_fire_at"`
-	Enabled         bool               `json:"enabled"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	Revision        int64              `json:"revision"`
-	LastTaskID      pgtype.UUID        `json:"last_task_id"`
-	LastError       pgtype.Text        `json:"last_error"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	FilterActorType pgtype.Text        `json:"filter_actor_type"`
-	FilterActorID   pgtype.UUID        `json:"filter_actor_id"`
-	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
-	ExpirySeconds   pgtype.Int8        `json:"expiry_seconds"`
-	OnTimeout       pgtype.Text        `json:"on_timeout"`
-	TimedOutAt      pgtype.Timestamptz `json:"timed_out_at"`
-	SystemRule      pgtype.Text        `json:"system_rule"`
-	CustomizedAt    pgtype.Timestamptz `json:"customized_at"`
-	Condition       json.RawMessage    `json:"condition"`
-	ConditionState  string             `json:"condition_state"`
-	MaxFires        pgtype.Int4        `json:"max_fires"`
-	FireCount       int32              `json:"fire_count"`
-	PausedReason    pgtype.Text        `json:"paused_reason"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	IssueID               pgtype.UUID        `json:"issue_id"`
+	AgentID               pgtype.UUID        `json:"agent_id"`
+	CreatedBy             pgtype.UUID        `json:"created_by"`
+	SourceTaskID          pgtype.UUID        `json:"source_task_id"`
+	ParentCommentID       pgtype.UUID        `json:"parent_comment_id"`
+	Instruction           string             `json:"instruction"`
+	Kind                  string             `json:"kind"`
+	Mode                  string             `json:"mode"`
+	EventTypes            []string           `json:"event_types"`
+	FilterAgentID         pgtype.UUID        `json:"filter_agent_id"`
+	FilterTaskID          pgtype.UUID        `json:"filter_task_id"`
+	IntervalSeconds       pgtype.Int8        `json:"interval_seconds"`
+	CronExpression        pgtype.Text        `json:"cron_expression"`
+	Timezone              string             `json:"timezone"`
+	NextFireAt            pgtype.Timestamptz `json:"next_fire_at"`
+	Enabled               bool               `json:"enabled"`
+	DisabledAt            pgtype.Timestamptz `json:"disabled_at"`
+	Revision              int64              `json:"revision"`
+	LastTaskID            pgtype.UUID        `json:"last_task_id"`
+	LastError             pgtype.Text        `json:"last_error"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	FilterActorType       pgtype.Text        `json:"filter_actor_type"`
+	FilterActorID         pgtype.UUID        `json:"filter_actor_id"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	ExpirySeconds         pgtype.Int8        `json:"expiry_seconds"`
+	OnTimeout             pgtype.Text        `json:"on_timeout"`
+	TimedOutAt            pgtype.Timestamptz `json:"timed_out_at"`
+	SystemRule            pgtype.Text        `json:"system_rule"`
+	CustomizedAt          pgtype.Timestamptz `json:"customized_at"`
+	Condition             json.RawMessage    `json:"condition"`
+	ConditionState        string             `json:"condition_state"`
+	MaxFires              pgtype.Int4        `json:"max_fires"`
+	FireCount             int32              `json:"fire_count"`
+	PausedReason          pgtype.Text        `json:"paused_reason"`
+	TargetSessionID       pgtype.UUID        `json:"target_session_id"`
+	LeadershipRootIssueID pgtype.UUID        `json:"leadership_root_issue_id"`
+	LeadershipRevision    pgtype.Int8        `json:"leadership_revision"`
 }
 
 type IssueWakeupReceipt struct {

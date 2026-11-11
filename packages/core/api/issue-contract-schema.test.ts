@@ -59,4 +59,12 @@ describe("contract API boundary", () => {
     expect(view.executor_representative).toEqual({ type: "agent", id: "leader" });
     expect(view.pending_actor).toEqual(view.executor);
   });
+  it("keeps session authors and ignores malformed additive session fields", () => {
+    const view = ContractViewSchema.parse({contract:null,executor_representative:{type:"agent",id:"template",session_id:"session-a"}});
+    expect(view.executor_representative?.session_id).toBe("session-a");
+    expect(ContractViewSchema.parse({contract:null,executor_representative:{type:"agent",id:"template",session_id:42}}).executor_representative?.session_id).toBeUndefined();
+    expect(IssueSchema.shape.leadership_revision.parse(-1)).toBeUndefined();
+    expect(IssueSchema.shape.leadership_revision.parse(undefined)).toBeUndefined();
+  });
+
 });

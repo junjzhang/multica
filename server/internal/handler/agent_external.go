@@ -496,6 +496,10 @@ func (h *Handler) CreateExternalAgent(w http.ResponseWriter, r *http.Request) {
 // extend; a session identity is immutable, so naming a different agent is a
 // conflict rather than a silent move of the session to that agent.
 func (h *Handler) writeExistingExternalAgent(w http.ResponseWriter, r *http.Request, session db.ExternalAgentSession, requestedAgentID pgtype.UUID, displayName string, link *string, daemonID string) {
+	if session.RevokedAt.Valid {
+		writeError(w, http.StatusConflict, "external session is revoked; register a new host session")
+		return
+	}
 	if requestedAgentID.Valid && requestedAgentID != session.AgentID {
 		writeError(w, http.StatusConflict, "external session is already registered to another agent")
 		return
@@ -659,7 +663,7 @@ func (h *Handler) RevokeExternalAgentSession(w http.ResponseWriter, r *http.Requ
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			w.WriteHeader(http.StatusNoContent)
+			writeError(w, http.StatusNotFound, "external session not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to revoke session")

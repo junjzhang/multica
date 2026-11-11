@@ -222,3 +222,21 @@ func TestBindRejectsForeignTargets(t *testing.T) {
 		t.Fatalf("cross-workspace error = %v, want ErrInvalidBinding", err)
 	}
 }
+
+func TestRevokedSessionCannotResolveOrBind(t *testing.T) {
+	f := newRouteFixture(t)
+	q := db.New(f.pool)
+	req := BindRequest{WorkspaceID: f.workspaceID, AgentID: f.agentID, IssueID: f.issue, SessionID: f.sessionA}
+	if _, err := Bind(t.Context(), q, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pool.Exec(t.Context(), "UPDATE external_agent_session SET revoked_at=now() WHERE id=$1", f.sessionA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(t.Context(), q, f.workspaceID, f.agentID, f.issue); !errors.Is(err, ErrNotBound) {
+		t.Fatalf("resolve revoked: %v", err)
+	}
+	if _, err := Bind(t.Context(), q, req); !errors.Is(err, ErrInvalidBinding) {
+		t.Fatalf("bind revoked: %v", err)
+	}
+}

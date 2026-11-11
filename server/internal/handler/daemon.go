@@ -3245,7 +3245,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 				if squad, err := h.Queries.GetSquadInWorkspace(r.Context(), db.GetSquadInWorkspaceParams{
 					ID:          task.SquadID,
 					WorkspaceID: issue.WorkspaceID,
-				}); err == nil && uuidToString(squad.LeaderID) == resp.Agent.ID {
+				}); err == nil && leaderMatches(r.Context(), h.Queries, issue, squad, resp.Agent.ID) {
 					// Parent-status authority is deliberately NARROWER than
 					// briefing injection. Injection is keyed off is_leader_task
 					// (see above) and therefore also fires on the MUL-3724 path,
@@ -3257,7 +3257,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 					ownsIssueStatus := issue.AssigneeType.Valid &&
 						issue.AssigneeType.String == "squad" &&
 						uuidToString(issue.AssigneeID) == uuidToString(squad.ID)
-					briefing := squadbriefing.Build(r.Context(), h.Queries, squad, ownsIssueStatus)
+					briefing := squadbriefing.BuildForIssue(r.Context(), h.Queries, issue, squad, ownsIssueStatus)
 					if strings.TrimSpace(resp.Agent.Instructions) == "" {
 						resp.Agent.Instructions = briefing
 					} else {

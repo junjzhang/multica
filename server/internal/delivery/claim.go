@@ -244,6 +244,16 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 			// Another claim transaction is already leasing this session.
 			continue
 		}
+		message, err := qtx.GetAgentMailboxMessage(ctx, db.GetAgentMailboxMessageParams{ID: candidate.ID, WorkspaceID: workspaceID})
+		if err != nil {
+			return nil, err
+		}
+		if message.DeliveryStatus == "pending" && message.LeadershipRootIssueID.Valid {
+			root, err := qtx.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: message.LeadershipRootIssueID, WorkspaceID: workspaceID})
+			if err != nil || root.LeadershipRevision != message.LeadershipRevision.Int64 || root.LeaderExternalSessionID != message.TargetSessionID {
+				continue
+			}
+		}
 		// The candidate list carried no status on purpose. Read the row under
 		// the same lock the lease takes: another worker may have leased and sent
 		// it, then lost the ack or recorded unknown and let the lease expire.

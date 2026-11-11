@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -162,7 +163,8 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		if err != nil {
 			return IssueRunTrigger{}, false
 		}
-		leader, err := s.Queries.GetAgent(ctx, squad.LeaderID)
+		resolved, err := issueleader.ResolveIssueLeader(ctx, s.Queries, issue, squad)
+		leader := resolved.Agent
 		if err != nil {
 			return IssueRunTrigger{}, false
 		}
@@ -175,7 +177,7 @@ func (s *IssueService) WillEnqueueRun(ctx context.Context, in IssueTriggerInput,
 		}
 		return IssueRunTrigger{
 			IssueID:      issue.ID,
-			AgentID:      squad.LeaderID,
+			AgentID:      leader.ID,
 			AssigneeType: "squad",
 			Source:       source,
 		}, true

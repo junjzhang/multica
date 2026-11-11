@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"io"
 	"log/slog"
 	"net/http"
@@ -785,7 +786,11 @@ func (h *Handler) prepareAgentCommentSubIssue(w http.ResponseWriter, r *http.Req
 		if err != nil || squad.ArchivedAt.Valid {
 			return nil, sourceContextBadRequest("squad not found or archived")
 		}
-		agentID = squad.LeaderID
+		leader, err := issueleader.ResolveIssueLeader(r.Context(), h.Queries, db.Issue{WorkspaceID: workspaceID}, squad)
+		if err != nil {
+			return nil, sourceContextBadRequest(err.Error())
+		}
+		agentID = leader.Agent.ID
 	} else {
 		parsed, err := util.ParseUUID(strings.TrimSpace(input.AgentID))
 		if err != nil {

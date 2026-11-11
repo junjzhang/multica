@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -87,13 +88,31 @@ func contractRepresentative(basis json.RawMessage) *issuecontract.Actor {
 	return fields.Representative
 }
 
+func contractActor(r *http.Request, kind, id string) issuecontract.Actor {
+	actor := issuecontract.Actor{Type: kind, ID: id}
+	if session, ok := externalActorSessionID(r); isExternalAgentActor(r) && ok {
+		actor.SessionID = uuidToString(session)
+	}
+	return actor
+}
+
+func contractParty(basis json.RawMessage, key string) issuecontract.Actor {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(basis, &fields)
+	var actor issuecontract.Actor
+	_ = json.Unmarshal(fields[key], &actor)
+	return actor
+}
+
+func sameContractEntity(a, b issuecontract.Actor) bool { return a.Type == b.Type && a.ID == b.ID }
+
 func representsContractExecutor(actor, executor issuecontract.Actor, representative *issuecontract.Actor) bool {
 	return actor == executor || representative != nil && actor == *representative
 }
 
 func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State) (ContractView, error) {
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
-	actor := issuecontract.Actor{Type: actorType, ID: actorID}
+	actor := contractActor(r, actorType, actorID)
 	executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
 	basis, err := contractBasis(ctx, q, issue)
 	if err != nil {
@@ -102,10 +121,12 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	active := issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) != "cancelled" && !issue.TriageState.Valid
 	view := ContractView{Accepted: []int{}, CanEdit: active && h.canMaintainContract(ctx, r, q, issue, state, basis), MergeAuthorization: mergeAuthorizationResponse(issue)}
 	if issue.AssigneeID.Valid {
+		executor = contractParty(basis, "executor")
 		view.Executor = &executor
 	}
 	if issue.CoordinatorID.Valid {
-		view.Acceptor = &issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
+		acceptor := contractParty(basis, "acceptor")
+		view.Acceptor = &acceptor
 	}
 	view.ExecutorRepresentative = contractRepresentative(basis)
 	v := state.Current()
@@ -195,7 +216,7 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
-	actor := issuecontract.Actor{Type: actorType, ID: actorID}
+	actor := contractActor(r, actorType, actorID)
 	if isMachineCredentialActor(r) && actor.Type != "agent" {
 		writeError(w, 403, "contract actions require a concrete agent identity")
 		return
@@ -246,7 +267,12 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "squad is changing; reload before retrying")
 			return
 		}
-		if _, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID}); err != nil {
+		leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+		if leaderErr != nil {
+			writeError(w, 409, leaderErr.Error())
+			return
+		}
+		if _, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: leader.Agent.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			writeError(w, 409, "squad leader is changing; reload before retrying")
 			return
 		}
@@ -360,11 +386,11 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		if !h.canMaintainContract(ctx, r, q, issue, *state, basis) {
 			return "", contractFail(403, "contract maintenance requires a verified original requester in scope; the executor cannot change its agreement")
 		}
-		executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
+		executor := contractParty(basis, "executor")
 		if representsContractExecutor(actor, executor, representative) {
 			return "", contractFail(403, "the executor cannot revise its own agreement")
 		}
-		acceptor := issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
+		acceptor := contractParty(basis, "acceptor")
 		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent" && executor.Type != "squad") || representsContractExecutor(acceptor, executor, representative) {
 			return "", contractFail(400, "choose distinct executor and coordinator before creating a contract")
 		}

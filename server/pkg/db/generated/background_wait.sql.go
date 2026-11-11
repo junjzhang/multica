@@ -25,7 +25,7 @@ WHERE agent_mailbox_message.recipient_agent_id = EXCLUDED.recipient_agent_id
   AND agent_mailbox_message.source_type = 'background_wait'
   AND agent_mailbox_message.payload = EXCLUDED.payload
   AND agent_mailbox_message.target_session_id IS NULL
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type CreateManagedWaitMailboxParams struct {
@@ -77,6 +77,8 @@ func (q *Queries) CreateManagedWaitMailbox(ctx context.Context, arg CreateManage
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -93,7 +95,7 @@ func (q *Queries) GetTaskMessageSequence(ctx context.Context, taskID pgtype.UUID
 }
 
 const listRuntimeBackgroundWaitTasks = `-- name: ListRuntimeBackgroundWaitTasks :many
-SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation FROM agent_task_queue
+SELECT id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation, leadership_root_issue_id, leadership_revision FROM agent_task_queue
 WHERE runtime_id = $1
   AND context->'background_wait'->'address'->>'task_id' = id::text
   AND context->'background_wait'->>'consumed' IS DISTINCT FROM 'true'
@@ -176,6 +178,8 @@ func (q *Queries) ListRuntimeBackgroundWaitTasks(ctx context.Context, runtimeID 
 			&i.TerminalReportedAt,
 			&i.SessionPinConfirmed,
 			&i.SessionPinGeneration,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -191,7 +195,7 @@ const setManagedWaitContext = `-- name: SetManagedWaitContext :one
 UPDATE agent_task_queue
 SET context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('background_wait', $1::jsonb)
 WHERE id = $2
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation, leadership_root_issue_id, leadership_revision
 `
 
 type SetManagedWaitContextParams struct {
@@ -268,6 +272,8 @@ func (q *Queries) SetManagedWaitContext(ctx context.Context, arg SetManagedWaitC
 		&i.TerminalReportedAt,
 		&i.SessionPinConfirmed,
 		&i.SessionPinGeneration,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -279,7 +285,7 @@ SET status = 'deferred', started_at = NULL, dispatched_at = NULL,
     wait_reason = 'Waiting for background command',
     branch_name = COALESCE(NULLIF($2::text, ''), branch_name)
 WHERE id = $3 AND status IN ('running','dispatched','waiting_local_directory','deferred')
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation, leadership_root_issue_id, leadership_revision
 `
 
 type SuspendTaskForBackgroundWaitParams struct {
@@ -357,6 +363,8 @@ func (q *Queries) SuspendTaskForBackgroundWait(ctx context.Context, arg SuspendT
 		&i.TerminalReportedAt,
 		&i.SessionPinConfirmed,
 		&i.SessionPinGeneration,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }

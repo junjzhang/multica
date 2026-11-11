@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"slices"
 	"time"
@@ -468,7 +469,8 @@ func (h *Handler) dispatchCommentObligation(ctx context.Context, obligationID pg
 	trigger := commentAgentTrigger{Agent: agent, Source: commentAgentTriggerSource(obligation.TriggerSource)}
 	if obligation.SquadID.Valid {
 		squad, err := q.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{ID: obligation.SquadID, WorkspaceID: obligation.WorkspaceID})
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && squad.LeaderID != agent.ID) {
+		leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+		if errors.Is(err, pgx.ErrNoRows) || leaderErr != nil || leader.Agent.ID != agent.ID {
 			return fail(ReasonTargetUnavailable, "accepted squad leader no longer available")
 		}
 		if err != nil {

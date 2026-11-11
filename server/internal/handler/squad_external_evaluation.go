@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"net/http"
 
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -40,7 +41,8 @@ func (h *Handler) recordExternalSquadEvaluation(w http.ResponseWriter, r *http.R
 		return
 	}
 	squad, err := h.Queries.GetSquadInWorkspace(r.Context(), db.GetSquadInWorkspaceParams{ID: squadID, WorkspaceID: issue.WorkspaceID})
-	if err != nil || squad.ArchivedAt.Valid || squad.LeaderID != message.RecipientAgentID {
+	leader, leaderErr := issueleader.ResolveIssueLeader(r.Context(), h.Queries, issue, squad)
+	if err != nil || leaderErr != nil || leader.Agent.ID != message.RecipientAgentID || leader.SessionID != actorSession {
 		writeError(w, http.StatusForbidden, "only the current squad leader can record evaluations")
 		return
 	}

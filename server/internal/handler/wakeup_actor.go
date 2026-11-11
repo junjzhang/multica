@@ -9,7 +9,7 @@ import (
 )
 
 type wakeupActorKey struct{}
-type wakeupActor struct{ kind, id, task string }
+type wakeupActor struct{ kind, id, task, session string }
 type wakeupHandedToKey struct{}
 
 // withWakeupHandedTo names the agent a write hands the issue to. That agent
@@ -35,7 +35,7 @@ func (h *Handler) withWakeupActor(r *http.Request) *http.Request {
 	if source.Valid {
 		task = uuidToString(source)
 	}
-	return r.WithContext(context.WithValue(r.Context(), wakeupActorKey{}, wakeupActor{kind, id, task}))
+	return r.WithContext(context.WithValue(r.Context(), wakeupActorKey{}, wakeupActor{kind, id, task, r.Header.Get(ActorSessionHeader)}))
 }
 
 func (h *Handler) beginWakeupWrite(ctx context.Context) (pgx.Tx, error) {
@@ -44,7 +44,7 @@ func (h *Handler) beginWakeupWrite(ctx context.Context) (pgx.Tx, error) {
 		return nil, err
 	}
 	if actor, ok := ctx.Value(wakeupActorKey{}).(wakeupActor); ok {
-		_, err = tx.Exec(ctx, `SELECT set_config('multica.actor_type',$1,true),set_config('multica.actor_id',$2,true),set_config('multica.source_task_id',$3,true)`, actor.kind, actor.id, actor.task)
+		_, err = tx.Exec(ctx, `SELECT set_config('multica.actor_type',$1,true),set_config('multica.actor_id',$2,true),set_config('multica.source_task_id',$3,true),set_config('multica.actor_session_id',$4,true)`, actor.kind, actor.id, actor.task, actor.session)
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return nil, err

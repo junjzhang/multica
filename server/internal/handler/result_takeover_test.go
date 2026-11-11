@@ -525,3 +525,40 @@ func TestResultTakeoverExternalUsesExistingDeliveryWorker(t *testing.T) {
 		t.Fatal("new notification rewrote old host uncertainty")
 	}
 }
+
+func TestResultTakeoverAcrossTemplatesKeepsOriginalObligation(t *testing.T) {
+	f := externalTakeoverFixture(t)
+	target, session, _ := externalAgentFixture(t, "Cross-template receipt", "cross-template-daemon")
+	body := takeoverBody(t, f, delegation.KindExternalSession, session)
+	body.Target.AgentID = target
+	body.ExpectedCurrentReturnID = "00000000-0000-0000-0000-000000000000"
+	first := decodeTakeover(t, callTakeover(t, f, body), 201)
+	replay := decodeTakeover(t, callTakeover(t, f, body), 200)
+	if first.ID != replay.ID || first.TargetReturnID == uuidToString(f.address.ID) {
+		t.Fatal("cross-template receipt was not independently idempotent")
+	}
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	var originalDispatcher, originalSession string
+	dbfx.QueryRow(t, "SELECT dispatcher_agent_id,external_session_id FROM issue_delegation_return WHERE id=$1", f.address.ID).Scan(&originalDispatcher, &originalSession)
+	if originalDispatcher != uuidToString(f.address.DispatcherAgentID) || originalSession != uuidToString(f.address.ExternalSessionID) {
+		t.Fatal("cross-template receipt rewrote source")
+	}
+	var actual string
+	dbfx.QueryRow(t, "SELECT dispatcher_agent_id FROM issue_delegation_return WHERE id=$1", first.TargetReturnID).Scan(&actual)
+	if actual != target {
+		t.Fatalf("new dispatcher=%s want=%s", actual, target)
+	}
+	if n := dbfx.Count(t, "SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1 AND recipient_agent_id=$2 AND kind='delegation_result'", f.result.IssueID, target); n != 1 {
+		t.Fatalf("new result notifications=%d", n)
+	}
+	var originalStatus string
+	dbfx.QueryRow(t, "SELECT delivery_status FROM agent_mailbox_message WHERE id=(SELECT notification_delivery_id FROM agent_task_delegation_return WHERE task_id=$1 AND delegation_return_id=$2)", f.result.ID, f.address.ID).Scan(&originalStatus)
+	if originalStatus != "unknown" {
+		t.Fatalf("old receipt changed=%s", originalStatus)
+	}
+}

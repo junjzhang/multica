@@ -164,3 +164,25 @@ func claimForTest(t *testing.T, queue *Queue, workspaceID, daemonID, ownerID str
 	}
 	return claims
 }
+
+func TestFinalLeaseRechecksSessionRevocation(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	workspace, agent, owner, daemon := newClaimFixture(t, pool)
+	created := enqueueGeneric(t, pool, workspace, agent, "revoked-session")
+	q := db.New(pool)
+	params := db.ListClaimableDeliveryIDsParams{WorkspaceID: mustParseUUID(t, workspace), OwnerUserID: mustParseUUID(t, owner), DaemonID: daemon, RowLimit: 5}
+	candidates, err := q.ListClaimableDeliveryIDs(t.Context(), params)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("candidates=%+v err=%v", candidates, err)
+	}
+	if _, err := pool.Exec(t.Context(), "UPDATE external_agent_session SET revoked_at=now() WHERE id=$1", fixtureSessionID(t, pool, agent)); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := q.ListClaimableDeliveryIDs(t.Context(), params); err != nil || len(rows) != 0 {
+		t.Fatalf("revoked candidates=%+v err=%v", rows, err)
+	}
+	_, err = q.LeaseClaimableDelivery(t.Context(), db.LeaseClaimableDeliveryParams{ID: mustParseUUID(t, created.ID), WorkspaceID: params.WorkspaceID, TargetSessionID: candidates[0].TargetSessionID, OwnerUserID: params.OwnerUserID, DaemonID: daemon, LeaseTokenHash: pgtype.Text{String: "revoked-race", Valid: true}, LeaseOwner: pgtype.Text{String: daemon, Valid: true}, LeaseExpiresAt: pgtypeTime(time.Now().Add(time.Minute))})
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("revoked final lease=%v", err)
+	}
+}

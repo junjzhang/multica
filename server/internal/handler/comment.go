@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -28,6 +29,7 @@ import (
 )
 
 type CommentResponse struct {
+	ActorSessionID *string `json:"actor_session_id,omitempty"`
 	ID             string  `json:"id"`
 	IssueID        string  `json:"issue_id"`
 	AuthorType     string  `json:"author_type"`
@@ -122,6 +124,7 @@ func commentToResponse(c db.Comment, reactions []ReactionResponse, attachments [
 		ID:             uuidToString(c.ID),
 		IssueID:        uuidToString(c.IssueID),
 		AuthorType:     c.AuthorType,
+		ActorSessionID: uuidToPtr(c.ActorSessionID),
 		AuthorID:       uuidToString(c.AuthorID),
 		Content:        c.Content,
 		Type:           c.Type,
@@ -749,6 +752,7 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 					IssueID:        r.IssueID,
 					AuthorType:     r.AuthorType,
 					AuthorID:       r.AuthorID,
+					ActorSessionID: r.ActorSessionID,
 					Content:        r.Content,
 					Type:           r.Type,
 					CreatedAt:      r.CreatedAt,
@@ -844,6 +848,7 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 				IssueID:        r.IssueID,
 				AuthorType:     r.AuthorType,
 				AuthorID:       r.AuthorID,
+				ActorSessionID: r.ActorSessionID,
 				Content:        r.Content,
 				Type:           r.Type,
 				CreatedAt:      r.CreatedAt,
@@ -933,6 +938,7 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 				IssueID:        r.IssueID,
 				AuthorType:     r.AuthorType,
 				AuthorID:       r.AuthorID,
+				ActorSessionID: r.ActorSessionID,
 				Content:        r.Content,
 				Type:           r.Type,
 				CreatedAt:      r.CreatedAt,
@@ -1000,7 +1006,7 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 			comments := make([]db.Comment, len(rows))
 			for i, r := range rows {
 				comments[i] = db.Comment{
-					ID: r.ID, IssueID: r.IssueID, AuthorType: r.AuthorType, AuthorID: r.AuthorID,
+					ID: r.ID, IssueID: r.IssueID, AuthorType: r.AuthorType, AuthorID: r.AuthorID, ActorSessionID: r.ActorSessionID,
 					Content: r.Content, Type: r.Type, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 					ParentID: r.ParentID, WorkspaceID: r.WorkspaceID, ResolvedAt: r.ResolvedAt,
 					ResolvedByType: r.ResolvedByType, ResolvedByID: r.ResolvedByID,
@@ -1031,7 +1037,7 @@ func (h *Handler) fetchCommentsForList(ctx context.Context, args fetchCommentsAr
 		comments := make([]db.Comment, len(rows))
 		for i, r := range rows {
 			comments[i] = db.Comment{
-				ID: r.ID, IssueID: r.IssueID, AuthorType: r.AuthorType, AuthorID: r.AuthorID,
+				ID: r.ID, IssueID: r.IssueID, AuthorType: r.AuthorType, AuthorID: r.AuthorID, ActorSessionID: r.ActorSessionID,
 				Content: r.Content, Type: r.Type, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 				ParentID: r.ParentID, WorkspaceID: r.WorkspaceID, ResolvedAt: r.ResolvedAt,
 				ResolvedByType: r.ResolvedByType, ResolvedByID: r.ResolvedByID,
@@ -1528,6 +1534,7 @@ func (h *Handler) commentAgentTriggerToResponse(trigger commentAgentTrigger) Com
 }
 
 func (h *Handler) PreviewCommentTriggers(w http.ResponseWriter, r *http.Request) {
+	r = h.withWakeupActor(r)
 	issueID := chi.URLParam(r, "id")
 	issue, ok := h.loadIssueForUser(w, r, issueID)
 	if !ok {
@@ -1596,6 +1603,9 @@ func (h *Handler) PreviewCommentTriggers(w http.ResponseWriter, r *http.Request)
 	// mention://agent/<uuid>) reads as inert in preview but enqueues the agent on
 	// submit — a preview/side-effect divergence (GH #5388 review).
 	content := sanitizeNullBytes(req.Content)
+	if !h.checkCommentSession(w, r, issue, content) {
+		return
+	}
 	if content == "" {
 		writeJSON(w, http.StatusOK, CommentTriggerPreviewResponse{Agents: []CommentTriggerAgentResponse{}})
 		return
@@ -1692,6 +1702,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// the plausible cause of GH #5388. Mirrors the skill-import sanitization;
 	// normalizing first means all-NUL content is correctly treated as empty.
 	req.Content = sanitizeNullBytes(req.Content)
+	if !h.checkCommentSession(w, r, issue, req.Content) {
+		return
+	}
 	if req.Content == "" {
 		writeError(w, http.StatusBadRequest, "content is required")
 		return
@@ -1923,6 +1936,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 		ParentID:                 parentID,
 		SourceTaskID:             sourceTaskID,
 		ExternalOriginatorUserID: externalOriginatorUserID(r, authorType),
+		ActorSessionID:           func() pgtype.UUID { id, _ := externalActorSessionID(r); return id }(),
 		// The author's "don't start" choices outlive this call: completion
 		// replay skips the agents it names.
 		SuppressedAgentIds: suppressAgentIDs,
@@ -2038,7 +2052,9 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// so the reply is visible regardless of the unresolve outcome. Shared with
 	// the agent task path (TaskService.createAgentComment) — both reply paths
 	// must keep the resolved root in sync.
-	h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(issue.WorkspaceID), authorType, authorID, h.wakeupSourceTaskID(r))
+	if conflict, err := h.issueSessionConflict(r, h.Queries, issue); err == nil && !conflict {
+		h.TaskService.AutoUnresolveThreadOnReply(r.Context(), rootComment, uuidToString(issue.WorkspaceID), authorType, authorID, h.wakeupSourceTaskID(r))
+	}
 
 	if len(mailboxDelivered.queuedMailboxAgents()) > 0 {
 		h.publishMailboxChanged(issue.WorkspaceID, uuidToString(issue.ID))
@@ -2995,6 +3011,23 @@ func (h *Handler) commentTriggerOutcomesAfterCommit(ctx context.Context, issue d
 // — the implicit routing fallbacks (assignee, thread parent, conversation) were
 // never named by the user, so a no-route there is not a silent no-op.
 func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issue, content string, parentComment *db.Comment, actorType, actorID string, opts commentTriggerComputeOptions) ([]commentAgentTrigger, []commentMentionTarget) {
+	if actorType == "agent" {
+		var session pgtype.UUID
+		if actor, ok := ctx.Value(wakeupActorKey{}).(wakeupActor); ok {
+			session, _ = util.ParseUUID(actor.session)
+		}
+		if !session.Valid && opts.ExcludeTriggerCommentID.Valid {
+			if c, err := h.Queries.GetComment(ctx, opts.ExcludeTriggerCommentID); err == nil {
+				session = c.ActorSessionID
+			}
+		}
+		if session.Valid {
+			if conflict, err := h.Queries.IssueActorSessionConflict(ctx, db.IssueActorSessionConflictParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: parseUUID(actorID), SessionID: session}); err != nil || conflict {
+				return nil, nil
+			}
+		}
+	}
+
 	// A persisted comment determines its thread; previews use the parent.
 	// A new top-level preview has no thread yet and cannot merge with a queue.
 	if opts.ThreadRootID.Valid {
@@ -3198,7 +3231,12 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 				blockTarget("squad", m.ID, ReasonTargetUnavailable)
 				continue
 			}
-			leaderID := squad.LeaderID
+			leader, leaderErr := issueleader.ResolveIssueLeader(ctx, h.Queries, issue, squad)
+			if leaderErr != nil {
+				blockTarget("squad", m.ID, ReasonTargetUnavailable)
+				continue
+			}
+			leaderID := leader.Agent.ID
 			// A2A self-suppression: the author IS this squad's leader and its
 			// most recent task on this issue was a leader/generic role (NOT a
 			// fresh same-squad worker→leader handoff), so we do not re-fire the
@@ -3369,6 +3407,10 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 
 	actorType, actorID := h.resolveActor(r, userID, workspaceID)
 	isAuthor := existing.AuthorType == actorType && uuidToString(existing.AuthorID) == actorID
+	if session, ok := externalActorSessionID(r); isExternalAgentActor(r) && existing.ActorSessionID.Valid && (!ok || session != existing.ActorSessionID) {
+		writeError(w, 403, "comment belongs to another session")
+		return
+	}
 	isAdmin := roleAllowed(member.Role, "owner", "admin")
 	if !isAuthor && !isAdmin {
 		writeError(w, http.StatusForbidden, "only comment author or admin can edit")
@@ -3478,6 +3520,9 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 				if parentErr == nil {
 					parentComment = &parent
 				}
+			}
+			if !h.checkCommentSession(w, r, issue, req.Content) {
+				return
 			}
 			triggerPlan = h.planCommentTriggers(r.Context(), issue, req.Content, parentComment, actorType, actorID, existing.ID, pgtype.UUID{}, sourceTaskID, h.invokeOriginatorFromRequest(r, actorType, actorID), suppressAgentIDs, false)
 			var prepErr error

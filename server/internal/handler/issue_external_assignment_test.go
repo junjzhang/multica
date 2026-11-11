@@ -24,7 +24,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	dbfx.SquadMember(t, squad, "agent", member)
 	create := map[string]any{"title": "External squad atomic assignment", "assignee_type": "squad", "assignee_id": squad}
 	response := testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", create)).Want(http.StatusBadRequest)
-	if !strings.Contains(response.Body.String(), "recipient_session_id") {
+	if !strings.Contains(response.Body.String(), "default_leader_must_be_managed") {
 		t.Fatal(response.Body.String())
 	}
 	if n := countRows(t, `SELECT count(*) FROM issue WHERE title=$1 AND workspace_id=$2`, create["title"], testWorkspaceID); n != 0 {
@@ -32,7 +32,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	}
 	create["recipient_session_id"] = session
 	var issue IssueResponse
-	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", create)).Want(http.StatusCreated).JSON(&issue)
+	testutil.Call(t, testHandler.CreateIssue, externalAgentRequest(t, agent, http.MethodPost, "/api/issues", create)).Want(http.StatusCreated).JSON(&issue)
 	cleanupDelegatedIssue(t, issue.ID)
 	var storedTarget, mailboxID string
 	var payload []byte
@@ -66,7 +66,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ExternalAssignment(context.Background(), testHandler.Queries, stored, target, nil, true, "member", testUserID, testUserID); err != nil {
+	if err := service.ExternalAssignment(context.Background(), testHandler.Queries, stored, target, nil, true, "agent", agent, owner); err != nil {
 		t.Fatal(err)
 	}
 	if n := countRows(t, `SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1`, issue.ID); n != 1 {
@@ -82,7 +82,7 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 	dbfx.Exec(t, `UPDATE agent_mailbox_message SET delivery_status='delivered', delivered_at=now() WHERE id=$1`, mailboxID)
 	testutil.Call(t, testHandler.RecordSquadLeaderEvaluation, evalReq()).Want(http.StatusCreated)
 	dbfx.Exec(t, `UPDATE squad SET leader_id=$1 WHERE id=$2`, member, squad)
-	testutil.Call(t, testHandler.RecordSquadLeaderEvaluation, evalReq()).Want(http.StatusForbidden)
+	testutil.Call(t, testHandler.RecordSquadLeaderEvaluation, evalReq()).Want(http.StatusCreated)
 	var frozen string
 	if err := testPool.QueryRow(t.Context(), `SELECT target_session_id FROM agent_mailbox_message WHERE id=$1`, mailboxID).Scan(&frozen); err != nil || frozen != session {
 		t.Fatalf("leader rotation retargeted history: %s %v", frozen, err)
@@ -92,9 +92,11 @@ func TestExternalSquadAssignmentAtomicTarget(t *testing.T) {
 func TestExternalAssignmentParkingAndReassignment(t *testing.T) {
 	agent, session, _ := externalAgentFixture(t, "Parked assignment", "parked-assignment-daemon")
 	squad := dbfx.Squad(t, "Parked external squad", agent)
+	recipient, recipientSession, _ := externalAgentFixture(t, "Unbound direct recipient", "unbound-direct-recipient")
 	for _, parked := range []string{"backlog", "suppress"} {
 		t.Run(parked, func(t *testing.T) {
 			issue := dbfx.Issue(t, "parked "+parked)
+			bindTaskLeadership(t, issue, squad, agent, session)
 			updates := map[string]any{"assignee_type": "squad", "assignee_id": squad}
 			if parked == "backlog" {
 				updates["status"] = "backlog"
@@ -109,9 +111,9 @@ func TestExternalAssignmentParkingAndReassignment(t *testing.T) {
 			testutil.Call(t, testHandler.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+issue, map[string]any{"status": "todo"}), "id", issue)).Want(http.StatusOK)
 			// Reassigning to the external agent requires a target; rejected writes
 			// keep the squad ownership and do not leave a partial binding.
-			updates = map[string]any{"assignee_type": "agent", "assignee_id": agent}
+			updates = map[string]any{"assignee_type": "agent", "assignee_id": recipient}
 			testutil.Call(t, testHandler.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+issue, updates), "id", issue)).Want(http.StatusBadRequest)
-			updates["recipient_session_id"] = session
+			updates["recipient_session_id"] = recipientSession
 			testutil.Call(t, testHandler.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+issue, updates), "id", issue)).Want(http.StatusOK)
 			if n := countRows(t, `SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1`, issue); n != 1 {
 				t.Fatalf("explicit reassignment sent %d messages", n)

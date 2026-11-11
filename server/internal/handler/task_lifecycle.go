@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"io"
 	"log/slog"
 	"net/http"
@@ -383,7 +384,11 @@ func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (p
 	targetAgentID := issue.AssigneeID
 	if issue.AssigneeType.String == "squad" {
 		if squad, squadErr := h.Queries.GetSquad(ctx, issue.AssigneeID); squadErr == nil {
-			targetAgentID = squad.LeaderID
+			leader, err := issueleader.ResolveIssueLeader(ctx, h.Queries, issue, squad)
+			if err != nil {
+				return pgtype.UUID{}, err
+			}
+			targetAgentID = leader.Agent.ID
 		}
 	}
 	latest, err := h.Queries.GetLatestTaskIDForIssueAndAgent(ctx, db.GetLatestTaskIDForIssueAndAgentParams{

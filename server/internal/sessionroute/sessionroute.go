@@ -222,6 +222,9 @@ func validateTarget(ctx context.Context, q *db.Queries, ws, agentID, issueID, se
 	if err != nil {
 		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load session: %w", err)
 	}
+	if session.RevokedAt.Valid {
+		return db.ExternalAgentSession{}, fmt.Errorf("%w: session is revoked", ErrInvalidBinding)
+	}
 	if util.UUIDToString(session.AgentID) != util.UUIDToString(agentID) {
 		return db.ExternalAgentSession{}, fmt.Errorf("%w: session belongs to another agent", ErrInvalidBinding)
 	}

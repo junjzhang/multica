@@ -589,6 +589,7 @@ func (q *Queries) ListExternalAgentSessionsByIDs(ctx context.Context, ids []pgty
 const listExternalAgentSessionsForRead = `-- name: ListExternalAgentSessionsForRead :many
 SELECT s.id, s.workspace_id, s.owner_user_id, s.agent_id, s.provider, s.host_id, s.session_id, s.display_name, s.url, s.daemon_id, s.created_at, s.updated_at, s.revoked_at,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
@@ -605,21 +606,22 @@ type ListExternalAgentSessionsForReadParams struct {
 }
 
 type ListExternalAgentSessionsForReadRow struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	OwnerUserID   pgtype.UUID        `json:"owner_user_id"`
-	AgentID       pgtype.UUID        `json:"agent_id"`
-	Provider      string             `json:"provider"`
-	HostID        string             `json:"host_id"`
-	SessionID     string             `json:"session_id"`
-	DisplayName   string             `json:"display_name"`
-	Url           pgtype.Text        `json:"url"`
-	DaemonID      string             `json:"daemon_id"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
-	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
-	AgentArchived bool               `json:"agent_archived"`
-	OwnerIsMember bool               `json:"owner_is_member"`
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	OwnerUserID    pgtype.UUID        `json:"owner_user_id"`
+	AgentID        pgtype.UUID        `json:"agent_id"`
+	Provider       string             `json:"provider"`
+	HostID         string             `json:"host_id"`
+	SessionID      string             `json:"session_id"`
+	DisplayName    string             `json:"display_name"`
+	Url            pgtype.Text        `json:"url"`
+	DaemonID       string             `json:"daemon_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	AgentArchived  bool               `json:"agent_archived"`
+	SessionRevoked bool               `json:"session_revoked"`
+	OwnerIsMember  bool               `json:"owner_is_member"`
 }
 
 // All registered host sessions of one external agent, with the two conditions
@@ -650,6 +652,7 @@ func (q *Queries) ListExternalAgentSessionsForRead(ctx context.Context, arg List
 			&i.UpdatedAt,
 			&i.RevokedAt,
 			&i.AgentArchived,
+			&i.SessionRevoked,
 			&i.OwnerIsMember,
 		); err != nil {
 			return nil, err
@@ -664,12 +667,12 @@ func (q *Queries) ListExternalAgentSessionsForRead(ctx context.Context, arg List
 
 const revokeExternalAgentSession = `-- name: RevokeExternalAgentSession :one
 UPDATE external_agent_session
-SET revoked_at = now(),
+SET revoked_at = COALESCE(revoked_at, now()),
     updated_at = now()
 WHERE id = $1
   AND agent_id = $2
   AND workspace_id = $3
-  AND revoked_at IS NULL
+
 RETURNING id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at
 `
 

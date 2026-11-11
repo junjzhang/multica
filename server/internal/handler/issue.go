@@ -27,6 +27,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/dispatch"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issueguard"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -42,6 +43,11 @@ import (
 
 // IssueResponse is the JSON response for an issue.
 type IssueResponse struct {
+	LeadershipRootIssueID   string `json:"leadership_root_issue_id,omitempty"`
+	LeaderAgentID           string `json:"leader_agent_id,omitempty"`
+	LeaderExternalSessionID string `json:"leader_external_session_id,omitempty"`
+	LeadershipRevision      int64  `json:"leadership_revision,omitempty"`
+
 	ID          string  `json:"id"`
 	WorkspaceID string  `json:"workspace_id"`
 	Number      int32   `json:"number"`
@@ -580,6 +586,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		statusCategory = i.Status
 	}
 	return IssueResponse{
+		LeadershipRootIssueID: uuidToString(i.LeadershipRootIssueID), LeaderAgentID: uuidToString(i.LeaderAgentID), LeaderExternalSessionID: uuidToString(i.LeaderExternalSessionID), LeadershipRevision: i.LeadershipRevision,
 		ID:                 uuidToString(i.ID),
 		WorkspaceID:        uuidToString(i.WorkspaceID),
 		Number:             i.Number,
@@ -1806,7 +1813,7 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
        UNION
        SELECT s.id
          FROM squad s
-         JOIN agent a ON a.id = s.leader_id
+         JOIN agent a ON a.id = issue_leader_id(i,s.id)
         WHERE s.workspace_id = $1
           AND a.workspace_id = $1
           AND a.owner_id     = %[1]s::uuid
@@ -2264,7 +2271,7 @@ func (h *Handler) ListGroupedIssues(w http.ResponseWriter, r *http.Request) {
        UNION
        SELECT s.id
          FROM squad s
-         JOIN agent a ON a.id = s.leader_id
+         JOIN agent a ON a.id = issue_leader_id(i,s.id)
         WHERE s.workspace_id = $1
           AND a.workspace_id = $1
           AND a.owner_id     = %[1]s::uuid
@@ -2933,7 +2940,12 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "squad is archived")
 			return
 		}
-		agentUUID = squad.LeaderID
+		leader, err := issueleader.ResolveIssueLeader(r.Context(), h.Queries, db.Issue{WorkspaceID: squad.WorkspaceID}, squad)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		agentUUID = leader.Agent.ID
 	} else {
 		var ok bool
 		agentUUID, ok = parseUUIDOrBadRequest(w, req.AgentID, "agent_id")
@@ -3167,19 +3179,20 @@ func readRuntimeCLIVersion(metadata []byte) string {
 }
 
 type CreateIssueRequest struct {
-	RecipientSessionID *string  `json:"recipient_session_id,omitempty"`
-	Title              string   `json:"title"`
-	Description        *string  `json:"description"`
-	Status             string   `json:"status"`
-	Priority           string   `json:"priority"`
-	AssigneeType       *string  `json:"assignee_type"`
-	AssigneeID         *string  `json:"assignee_id"`
-	ParentIssueID      *string  `json:"parent_issue_id"`
-	ProjectID          *string  `json:"project_id"`
-	Stage              *int32   `json:"stage,omitempty"`
-	StartDate          *string  `json:"start_date"`
-	DueDate            *string  `json:"due_date"`
-	AttachmentIDs      []string `json:"attachment_ids,omitempty"`
+	LeadershipRootIssueID *string  `json:"leadership_root_issue_id,omitempty"`
+	RecipientSessionID    *string  `json:"recipient_session_id,omitempty"`
+	Title                 string   `json:"title"`
+	Description           *string  `json:"description"`
+	Status                string   `json:"status"`
+	Priority              string   `json:"priority"`
+	AssigneeType          *string  `json:"assignee_type"`
+	AssigneeID            *string  `json:"assignee_id"`
+	ParentIssueID         *string  `json:"parent_issue_id"`
+	ProjectID             *string  `json:"project_id"`
+	Stage                 *int32   `json:"stage,omitempty"`
+	StartDate             *string  `json:"start_date"`
+	DueDate               *string  `json:"due_date"`
+	AttachmentIDs         []string `json:"attachment_ids,omitempty"`
 	// LabelIDs are issue-scoped labels to attach to the new issue in the same
 	// transaction as the create. Unknown or non-issue ids are rejected with
 	// 400 (service.ErrIssueLabelNotFound) rather than silently dropped.
@@ -3614,7 +3627,16 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		delegationCreatedBy = requestUserID(r)
 	}
 
+	var leadershipRoot pgtype.UUID
+	if req.LeadershipRootIssueID != nil {
+		var ok bool
+		leadershipRoot, ok = parseUUIDOrBadRequest(w, *req.LeadershipRootIssueID, "leadership_root_issue_id")
+		if !ok {
+			return
+		}
+	}
 	res, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
+		LeadershipRootIssueID: leadershipRoot, CreatorSessionID: func() pgtype.UUID { id, _ := externalActorSessionID(r); return id }(),
 		WorkspaceID:        wsUUID,
 		Title:              req.Title,
 		Description:        ptrToText(req.Description),
@@ -4595,7 +4617,19 @@ func (h *Handler) validateAssigneePair(ctx context.Context, r *http.Request, wor
 		if squad.ArchivedAt.Valid {
 			return http.StatusBadRequest, "cannot assign to an archived squad"
 		}
-		leader, err := h.Queries.GetAgent(ctx, squad.LeaderID)
+		leaderID := squad.LeaderID
+		if isExternalAgentActor(r) {
+			actorID, parseErr := util.ParseUUID(r.Header.Get("X-Agent-ID"))
+			if parseErr != nil {
+				return 403, "session identity required"
+			}
+			member, err := h.Queries.IsSquadMember(ctx, db.IsSquadMemberParams{SquadID: squad.ID, MemberType: "agent", MemberID: actorID})
+			if err != nil || !member {
+				return 403, "external initiator must be a squad member"
+			}
+			leaderID = actorID
+		}
+		leader, err := h.Queries.GetAgent(ctx, leaderID)
 		if err != nil || leader.ArchivedAt.Valid {
 			return http.StatusBadRequest, "squad leader is archived; cannot assign to this squad"
 		}
