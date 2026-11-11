@@ -58,6 +58,15 @@ func (f handoffAPIFixture) root(t *testing.T) IssueResponse {
 
 func TestHandoffExplicitAndLegacyAPI(t *testing.T) {
 	f := newHandoffAPIFixture(t)
+	t.Run("request id cannot replay executor as leader", func(t *testing.T) {
+		root := f.root(t)
+		testutil.Call(t, f.h.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+root.ID, map[string]any{"status": "backlog", "assignee_type": "agent", "assignee_id": f.agent, "recipient_session_id": f.a}), "id", root.ID)).Want(200)
+		var current IssueResponse
+		testutil.Call(t, f.h.GetIssue, withURLParam(newRequest(http.MethodGet, "/api/issues/"+root.ID, nil), "id", root.ID)).Want(200).JSON(&current)
+		req := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: current.LeadershipRevision, ExpectedIssueRevision: current.Revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Recover reassigned executor"}
+		testutil.Call(t, f.h.HandoffIssueExecutor, withURLParam(newRequest(http.MethodPost, "/api/issues/"+root.ID+"/executor/handoff", req), "id", root.ID)).Want(200)
+		testutil.Call(t, f.h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+root.ID+"/task-leader/handoff", req), "id", root.ID)).Want(409)
+	})
 	t.Run("child changes root leader", func(t *testing.T) {
 		root := f.root(t)
 		var child IssueResponse
