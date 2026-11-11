@@ -31,6 +31,7 @@ func TestCreateIssueAssignedToSquadEnqueuesLeader(t *testing.T) {
 	`, testWorkspaceID, "Trigger Test Squad", leaderID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	defer testPool.Exec(ctx, `DELETE FROM squad WHERE id = $1`, squadID)
 
 	// Create an issue assigned to the squad.

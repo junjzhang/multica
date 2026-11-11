@@ -62,6 +62,17 @@ func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *d
 				return false
 			}
 		}
+		if !issue.CreatorSessionID.Valid {
+			pinned := false
+			for _, version := range state.Versions {
+				if version.Author.ID == actor.ID && version.Author.Type == actor.Type && version.Author.SessionID == actor.SessionID {
+					pinned = true
+				}
+			}
+			if !pinned && !contractActorMatches(ctx, q, issue, actor, issuecontract.Actor{Type: actor.Type, ID: actor.ID}) {
+				return false
+			}
+		}
 		return true
 	case "task_token":
 		if agent.ExecutionKind != "managed" || !issue.OriginID.Valid || (issue.OriginType.String != "agent_create" && issue.OriginType.String != "quick_create") {

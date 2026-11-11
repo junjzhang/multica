@@ -90,6 +90,22 @@ func (q *Queries) AttachIssueLeadershipRoot(ctx context.Context, arg AttachIssue
 	return i, err
 }
 
+const cancelExecutorQueuedTasks = `-- name: CancelExecutorQueuedTasks :exec
+UPDATE agent_task_queue SET status='cancelled',completed_at=now(),prepare_lease_expires_at=NULL
+WHERE issue_id= $1 AND agent_id= $2
+ AND status IN ('queued','deferred','waiting_local_directory') AND started_at IS NULL
+`
+
+type CancelExecutorQueuedTasksParams struct {
+	IssueID pgtype.UUID `json:"issue_id"`
+	AgentID pgtype.UUID `json:"agent_id"`
+}
+
+func (q *Queries) CancelExecutorQueuedTasks(ctx context.Context, arg CancelExecutorQueuedTasksParams) error {
+	_, err := q.db.Exec(ctx, cancelExecutorQueuedTasks, arg.IssueID, arg.AgentID)
+	return err
+}
+
 const cancelLeadershipQueuedTasks = `-- name: CancelLeadershipQueuedTasks :exec
 UPDATE agent_task_queue SET status='cancelled',completed_at=now()
 WHERE issue_id= $1 AND agent_id= $2 AND is_leader_task=true
@@ -197,6 +213,80 @@ type GetIssueLeadershipRootParams struct {
 
 func (q *Queries) GetIssueLeadershipRoot(ctx context.Context, arg GetIssueLeadershipRootParams) (Issue, error) {
 	row := q.db.QueryRow(ctx, getIssueLeadershipRoot, arg.ID, arg.WorkspaceID)
+	var i Issue
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.Stage,
+		&i.Properties,
+		&i.Revision,
+		&i.LastActivityAt,
+		&i.TriageState,
+		&i.DuplicateOfIssueID,
+		&i.CoordinatorType,
+		&i.CoordinatorID,
+		&i.MergeAllowed,
+		&i.MergeRepositoryUrl,
+		&i.MergeTargetBranch,
+		&i.MergeGrantedBy,
+		&i.MergeGrantedAt,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipSquadID,
+		&i.LeaderAgentID,
+		&i.LeaderExternalSessionID,
+		&i.LeadershipRevision,
+		&i.CreatorSessionID,
+		&i.SessionSemantics,
+		&i.RequesterLeadershipRootID,
+	)
+	return i, err
+}
+
+const handoffIssueExecutor = `-- name: HandoffIssueExecutor :one
+UPDATE issue SET assignee_id= $1, revision=revision+1, updated_at=now(), session_semantics=true
+WHERE id= $2 AND workspace_id= $3 AND assignee_type='agent'
+ AND assignee_id= $4 AND revision= $5
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+`
+
+type HandoffIssueExecutorParams struct {
+	AgentID               pgtype.UUID `json:"agent_id"`
+	ID                    pgtype.UUID `json:"id"`
+	WorkspaceID           pgtype.UUID `json:"workspace_id"`
+	PreviousAgentID       pgtype.UUID `json:"previous_agent_id"`
+	ExpectedIssueRevision int64       `json:"expected_issue_revision"`
+}
+
+func (q *Queries) HandoffIssueExecutor(ctx context.Context, arg HandoffIssueExecutorParams) (Issue, error) {
+	row := q.db.QueryRow(ctx, handoffIssueExecutor,
+		arg.AgentID,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.PreviousAgentID,
+		arg.ExpectedIssueRevision,
+	)
 	var i Issue
 	err := row.Scan(
 		&i.ID,

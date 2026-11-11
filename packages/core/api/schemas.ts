@@ -2654,6 +2654,7 @@ const SquadMemberPreviewSchema = z.object({
 }).loose();
 
 export const SquadSchema = z.object({
+ default_leader_unavailable_reason:z.string().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   name: z.string(),

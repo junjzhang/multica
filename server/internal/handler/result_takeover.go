@@ -252,6 +252,25 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 	if in.kind == delegation.KindManagedTask && in.selectionVersion != delegation.TakeoverSelectionVersion(target, source) {
 		return empty, pgtype.UUID{}, false, takeoverError{409, "selected source session changed; reload before taking over"}
 	}
+	if in.kind == delegation.KindExternalSession {
+		issue, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: in.issue, WorkspaceID: in.workspace})
+		if err != nil {
+			return empty, pgtype.UUID{}, false, err
+		}
+		root, err := q.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{ID: in.issue, WorkspaceID: in.workspace})
+		if err != nil {
+			return empty, pgtype.UUID{}, false, err
+		}
+		if root.LeaderAgentID == targetDispatcher && root.LeaderExternalSessionID != target.ExternalSessionID {
+			return empty, pgtype.UUID{}, false, takeoverError{409, "hand off task leadership before changing its executor session"}
+		}
+		if issue.AssigneeType.String == "agent" && issue.AssigneeID == targetDispatcher {
+			binding, err := q.GetActiveAgentSessionBindingView(ctx, db.GetActiveAgentSessionBindingViewParams{WorkspaceID: in.workspace, IssueID: in.issue, AgentID: targetDispatcher})
+			if err != nil || binding.SessionID != target.ExternalSessionID {
+				return empty, pgtype.UUID{}, false, takeoverError{409, "hand off task execution before changing its executor session"}
+			}
+		}
+	}
 	current, err := q.LockIssueDelegationReturnForDispatcher(ctx, db.LockIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: targetDispatcher})
 	if errors.Is(err, pgx.ErrNoRows) && in.targetDispatcher.Valid && !in.expected.Valid {
 		current = db.IssueDelegationReturn{}

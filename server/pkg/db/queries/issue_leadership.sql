@@ -76,3 +76,14 @@ ORDER BY c.issue_id;
 -- name: ListLeadershipReferencingIssues :many
 SELECT id FROM issue WHERE workspace_id= @workspace_id AND leadership_root_issue_id= @root_id AND id<> @root_id
 ORDER BY id;
+
+-- name: HandoffIssueExecutor :one
+UPDATE issue SET assignee_id= @agent_id, revision=revision+1, updated_at=now(), session_semantics=true
+WHERE id= @id AND workspace_id= @workspace_id AND assignee_type='agent'
+ AND assignee_id= @previous_agent_id AND revision= @expected_issue_revision
+RETURNING *;
+
+-- name: CancelExecutorQueuedTasks :exec
+UPDATE agent_task_queue SET status='cancelled',completed_at=now(),prepare_lease_expires_at=NULL
+WHERE issue_id= @issue_id AND agent_id= @agent_id
+ AND status IN ('queued','deferred','waiting_local_directory') AND started_at IS NULL;

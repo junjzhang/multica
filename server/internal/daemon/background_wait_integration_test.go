@@ -62,7 +62,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Insert(t, "external_agent_token", testutil.Cols{"workspace_id": f.WorkspaceID, "agent_id": agentID, "owner_user_id": f.UserID, "token_hash": auth.HashToken(externalToken), "expires_at": time.Now().Add(time.Hour)})
+	f.Insert(t, "external_agent_token", testutil.Cols{"workspace_id": f.WorkspaceID, "agent_id": agentID, "owner_user_id": f.UserID, "token_hash": auth.HashToken(externalToken), "external_session_id": sessionID, "expires_at": time.Now().Add(time.Hour)})
 	daemonToken, err := auth.GenerateDaemonToken()
 	if err != nil {
 		t.Fatal(err)

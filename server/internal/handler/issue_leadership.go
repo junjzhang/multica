@@ -150,6 +150,10 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	}
 	defer tx.Rollback(r.Context())
 	q := h.Queries.WithTx(tx)
+	if issue.AssigneeType.String == "agent" {
+		h.handoffExternalExecutor(w, r, q, tx, issue, req, requestID, agentID, previous, sessionID, previousSession, member)
+		return
+	}
 	root, err := q.GetIssueLeadershipRoot(r.Context(), db.GetIssueLeadershipRootParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
 	if err != nil || !root.LeadershipSquadID.Valid {
 		writeError(w, 409, "task has no leadership root")
@@ -268,6 +272,107 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 409, "handoff conflicted")
 		return
+	}
+	writeJSON(w, 200, response)
+}
+
+// External executor recovery uses its binding and issue CAS; it does not
+// manufacture a squad leadership root for an ordinary agent assignment.
+func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request, q *db.Queries, tx pgx.Tx, issue db.Issue, req leadershipRequest, requestID, agentID, previous, sessionID, previousSession pgtype.UUID, member db.Member) {
+	ctx := r.Context()
+	old, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: previous, WorkspaceID: issue.WorkspaceID})
+	if err != nil || old.ExecutionKind != "external" {
+		writeError(w, 400, "direct executor handoff requires an external current executor")
+		return
+	}
+	target, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: agentID, WorkspaceID: issue.WorkspaceID})
+	if err != nil || target.ArchivedAt.Valid || !h.memberCanWireAgent(ctx, member, target, uuidToString(issue.WorkspaceID)) {
+		writeError(w, 403, "target agent is unavailable or not callable")
+		return
+	}
+	if (target.ExecutionKind == "external") != sessionID.Valid {
+		writeError(w, 400, "external targets require a session; managed targets do not accept one")
+		return
+	}
+	issue, err = q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+	if err != nil {
+		writeError(w, 409, "issue changed")
+		return
+	}
+	raw, _ := json.Marshal(req)
+	sum := sha256.Sum256(raw)
+	digest := hex.EncodeToString(sum[:])
+	if prior, err := q.GetActivity(ctx, requestID); err == nil {
+		var data map[string]any
+		_ = json.Unmarshal(prior.Details, &data)
+		if prior.WorkspaceID != issue.WorkspaceID || prior.IssueID != issue.ID || prior.ActorID != member.UserID || data["request_digest"] != digest {
+			writeError(w, 409, "request id reused with different content")
+			return
+		}
+		writeJSON(w, 200, data)
+		return
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 500, "load handoff failed")
+		return
+	}
+	binding, err := q.GetActiveAgentSessionBindingView(ctx, db.GetActiveAgentSessionBindingViewParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: previous})
+	if err != nil || binding.SessionID != previousSession {
+		writeError(w, 409, "previous executor session changed")
+		return
+	}
+	updated, err := q.HandoffIssueExecutor(ctx, db.HandoffIssueExecutorParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, AgentID: agentID, PreviousAgentID: previous, ExpectedIssueRevision: req.ExpectedIssueRevision})
+	if err != nil {
+		writeError(w, 409, "executor or issue revision changed")
+		return
+	}
+	if _, err = q.RevokeActiveAgentSessionBindings(ctx, db.RevokeActiveAgentSessionBindingsParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: previous}); err != nil {
+		writeError(w, 500, "revoke executor binding failed")
+		return
+	}
+	if sessionID.Valid {
+		if _, err = sessionroute.Bind(ctx, q, sessionroute.BindRequest{WorkspaceID: uuidToString(issue.WorkspaceID), IssueID: uuidToString(issue.ID), AgentID: req.AgentID, SessionID: req.SessionID, CreatedBy: requestUserID(r)}); err != nil {
+			writeError(w, 409, err.Error())
+			return
+		}
+	}
+	if err = q.WithdrawLeadershipDeliveries(ctx, db.WithdrawLeadershipDeliveriesParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: previous}); err != nil {
+		writeError(w, 500, "withdraw executor dispatch failed")
+		return
+	}
+	if err = q.CancelExecutorQueuedTasks(ctx, db.CancelExecutorQueuedTasksParams{IssueID: issue.ID, AgentID: previous}); err != nil {
+		writeError(w, 500, "cancel queued executor dispatch failed")
+		return
+	}
+	var queued db.AgentTaskQueue
+	if updated.Status != "backlog" && !updated.TriageState.Valid {
+		var recipient *string
+		if sessionID.Valid {
+			recipient = &req.SessionID
+		}
+		if err = service.ExternalAssignment(ctx, q, updated, service.AssignmentTarget{Agent: target}, recipient, true, "member", requestUserID(r), requestUserID(r)); err != nil {
+			writeError(w, 409, err.Error())
+			return
+		}
+		if target.ExecutionKind == "managed" {
+			queued, _, err = h.TaskService.EnqueueAssignedTaskInTx(ctx, q, updated, nil, nil)
+			if err != nil {
+				writeError(w, 409, err.Error())
+				return
+			}
+		}
+	}
+	response := map[string]any{"issue_id": uuidToString(issue.ID), "issue_revision": updated.Revision, "agent_id": req.AgentID, "session_id": req.SessionID, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "reason": req.Reason, "request_digest": digest, "historical_results": "explicit_result_takeover_required"}
+	data, _ := json.Marshal(response)
+	if _, err = q.CreateActivity(ctx, db.CreateActivityParams{ID: requestID, WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, ActorType: strToText("member"), ActorID: member.UserID, Action: "executor_handoff", Details: data}); err != nil {
+		writeError(w, 500, "record executor handoff failed")
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
+		writeError(w, 409, "executor handoff conflicted")
+		return
+	}
+	if queued.ID.Valid {
+		h.TaskService.NotifyTaskEnqueued(ctx, queued)
 	}
 	writeJSON(w, 200, response)
 }

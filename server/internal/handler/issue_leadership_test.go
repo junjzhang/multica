@@ -199,6 +199,12 @@ func TestTaskLeadershipRejectsExternalDefaultConfiguration(t *testing.T) {
 	testutil.Call(t, testHandler.CreateSquad, squadScopeReq(testUserID, http.MethodPost, "/api/squads", map[string]any{"name": "Invalid external default", "leader_id": f.agent}, nil)).Want(400)
 	testutil.Call(t, testHandler.UpdateSquad, squadScopeReq(testUserID, http.MethodPatch, "/api/squads", map[string]any{"leader_id": f.agent}, map[string]string{"id": f.squad})).Want(400)
 	dbfx.Exec(t, "UPDATE squad SET leader_id=$1 WHERE id=$2", f.agent, f.squad)
+	var legacy SquadResponse
+	testutil.Call(t, testHandler.GetSquad, squadScopeReq(testUserID, http.MethodGet, "/api/squads", nil, map[string]string{"id": f.squad})).Want(200).JSON(&legacy)
+	if legacy.DefaultLeaderUnavailableReason != "default_leader_must_be_managed" {
+		t.Fatal("legacy external default lacks a read-only migration diagnostic")
+	}
+
 	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "Legacy default must not dispatch", "assignee_type": "squad", "assignee_id": f.squad})).Want(400)
 	// External initiation uses the actual qualified session even before a
 	// human replaces a legacy invalid default.
@@ -248,5 +254,29 @@ func TestTaskLeadershipCrossSquadReassignmentChecksReferencingChain(t *testing.T
 				t.Fatalf("target root=%s/%s/%d", squad, leader, revision)
 			}
 		})
+	}
+}
+
+func TestTaskExternalExecutorHandoffPreservesHistoryAndStalesContract(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	issue := dbfx.Issue(t, "Direct external executor handoff", testutil.Cols{"assignee_type": "agent", "assignee_id": f.agent, "coordinator_type": "member", "coordinator_id": testUserID})
+	bindExternalSession(t, f.agent, f.a, issue)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	contractCall(t, issue, definition(0), "").Want(200)
+	var revision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Recover direct executor through explicit human handoff"}
+	for range 2 {
+		testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+	}
+	submit := contractRequest{Action: "submit", Version: 1, ExpectedSequence: 1, ClientRequestID: uuidToString(dbid.NewV7()), Criteria: []int{0}, Evidence: "Direct executor evidence"}
+	authenticatedContractCall(t, issue, submit, f.tokenA).Want(409)
+	authenticatedContractCall(t, issue, submit, f.tokenB).Want(409)
+	contractCall(t, issue, definition(1), "").Want(200)
+	submit.Version = 2
+	submit.ExpectedSequence = 2
+	authenticatedContractCall(t, issue, submit, f.tokenB).Want(200)
+	if n := dbfx.Count(t, "SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='executor_handoff'", issue); n != 1 {
+		t.Fatalf("direct handoff audit rows=%d", n)
 	}
 }

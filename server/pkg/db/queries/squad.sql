@@ -168,3 +168,7 @@ LEFT JOIN issue i
        ON i.id = atq.issue_id
 WHERE sm.squad_id = $1
 ORDER BY sm.created_at ASC, atq.dispatched_at DESC NULLS LAST;
+
+-- name: ListSquadsWithExternalDefaultLeaders :many
+SELECT s.id FROM squad s JOIN agent a ON a.id=s.leader_id AND a.workspace_id=s.workspace_id
+WHERE s.workspace_id=$1 AND s.archived_at IS NULL AND a.execution_kind='external';

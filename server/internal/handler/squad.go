@@ -23,20 +23,21 @@ import (
 // ── Response types ──────────────────────────────────────────────────────────
 
 type SquadResponse struct {
-	ID            string                       `json:"id"`
-	WorkspaceID   string                       `json:"workspace_id"`
-	Name          string                       `json:"name"`
-	Description   string                       `json:"description"`
-	Instructions  string                       `json:"instructions"`
-	AvatarURL     *string                      `json:"avatar_url"`
-	LeaderID      string                       `json:"leader_id"`
-	CreatorID     string                       `json:"creator_id"`
-	CreatedAt     string                       `json:"created_at"`
-	UpdatedAt     string                       `json:"updated_at"`
-	ArchivedAt    *string                      `json:"archived_at"`
-	ArchivedBy    *string                      `json:"archived_by"`
-	MemberCount   int                          `json:"member_count"`
-	MemberPreview []SquadMemberPreviewResponse `json:"member_preview"`
+	DefaultLeaderUnavailableReason string                       `json:"default_leader_unavailable_reason,omitempty"`
+	ID                             string                       `json:"id"`
+	WorkspaceID                    string                       `json:"workspace_id"`
+	Name                           string                       `json:"name"`
+	Description                    string                       `json:"description"`
+	Instructions                   string                       `json:"instructions"`
+	AvatarURL                      *string                      `json:"avatar_url"`
+	LeaderID                       string                       `json:"leader_id"`
+	CreatorID                      string                       `json:"creator_id"`
+	CreatedAt                      string                       `json:"created_at"`
+	UpdatedAt                      string                       `json:"updated_at"`
+	ArchivedAt                     *string                      `json:"archived_at"`
+	ArchivedBy                     *string                      `json:"archived_by"`
+	MemberCount                    int                          `json:"member_count"`
+	MemberPreview                  []SquadMemberPreviewResponse `json:"member_preview"`
 }
 
 type SquadMemberPreviewResponse struct {
@@ -183,6 +184,9 @@ func (h *Handler) squadToResponseWithPreview(ctx context.Context, squad db.Squad
 	if err != nil {
 		return resp, err
 	}
+	if leader, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: squad.LeaderID, WorkspaceID: squad.WorkspaceID}); err == nil && leader.ExecutionKind == "external" {
+		resp.DefaultLeaderUnavailableReason = "default_leader_must_be_managed"
+	}
 	applySquadMemberSummary(&resp, summary)
 	return resp, nil
 }
@@ -217,9 +221,21 @@ func (h *Handler) ListSquads(w http.ResponseWriter, r *http.Request) {
 		addSquadMemberPreview(summary, row.MemberType, row.MemberID, row.Role)
 	}
 
+	invalid, err := h.Queries.ListSquadsWithExternalDefaultLeaders(r.Context(), wsUUID)
+	if err != nil {
+		writeError(w, 500, "load default leader availability failed")
+		return
+	}
+	unavailable := make(map[string]bool, len(invalid))
+	for _, id := range invalid {
+		unavailable[uuidToString(id)] = true
+	}
 	resp := make([]SquadResponse, len(squads))
 	for i, s := range squads {
 		resp[i] = h.squadToResponse(s)
+		if unavailable[uuidToString(s.ID)] {
+			resp[i].DefaultLeaderUnavailableReason = "default_leader_must_be_managed"
+		}
 		applySquadMemberSummary(&resp[i], summaries[uuidToString(s.ID)])
 	}
 	writeJSON(w, http.StatusOK, resp)

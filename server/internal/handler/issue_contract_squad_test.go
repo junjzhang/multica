@@ -79,7 +79,7 @@ func TestContractSquadAuthenticatedDelivery(t *testing.T) {
 	}
 }
 
-func TestContractSquadLeaderChangeInvalidatesPendingAndAuthority(t *testing.T) {
+func TestContractSquadHandoffInvalidatesPendingAndAuthority(t *testing.T) {
 	issue, squad, leader, token := squadContractFixture(t, true)
 	dbfx.Exec(t, "UPDATE issue SET creator_type='agent',creator_id=$2 WHERE id=$1", issue, leader)
 	authenticatedContractCall(t, issue, definition(0), token).Want(403)
@@ -142,7 +142,7 @@ func TestContractSquadRejectsInactiveRepresentativeAndSelfAcceptance(t *testing.
 	}
 }
 
-func TestContractSquadSubmitConflictsWithLeaderChange(t *testing.T) {
+func TestContractSquadSubmitConflictsWithConcurrentConfigurationWrite(t *testing.T) {
 	issue, squad, _, token := squadContractFixture(t, true)
 	contractCall(t, issue, definition(0), "").Want(200)
 	newLeader := dbfx.Agent(t, "Concurrent replacement", testRuntimeID)

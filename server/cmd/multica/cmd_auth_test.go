@@ -52,7 +52,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// A managed checkout carries a real daemon marker. Tests create their own
+	// markers explicitly and must not inherit the checkout's task identity.
+	previousDir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err = os.Chdir(scratchHome); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	code := m.Run()
+	_ = os.Chdir(previousDir)
 	_ = os.RemoveAll(scratchHome)
 	os.Exit(code)
 }
