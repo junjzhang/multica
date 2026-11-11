@@ -41,17 +41,14 @@ export function TaskLeaderHandoff({ issue }: { issue: Issue }) {
   const squadId = issue.leadership_squad_id ?? "";
   const { data: members = [] } = useQuery(squadMembersOptions(wsId, squadId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  // The server hands off the chain at its root. A subtask's card renders the
-  // same dialog, but posting to the subtask id would take the executor-handoff
-  // branch and fail with a revision conflict, so the request always targets
-  // the leadership root and the invalidation refreshes that root's detail.
+  // CAS and cache invalidation refer to the root even when the card is a subtask.
   const rootIssueId = issue.leadership_root_issue_id ?? issue.id;
   // A subtask's own revision is not the root's; without a projected root
   // revision, send an impossible value so the server rejects the stale request
   // instead of silently comparing against the wrong row.
   const rootRevision =
     issue.leadership_root_revision ?? (rootIssueId === issue.id ? issue.revision ?? 0 : 0);
-  const mutation = useHandoffIssueLeadership(wsId, rootIssueId);
+  const mutation = useHandoffIssueLeadership(wsId, issue.id, rootIssueId);
   const [open, setOpen] = useState(false);
   const [targetId, setTargetId] = useState("");
   const [sessionId, setSessionId] = useState("");

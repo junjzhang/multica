@@ -287,7 +287,7 @@ func TestTaskExternalExecutorHandoffPreservesHistoryAndStalesContract(t *testing
 	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
 	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Recover direct executor through explicit human handoff"}
 	for range 2 {
-		testutil.Call(t, h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+		testutil.Call(t, h.HandoffIssueExecutor, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/executor/handoff", body), "id", issue)).Want(200)
 	}
 	if len(updates) != 1 {
 		t.Fatalf("idempotent handoff published %d issue updates", len(updates))
@@ -325,7 +325,7 @@ func TestExternalExecutorHandoffPublishesAssigneeTransition(t *testing.T) {
 	updates := make(chan events.Event, 4)
 	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
 	body := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: target, Reason: "Move the responsible executor to a managed agent"}
-	testutil.Call(t, h.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", body), "id", issue)).Want(200)
+	testutil.Call(t, h.HandoffIssueExecutor, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/executor/handoff", body), "id", issue)).Want(200)
 	if len(updates) != 1 {
 		t.Fatalf("executor handoff published %d issue updates", len(updates))
 	}

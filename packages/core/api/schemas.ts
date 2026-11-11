@@ -1783,6 +1783,11 @@ export const IssueLeadershipHandoffResponseSchema = z.object({
   historical_results: z.string().optional().catch(undefined),
 }).loose();
 
+export const IssueExecutorHandoffResponseSchema = z.object({
+  issue_id: z.string().min(1),
+  issue_revision: z.number().int().nonnegative(),
+}).loose();
+
 export const ListIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
   total: z.number().default(0),

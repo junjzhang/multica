@@ -132,6 +132,29 @@ func (h *Handler) ClaimIssueLeadership(w http.ResponseWriter, r *http.Request) {
 // HandoffIssueLeadership changes current responsibility, never accepted returns,
 // authors, running tasks, or the targets and receipts of existing envelopes.
 func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request) {
+	h.handoffIssue(w, r, false)
+}
+
+func (h *Handler) HandoffIssueExecutor(w http.ResponseWriter, r *http.Request) {
+	h.handoffIssue(w, r, true)
+}
+
+// LegacyIssueHandoff preserves the old dispatch until all repository callers
+// have migrated and one release cycle has passed.
+func (h *Handler) LegacyIssueHandoff(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Deprecation", "true")
+	if isMachineCredentialActor(r) {
+		writeError(w, 403, "leadership handoff requires a human owner/admin")
+		return
+	}
+	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))
+	if !ok {
+		return
+	}
+	h.handoffIssue(w, r, issue.AssigneeType.String == "agent")
+}
+
+func (h *Handler) handoffIssue(w http.ResponseWriter, r *http.Request, executor bool) {
 	if isMachineCredentialActor(r) {
 		writeError(w, 403, "leadership handoff requires a human owner/admin")
 		return
@@ -190,7 +213,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	}
 	defer tx.Rollback(r.Context())
 	q := h.Queries.WithTx(tx)
-	if issue.AssigneeType.String == "agent" {
+	if executor {
 		h.handoffExternalExecutor(w, r, q, tx, issue, req, requestID, agentID, previous, sessionID, previousSession, member)
 		return
 	}
@@ -227,7 +250,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	if prior, err := q.GetActivity(r.Context(), requestID); err == nil {
 		var data map[string]any
 		_ = json.Unmarshal(prior.Details, &data)
-		if prior.WorkspaceID != issue.WorkspaceID || prior.IssueID != root.ID || prior.ActorID != member.UserID || data["request_digest"] != digest {
+		if prior.Action != "leadership_handoff" || prior.WorkspaceID != issue.WorkspaceID || prior.IssueID != root.ID || prior.ActorID != member.UserID || data["request_digest"] != digest {
 			writeError(w, 409, "request id reused with different content")
 			return
 		}
@@ -365,7 +388,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 	if prior, err := q.GetActivity(ctx, requestID); err == nil {
 		var data map[string]any
 		_ = json.Unmarshal(prior.Details, &data)
-		if prior.WorkspaceID != issue.WorkspaceID || prior.IssueID != issue.ID || prior.ActorID != member.UserID || data["request_digest"] != digest {
+		if prior.Action != "executor_handoff" || prior.WorkspaceID != issue.WorkspaceID || prior.IssueID != issue.ID || prior.ActorID != member.UserID || data["request_digest"] != digest {
 			writeError(w, 409, "request id reused with different content")
 			return
 		}

@@ -20,6 +20,13 @@ func init() {
 		leadership.AddCommand(command)
 	}
 	issueCmd.AddCommand(leadership)
+	executor := &cobra.Command{Use: "executor", Short: "Manage the task executor"}
+	handoff := &cobra.Command{Use: "handoff <issue-id>", Short: "Hand off an external executor from a UTF-8 JSON file", Args: exactArgs(1), RunE: runIssueLeadership}
+	handoff.Flags().String("request-file", "", "JSON request including expected_issue_revision")
+	handoff.Flags().String("output", "json", "Output format: json")
+	_ = handoff.MarkFlagRequired("request-file")
+	executor.AddCommand(handoff)
+	issueCmd.AddCommand(executor)
 }
 
 func runIssueLeadership(cmd *cobra.Command, args []string) error {
@@ -45,7 +52,14 @@ func runIssueLeadership(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	var result json.RawMessage
-	if err = client.PostJSON(ctx, "/api/issues/"+ref.ID+"/leadership/"+cmd.Name(), json.RawMessage(data), &result); err != nil {
+	endpoint := "/leadership/claim"
+	if cmd.Name() == "handoff" {
+		endpoint = "/task-leader/handoff"
+		if cmd.Parent().Name() == "executor" {
+			endpoint = "/executor/handoff"
+		}
+	}
+	if err = client.PostJSON(ctx, "/api/issues/"+ref.ID+endpoint, json.RawMessage(data), &result); err != nil {
 		return err
 	}
 	return cli.PrintJSON(os.Stdout, result)
