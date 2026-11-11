@@ -51,6 +51,7 @@ export interface IssueCreateManual {
   startDate: string | null;
   assigneeType?: IssueAssigneeType;
   assigneeId?: string;
+  recipientSessionId?: string;
   /** Label IDs chosen in the create dialog. Attached to the issue right after
    *  it is created (the create endpoint takes no labels), so they are kept as
    *  a plain id list rather than full Label objects. */

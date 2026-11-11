@@ -49,11 +49,13 @@ export function SourceContextBadge({
   refetchIssue,
   parentIssue,
   parentProgress,
+  onParentClick,
 }: {
   context: IssueSourceContext;
   refetchIssue: () => Promise<Issue | null | undefined>;
   parentIssue?: Issue | null;
   parentProgress?: { done: number; total: number };
+  onParentClick?: React.MouseEventHandler<HTMLAnchorElement>;
 }) {
   const { t } = useT("issues");
   const { colorOf, iconOf } = useIssueStatuses(useWorkspaceId());
@@ -157,6 +159,7 @@ export function SourceContextBadge({
           {parentIssue ? (
             <AppLink
               href={paths.issueDetail(parentIssue.id)}
+              onClick={onParentClick}
               aria-label={`${originIdentifier} ${originTitle}`}
               className="group/source-parent flex min-w-0 items-center gap-1.5 rounded-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >

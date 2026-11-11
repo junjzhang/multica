@@ -60,6 +60,9 @@ func newCodeArtsBackend(cfg Config) (Backend, error) {
 }
 
 func (b *codeartsBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("codearts", opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "codearts"

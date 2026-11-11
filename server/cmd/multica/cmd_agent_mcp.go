@@ -91,7 +91,7 @@ func agentMcpPath(agentID string, parts ...string) string {
 
 func runAgentMcpList(cmd *cobra.Command, args []string) error {
 	agentID := strings.TrimSpace(args[0])
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func runAgentMcpList(cmd *cobra.Command, args []string) error {
 
 func runAgentMcpAdd(cmd *cobra.Command, args []string) error {
 	agentID, serverID := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func runAgentMcpDisable(cmd *cobra.Command, args []string) error {
 
 func setAgentMcpEnabled(cmd *cobra.Command, args []string, enabled bool) error {
 	agentID, serverID := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func setAgentMcpEnabled(cmd *cobra.Command, args []string, enabled bool) error {
 
 func runAgentMcpRemove(cmd *cobra.Command, args []string) error {
 	agentID, serverID := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}

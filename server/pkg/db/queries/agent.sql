@@ -445,13 +445,20 @@ WHERE id = @id
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The
 -- daemon detects this variant via context.type == "quick_create".
--- The requester who opened the quick-create modal is a direct_human originator
--- and accountable; attribution provenance is stamped so this path is not a
--- NULL-source enqueue bypass (MUL-4302 §2).
+-- Current invocation provenance is explicit. A managed source is locked after
+-- workspace ownership and must remain live with the same authorization principal.
+WITH owner_fence AS MATERIALIZED (
+    SELECT lock_task_owner_rows($1, NULL, $2) AS allowed
+), invocation_source AS MATERIALIZED (
+    SELECT task.id, task.status, task.originator_user_id
+    FROM agent_task_queue task CROSS JOIN owner_fence
+    WHERE owner_fence.allowed AND task.id = sqlc.narg(delegated_from_task_id)::uuid
+    FOR SHARE OF task
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context, originator_user_id,
     accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
-    originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, delegated_from_task_id,
     id
 )
 SELECT
@@ -463,8 +470,15 @@ SELECT
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
     sqlc.narg(trigger_evidence_ref_id),
+    sqlc.narg(delegated_from_task_id),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
-WHERE lock_task_owner_rows($1, NULL, $2)
+FROM owner_fence
+WHERE owner_fence.allowed
+  AND (sqlc.narg(delegated_from_task_id)::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM invocation_source
+      WHERE status NOT IN ('completed', 'failed', 'cancelled')
+        AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(originator_user_id)::uuid
+  ))
 RETURNING *;
 
 -- name: LinkTaskToIssue :exec
@@ -539,8 +553,9 @@ SELECT
 FROM agent_task_queue p
 WHERE p.id = $1
   AND lock_task_owner_rows(p.agent_id, p.issue_id, p.runtime_id)
-ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE status IN ('queued', 'dispatched')
-       OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
+ON CONFLICT (issue_id, agent_id, (COALESCE(comment_thread_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE COALESCE(context->>'type', '') <> 'delegation_result'
+  AND (status IN ('queued', 'dispatched')
+       OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true'))
 DO NOTHING
 RETURNING *;
 
@@ -627,8 +642,18 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND status IN ('queued', 'dispatched', 'deferred')
 RETURNING *;
+
+-- name: LockIssueForTaskRerun :one
+-- Match task-owner acquisition before locking the issue for queue replacement.
+-- Cancellation and insertion then share the owner-before-task lock order.
+SELECT i.id FROM issue i
+JOIN agent a ON a.id = @agent_id AND a.workspace_id = i.workspace_id
+WHERE i.id = @issue_id AND i.workspace_id = @workspace_id
+  AND lock_task_owner_rows(a.id, i.id, a.runtime_id)
+FOR NO KEY UPDATE OF i;
 
 -- name: CancelPendingTasksByIssueAndAgentInThread :many
 -- Cancel only the not-yet-started plan in the selected thread. Other threads
@@ -637,6 +662,7 @@ UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND status IN ('queued', 'dispatched', 'deferred')
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid)
 RETURNING *;
@@ -658,13 +684,37 @@ RETURNING *;
 -- The body may already have been embedded as either the primary trigger or a
 -- coalesced input; cancellation prevents an agent from acting on a stale or
 -- deleted version. Must run before deletion clears trigger_comment_id.
+-- Serialize with recovery in issue -> task -> obligation order. Editing already
+-- holds the issue lock; deletion's cancellation also needs it before task locks.
+WITH locked_issue AS MATERIALIZED (
+    SELECT issue.id FROM issue
+    JOIN comment ON comment.issue_id = issue.id AND comment.workspace_id = issue.workspace_id
+    WHERE comment.id = $1
+    FOR UPDATE OF issue
+), issue_fence AS MATERIALIZED (
+    SELECT count(*) AS locked_count FROM locked_issue
+), targets AS MATERIALIZED (
+    SELECT agent_task_queue.id FROM agent_task_queue
+    WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
+      AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
+      AND (SELECT locked_count FROM issue_fence) >= 0
+    FOR UPDATE OF agent_task_queue
+), reopened AS (
+    UPDATE comment_dispatch_obligation AS obligation
+    SET status = 'pending', next_attempt_at = now(), last_error = NULL, updated_at = now()
+    FROM targets
+    WHERE obligation.settled_task_id = targets.id
+      AND obligation.comment_id <> $1
+      AND obligation.status = 'settled'
+    RETURNING obligation.id
+)
 UPDATE agent_task_queue
 SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
     cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL,
     context = COALESCE(context, '{}'::jsonb) || jsonb_build_object('comment_change_cancelled_task_id', id::text)
-WHERE (trigger_comment_id = $1 OR $1 = ANY(coalesced_comment_ids))
-  AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred')
-RETURNING *;
+WHERE id IN (SELECT id FROM targets)
+  AND (SELECT count(*) FROM reopened) >= 0
+RETURNING agent_task_queue.*;
 
 -- name: CancelAgentTasksByChatSession :many
 -- Cancels active tasks belonging to a chat session. Called from
@@ -746,6 +796,7 @@ WHERE id = (
     WHERE atq.agent_id = @agent_id
       AND atq.runtime_id = @runtime_id
       AND atq.status = 'queued'
+      AND NOT EXISTS (SELECT 1 FROM agent_task_delegation_return l JOIN agent_mailbox_message m ON m.id = l.notification_delivery_id WHERE l.notification_task_id = atq.id AND m.processing_status = 'handled')
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
       AND EXISTS (
           SELECT 1
@@ -1009,7 +1060,7 @@ RETURNING *;
 -- to retire the transcript it retried away from, or an older completed row
 -- pointing at the same id resurrects it on the next run.
 UPDATE agent_task_queue
-SET status = 'completed', completed_at = now(), result = $2,
+SET status = 'completed', completed_at = now(), result = $2, delegation_outcome_final = true,
     session_id = CASE WHEN sqlc.arg('session_rollout_missing') THEN NULL ELSE $3 END,
     work_dir = $4,
     durable_work_dir = COALESCE(sqlc.narg('durable_work_dir'), durable_work_dir),
@@ -1261,7 +1312,7 @@ UPDATE agent_task_queue
 SET status = 'failed', completed_at = now(), error = 'task timed out',
     failure_reason = 'timeout',
     prepare_lease_expires_at = NULL
-WHERE (
+WHERE ((
     status = 'dispatched'
     AND dispatched_at < now() - make_interval(secs => @dispatch_timeout_secs::double precision)
     AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
@@ -1298,7 +1349,9 @@ WHERE (
               now() - make_interval(secs => @runtime_reconnect_grace_secs::double precision)
       )
     )
-  )
+  ))
+  AND NOT COALESCE(context->'background_wait'->'address'->>'task_id'=id::text
+      AND context->'background_wait'->>'consumed' IS DISTINCT FROM 'true',false)
 RETURNING *;
 
 -- name: ExpireStaleQueuedTasks :many
@@ -1686,6 +1739,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND status IN ('queued', '
 -- the pre-TEN-356 (issue_id, agent_id) key so non-PR issues keep coalescing.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -1700,6 +1754,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
 -- root comment and all descendants. NULL selects assignment-level work.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -1717,6 +1772,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = $1 AND agent_id = $2
 -- Carries the same head_sha dedup key as HasPendingTaskForIssueAndAgent (TEN-356).
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
     status IN ('queued', 'dispatched')
@@ -1732,6 +1788,7 @@ WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
 -- Thread-scoped edit preview: ignore the comment whose old run save replaces.
 SELECT count(*) > 0 AS has_pending FROM agent_task_queue
 WHERE context->>'wakeup_id' IS NULL AND issue_id = @issue_id
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND agent_id = @agent_id
   AND (
     status IN ('queued', 'dispatched')
@@ -1814,6 +1871,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND COALESCE(t.context->>'type', '') <> 'delegation_result'
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
       AND (
@@ -1870,6 +1928,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND COALESCE(t.context->>'type', '') <> 'delegation_result'
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND t.status IN ('dispatched', 'running', 'waiting_local_directory')
@@ -1901,6 +1960,7 @@ SET coalesced_comment_ids = (
 WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND COALESCE(t.context->>'type', '') <> 'delegation_result'
       AND t.agent_id = @agent_id
       AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@comment_id::uuid)
       AND (
@@ -2121,6 +2181,7 @@ LIMIT @max_per_tick;
 -- NO active task exists.
 SELECT count(*) > 0 AS has_active FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -2130,6 +2191,7 @@ WHERE issue_id = $1 AND agent_id = $2
 -- Active execution and pending work in this comment thread only.
 SELECT count(*) > 0 AS has_active FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
   AND (
     status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
     OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true')
@@ -2143,6 +2205,7 @@ WHERE issue_id = $1 AND agent_id = $2
 -- thread-parent replies.
 SELECT is_leader_task, squad_id FROM agent_task_queue
 WHERE issue_id = $1 AND agent_id = $2
+  AND COALESCE(context->>'type', '') <> 'delegation_result'
 ORDER BY created_at DESC
 LIMIT 1;
 
@@ -2214,6 +2277,7 @@ WHERE r.runtime_id = ANY(@runtime_ids::uuid[])
     WHERE successor.issue_id = r.issue_id
       AND successor.agent_id = r.agent_id
       AND successor.comment_thread_id IS NOT DISTINCT FROM r.comment_thread_id
+      AND COALESCE(successor.context->>'type', '') <> 'delegation_result'
       AND successor.id <> r.id
       AND successor.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
   )
@@ -2259,6 +2323,7 @@ WITH due AS (
           AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
           AND (
             occupant.status IN ('queued', 'dispatched')
             OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')
@@ -2327,6 +2392,7 @@ WHERE t.runtime_id = ANY(@runtime_ids::uuid[])
         AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
         AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
         AND (
           occupant.status IN ('queued', 'dispatched')
           OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')
@@ -2362,6 +2428,7 @@ WITH due AS (
           AND occupant.agent_id = t.agent_id
           AND occupant.comment_thread_id IS NOT DISTINCT FROM t.comment_thread_id
           AND occupant.id <> t.id
+          AND COALESCE(occupant.context->>'type', '') <> 'delegation_result'
           AND (
             occupant.status IN ('queued', 'dispatched')
             OR (occupant.status = 'deferred' AND occupant.context->>'channel_issue_media_pending' = 'true')
@@ -2720,3 +2787,15 @@ RETURNING *;
 
 -- name: GetCommentThreadRootID :one
 SELECT comment_thread_root_id(@comment_id::uuid)::uuid AS id;
+
+-- name: SetQueuedAgentTaskRuntimeOverlay :execrows
+-- The delegated issue, accepted return, and task commit atomically before the
+-- optional external overlay is built. Hydrate only the same trigger/actor plan;
+-- even a same-actor comment merge may have superseded the original request.
+UPDATE agent_task_queue
+SET runtime_mcp_overlay = sqlc.narg(runtime_mcp_overlay),
+    runtime_connected_apps = sqlc.narg(runtime_connected_apps)
+WHERE id = @id
+  AND (status = 'queued' OR (status = 'deferred' AND context->>'channel_issue_media_pending' = 'true'))
+  AND trigger_comment_id IS NOT DISTINCT FROM sqlc.narg(expected_trigger_comment_id)::uuid
+  AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(expected_originator_user_id)::uuid;

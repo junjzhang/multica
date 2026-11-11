@@ -52,6 +52,7 @@ import { cn } from "@multica/ui/lib/utils";
 import { useT, useTimeAgo } from "../../i18n";
 import { useStatusLabel } from "../utils/status-label";
 import { StatusIcon } from "./status-icon";
+import { PullRequestSnapshotDetails } from "./pull-request-snapshot-details";
 
 type IssuesT = ReturnType<typeof useT<"issues">>["t"];
 
@@ -485,6 +486,7 @@ function PullRequestRow({
           ) : null}
         </TooltipContent>
       </Tooltip>
+      <PullRequestSnapshotDetails pr={pr} />
       {actions ? <PullRequestRowMenu pr={pr} actions={actions} /> : null}
     </div>
   );
@@ -554,7 +556,7 @@ function PullRequestProblems({
     ...(verdict.conflicting
       ? [{ key: "conflict", icon: TriangleAlert, className: "text-amber-600 dark:text-amber-400", label: t(($) => $.detail.pull_request_merge_conflicting) }]
       : []),
-    ...verdict.names.map((name) => ({ key: `check:${name}`, icon: XCircle, className: "text-rose-600 dark:text-rose-400", label: name })),
+    ...verdict.names.map((name, index) => ({ key: `check:${index}:${name}`, icon: XCircle, className: "text-rose-600 dark:text-rose-400", label: name })),
   ];
   if (items.length === 0) return null;
   const shown = items.slice(0, PROBLEM_LIMIT);
@@ -586,7 +588,7 @@ function getVerdictPill(verdict: PullRequestVerdict, t: IssuesT): VerdictPillCon
       return {
         icon: XCircle,
         tone: "red",
-        label: t(($) => $.detail.pull_request_checks_failed_count, {
+        label: verdict.failed === 0 ? t(($) => $.detail.pull_request_check_failed) : t(($) => $.detail.pull_request_checks_failed_count, {
           failed: verdict.failed,
           total: verdict.total,
         }),
@@ -603,8 +605,8 @@ function getVerdictPill(verdict: PullRequestVerdict, t: IssuesT): VerdictPillCon
         icon: LoaderCircle,
         tone: "amber",
         spin: true,
-        label: `${verdict.passed}/${verdict.total}`,
-        title: t(($) => $.detail.pull_request_checks_running, {
+        label: verdict.running === 0 ? t(($) => $.detail.pull_request_check_pending) : `${verdict.passed}/${verdict.total}`,
+        title: verdict.running === 0 ? t(($) => $.detail.pull_request_check_pending) : t(($) => $.detail.pull_request_checks_running, {
           passed: verdict.passed,
           total: verdict.total,
           running: verdict.running,

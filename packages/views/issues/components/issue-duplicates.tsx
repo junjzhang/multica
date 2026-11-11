@@ -141,7 +141,7 @@ export function IssueDuplicatesSection({ issueId }: { issueId: string }) {
  * and rows that are not duplicates render nothing.
  *
  * It is a real link wherever the row is not one itself (the table's rows are
- * plain elements). List rows and board cards are anchors, and an anchor may
+ * plain elements). List rows are anchors, and an anchor may
  * not contain another, so there it is a keyboard-operable control that
  * navigates like a link and stops the row from also opening the duplicate.
  */

@@ -3,10 +3,15 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/attribution"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -17,17 +22,16 @@ import (
 // selection cannot fan out into thousands of readiness probes.
 const maxPreviewTriggerIssues = 500
 
+var errAssignmentOriginatorConflict = errors.New("pending assignment has a different authorization originator")
+
 // issueTriggerWriteProbe builds the probe the write paths feed to
 // WillEnqueueRun. The private-agent gate is already enforced at the HTTP
 // boundary (validateAssigneePair on assign) and inside enqueueSquadLeaderTask
 // (canEnqueueSquadLeader), so a write must NOT re-run or sink it — it passes
-// allow-all. The self-loop check needs the request's X-Task-ID header.
+// allow-all.
 func (h *Handler) issueTriggerWriteProbe(r *http.Request, actorType, actorID string, issue db.Issue) service.IssueTriggerProbe {
 	return service.IssueTriggerProbe{
 		CanAccessAgent: nil, // allow-all; gate lives at the write boundary
-		IsSelfLoop: func() bool {
-			return h.isAgentRunningOnIssue(r, actorType, issue)
-		},
 		SuppressActiveSelfAssignment: func(agentID pgtype.UUID) bool {
 			suppress := h.shouldSuppressActiveSelfAssignment(r.Context(), actorType, actorID, issue.ID, agentID)
 			if suppress {
@@ -44,15 +48,12 @@ func (h *Handler) issueTriggerWriteProbe(r *http.Request, actorType, actorID str
 // issueTriggerPreviewProbe mirrors the real write-time gates for the read-only
 // preview: the private-agent gate (so preview never leaks a private agent's
 // readiness to a member who cannot see it — matching validateAssigneePair /
-// canEnqueueSquadLeader) and the same self-loop guard.
+// canEnqueueSquadLeader).
 func (h *Handler) issueTriggerPreviewProbe(r *http.Request, actorType, actorID, workspaceID string, issue db.Issue) service.IssueTriggerProbe {
 	originatorUserID := h.invokeOriginatorFromRequest(r, actorType, actorID)
 	return service.IssueTriggerProbe{
 		CanAccessAgent: func(agent db.Agent) bool {
 			return h.canInvokeAgent(r.Context(), agent, actorType, actorID, originatorUserID, workspaceID)
-		},
-		IsSelfLoop: func() bool {
-			return h.isAgentRunningOnIssue(r, actorType, issue)
 		},
 		SuppressActiveSelfAssignment: func(agentID pgtype.UUID) bool {
 			return h.shouldSuppressActiveSelfAssignment(r.Context(), actorType, actorID, issue.ID, agentID)
@@ -77,21 +78,68 @@ func (h *Handler) shouldSuppressActiveSelfAssignment(ctx context.Context, actorT
 	return active || err != nil
 }
 
-// dispatchIssueRun executes the enqueue side effect for a decision produced by
-// WillEnqueueRun. handoffNote is a legacy API input retained for installed
-// clients and travels only with a run that actually starts. The squad path
-// still flows through enqueueSquadLeaderTask so the leader access gate and
-// pending dedup stay in one place.
-func (h *Handler) dispatchIssueRun(ctx context.Context, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string) {
-	switch trigger.AssigneeType {
-	case "agent":
-		// The member who performed this assign/promote is the accountable human
-		// for the run (MUL-4302 §4). An agent actor is not a human, so only a
-		// member actor is threaded; otherwise attribution falls back to the chain.
-		_, _ = h.TaskService.EnqueueTaskForIssueWithHandoff(ctx, issue, handoffNote, memberActorUserID(actorType, actorID))
-	case "squad":
-		h.enqueueSquadLeaderTask(ctx, issue, pgtype.UUID{}, actorType, actorID, handoffNote)
+// enqueueAssignmentRunInTx creates the run an explicit assignment starts inside
+// the issue write's transaction. inserted=false means a sibling pending run
+// already covers the target; the assignment intent still commits. Any other
+// error rolls the whole assignment back, so a rejected or failed enqueue can
+// never leave an assignee without its durable launch obligation.
+func (h *Handler) enqueueAssignmentRunInTx(ctx context.Context, tx pgx.Tx, q *db.Queries, issue db.Issue, trigger service.IssueRunTrigger, actorType, actorID, handoffNote string, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, bool, error) {
+	if trigger.AssigneeType != "agent" && trigger.AssigneeType != "squad" {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
+	// A pending sibling may already cover the target. The occupant can change
+	// state between the conflict and the follow-up read, so this is a bounded
+	// re-observation loop, not a one-shot fallback: a queued/deferred occupant
+	// is linked, while an occupant that started or disappeared lets the retry
+	// insert its own run. Returning inserted=false without either outcome would
+	// commit an assignment whose launch and accepted return are both lost.
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		pending, err := q.GetPendingAssignmentTaskForIssueAndAgent(ctx, db.GetPendingAssignmentTaskForIssueAndAgentParams{
+			IssueID: issue.ID, AgentID: trigger.AgentID,
+		})
+		if err == nil {
+			if invocation != nil && pending.OriginatorUserID != invocation.UserID {
+				return db.AgentTaskQueue{}, attribution.Result{}, false, errAssignmentOriginatorConflict
+			}
+			if err := delegation.LinkRun(ctx, q, pending.ID, delegationReturns...); err != nil {
+				return db.AgentTaskQueue{}, attribution.Result{}, false, err
+			}
+			return pending, attribution.Result{}, false, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return db.AgentTaskQueue{}, attribution.Result{}, false, err
+		}
+
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, false, err
+		}
+		qsp := h.Queries.WithTx(sp)
+		var task db.AgentTaskQueue
+		var attr attribution.Result
+		switch trigger.AssigneeType {
+		case "agent":
+			// Explicit invocation distinguishes member action from delegated authority.
+			task, attr, err = h.TaskService.EnqueueIssueAssignmentInTx(ctx, qsp, issue, handoffNote, memberActorUserID(actorType, actorID), delegationReturns, invocation)
+		case "squad":
+			task, attr, err = h.TaskService.EnqueueSquadLeaderAssignmentInTx(ctx, qsp, issue, trigger.AgentID, issue.AssigneeID, handoffNote, memberActorUserID(actorType, actorID), delegationReturns, invocation)
+		}
+		if err != nil {
+			_ = sp.Rollback(ctx)
+			if errors.Is(err, service.ErrDuplicatePendingTask) {
+				lastErr = err
+				continue
+			}
+			return db.AgentTaskQueue{}, attribution.Result{}, false, err
+		}
+		if err := sp.Commit(ctx); err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, false, err
+		}
+		return task, attr, true, nil
+	}
+	return db.AgentTaskQueue{}, attribution.Result{}, false, fmt.Errorf("assignment enqueue could not resolve the pending occupant after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // memberActorUserID returns the acting member's user id as a pgtype.UUID when the
@@ -249,7 +297,7 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 
 		post := loaded
-		in := service.IssueTriggerInput{PrevStatus: loaded.Status}
+		in := service.IssueTriggerInput{}
 		if hasNewAssignee {
 			post.AssigneeType = newAssigneeType
 			post.AssigneeID = newAssigneeID
@@ -258,7 +306,6 @@ func (h *Handler) PreviewIssueTrigger(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Status != nil && *req.Status != "" {
 			post.Status = *req.Status
-			in.StatusChanged = loaded.Status != *req.Status
 			// A status that enters a workflow handoff step reassigns the
 			// issue, exactly as UpdateIssue will. (MUL-7420)
 			if !hasNewAssignee {

@@ -1,0 +1,1 @@
+ALTER TABLE agent_task_delegation_return ADD COLUMN last_attempt_at TIMESTAMPTZ;

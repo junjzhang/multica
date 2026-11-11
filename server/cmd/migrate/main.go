@@ -140,6 +140,31 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"656_external_agent_template_key_index":                     "uq_agent_external_template_key",
+	"651_issue_contract_unique":                                 "issue_contract_issue_unique",
+	"649_mailbox_result_consumer_index":                         "idx_mailbox_result_consumer",
+	"648_mailbox_result_delivery_index":                         "uq_delegation_result_delivery",
+	"636_ordinary_task_pending_thread_index":                    "idx_one_pending_ordinary_task_per_issue_agent_thread",
+	"640_current_delegation_return_index":                       "uq_current_issue_delegation_return",
+	"642_result_takeover_request_index":                         "uq_delegation_result_takeover_request",
+	"632_delegation_result_task_index":                          "uq_delegation_result_task",
+	"610_tgit_snapshot_refresh_index":                           "idx_tgit_snapshot_refresh",
+	"616_agent_mailbox_target_session_index":                    "idx_agent_mailbox_target_session",
+	"615_agent_mailbox_notification_key_index":                  "uq_agent_mailbox_notification_key",
+	"614_agent_session_binding_active_index":                    "uq_agent_session_binding_active",
+	"619_issue_delegation_return_issue_index":                   "uq_issue_delegation_return_dispatch",
+	"622_comment_dispatch_obligation_target_index":              "uq_comment_dispatch_obligation_target",
+	"623_comment_dispatch_obligation_pending_index":             "idx_comment_dispatch_obligation_pending",
+	"596_external_agent_session_identity_index":                 "uq_external_agent_session_identity",
+	"597_external_agent_session_agent_index":                    "uq_external_agent_session_agent",
+	"598_external_agent_token_hash_index":                       "uq_external_agent_token_hash",
+	"599_external_agent_token_agent_index":                      "idx_external_agent_token_agent",
+	"600_agent_mailbox_recipient_comment_index":                 "uq_agent_mailbox_recipient_comment",
+	"601_agent_mailbox_claim_index":                             "idx_agent_mailbox_claim",
+	"602_agent_mailbox_recipient_index":                         "idx_agent_mailbox_recipient",
+	"603_agent_mailbox_issue_index":                             "idx_agent_mailbox_issue",
+	"605_agent_mailbox_delivery_idempotency_index":              "uq_agent_mailbox_delivery_idempotency",
+	"607_agent_mailbox_verify_index":                            "idx_agent_mailbox_verify",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",
@@ -367,6 +392,10 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"641_retire_delegation_return_dispatch_index":           "uq_issue_delegation_return_dispatch",
+	"637_retire_shared_task_pending_thread_index":           "idx_one_pending_task_per_issue_agent_thread",
+	"617_drop_mailbox_source_key_unique":                    "uq_agent_mailbox_delivery_idempotency",
+	"613_drop_external_agent_session_agent_unique":          "uq_external_agent_session_agent",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",
@@ -414,6 +443,18 @@ var preRollbackHooks = func() map[string]preMigrationHook {
 	// partially applied version fails before dropping its first live index.
 	for _, version := range sourceContextMigrationVersions {
 		hooks[version] = ensureSourceContextRollbackSafe
+	}
+	for _, version := range resultTakeoverMigrationVersions {
+		cleanup := hooks[version]
+		hooks[version] = func(ctx context.Context, pool *pgxpool.Pool) error {
+			if err := ensureResultTakeoverRollbackSafe(ctx, pool); err != nil {
+				return err
+			}
+			if cleanup != nil {
+				return cleanup(ctx, pool)
+			}
+			return nil
+		}
 	}
 	hooks["430_channel_outbound_message_binding_index"] = refuseChannelChatRouteHistoryRollback
 	return hooks
