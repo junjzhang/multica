@@ -41,7 +41,17 @@ export function TaskLeaderHandoff({ issue }: { issue: Issue }) {
   const squadId = issue.leadership_squad_id ?? "";
   const { data: members = [] } = useQuery(squadMembersOptions(wsId, squadId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const mutation = useHandoffIssueLeadership(wsId, issue.id);
+  // The server hands off the chain at its root. A subtask's card renders the
+  // same dialog, but posting to the subtask id would take the executor-handoff
+  // branch and fail with a revision conflict, so the request always targets
+  // the leadership root and the invalidation refreshes that root's detail.
+  const rootIssueId = issue.leadership_root_issue_id ?? issue.id;
+  // A subtask's own revision is not the root's; without a projected root
+  // revision, send an impossible value so the server rejects the stale request
+  // instead of silently comparing against the wrong row.
+  const rootRevision =
+    issue.leadership_root_revision ?? (rootIssueId === issue.id ? issue.revision ?? 0 : 0);
+  const mutation = useHandoffIssueLeadership(wsId, rootIssueId);
   const [open, setOpen] = useState(false);
   const [targetId, setTargetId] = useState("");
   const [sessionId, setSessionId] = useState("");
@@ -86,7 +96,7 @@ export function TaskLeaderHandoff({ issue }: { issue: Issue }) {
     mutation.mutate({
       client_request_id: createSafeId(),
       expected_revision: issue.leadership_revision ?? 0,
-      expected_issue_revision: issue.leadership_root_revision ?? issue.revision ?? 0,
+      expected_issue_revision: rootRevision,
       previous_agent_id: issue.leader_agent_id ?? "",
       previous_session_id: issue.leader_external_session_id || undefined,
       agent_id: target.id,
@@ -144,7 +154,7 @@ export function TaskLeaderHandoff({ issue }: { issue: Issue }) {
               <p className="text-caption text-muted-foreground">
                 {t(($) => $.detail.task_leader_handoff_revisions, {
                   leadership: issue.leadership_revision ?? 0,
-                  issue: issue.leadership_root_revision ?? issue.revision ?? 0,
+                  issue: rootRevision,
                 })}
               </p>
               <div className="space-y-1.5">

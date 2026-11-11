@@ -5,6 +5,7 @@ import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@multica/core/api";
+import { issueKeys } from "@multica/core/issues/queries";
 import type { Agent, Issue } from "@multica/core/types";
 import { renderWithI18n } from "../../test/i18n";
 
@@ -122,13 +123,17 @@ function issue(overrides: Partial<Issue> = {}): Issue {
   };
 }
 
-function renderHandoff(value: Issue = issue()) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return renderWithI18n(
+function handoffQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+}
+
+function renderHandoff(value: Issue = issue(), queryClient: QueryClient = handoffQueryClient()) {
+  const view = renderWithI18n(
     <QueryClientProvider client={queryClient}>
       <TaskLeaderHandoff issue={value} />
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
 }
 
 beforeEach(() => {
@@ -188,6 +193,52 @@ describe("TaskLeaderHandoff", () => {
     });
     expect(await within(dialog).findByText(/Contracts now stale: 1/)).toBeInTheDocument();
     expect(within(dialog).getByText(/explicit result takeover/)).toBeInTheDocument();
+  });
+
+  it("hands a subtask over through its leadership root", async () => {
+    const user = userEvent.setup();
+    calls.handoffIssueLeadership.mockResolvedValue({
+      root_issue_id: "issue-1",
+      revision: 4,
+      issue_revision: 8,
+      stale_contract_ids: [],
+      advanced_returns: [],
+      historical_results: "explicit_result_takeover_required",
+    });
+    const queryClient = handoffQueryClient();
+    queryClient.setQueryData(issueKeys.detail("ws-1", "issue-1"), issue());
+    const subtask = issue({
+      id: "sub-1",
+      number: 15,
+      identifier: "WORK-15",
+      parent_issue_id: "issue-1",
+      revision: 5,
+      leadership_root_issue_id: "issue-1",
+    });
+    renderHandoff(subtask, queryClient);
+
+    await user.click(screen.getByRole("button", { name: "Hand off" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("radio", { name: /Second Reviewer/ }));
+    await user.click(await within(dialog).findByRole("radio", { name: /Next route/ }));
+    await user.type(within(dialog).getByLabelText("Reason"), "Subtask owner is parked");
+    await user.click(within(dialog).getByRole("button", { name: "Hand off" }));
+
+    await waitFor(() => {
+      expect(calls.handoffIssueLeadership).toHaveBeenCalledWith(
+        "issue-1",
+        expect.objectContaining({
+          expected_issue_revision: 7,
+          previous_agent_id: "agent-external",
+          previous_session_id: "session-current",
+          agent_id: "agent-next",
+          session_id: "session-next",
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(queryClient.getQueryState(issueKeys.detail("ws-1", "issue-1"))?.isInvalidated).toBe(true);
+    });
   });
 
   it("reports a revision or leader conflict without claiming success", async () => {
