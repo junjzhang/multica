@@ -5,6 +5,7 @@ import { createTestApi, loginAsDefault } from "./helpers";
 const base = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 test("explicit and legacy handoffs keep their distinct responsibilities", async ({ page }) => {
+  test.skip(process.env.MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED !== "true", "Requires external agent templates enabled on the API");
   test.setTimeout(120_000);
   const api = await createTestApi();
   const workspace = await api.ensureWorkspace();
