@@ -138,7 +138,7 @@ func TestTaskLeadershipHandoffConflictsWithAClaimedQueueRow(t *testing.T) {
 	if _, err = tx.Exec(t.Context(), "SELECT id FROM agent_task_queue WHERE id=$1 FOR UPDATE", queued); err != nil {
 		t.Fatal(err)
 	}
-	path := "/api/issues/" + issue + "/leadership/handoff"
+	path := "/api/issues/" + issue + "/task-leader/handoff"
 	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, path, request).WithContext(ctx), "id", issue)).Want(409)
 	var leader string
 	var leadershipRevision int64
@@ -176,7 +176,7 @@ func TestTaskLeadershipHandoffKeepsAcceptedUpstreamOnReplacementRun(t *testing.T
 	cleanupDelegatedIssue(t, issue.ID)
 	accepted, _ := acceptedReturn(t, issue.ID)
 	request := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: issue.Revision, PreviousAgentID: old, AgentID: next, Reason: "Preserve the accepted source while replacing the leader"}
-	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/leadership/handoff", request), "id", issue.ID)).Want(200)
+	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue.ID+"/task-leader/handoff", request), "id", issue.ID)).Want(200)
 	var runID, returnID, sourceID string
 	dbfx.QueryRow(t, `SELECT t.id,l.delegation_return_id,d.source_task_id FROM agent_task_queue t
  JOIN agent_task_delegation_return l ON l.task_id=t.id JOIN issue_delegation_return d ON d.id=l.delegation_return_id

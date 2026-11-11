@@ -90,7 +90,7 @@ func TestContractSquadHandoffInvalidatesPendingAndAuthority(t *testing.T) {
 	dbfx.SquadMember(t, squad, "agent", newLeader)
 	var rev int64
 	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&rev)
-	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: rev, PreviousAgentID: leader, PreviousSessionID: oldestExternalSessionID(t, leader), AgentID: newLeader, Reason: "Explicit contract representative handoff"}), "id", issue)).Want(200)
+	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/task-leader/handoff", leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: rev, PreviousAgentID: leader, PreviousSessionID: oldestExternalSessionID(t, leader), AgentID: newLeader, Reason: "Explicit contract representative handoff"}), "id", issue)).Want(200)
 	var view ContractView
 	testutil.Call(t, testHandler.GetIssueContract, withURLParam(newRequest(http.MethodGet, "/", nil), "id", issue)).Want(200).JSON(&view)
 	if !view.Stale || view.CanSubmit || view.CanReview || view.ExecutorRepresentative.ID != newLeader || view.Contract.Pending().Author.ID != leader {

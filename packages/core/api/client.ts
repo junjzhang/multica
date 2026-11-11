@@ -350,6 +350,7 @@ import {
   CreateIssueResponseSchema,
   IssueSchema,
   IssueLeadershipHandoffResponseSchema,
+  IssueExecutorHandoffResponseSchema,
   AgentTaskSchema,
   AgentArchivePreflightSchema,
   SourceContextPreviewSchema,
@@ -1915,12 +1916,12 @@ export class ApiClient {
    * session, a managed target none.
    */
   async handoffIssueLeadership(issueId: string, data: IssueLeadershipHandoffRequest): Promise<IssueLeadershipHandoffResponse> {
-    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/leadership/handoff`, {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/task-leader/handoff`, {
       method: "POST",
       body: JSON.stringify(data),
     });
     const parsed = parseWithFallback<IssueLeadershipHandoffResponse | null>(raw, IssueLeadershipHandoffResponseSchema, null, {
-      endpoint: "POST /api/issues/{id}/leadership/handoff",
+      endpoint: "POST /api/issues/{id}/task-leader/handoff",
     });
     if (!parsed || !parsed.root_issue_id) {
       throw new Error("The server did not confirm this task-leader handoff.");
@@ -1931,6 +1932,18 @@ export class ApiClient {
       advanced_returns: parsed.advanced_returns ?? [],
       historical_results: parsed.historical_results ?? "",
     };
+  }
+
+  async handoffIssueExecutor(issueId: string, data: Omit<IssueLeadershipHandoffRequest, "expected_revision">): Promise<{ issue_id: string; issue_revision: number }> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/executor/handoff`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<{ issue_id: string; issue_revision: number } | null>(raw, IssueExecutorHandoffResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/executor/handoff",
+    });
+    if (!parsed) throw new Error("The server did not confirm this executor handoff.");
+    return parsed;
   }
 
   async getAgent(id: string): Promise<Agent> {

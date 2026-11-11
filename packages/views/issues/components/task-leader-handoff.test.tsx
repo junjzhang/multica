@@ -226,7 +226,7 @@ describe("TaskLeaderHandoff", () => {
 
     await waitFor(() => {
       expect(calls.handoffIssueLeadership).toHaveBeenCalledWith(
-        "issue-1",
+        "sub-1",
         expect.objectContaining({
           expected_issue_revision: 7,
           previous_agent_id: "agent-external",
