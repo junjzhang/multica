@@ -587,10 +587,13 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 	if issuestatus.IsBuiltIn(i.Status) {
 		statusCategory = i.Status
 	}
-	// Only leaders carry a root revision; on a child it is the root row's
-	// revision under the same name, filled by projectTaskLeader.
+	// Only the chain root carries the root revision. A subtask's own revision
+	// is not the root's, so subtask rows leave the field empty: detail
+	// responses fill it from the root in projectTaskLeader, and every
+	// issue:updated payload goes through issueResponseForEvent for the same
+	// projection. A raw subtask row must never report its own revision here.
 	leadershipRootRevision := int64(0)
-	if i.LeadershipRootIssueID.Valid {
+	if i.LeadershipRootIssueID.Valid && i.LeadershipRootIssueID == i.ID {
 		leadershipRootRevision = i.Revision
 	}
 	return IssueResponse{
@@ -4879,7 +4882,7 @@ func (h *Handler) deleteIssuesAndCollectAttachmentURLs(ctx context.Context, issu
 // detached children and duplicates whose original was deleted.
 func (h *Handler) publishIssueSnapshots(ctx context.Context, issues []db.Issue, actorType, actorID string) {
 	for _, issue := range issues {
-		response := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+		response := h.issueResponseForEvent(ctx, issue)
 		h.fillStatusCategory(ctx, issue.WorkspaceID, &response)
 		h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": response})
 	}
@@ -4892,7 +4895,7 @@ func (h *Handler) publishIssueSnapshots(ctx context.Context, issues []db.Issue, 
 func (h *Handler) publishClearedDuplicates(ctx context.Context, cleared []clearedDuplicate, actorType, actorID string) {
 	for _, c := range cleared {
 		prefix := h.getIssuePrefix(ctx, c.Issue.WorkspaceID)
-		response := issueToResponse(c.Issue, prefix)
+		response := h.issueResponseForEvent(ctx, c.Issue)
 		h.fillStatusCategory(ctx, c.Issue.WorkspaceID, &response)
 		h.publish(protocol.EventIssueUpdated, uuidToString(c.Issue.WorkspaceID), actorType, actorID, map[string]any{
 			"issue":                        response,
@@ -5329,8 +5332,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		prefix := h.getIssuePrefix(r.Context(), issue.WorkspaceID)
-		resp := issueToResponse(issue, prefix)
+		resp := h.issueResponseForEvent(r.Context(), issue)
 		h.advanceRunStep(r.Context(), callerRun, prevIssue, issue)
 
 		fillBatch(&resp)

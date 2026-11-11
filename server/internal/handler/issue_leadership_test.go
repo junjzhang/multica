@@ -12,6 +12,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -373,5 +374,66 @@ func TestTaskLeadershipChildIssueProjectsRootLeader(t *testing.T) {
 	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", root).Scan(&rootRevision)
 	if resp.LeadershipRootRevision != rootRevision {
 		t.Fatalf("child root revision = %d, want %d", resp.LeadershipRootRevision, rootRevision)
+	}
+}
+
+// A subtask row carries only the leadership root pointer, so every issue:updated
+// payload must project the leader from the root before it leaves the server.
+// Without the projection the client's shallow cache merge drops the leader and
+// replaces the root revision with the subtask's own revision.
+func TestTaskLeadershipChildBroadcastProjectsRootLeader(t *testing.T) {
+	f := taskLeadershipFixture(t)
+	root := f.create(t, f.tokenA)
+	child := dbfx.Issue(t, "Child of a task chain", testutil.Cols{
+		"parent_issue_id":          root,
+		"leadership_root_issue_id": root,
+		"leadership_squad_id":      f.squad,
+		"assignee_type":            "squad",
+		"assignee_id":              f.squad,
+	})
+	row, err := testHandler.Queries.GetIssueInWorkspace(t.Context(), db.GetIssueInWorkspaceParams{
+		ID:          parseUUID(child),
+		WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("load child: %v", err)
+	}
+	var rootRevision, childRevision int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", root).Scan(&rootRevision)
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", child).Scan(&childRevision)
+
+	// The raw row must not report its own revision as the chain's root revision.
+	unprojected := issueToResponse(row, "WORK")
+	if unprojected.LeadershipRootRevision != 0 || unprojected.LeaderAgentID != "" {
+		t.Fatalf("raw subtask row carries unprojected leadership fields: root revision %d, leader %q",
+			unprojected.LeadershipRootRevision, unprojected.LeaderAgentID)
+	}
+
+	h := *testHandler
+	h.Bus = events.New()
+	updates := make(chan events.Event, 4)
+	h.Bus.Subscribe(protocol.EventIssueUpdated, func(event events.Event) { updates <- event })
+	h.publishIssueChange(t.Context(), row, row.Status, "member", f.owner)
+
+	var event events.Event
+	select {
+	case event = <-updates:
+	default:
+		t.Fatal("child change published no issue:updated event")
+	}
+	payload, ok := event.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload = %T, want map[string]any", event.Payload)
+	}
+	resp, ok := payload["issue"].(IssueResponse)
+	if !ok {
+		t.Fatalf("payload issue = %T, want IssueResponse", payload["issue"])
+	}
+	if resp.LeaderAgentID != f.agent || resp.LeaderExternalSessionID != f.a {
+		t.Fatalf("child broadcast leader = %q/%q, want %q/%q", resp.LeaderAgentID, resp.LeaderExternalSessionID, f.agent, f.a)
+	}
+	if resp.LeadershipRootRevision != rootRevision {
+		t.Fatalf("child broadcast root revision = %d, want %d (child revision %d)",
+			resp.LeadershipRootRevision, rootRevision, childRevision)
 	}
 }

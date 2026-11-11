@@ -53,6 +53,16 @@ func (h *Handler) projectTaskLeader(ctx context.Context, issue db.Issue, resp *I
 	resp.LeadershipRootRevision = root.Revision
 }
 
+// issueResponseForEvent renders the issue embedded in an issue:updated event.
+// Every issue:updated payload goes through it: a subtask row carries only the
+// leadership root pointer, so without the projection the event would patch the
+// detail cache with a row whose leader is empty and drop the chain's leader.
+func (h *Handler) issueResponseForEvent(ctx context.Context, issue db.Issue) IssueResponse {
+	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+	h.projectTaskLeader(ctx, issue, &resp)
+	return resp
+}
+
 func (h *Handler) ClaimIssueLeadership(w http.ResponseWriter, r *http.Request) {
 	r = h.withWakeupActor(r)
 	issue, ok := h.loadIssueForUser(w, r, chi.URLParam(r, "id"))

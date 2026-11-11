@@ -612,7 +612,7 @@ func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, s
 }
 
 func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previous, actorType, actorID string) {
-	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
+	resp := h.issueResponseForEvent(ctx, issue)
 	h.fillStatusCategory(ctx, issue.WorkspaceID, &resp)
 	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous})
 }
@@ -624,7 +624,7 @@ func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previo
 // notification the ordinary assignment path grants. A same-agent session
 // handoff keeps the assignee unchanged and therefore emits no such flag.
 func (h *Handler) publishExecutorHandoffChange(ctx context.Context, updated, previous db.Issue, actorType, actorID string) {
-	resp := issueToResponse(updated, h.getIssuePrefix(ctx, updated.WorkspaceID))
+	resp := h.issueResponseForEvent(ctx, updated)
 	h.fillStatusCategory(ctx, updated.WorkspaceID, &resp)
 	assigneeChanged := previous.AssigneeType.String != updated.AssigneeType.String ||
 		uuidToString(previous.AssigneeID) != uuidToString(updated.AssigneeID)
