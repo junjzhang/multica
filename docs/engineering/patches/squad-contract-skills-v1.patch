@@ -1,0 +1,38 @@
+--- a/skills/development-workflow/SKILL.md
++++ b/skills/development-workflow/SKILL.md
+@@ -46,7 +46,8 @@
+ 先建单停放，确定不同的 executor 与 acceptor，由有权的 creator 建约，回读确认有效且
+ 尚无运行，再明确启动。状态变化和建约本身不证明已经派发；命令、权限和回执见 `multica`。
+ 无合同历史任务沿用原约定，不批量迁移或卡死；顺手活不为建约另造任务。
+-Squad assignee 当前不支持 Contract，保留小队路由，具体执行子任务按上述流程建约。
++Squad assignee 支持父任务 Contract：保留小队 executor，由当前有效队长以真实 Agent 身份提交，上游验收。
++成员子任务仍独立建约和验收；队长不能自改标准或自验，队长变化后先由有权请求方 revise。
+ 发现合同、正文或本轮交接冲突时指出差异，未定部分交回直接分发者，不自行累加要求。
+ 
+ 读取任务及本轮交接，明确目标、范围、验收条件、输入修订、执行者、审查者、
+--- a/skills/multica/references/contracts.md
++++ b/skills/multica/references/contracts.md
+@@ -18,8 +18,9 @@
+ 
+ 创建非 Backlog 且分配 Agent 可能立即启动，不能用于需要先建约的新委派。
+ 延后任务建约后若仍需停放，可再置 backlog；不要因 revise 后状态变动提前启动。
+-Squad assignee 当前不能建 Contract：保留小队路由，在具体 member/agent 执行子任务建约，
+-不自动更换小队负责人。无合同历史任务不批量改造，沿用原约定；短小顺手操作无需造任务。
++Squad assignee 可建父任务 Contract：executor 保留 squad，executor_representative 为当前有效队长。
++队长使用真实 Agent 凭据 submit，指定上游 accept/return；不能自改标准或自验。队长变化使合同 stale，
++须由有权请求方 revise，新版本不继承验收。历史作者、证据和固定返回不改写；成员子合同独立验收。无合同历史任务不批量改造，沿用原约定；短小顺手操作无需造任务。
+ 
+ ## 权威与权限
+ 
+--- a/skills/development-workflow/references/implementer.md
++++ b/skills/development-workflow/references/implementer.md
+@@ -8,7 +8,8 @@
+ 
+ 新委派先核对结构化 Contract 的当前版本、有效性和 executor/acceptor；目标、范围、验收和
+ 授权说明以它为准，正文提供输入、规则来源与证据。未建约不启动受委派执行，交回原请求方
+-补齐；历史无合同任务沿用原约定，Squad 路由例外按 development-workflow 处理。
++补齐；历史无合同任务沿用原约定。小队父合同由当前有效队长以真实身份代表提交，上游验收；
++成员子合同独立验收，队长不得自改标准或自验，角色变化后先核对当前有效版本。
+ 不得修订自己的验收条件。获准发起子任务时，先停放、由有权请求方建约并回读，再明确派发。
+ 
+ 在范围内自主推进实现或实验、必要验证和 CI。合同已授权独立审查时，直接请求指定

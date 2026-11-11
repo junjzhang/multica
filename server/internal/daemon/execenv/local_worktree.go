@@ -135,7 +135,7 @@ func localWorktreeConversation(params PrepareParams) (key, id string) {
 	if params.Task.ChatSessionID != "" {
 		return "chat-" + taskKey(params.Task.ChatSessionID), params.Task.ChatSessionID
 	}
-	return "", ""
+	return "", params.Task.ScopeTaskID
 }
 
 // LocalWorktree is a prepared worktree plus everything the daemon needs to
@@ -205,7 +205,10 @@ type LocalWorktree struct {
 	// aborted, when set, makes Finalize refuse to commit or remove anything.
 	// Set by the daemon when a pre-commit step failed in a way that would make
 	// the committed branch wrong (see AbortWithReason).
-	aborted error
+	aborted       error
+	finalizedTip  string
+	finalizedInfo os.FileInfo
+	dropOnRemove  bool
 }
 
 // MarshalJSON / UnmarshalJSON carry this struct's unexported state across the
@@ -232,6 +235,8 @@ func (w *LocalWorktree) MarshalJSON() ([]byte, error) {
 		Owner           branchOwner `json:"owner"`
 		TracksState     bool        `json:"tracks_state"`
 		SnapshotPending bool        `json:"snapshot_pending"`
+		FinalizedTip    string      `json:"finalized_tip,omitempty"`
+		DropOnRemove    bool        `json:"drop_on_remove,omitempty"`
 	}{
 		wire:            (*wire)(w),
 		CreatedBranch:   w.createdBranch,
@@ -240,6 +245,8 @@ func (w *LocalWorktree) MarshalJSON() ([]byte, error) {
 		Owner:           w.owner,
 		TracksState:     w.tracksState,
 		SnapshotPending: w.snapshotPending,
+		FinalizedTip:    w.finalizedTip,
+		DropOnRemove:    w.dropOnRemove,
 	})
 }
 
@@ -253,6 +260,8 @@ func (w *LocalWorktree) UnmarshalJSON(data []byte) error {
 		Owner           branchOwner `json:"owner"`
 		TracksState     bool        `json:"tracks_state"`
 		SnapshotPending bool        `json:"snapshot_pending"`
+		FinalizedTip    string      `json:"finalized_tip,omitempty"`
+		DropOnRemove    bool        `json:"drop_on_remove,omitempty"`
 	}{wire: (*wire)(w)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -263,6 +272,8 @@ func (w *LocalWorktree) UnmarshalJSON(data []byte) error {
 	w.owner = aux.Owner
 	w.tracksState = aux.TracksState
 	w.snapshotPending = aux.SnapshotPending
+	w.finalizedTip = aux.FinalizedTip
+	w.dropOnRemove = aux.DropOnRemove
 	return nil
 }
 
@@ -506,9 +517,9 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	return wt, nil
 }
 
-// Finalize commits whatever the agent left behind, removes the worktree, and
-// reports the branch. Called after the agent exits, before the env root is
-// handed to the GC.
+// Finalize persists the agent's work and branch state without removing its
+// directory. The caller reports the terminal outcome before obtaining resource
+// release authority and calling Remove.
 //
 // The auto-commit is the reason a worktree task can't lose work: `git worktree
 // remove --force` would happily delete uncommitted edits, and the user would
@@ -527,6 +538,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		return LocalWorktreeOutcome{}, nil
 	}
 	outcome := LocalWorktreeOutcome{Branch: w.Branch}
+	w.finalizedTip, w.finalizedInfo = "", nil
 
 	unlock, err := lockGitRoot(w.GitRoot, logger)
 	if err != nil {
@@ -681,15 +693,17 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
-	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
+	info, infoErr := os.Lstat(w.Path)
+	if infoErr != nil {
 		outcome.PreservedPath = w.Path
-		return outcome, fmt.Errorf(
-			"could not remove finalized worktree for branch %s: %w; the task worktree remains at %s",
-			w.Branch, removeErr, w.Path)
+		return outcome, fmt.Errorf("cannot confirm finalized worktree identity: %w", infoErr)
 	}
-
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || tip == "" {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("invalid finalized worktree: %s", w.Path)
+	}
+	w.finalizedTip, w.finalizedInfo, w.dropOnRemove = tip, info, dropped
 	if dropped {
-		dropBranch(w.GitRoot, w.Branch, logger)
 		outcome.Branch = ""
 	}
 
@@ -703,6 +717,42 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+// Remove deletes only the exact clean worktree Finalize persisted. The caller
+// must hold its env-root lock and have authoritative permission to release the
+// resource. New ownership or edits after finalization always preserve the tree.
+func (w *LocalWorktree) Remove(logger *slog.Logger) error {
+	if w == nil {
+		return nil
+	}
+	if w.finalizedTip == "" || w.finalizedInfo == nil {
+		return errors.New("worktree has not been finalized")
+	}
+	unlock, err := lockGitRoot(w.GitRoot, logger)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	info, err := os.Lstat(w.Path)
+	if err != nil || !info.IsDir() || !os.SameFile(w.finalizedInfo, info) {
+		return fmt.Errorf("finalized worktree identity changed: %s", w.Path)
+	}
+	tip, err := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD")
+	if err != nil || tip != w.finalizedTip {
+		return fmt.Errorf("finalized worktree commit changed: %s", w.Path)
+	}
+	dirty, err := worktreeIsDirty(w.Path)
+	if err != nil || dirty {
+		return fmt.Errorf("finalized worktree is no longer clean: %s", w.Path)
+	}
+	if err := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); err != nil {
+		return err
+	}
+	if w.dropOnRemove {
+		dropBranch(w.GitRoot, w.Branch, logger)
+	}
+	return nil
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,
@@ -1210,6 +1260,9 @@ func resolveTaskBranch(gitRoot string, params LocalWorktreeParams, headSHA strin
 	taskScoped := taskBranchPlan{name: fmt.Sprintf("agent/%s/%s", agentSegment, taskKey(params.TaskID)), base: headSHA}
 
 	owner := params.owner()
+	if owner.valid() {
+		taskScoped.owner = owner
+	}
 	if params.ConversationKey == "" || !owner.valid() {
 		return taskScoped
 	}

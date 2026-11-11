@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"strings"
 	"time"
@@ -48,7 +49,8 @@ var childDoneCondition = json.RawMessage(`{"type":"children_done","each_stage":t
 // neither the issue nor the workspace sets an instruction. The trigger facts
 // say which stage closed, which one is next and how many were cancelled.
 const ChildDoneDefaultInstruction = "Sub-issues of this issue have closed; the trigger facts list each stage and which one is next. " +
-	"If a later stage is waiting, check that its dependencies are met, then move its sub-issues out of backlog so they start. " +
+	"If a later stage is waiting, check that its dependencies are met, then explicitly @mention each next-stage sub-issue's assignee (or rerun it) so that work starts. " +
+	"Moving a sub-issue out of backlog or changing its status does not start a run on its own. " +
 	"If a sub-issue in the closed stages was cancelled rather than finished, decide whether its work is still needed before advancing. " +
 	"When every sub-issue is closed, bring their results together on this issue and move it forward, or mark it ready for review when nothing remains."
 
@@ -317,7 +319,9 @@ func resolveWakeTarget(ctx context.Context, q *db.Queries, issue db.Issue) (wake
 		return wakeTarget{Type: "none"}, nil
 	}
 	target := wakeTarget{Type: issue.AssigneeType.String, ID: issue.AssigneeID}
-	usable := func(a db.Agent) bool { return a.RuntimeID.Valid && !a.ArchivedAt.Valid }
+	usable := func(a db.Agent) bool {
+		return (a.RuntimeID.Valid || a.ExecutionKind == "external") && !a.ArchivedAt.Valid
+	}
 	switch target.Type {
 	case "member":
 		return target, nil
@@ -339,7 +343,8 @@ func resolveWakeTarget(ctx context.Context, q *db.Queries, issue db.Issue) (wake
 			return target, err
 		}
 		target.SquadID = squad.ID
-		leader, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID})
+		resolved, err := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+		leader := resolved.Agent
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return target, err
 		}
@@ -409,7 +414,11 @@ func (s *IssueWakeupService) dispatchSystem(ctx context.Context, prev db.IssueWa
 		return err
 	}
 	q := s.Tasks.Queries.WithTx(tx)
-	if target.Agent.ID.Valid {
+	if target.Agent.ExecutionKind == "external" {
+		if _, err = q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: target.Agent.ID, WorkspaceID: snapshot.WorkspaceID}); err != nil {
+			return err
+		}
+	} else if target.Agent.ID.Valid {
 		var fenced bool
 		if err = tx.QueryRow(ctx, "SELECT lock_task_owner_rows($1,$2,$3)", target.Agent.ID, prev.IssueID, target.Agent.RuntimeID).Scan(&fenced); err != nil {
 			return err
@@ -599,6 +608,25 @@ func (s *IssueWakeupService) dispatchSystem(ctx context.Context, prev db.IssueWa
 		instruction.Instruction = ChildDoneInstruction(w.Instruction, nil)
 	}
 	noteText, evidence := mergeWakeupEvidence(instruction, task, receipts)
+	if agent.ExecutionKind == "external" {
+		instruction.AgentID = agent.ID
+		deliveryID, err := enqueueWakeupDelivery(ctx, q, instruction, receipts, noteText)
+		if err != nil {
+			return err
+		}
+		if err = q.ConsumeWakeupReceipts(ctx, db.ConsumeWakeupReceiptsParams{Ids: ids}); err != nil {
+			return err
+		}
+		if err = q.CountWakeupFires(ctx, w.ID); err != nil {
+			return err
+		}
+		facts["outcome"], facts["delivery_id"] = "notified", deliveryID
+		if err = note(wakeupActivityTriggered, facts); err != nil {
+			return err
+		}
+		return commit()
+	}
+
 	if taskExists {
 		task, err = q.ReplaceWakeupEvidence(ctx, db.ReplaceWakeupEvidenceParams{ID: task.ID, HandoffNote: pgtype.Text{String: noteText, Valid: true}, WakeupEvidence: evidence})
 		if err != nil {

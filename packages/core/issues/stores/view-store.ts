@@ -178,7 +178,7 @@ export const CARD_PROPERTY_OPTIONS: { key: keyof CardProperties; label: string }
   { key: "dueDate", label: "Due date" },
   { key: "project", label: "Project" },
   { key: "labels", label: "Labels" },
-  { key: "childProgress", label: "Sub-issue progress" },
+  { key: "childProgress", label: "Sub-issues" },
 ];
 
 export const DEFAULT_CARD_PROPERTIES: Readonly<CardProperties> = {
@@ -281,6 +281,8 @@ export interface IssueViewState {
   // board / list / swimlane so users can focus on top-level parent issues.
   // Purely a display filter — it never touches the parent/child relationship.
   showSubIssues: boolean;
+  /** False only for an untouched workspace-board default; explicit choices survive filtering. */
+  showSubIssuesExplicit: boolean;
   listCollapsedStatuses: IssueStatus[];
   /**
    * Board / list columns the user hid, as concrete status keys.
@@ -345,6 +347,7 @@ export interface IssueViewState {
   toggleCardProperty: (key: keyof CardProperties) => void;
   toggleCardPropertyId: (propertyId: string) => void;
   toggleShowSubIssues: () => void;
+  setShowSubIssues: (show: boolean) => void;
   toggleListCollapsed: (status: IssueStatus) => void;
   setSwimlaneGrouping: (grouping: SwimlaneGrouping) => void;
   /** Update the lane order for the currently active swimlane grouping. */
@@ -382,6 +385,7 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
   cardProperties: { ...DEFAULT_CARD_PROPERTIES },
   cardPropertyIds: [],
   showSubIssues: true,
+  showSubIssuesExplicit: true,
   listCollapsedStatuses: [],
   hiddenStatuses: [...DEFAULT_HIDDEN_STATUSES],
   ganttZoom: "week",
@@ -584,7 +588,8 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
         : [...state.cardPropertyIds, propertyId],
     })),
   toggleShowSubIssues: () =>
-    set((state) => ({ showSubIssues: !state.showSubIssues })),
+    set((state) => ({ showSubIssues: !state.showSubIssues, showSubIssuesExplicit: true })),
+  setShowSubIssues: (showSubIssues) => set({ showSubIssues, showSubIssuesExplicit: true }),
   toggleListCollapsed: (status) =>
     set((state) => ({
       listCollapsedStatuses: state.listCollapsedStatuses.includes(status)
@@ -655,6 +660,17 @@ export const viewStoreSlice = (set: StoreApi<IssueViewState>["setState"]): Issue
   setTableCalculation: (tableCalculation) => set({ tableCalculation }),
 });
 
+export function effectiveShowSubIssues(state: IssueViewState, search = ""): boolean {
+  if (state.showSubIssuesExplicit !== false || state.showSubIssues) return state.showSubIssues;
+  return (
+    state.viewMode !== "board" || !!search.trim() || !!state.dateFilter ||
+    state.agentRunningFilter || state.includeNoAssignee || state.includeNoProject ||
+    [state.statusFilters, state.priorityFilters, state.assigneeFilters, state.creatorFilters,
+      state.projectFilters, state.projectStatusFilters, state.labelFilters].some((values) => values.length > 0) ||
+    Object.values(state.propertyFilters).some((values) => values.length > 0)
+  );
+}
+
 export const viewStorePersistOptions = (name: string) => ({
   name,
   storage: createJSONStorage(() => createWorkspaceAwareStorage(defaultStorage)),
@@ -683,6 +699,7 @@ export const viewStorePersistOptions = (name: string) => ({
     cardProperties: state.cardProperties,
     cardPropertyIds: state.cardPropertyIds,
     showSubIssues: state.showSubIssues,
+    showSubIssuesExplicit: state.showSubIssuesExplicit,
     listCollapsedStatuses: state.listCollapsedStatuses,
     hiddenStatuses: state.hiddenStatuses,
     ganttZoom: state.ganttZoom,
@@ -762,6 +779,9 @@ export function mergeViewStatePersisted<T extends IssueViewState>(
   const merged = {
     ...current,
     ...p,
+    showSubIssuesExplicit: typeof p.showSubIssuesExplicit === "boolean"
+      ? p.showSubIssuesExplicit
+      : typeof p.showSubIssues === "boolean" || current.showSubIssuesExplicit,
     hiddenStatuses: statusesFromStorage(p.hiddenStatuses ?? legacy?.hiddenStatusCategories, current.hiddenStatuses, p.hiddenStatuses === undefined),
     listCollapsedStatuses: statusesFromStorage(p.listCollapsedStatuses, current.listCollapsedStatuses, p.hiddenStatuses === undefined),
     cardProperties: {

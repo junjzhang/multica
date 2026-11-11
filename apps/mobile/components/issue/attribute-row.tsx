@@ -32,6 +32,12 @@ import { ProjectIcon } from "@/components/ui/project-icon";
 import { AttributeChip } from "./attribute-chip";
 import { useActorLookup } from "@/data/use-actor-name";
 import { findProject, projectListOptions } from "@/data/queries/projects";
+import { agentListOptions } from "@/data/queries/agents";
+import {
+  boundExternalSession,
+  externalAssigneeAgent,
+  externalAssigneeChipLabel,
+} from "@/lib/external-assignee";
 import { useWorkspaceStore } from "@/data/workspace-store";
 import { PRIORITY_LABEL as PRIORITY_FULL_LABEL } from "@/lib/issue-status";
 import { useIssueStatuses } from "@/lib/use-issue-statuses";
@@ -98,6 +104,24 @@ export function AttributeRow({ issue }: { issue: Issue }) {
     [projects, issue.project_id],
   );
 
+  // External execution is a template plus a host session. Mobile shows the
+  // concrete "template › session" identity read-only: choosing a session and
+  // dispatching stay on web/desktop until that flow ships here.
+  const { data: agents = [] } = useQuery(agentListOptions(wsId));
+  const externalAssignee = useMemo(
+    () => externalAssigneeAgent(issue, agents),
+    [issue, agents],
+  );
+  // The session must come from this issue's binding, never from the Agent's
+  // display projection (which picks one arbitrary session).
+  const externalAssigneeLabel = externalAssignee
+    ? externalAssigneeChipLabel(
+        externalAssignee,
+        boundExternalSession(issue, externalAssignee.id),
+        t("picker.external_session_unknown"),
+      )
+    : null;
+
   const labels = issue.labels ?? [];
 
   const assigneeValue =
@@ -154,9 +178,9 @@ export function AttributeRow({ issue }: { issue: Issue }) {
               showPresence
             />
           }
-          label={assigneeName ?? t("picker.unknown")}
+          label={externalAssigneeLabel ?? assigneeName ?? t("picker.unknown")}
           variant="filled"
-          onPress={() => openPicker("assignee")}
+          onPress={externalAssignee ? undefined : () => openPicker("assignee")}
         />
       ) : (
         <AttributeChip

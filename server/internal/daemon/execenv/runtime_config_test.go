@@ -207,12 +207,17 @@ func TestStatusRuleIsFactJudgmentAtBothMoments(t *testing.T) {
 		"the board should show the issue being worked while you work, not only after",
 		// No assignee gate: the judgment applies to whoever is running.
 		"whoever the assignee is",
-		// Delivery lands in in_review and the ceiling keeps `done` human.
-		"`done` stays human",
+		// Delivery lands in in_review; acceptance, not the delivery itself,
+		// moves a child on to done.
+		"An implementer never accepts its own delivery",
+		"the task's explicitly authorized coordinator verifies the review evidence",
+		"records acceptance, and closes the accepted sub-issue",
+		"Acceptance is not merge authorization; merging needs its own grant",
 		// Assigned deliverables must not be misread as status-neutral
-		// research: stage barriers and parent notifications key off the
-		// delivery write.
-		"stage barriers and parent notifications depend on that signal",
+		// research: the review handoff is what acceptance begins with, while
+		// in_review stays distinct from the terminal done that closes stages.
+		"acceptance begins with that signal",
+		"`in_review` is not `done`: it closes no stage barrier and wakes no parent",
 		// Invariant 1: conversation does not move the board. Ancillary is
 		// defined by OUTPUT (no part of the issue's own deliverable), not by
 		// activity words like "research" that also describe real work.
@@ -252,6 +257,10 @@ func TestStatusRuleIsFactJudgmentAtBothMoments(t *testing.T) {
 		"A turn that only answers, reviews, or consults",
 		"you only answered a question, reviewed, or discussed",
 		"in whatever form: code, research",
+		// The unconditional ceiling this contract replaced: an implementer
+		// still cannot self-accept, but `done` is no longer reserved for a
+		// human — an explicitly authorized coordinator closes accepted work.
+		"`done` stays human",
 	} {
 		if strings.Contains(out, banned) {
 			t.Errorf("brief still carries retired status gate %q (MUL-6417)\n---\n%s", banned, out)
@@ -284,6 +293,63 @@ func TestStatusRuleIsFactJudgmentAtBothMoments(t *testing.T) {
 	// The squad-leader bullet must not leak into the ordinary path.
 	if strings.Contains(out, "dispatching members is not delivery") {
 		t.Errorf("ordinary-agent brief must not carry the squad-leader status bullet:\n%s", out)
+	}
+}
+
+// TestIssueBriefSeparatesAcceptanceFromDeliveryAndMerge pins the coordinator
+// closure contract: the implementer's turn ends at in_review, only a
+// coordinator the task explicitly authorizes records acceptance and closes the
+// accepted sub-issue, and acceptance never implies merge permission.
+//
+// Two failure directions matter. The retired "`done` stays human" ceiling was
+// unconditional — it also blocked the authorized coordinator that now closes
+// accepted sub-issues — while dropping the boundary entirely would let the
+// delivering run accept itself. Handoffs follow the same contract: only an
+// explicit @mention of a registered recipient dispatches, the child-done
+// wakeup keeps targeting the parent assignee by stage, and in_review wakes
+// nobody because it is not terminal.
+func TestIssueBriefSeparatesAcceptanceFromDeliveryAndMerge(t *testing.T) {
+	t.Parallel()
+	out := buildMetaSkillContent("claude", TaskContextForEnv{
+		IssueID:          "55555555-6666-7777-8888-999999999999",
+		TriggerCommentID: "66666666-7777-8888-9999-aaaaaaaaaaaa",
+	})
+
+	for _, want := range []string{
+		// The implementer stops at the review handoff.
+		"An implementer never accepts its own delivery",
+		// Acceptance belongs to an explicitly authorized coordinator.
+		"the task's explicitly authorized coordinator verifies the review evidence",
+		"records acceptance, and closes the accepted sub-issue",
+		"without that authorization, stop at `in_review`",
+		// Two independent grants: acceptance is not merge authorization.
+		"Acceptance is not merge authorization; merging needs its own grant",
+		// in_review is not terminal, so it closes no stage and wakes no parent.
+		"`in_review` is not `done`: it closes no stage barrier and wakes no parent",
+		// Next-action handoffs name a registered recipient; the platform
+		// cannot wake a coordinator that has no identity to dispatch to.
+		"Only an explicit @ is a handoff",
+		"Address a next-action handoff to the registered recipient",
+		"a managed agent gets a dispatched run, an external session gets one mailbox request",
+		"A coordinator with no registered identity is not woken",
+		"a child's `done` wakes its parent's assignee by stage",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("coordinator acceptance contract missing %q\n---\n%s", want, out)
+		}
+	}
+
+	for _, banned := range []string{
+		// The unconditional human ceiling must not return.
+		"`done` stays human",
+		// Nor may the delivery itself become acceptance.
+		"you may mark your own work `done`",
+		"accept your own delivery",
+		"in_review means done",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("coordinator acceptance contract still carries %q\n---\n%s", banned, out)
+		}
 	}
 }
 
