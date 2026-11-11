@@ -82,6 +82,11 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 			// fixed in #4313.
 			r.Header.Del("X-Agent-ID")
 			r.Header.Del("X-Task-ID")
+			// The acting session is server-set too. Only the mea_ branch
+			// below re-stamps it, from the credential's bound session; a
+			// client value would otherwise let one session claim another's
+			// mailbox, contract, wait or activity.
+			r.Header.Del("X-Actor-Session-ID")
 
 			tokenString, fromCookie := extractToken(r)
 			if tokenString == "" {
@@ -132,6 +137,20 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				if checkTaskTokenWorkspaceTarget(w, r, queries, boundWorkspaceID) {
 					return
 				}
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					task, err := queries.GetAgentTask(r.Context(), tt.TaskID)
+					if err != nil {
+						http.Error(w, `{"error":"task unavailable"}`, http.StatusUnauthorized)
+						return
+					}
+					if task.LeadershipRootIssueID.Valid {
+						root, err := queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: task.LeadershipRootIssueID, WorkspaceID: tt.WorkspaceID})
+						if err != nil || root.LeadershipRevision != task.LeadershipRevision.Int64 || root.LeaderAgentID != task.AgentID {
+							http.Error(w, `{"error":"task leadership changed; explicit handoff and contract revision required"}`, http.StatusConflict)
+							return
+						}
+					}
+				}
 				r.Header.Set("X-User-ID", userID)
 				r.Header.Set("X-Agent-ID", uuidToString(tt.AgentID))
 				r.Header.Set("X-Task-ID", uuidToString(tt.TaskID))
@@ -142,6 +161,85 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				// this header is allowed to carry — strip anything else a
 				// client tried to send.
 				r.Header.Set("X-Actor-Source", "task_token")
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// External agent token: "mea_" prefix. A long-lived machine
+			// credential for one registered host session. Unlike mat_ it
+			// carries no task id, so it authenticates authorship only —
+			// downstream code must not invent a task or treat it as a
+			// managed run. Revocation, expiry, archive and loss of the
+			// owner's membership are re-checked on EVERY request so an
+			// already-issued credential cannot outlive any of them.
+			if strings.HasPrefix(tokenString, auth.ExternalAgentTokenPrefix) {
+				if queries == nil {
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				hash := auth.HashToken(tokenString)
+				et, err := queries.GetExternalAgentTokenByHash(r.Context(), hash)
+				if err != nil {
+					slog.Warn("auth: invalid external agent token", "path", r.URL.Path, "error", err)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				ownerID := uuidToString(et.OwnerUserID)
+				if rejectTemporarilyDisabledUser(w, r, ownerID, "", "external_agent_token") {
+					return
+				}
+				boundWorkspaceID := uuidToString(et.WorkspaceID)
+				if checkExternalAgentTokenWorkspaceTarget(w, r, queries, boundWorkspaceID) {
+					return
+				}
+				// The token's authority is its owner's membership. Losing that
+				// membership invalidates the credential immediately.
+				if _, err := queries.GetMemberByUserAndWorkspace(r.Context(), db.GetMemberByUserAndWorkspaceParams{
+					UserID:      et.OwnerUserID,
+					WorkspaceID: et.WorkspaceID,
+				}); err != nil {
+					slog.Warn("auth: external agent token owner is no longer a member", "path", r.URL.Path, "workspace_id", boundWorkspaceID, "error", err)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				agent, err := queries.GetAgent(r.Context(), et.AgentID)
+				if err != nil || uuidToString(agent.WorkspaceID) != boundWorkspaceID ||
+					agent.ExecutionKind != "external" || agent.ArchivedAt.Valid {
+					slog.Warn("auth: external agent token target is not a live external agent", "path", r.URL.Path, "agent_id", uuidToString(et.AgentID))
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				// A session-bound credential acts ONLY as its own registered
+				// session. The session row is re-read on every request so a
+				// revoked session stops working immediately, and a token whose
+				// row claims a session of another agent/owner/workspace is
+				// refused rather than downgraded.
+				actorSession, sessionErr := resolveActorSession(r.Context(), queries, et)
+				if sessionErr != nil {
+					slog.Warn("auth: external agent token session is unusable", "path", r.URL.Path, "agent_id", uuidToString(et.AgentID), "error", sessionErr)
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				if actorSession != nil {
+					// The CLI's --return-session is a consistency parameter, not
+					// authority. A value that names a different session is a
+					// cross-session attempt and is refused before any handler
+					// runs, so it can produce no business write.
+					if ref := strings.TrimSpace(r.Header.Get(returnSessionHeader)); ref != "" && !matchesExternalSession(ref, *actorSession) {
+						slog.Warn("auth: return session does not match the credential's session", "path", r.URL.Path, "agent_id", uuidToString(et.AgentID))
+						http.Error(w, `{"error":"return session does not match this credential's session"}`, http.StatusForbidden)
+						return
+					}
+					r.Header.Set("X-Actor-Session-ID", uuidToString(actorSession.ID))
+				}
+				r.Header.Set("X-User-ID", ownerID)
+				r.Header.Set("X-Agent-ID", uuidToString(et.AgentID))
+				// Deliberately no X-Task-ID: an external session has no
+				// managed run, and a synthetic task id would corrupt task
+				// attribution and run/claim guards.
+				r.Header.Del("X-Task-ID")
+				r.Header.Set("X-Workspace-ID", boundWorkspaceID)
+				r.Header.Set("X-Actor-Source", "external_agent")
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -302,6 +400,65 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// resolveActorSession returns the one session an external credential may act
+// as. A bound token is checked against its own row. A legacy unbound token is
+// allowed to derive the session ONLY when the server can prove the agent has
+// exactly one live session; an agent with several sessions yields a nil
+// session, which downstream session-sensitive endpoints reject instead of
+// guessing a sibling. Returning nil, nil is therefore "unbound", not "error".
+func resolveActorSession(ctx context.Context, queries *db.Queries, et db.ExternalAgentToken) (*db.ExternalAgentSession, error) {
+	if et.ExternalSessionID.Valid {
+		session, err := queries.GetExternalAgentSessionByID(ctx, db.GetExternalAgentSessionByIDParams{
+			ID:          et.ExternalSessionID,
+			WorkspaceID: et.WorkspaceID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if session.AgentID != et.AgentID || session.OwnerUserID != et.OwnerUserID || session.RevokedAt.Valid {
+			return nil, errSessionUnusable
+		}
+		return &session, nil
+	}
+	sessions, err := queries.ListExternalAgentSessionsByAgentIDs(ctx, []pgtype.UUID{et.AgentID})
+	if err != nil {
+		return nil, err
+	}
+	var live []db.ExternalAgentSession
+	for _, session := range sessions {
+		if session.WorkspaceID == et.WorkspaceID && session.OwnerUserID == et.OwnerUserID && !session.RevokedAt.Valid {
+			live = append(live, session)
+		}
+	}
+	if len(live) == 1 {
+		return &live[0], nil
+	}
+	return nil, nil
+}
+
+var errSessionUnusable = errors.New("external agent token session is not usable")
+
+// returnSessionHeader mirrors handler.ReturnSessionHeader. It is declared here
+// so the auth path can validate the consistency parameter before handler code
+// runs; importing the handler package from middleware would cycle.
+const returnSessionHeader = "X-Return-Session"
+
+// matchesExternalSession reports whether ref names session. The reference is
+// either the registered session UUID or the provider's own session id (Paseo's
+// PASEO_AGENT_ID); anything else is not this credential's session.
+func matchesExternalSession(ref string, session db.ExternalAgentSession) bool {
+	if uuidToString(session.ID) == ref {
+		return true
+	}
+	if session.SessionID == ref {
+		return true
+	}
+	if parsed, err := util.ParseUUID(ref); err == nil {
+		return parsed == session.ID
+	}
+	return false
 }
 
 // extractToken returns the bearer token and whether it came from a cookie.

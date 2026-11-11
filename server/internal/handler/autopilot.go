@@ -1851,6 +1851,10 @@ func (h *Handler) validateAutopilotAssigneeForSave(
 			writeError(w, http.StatusBadRequest, "squad leader agent not found")
 			return false
 		}
+		if leader.ExecutionKind != "managed" {
+			writeError(w, 400, "default_leader_must_be_managed: select a managed default leader")
+			return false
+		}
 		if leader.ArchivedAt.Valid {
 			writeError(w, http.StatusUnprocessableEntity, "squad leader is archived; pick a different squad or rotate the leader before assigning autopilot")
 			return false

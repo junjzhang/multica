@@ -287,11 +287,11 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		resp.Body.Close()
 	})
 
-	t.Run("top-level comment without mentions triggers agent", func(t *testing.T) {
+	t.Run("top-level comment without mentions does not trigger agent", func(t *testing.T) {
 		clearTasks(t, issueID)
 		postComment(t, issueID, "Please fix this bug", nil)
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected 1 pending task, got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("plain comment must not enqueue a run, got %d", n)
 		}
 	})
 
@@ -314,14 +314,14 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		}
 	})
 
-	t.Run("reply to agent thread without mentions triggers agent", func(t *testing.T) {
+	t.Run("reply to agent thread without mentions does not trigger agent", func(t *testing.T) {
 		clearTasks(t, issueID)
 		// Agent starts a thread.
 		threadID := postCommentAsAgent(t, issueID, "I analyzed the issue.", agentID, nil)
-		// Member replies in the agent's thread.
+		// Member replies in the agent's thread without an explicit @.
 		postComment(t, issueID, "Looks good, please proceed", strPtr(threadID))
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected 1 pending task, got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("plain reply must not enqueue a run, got %d", n)
 		}
 	})
 
@@ -334,7 +334,7 @@ func TestCommentTriggerOnComment(t *testing.T) {
 	t.Run("reply records new comment id (not thread root) as trigger_comment_id", func(t *testing.T) {
 		clearTasks(t, issueID)
 		threadID := postCommentAsAgent(t, issueID, "First pass analysis.", agentID, nil)
-		replyID := postComment(t, issueID, "Please also check the edge case", strPtr(threadID))
+		replyID := postComment(t, issueID, fmt.Sprintf("[@Agent](mention://agent/%s) please also check the edge case", agentID), strPtr(threadID))
 		if n := countPendingTasks(t, issueID); n != 1 {
 			t.Fatalf("expected 1 pending task, got %d", n)
 		}
@@ -357,7 +357,7 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		}
 	})
 
-	t.Run("reply to member thread after agent handled root continues agent", func(t *testing.T) {
+	t.Run("plain reply to a handled member thread does not continue the agent", func(t *testing.T) {
 		clearTasks(t, issueID)
 		// Member starts a thread (top-level comment).
 		threadID := postComment(t, issueID, "Please fix this bug", nil)
@@ -374,8 +374,8 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		postCommentAsAgent(t, issueID, "Working on it, found the root cause.", agentID, strPtr(threadID))
 		// Member follows up in the same thread without @mentioning the agent.
 		postComment(t, issueID, "Great, please also check the edge case", strPtr(threadID))
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected 1 pending task (conversation continuation), got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("plain reply must not continue the agent, got %d", n)
 		}
 	})
 
@@ -401,7 +401,7 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		}
 	})
 
-	t.Run("reply to member thread that @mentioned assignee triggers without re-mention", func(t *testing.T) {
+	t.Run("reply to a thread whose root mentioned the assignee does not inherit it", func(t *testing.T) {
 		clearTasks(t, issueID)
 		// Member starts a thread that @mentions the assignee agent.
 		content := fmt.Sprintf("[@Agent](mention://agent/%s) can you review this?", agentID)
@@ -410,8 +410,8 @@ func TestCommentTriggerOnComment(t *testing.T) {
 		clearTasks(t, issueID)
 		// Reply in the thread WITHOUT re-mentioning the assignee.
 		postComment(t, issueID, "Here is more context for you", strPtr(threadID))
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected 1 pending task (assignee mentioned in thread root), got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("a root mention must not be inherited by a plain reply, got %d", n)
 		}
 	})
 }
@@ -544,8 +544,8 @@ func TestCommentTriggerThreadExplicitMentions(t *testing.T) {
 		clearTasks(t, issueID)
 		// Reply in the thread WITHOUT mentioning the agent.
 		postComment(t, issueID, "Here is more context for you", strPtr(threadID))
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected 1 pending task from root mention owner, got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("a plain reply must not route to the root mention owner, got %d", n)
 		}
 	})
 
@@ -567,14 +567,14 @@ func TestCommentTriggerThreadExplicitMentions(t *testing.T) {
 		clearTasks(t, issueID)
 
 		postComment(t, issueID, "Here is more context for you both", strPtr(threadID))
-		if n := countPendingTasksForAgent(t, issueID, agentID); n != 1 {
-			t.Errorf("expected 1 pending reply task for first agent, got %d", n)
+		if n := countPendingTasksForAgent(t, issueID, agentID); n != 0 {
+			t.Errorf("a plain reply must not route to the first root mention, got %d", n)
 		}
 		if n := countPendingTasksForAgent(t, issueID, agentB); n != 0 {
-			t.Errorf("expected 0 pending reply tasks for second agent, got %d", n)
+			t.Errorf("a plain reply must not route to the second root mention, got %d", n)
 		}
-		if n := countPendingTasks(t, issueID); n != 1 {
-			t.Errorf("expected exactly 1 pending task after multi-agent root reply, got %d", n)
+		if n := countPendingTasks(t, issueID); n != 0 {
+			t.Errorf("a multi-agent root mention must not route a plain reply, got %d", n)
 		}
 	})
 
@@ -654,7 +654,7 @@ func TestDeleteCommentCancelsTriggeredTasks(t *testing.T) {
 
 	t.Run("deleting trigger comment cancels its queued task", func(t *testing.T) {
 		clearTasks(t, issueID)
-		commentID := postComment(t, issueID, "Please fix this bug", nil)
+		commentID := postComment(t, issueID, fmt.Sprintf("[@Agent](mention://agent/%s) please fix this bug", agentID), nil)
 		if n := countPendingTasks(t, issueID); n != 1 {
 			t.Fatalf("expected 1 pending task before delete, got %d", n)
 		}
@@ -683,8 +683,8 @@ func TestCommentThreadsQueueSeparatelyFromAssignment(t *testing.T) {
 	})
 
 	// Distinct root comments must not merge with each other or the assignment.
-	first := postComment(t, issueID, "First comment", nil)
-	second := postComment(t, issueID, "Second comment", nil)
+	first := postComment(t, issueID, fmt.Sprintf("[@Agent](mention://agent/%s) first comment", agentID), nil)
+	second := postComment(t, issueID, fmt.Sprintf("[@Agent](mention://agent/%s) second comment", agentID), nil)
 
 	if n := countPendingTasks(t, issueID); n != 3 {
 		t.Fatalf("expected assignment plus two independent thread tasks, got %d", n)

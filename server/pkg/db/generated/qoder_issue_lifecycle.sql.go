@@ -11,8 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const lockQoderIssueForTaskTransition = `-- name: LockQoderIssueForTaskTransition :exec
+SELECT i.id FROM issue i
+JOIN agent_task_queue t ON t.issue_id = i.id
+JOIN agent_runtime r ON r.id = t.runtime_id AND r.workspace_id = i.workspace_id
+WHERE t.id = $1 AND r.provider = 'qoder_cloud'
+FOR UPDATE OF i
+`
+
+// Follow the issue -> task order shared by comment mutations. Lock the owner
+// before testing mutable assignee/latest-run eligibility in LockQoderTaskIssue.
+func (q *Queries) LockQoderIssueForTaskTransition(ctx context.Context, taskID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, lockQoderIssueForTaskTransition, taskID)
+	return err
+}
+
 const lockQoderTaskIssue = `-- name: LockQoderTaskIssue :one
-SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties, i.revision, i.last_activity_at, i.triage_state, i.duplicate_of_issue_id FROM issue i
+SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata, i.stage, i.properties, i.revision, i.last_activity_at, i.triage_state, i.duplicate_of_issue_id, i.coordinator_type, i.coordinator_id, i.merge_allowed, i.merge_repository_url, i.merge_target_branch, i.merge_granted_by, i.merge_granted_at, i.leadership_root_issue_id, i.leadership_squad_id, i.leader_agent_id, i.leader_external_session_id, i.leadership_revision, i.creator_session_id, i.session_semantics, i.requester_leadership_root_id FROM issue i
 JOIN agent_task_queue t ON t.issue_id = i.id
 JOIN agent_runtime r ON r.id = t.runtime_id AND r.workspace_id = i.workspace_id
 WHERE t.id = $1 AND r.provider = 'qoder_cloud'
@@ -24,7 +39,7 @@ WHERE t.id = $1 AND r.provider = 'qoder_cloud'
 FOR UPDATE OF i
 `
 
-// The task row is locked by the lifecycle transition before locking its issue.
+// Recheck eligibility after the lifecycle locks issue and then task.
 func (q *Queries) LockQoderTaskIssue(ctx context.Context, taskID pgtype.UUID) (Issue, error) {
 	row := q.db.QueryRow(ctx, lockQoderTaskIssue, taskID)
 	var i Issue
@@ -59,6 +74,21 @@ func (q *Queries) LockQoderTaskIssue(ctx context.Context, taskID pgtype.UUID) (I
 		&i.LastActivityAt,
 		&i.TriageState,
 		&i.DuplicateOfIssueID,
+		&i.CoordinatorType,
+		&i.CoordinatorID,
+		&i.MergeAllowed,
+		&i.MergeRepositoryUrl,
+		&i.MergeTargetBranch,
+		&i.MergeGrantedBy,
+		&i.MergeGrantedAt,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipSquadID,
+		&i.LeaderAgentID,
+		&i.LeaderExternalSessionID,
+		&i.LeadershipRevision,
+		&i.CreatorSessionID,
+		&i.SessionSemantics,
+		&i.RequesterLeadershipRootID,
 	)
 	return i, err
 }

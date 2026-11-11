@@ -320,3 +320,75 @@ WHERE id= @id AND status='dispatched' AND dispatched_at= @dispatched_at RETURNIN
 -- not finished: the run that made a change still knows about it.
 SELECT count(*) FROM agent_task_queue WHERE id=ANY(@ids::uuid[]) AND agent_id= @agent_id AND issue_id= @issue_id
  AND status IN ('dispatched','running','waiting_local_directory');
+
+-- name: WithdrawUnclaimedWakeupDeliveries :execrows
+-- Withdraws every notification from one disabled or replaced rule that no host
+-- has accepted yet. A pending row has no lease, so it becomes failed at once.
+-- A leased or unknown row keeps its transport state because the host may
+-- already have acted; it is marked withdrawn instead, which stops the record
+-- outcome from returning a known no-effect answer to claimable delivery. The
+-- marker is the one durable expression of "this notification was withdrawn".
+-- Only delivery-core rows are touched: a legacy internal-mailbox row has no
+-- target session and is consumed through processing_status, so rewriting its
+-- delivery_status would only publish a failure nothing can clear.
+UPDATE agent_mailbox_message
+SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = COALESCE(withdrawn_at, now()),
+    -- A pending row's withdrawal is certain, so the reason is the reason. A
+    -- leased or unknown row keeps any diagnostic it already had (the host may
+    -- have said something useful); the marker still records the withdrawal.
+    last_error = CASE WHEN delivery_status = 'pending' THEN @reason
+                      ELSE COALESCE(NULLIF(last_error, ''), @reason) END,
+    updated_at = now()
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND target_session_id IS NOT NULL
+  AND delivery_status IN ('pending','leased','unknown')
+  AND withdrawn_at IS NULL;
+
+-- name: WithdrawIssueDeliveries :execrows
+-- Withdraws every notification of a closed or cancelled issue that no host has
+-- accepted yet. Cancellation is about the notification, not about its source:
+-- comment mentions, generic wakeups and any future producer share this one
+-- statement, so no source type can keep waking a closed issue. Rows created
+-- after this transaction are new explicit requests and are untouched. The
+-- pending/leased boundary is the same as the rule-scoped withdrawal: pending
+-- becomes failed, leased and unknown keep their state and are marked withdrawn.
+-- target_session_id scopes this to rows the delivery core can actually claim;
+-- the legacy internal-mailbox projection is left alone.
+UPDATE agent_mailbox_message
+SET delivery_status = CASE WHEN delivery_status = 'pending' THEN 'failed' ELSE delivery_status END,
+    withdrawn_at = COALESCE(withdrawn_at, now()),
+    -- A pending row's withdrawal is certain, so the reason is the reason. A
+    -- leased or unknown row keeps any diagnostic it already had (the host may
+    -- have said something useful); the marker still records the withdrawal.
+    last_error = CASE WHEN delivery_status = 'pending' THEN @reason
+                      ELSE COALESCE(NULLIF(last_error, ''), @reason) END,
+    updated_at = now()
+WHERE workspace_id = @workspace_id AND issue_id = @issue_id
+  AND target_session_id IS NOT NULL
+  AND delivery_status IN ('pending','leased','unknown')
+  AND withdrawn_at IS NULL;
+
+-- name: FindUndecidedWakeupDelivery :one
+-- An external target has no task that a later firing could join. While a
+-- notification for the rule has not reached a terminal transport state, the
+-- rule keeps its inputs instead of queueing another notification, just as a
+-- managed rule waits for its claimed run. Terminal states (delivered, failed)
+-- never block a new firing. The row is reported so last_error names the
+-- delivery; unknown is fail-closed and waits for an operator, never a replay
+-- under a new id.
+SELECT id, delivery_status FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND delivery_status IN ('pending','leased','unknown')
+ORDER BY (delivery_status = 'unknown') DESC, created_at ASC
+LIMIT 1;
+
+-- name: CountRecentWakeupDeliveries :one
+-- The hourly firing cap for an external target. It starts no runs, so the
+-- managed-run count cannot see its firings.
+SELECT count(*) FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id AND recipient_agent_id = @recipient_agent_id
+  AND source_type = 'issue_wakeup' AND source_key LIKE @source_pattern::text
+  AND created_at > @since;

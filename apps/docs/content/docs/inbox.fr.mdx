@@ -3,8 +3,6 @@ title: "Boîte de réception et abonnements"
 description: "Un seul endroit pour les assignations, mentions, commentaires et échecs d'agents qui demandent votre suivi."
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-
 La boîte de réception rassemble l'activité de travail qui vous concerne. Ce n'est pas un journal d'activité complet — elle signale les changements qui demandent votre attention ; le contexte complet reste sur la tâche correspondante.
 
 ## Ce qui arrive dans la boîte de réception
@@ -12,10 +10,11 @@ La boîte de réception rassemble l'activité de travail qui vous concerne. Ce n
 Les notifications courantes incluent :
 
 - une tâche vous est assignée, ou vous est retirée ;
-- une tâche à laquelle vous êtes abonné reçoit un nouveau commentaire, ou son assigné, son statut, sa priorité ou ses dates changent ;
+- une tâche racine à laquelle vous êtes abonné reçoit un nouveau commentaire, ou son assigné, son statut, sa priorité ou ses dates changent ;
+- une activité courante sur une sous-tâche à laquelle vous êtes abonné manuellement, ou dont vous êtes l'assigné actuel (voir « Activité des sous-tâches » ci-dessous) ;
 - quelqu'un vous @mentionne dans la description ou un commentaire d'une tâche ;
 - une tâche ou un commentaire que vous avez créé reçoit une réaction ;
-- une exécution d'agent échoue sur une tâche à laquelle vous êtes abonné ;
+- une exécution d'agent échoue sur une tâche à laquelle vous êtes abonné après épuisement des nouvelles tentatives en attente ;
 - la création d'une tâche via un agent aboutit ou échoue ;
 - une automatisation à laquelle vous êtes abonné crée une nouvelle tâche, ou est mise en pause après des échecs consécutifs.
 
@@ -33,9 +32,18 @@ Ces participants sont automatiquement abonnés à une tâche :
 
 Changer l'assigné ne supprime pas les abonnements existants. Abonnez-vous ou désabonnez-vous à tout moment depuis la page de la tâche ; après le désabonnement, les mises à jour ordinaires n'arrivent plus dans votre boîte de réception, mais les @mentions directes vous notifient toujours individuellement.
 
-<Callout type="info">
-Lorsque le statut d'une sous-tâche change, les abonnés de la tâche parente sont également notifiés. Les commentaires, la priorité et les changements de dates d'une sous-tâche ne remontent pas à la tâche parente.
-</Callout>
+## Activité des sous-tâches
+
+L'activité courante d'une sous-tâche reste silencieuse par défaut. Elle reste visible dans la chronologie de la tâche, mais ne crée pas de notification dans la boîte de réception pour les abonnés implicites : le créateur de la sous-tâche, les personnes qui commentent, les abonnés délégués et toute personne abonnée uniquement via la tâche parente. Un abonnement manuel à la tâche parente ne vaut pas abonnement à ses sous-tâches.
+
+Deux destinataires continuent de recevoir les mises à jour courantes d'une sous-tâche dans la boîte de réception :
+
+- l'assigné humain actuel de la sous-tâche ;
+- toute personne abonnée manuellement à cette sous-tâche précise.
+
+Pour suivre les mises à jour courantes d'une sous-tâche, abonnez-vous manuellement à cette sous-tâche. Si l'interface indique déjà que vous êtes abonné via une source automatique, désabonnez-vous d'abord, puis abonnez-vous à nouveau ; seule cette seconde action explicite enregistre un abonnement manuel. Les changements de statut qui demandent une intervention humaine continuent d'être notifiés, par exemple `blocked` ou un statut personnalisé qui marque une passation ; seule la progression courante reste silencieuse. Les abonnés de la tâche parente reçoivent ces changements de passation, mais pas l'activité courante des sous-tâches. Les @mentions explicites et les assignations continuent également de notifier. Les tâches racines (sans tâche parente) conservent leur comportement existant : les commentaires et changements de statut d'une tâche racine notifient ses abonnés comme avant.
+
+Un échec dont la nouvelle tentative est déjà en attente reste visible dans l'interface, mais ne crée pas de ligne dans la boîte de réception ; la notification n'arrive que lorsque la récupération est épuisée.
 
 ## Les agents n'utilisent pas la boîte de réception
 

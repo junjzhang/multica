@@ -69,7 +69,7 @@ LEFT JOIN "user" actor_user ON actor_user.id=actor_member.user_id
  JOIN workspace ws ON ws.id=p.workspace_id
  LEFT JOIN agent ta ON p.assignee_type='agent' AND ta.id=p.assignee_id AND ta.workspace_id=p.workspace_id
  LEFT JOIN squad sq ON p.assignee_type='squad' AND sq.id=p.assignee_id AND sq.workspace_id=p.workspace_id
- LEFT JOIN agent leader ON leader.id=sq.leader_id AND leader.workspace_id=p.workspace_id
+ LEFT JOIN agent leader ON leader.id=issue_leader_id(p,sq.id) AND leader.workspace_id=p.workspace_id
  CROSS JOIN LATERAL (
   SELECT bool_or(ci.stage IS NOT NULL) AS staged,
    min(ci.stage) FILTER(WHERE ci.stage IS NOT NULL AND NOT (ci.status IN ('done','cancelled') OR EXISTS(SELECT 1 FROM issue_status cs WHERE cs.workspace_id=ci.workspace_id AND cs.key=ci.status AND cs.category IN ('done','closed')))) AS stage,
