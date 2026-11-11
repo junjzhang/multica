@@ -35,14 +35,14 @@ func ResolveDeliveryDisplay(ctx context.Context, q *db.Queries, issue db.Issue, 
 	if prefix := strings.TrimSpace(workspace.IssuePrefix); prefix != "" {
 		display.Identifier = fmt.Sprintf("%s-%d", prefix, issue.Number)
 	}
-	display.URL = issueBrowserURL(appURL, workspace.Slug, display.Identifier)
+	display.URL = IssueBrowserURL(appURL, workspace.Slug, display.Identifier)
 	return display
 }
 
-// issueBrowserURL joins the configured app origin with the workspace-scoped
-// issue route. It returns "" rather than a partial link so the prompt never
-// shows a URL that does not resolve.
-func issueBrowserURL(appURL, workspaceSlug, identifier string) string {
+// IssueBrowserURL joins the configured app origin with the workspace-scoped
+// issue route. It returns "" rather than a partial link so a reader never sees
+// a URL that does not resolve.
+func IssueBrowserURL(appURL, workspaceSlug, identifier string) string {
 	origin := strings.TrimRight(strings.TrimSpace(appURL), "/")
 	slug := strings.TrimSpace(workspaceSlug)
 	key := strings.TrimSpace(identifier)

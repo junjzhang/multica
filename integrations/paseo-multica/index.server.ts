@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { connectSession, disconnectSession, statusSession } from "./shared/contracts";
+import { connectSession, disconnectSession, statusSession, tasksSummary } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
 import { ConfigurationError } from "./server/owner-profile";
 import { paseoHostAdapter } from "./server/host";
@@ -31,6 +31,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(connectSession, async ({ agentId }, context) => service(context).connect(agentId));
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));
+  server.handle(tasksSummary, async ({ agentId }, context) => service(context).tasks(agentId));
 
   // Only the context path, only for an existing binding, and never for history
   // replay. Existing sessions already carry PASEO_AGENT_ID and need no reload.

@@ -2,8 +2,9 @@
 
 A private Paseo directory plugin that binds the current Paseo conversation to
 Multica as its own external agent. It is intentionally smaller than a task
-board: three composer commands, one read-only status panel, one delivery card
-in the timeline, and one operator settings screen.
+board: three composer commands, one composer pill summarizing this session's
+tasks, one read-only panel (connection status plus those tasks), one delivery
+card in the timeline, and one operator settings screen.
 
 ```text
 /multica connect      register this conversation, mint its external credential
@@ -25,6 +26,26 @@ The daemon renders the readable part of that prompt from optional
 this plugin does not fully recognize therefore renders exactly as it arrived:
 a message from a daemon that predates those fields, a message that is still
 streaming, a prompt missing one of its stable IDs, and ordinary conversation.
+
+## Session tasks
+
+Every Paseo agent on the host gets one Multica composer pill. For a connected
+session the pill summarizes three Multica obligations, and the Multica panel
+lists them with status and task links:
+
+- owned: issues the session's agent executes or leads as task leader;
+- waiting for acceptance: contracts whose current version names the agent as
+  acceptor while a delivery is still undecided;
+- returns pending: delegations the agent accepted as a worker whose result has
+  not been returned yet.
+
+The data comes from the read-only `GET /api/agents/{id}/session-tasks`
+projection, scoped to the credential's own agent and requiring a session-bound
+`mea_` credential. Everything outside that happy path degrades to an
+explanation instead of an error: a session with no local binding, an unreadable
+context, an expired or revoked credential, a legacy token whose agent has no
+registered session, a server that does not expose the projection, and a
+network failure all keep the composer usable and leave the counts off.
 
 ## What it reuses
 

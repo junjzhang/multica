@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PaseoHostAdapter } from "../server/host";
+import { MulticaApiError } from "../server/api";
 import { ConfigurationError } from "../server/owner-profile";
 import { createSessionService } from "../server/service";
 import {
@@ -25,6 +26,7 @@ import {
   fakeHost,
   makeContext,
   makeHome,
+  makeTasksWire,
 } from "./fixtures";
 
 const NOW = new Date("2026-10-26T12:00:00.000Z");
@@ -414,5 +416,108 @@ describe("session service", () => {
       now: () => NOW,
     }).status(SESSION_A);
     expect(malformed.state).toBe("invalid");
+  });
+});
+describe("session tasks service", () => {
+  it("returns the parsed server projection for the bound session", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    api.tasksResult = makeTasksWire({
+      owned: [
+        {
+          issue_id: "0199a0b1-4444-7444-8444-444444444444",
+          identifier: "WORK-1",
+          title: "Owned task",
+          status: "in_progress",
+          status_category: "started",
+          url: "https://app.multica.example/acme/issues/WORK-1",
+          role: "executor",
+          updated_at: "2026-10-26T11:00:00Z",
+        },
+        {
+          issue_id: "0199a0b1-7777-7777-8777-777777777777",
+          title: "Unsafe link",
+          status: "todo",
+          status_category: "unstarted",
+          url: "javascript:alert(1)",
+          role: "leader",
+        },
+      ],
+    });
+
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("ready");
+    if (view.state !== "ready") return;
+    expect(view.agentId).toBe(AGENT_A);
+    expect(view.sessionId).toBe(api.tasksResult.session_id);
+    expect(view.checkedAt).toBe(NOW.toISOString());
+    expect(view.owned[0]).toMatchObject({
+      issueId: "0199a0b1-4444-7444-8444-444444444444",
+      identifier: "WORK-1",
+      role: "executor",
+      url: "https://app.multica.example/acme/issues/WORK-1",
+    });
+    expect(view.owned[1]?.url).toBeUndefined();
+    expect(view.accepting[0]?.role).toBe("acceptor");
+    expect(view.returning[0]).toMatchObject({ role: "return", taskStatus: "running" });
+    expect(api.tasksCalls).toEqual([{ agentId: AGENT_A, token: EXTERNAL_TOKEN }]);
+    expect(JSON.stringify(view)).not.toContain(EXTERNAL_TOKEN);
+  });
+
+  it("explains a missing binding and never calls the server", async () => {
+    const { api, service } = await setup();
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("disconnected");
+    if (view.state !== "disconnected") return;
+    expect(view.reason).toMatch(/no Multica binding/);
+    expect(view.reason).toMatch(/\/multica connect/);
+    expect(api.tasksCalls).toHaveLength(0);
+  });
+
+  it("explains a malformed local context instead of guessing", async () => {
+    const home = await makeHome();
+    await mkdir(join(home, ".multica", "external-sessions", "paseo"), { recursive: true });
+    await writeFile(contextPath(home, SESSION_A), "{broken");
+    const { service } = await setup({ home });
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("disconnected");
+    if (view.state !== "disconnected") return;
+    expect(view.reason).toMatch(/not valid JSON/);
+  });
+
+  it("does not send an expired credential and says how to repair it", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext({ expires_at: new Date(NOW.getTime() - 1_000).toISOString() }));
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("unavailable");
+    if (view.state !== "unavailable") return;
+    expect(view.reason).toMatch(/expired/);
+    expect(view.reason).toMatch(/\/multica connect/);
+    expect(api.tasksCalls).toHaveLength(0);
+  });
+
+  it.each([
+    [403, /no registered session/],
+    [404, /does not expose session task summaries/],
+    [401, /no longer accepts/],
+  ] as const)("degrades a %d response to an explanatory view", async (status, reason) => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    api.tasksResult = new MulticaApiError(status, "rejected");
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("unavailable");
+    if (view.state !== "unavailable") return;
+    expect(view.reason).toMatch(reason);
+  });
+
+  it("degrades a transport failure without leaking the credential", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    api.tasksResult = new Error(`socket closed for ${EXTERNAL_TOKEN}`);
+    const view = await service.tasks(SESSION_A);
+    expect(view.state).toBe("unavailable");
+    if (view.state !== "unavailable") return;
+    expect(view.reason).toMatch(/Could not read this session's Multica tasks/);
+    expect(view.reason).not.toContain(EXTERNAL_TOKEN);
   });
 });

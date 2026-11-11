@@ -19,8 +19,8 @@ func TestIssueBrowserURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := issueBrowserURL(tc.appURL, tc.slug, tc.key); got != tc.expected {
-				t.Fatalf("issueBrowserURL(%q, %q, %q) = %q, want %q", tc.appURL, tc.slug, tc.key, got, tc.expected)
+			if got := IssueBrowserURL(tc.appURL, tc.slug, tc.key); got != tc.expected {
+				t.Fatalf("IssueBrowserURL(%q, %q, %q) = %q, want %q", tc.appURL, tc.slug, tc.key, got, tc.expected)
 			}
 		})
 	}

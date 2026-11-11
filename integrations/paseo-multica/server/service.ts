@@ -1,4 +1,5 @@
 import type { StatusView } from "../shared/contracts";
+import { toTasksView, type SessionTasksView } from "../shared/tasks";
 import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
 import {
@@ -43,6 +44,7 @@ export interface SessionService {
   connect(agentId: string): Promise<StatusView>;
   status(agentId: string): Promise<StatusView>;
   disconnect(agentId: string): Promise<StatusView>;
+  tasks(agentId: string): Promise<SessionTasksView>;
 }
 
 const DEFAULT_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -354,6 +356,75 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     });
   }
 
+  /**
+   * Reads the session's task summary. A missing or unusable binding degrades to
+   * an explanatory view instead of an RPC error: the pill and panel are a
+   * convenience surface and must never break the composer.
+   */
+  async function tasks(agentId: string): Promise<SessionTasksView> {
+    if (!isLocator(agentId)) throw new ConfigurationError("The current Paseo session id is invalid.");
+    const existing = await store.read(deps.home, agentId);
+    const checkedAt = now().toISOString();
+    if (existing.status === "missing") {
+      return {
+        state: "disconnected",
+        agentId,
+        reason: `This Paseo session has no Multica binding. ${CONNECT_HINT}.`,
+        checkedAt,
+      };
+    }
+    if (existing.status === "invalid") {
+      return { state: "disconnected", agentId, reason: existing.reason, checkedAt };
+    }
+    const context = existing.context;
+    if (isExpired(context, now())) {
+      return {
+        state: "unavailable",
+        agentId,
+        reason: `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`,
+        checkedAt,
+      };
+    }
+    try {
+      const wire = await api.listSessionTasks(contextCredential(context), context.agent_id);
+      return toTasksView(wire, checkedAt);
+    } catch (error) {
+      if (error instanceof MulticaApiError) {
+        if (error.status === 403) {
+          return {
+            state: "unavailable",
+            agentId,
+            reason:
+              "This Multica agent has no registered session, so it has no session task summary. Reconnect this session to issue a session credential.",
+            checkedAt,
+          };
+        }
+        if (error.status === 404) {
+          return {
+            state: "unavailable",
+            agentId,
+            reason: "This Multica server does not expose session task summaries yet. Update the server to use the task panel.",
+            checkedAt,
+          };
+        }
+        if (error.status === 401) {
+          return {
+            state: "unavailable",
+            agentId,
+            reason: `Multica no longer accepts this session's credential. ${CONNECT_HINT} to repair it.`,
+            checkedAt,
+          };
+        }
+      }
+      return {
+        state: "unavailable",
+        agentId,
+        reason: `Could not read this session's Multica tasks: ${describeError(error)}.`,
+        checkedAt,
+      };
+    }
+  }
+
   return {
     async connect(agentId) {
       try {
@@ -365,6 +436,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     },
     status,
     disconnect,
+    tasks,
   };
 }
 

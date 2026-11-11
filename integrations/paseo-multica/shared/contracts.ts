@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { sessionTasksViewSchema } from "./tasks";
 
 export const statusViewSchema = z.object({
   state: z.enum(["connected", "invalid", "unverified", "disconnected"]),
@@ -37,4 +38,14 @@ export const disconnectSession = defineRpc({
   name: "session.disconnect",
   input: agentInput,
   output: statusViewSchema,
+});
+
+/**
+ * "This session's tasks": a read-only projection for the composer pill and the
+ * Multica panel. It never mutates an obligation.
+ */
+export const tasksSummary = defineRpc({
+  name: "session.tasks",
+  input: agentInput,
+  output: sessionTasksViewSchema,
 });

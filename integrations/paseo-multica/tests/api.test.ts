@@ -229,4 +229,43 @@ describe("Multica API client", () => {
     expect(message).not.toContain(OWNER_TOKEN);
     expect(message).not.toContain(SERVER_URL);
   });
+
+  it("reads the session task summary with the external credential", async () => {
+    const { credential, calls } = await startServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          agent_id: AGENT_A,
+          session_id: SESSION_REGISTERED,
+          workspace_id: WORKSPACE_ID,
+          owned: [],
+          accepting: [],
+          returning: [],
+          truncated: false,
+        }),
+      );
+    });
+    const api = createMulticaApi();
+
+    const wire = await api.listSessionTasks({ ...credential, token: EXTERNAL_TOKEN }, AGENT_A);
+
+    expect(wire.agent_id).toBe(AGENT_A);
+    expect(wire.session_id).toBe(SESSION_REGISTERED);
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.url).toBe(`/api/agents/${AGENT_A}/session-tasks`);
+    expect(calls[0]?.headers.authorization).toBe(`Bearer ${EXTERNAL_TOKEN}`);
+    expect(calls[0]?.headers["x-workspace-id"]).toBe(WORKSPACE_ID);
+  });
+
+  it("rejects a session task summary that does not match the wire shape", async () => {
+    const { credential } = await startServer((_request, response) => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ agent_id: AGENT_A }));
+    });
+    const api = createMulticaApi();
+
+    await expect(
+      api.listSessionTasks({ ...credential, token: EXTERNAL_TOKEN }, AGENT_A),
+    ).rejects.toThrow(/valid session task summary/);
+  });
 });
