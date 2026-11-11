@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -255,6 +256,8 @@ const (
 // reportTerminalTask gives the durable outbox one insertion point without
 // revisiting every task exit when it is added.
 type terminalTaskReport struct {
+	generation     string
+	knownWaitIDs   string
 	kind           terminalTaskReportKind
 	taskID         string
 	output         string
@@ -431,11 +434,12 @@ type repoCacheBackend interface {
 
 // Daemon is the local agent runtime that polls for and executes tasks.
 type Daemon struct {
-	cfg        Config
-	client     *Client
-	repoCache  repoCacheBackend
-	skillCache *SkillBundleCache
-	logger     *slog.Logger
+	backgroundWaits *backgroundwait.Manager
+	cfg             Config
+	client          *Client
+	repoCache       repoCacheBackend
+	skillCache      *SkillBundleCache
+	logger          *slog.Logger
 
 	// gitCALastErr is the last applyGitCACerts failure, so a persistent one
 	// (e.g. on Windows) is logged once rather than on every repo refresh.
@@ -758,6 +762,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 	cacheRoot := filepath.Join(cfg.WorkspacesRoot, ".repos")
 	skillCacheRoot := filepath.Join(cfg.WorkspacesRoot, ".skill-cache", "v1")
 	client := NewClient(cfg.ServerBaseURL)
+	client.mailboxDaemonID = cfg.DaemonID
 	// Tag every daemon HTTP request with the daemon's CLI version so the
 	// server can split logs/metrics by client version (parallel to the CLI).
 	client.SetVersion(cfg.CLIVersion)
@@ -2123,6 +2128,10 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	if err := d.resolveAuth(); err != nil {
 		return err
 	}
+	if err := d.startBackgroundWaits(ctx, healthLn.Addr()); err != nil {
+		return err
+	}
+	defer d.backgroundWaits.Close()
 
 	// Bind and serve the health port before the (potentially slow) preflight,
 	// so `daemon start` and the desktop see a live "starting" daemon instead
@@ -2147,6 +2156,9 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
 	defer d.deregisterRuntimes()
 
+	// Configure shared client identity before any background loop reads it.
+	d.client.mailboxDaemonID = d.cfg.DaemonID
+
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
 	go d.terminalReportReplayLoop(ctx)
@@ -2162,6 +2174,18 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
+	deliveryWorkerDone := make(chan struct{})
+	go func() {
+		defer close(deliveryWorkerDone)
+		d.runDeliveryWorker(ctx)
+	}()
+	defer func() {
+		select {
+		case <-deliveryWorkerDone:
+		case <-time.After(3 * time.Second):
+			d.logger.Warn("timed out waiting for the delivery worker to stop")
+		}
+	}()
 
 	// Preflight succeeded and the background loops are up: the daemon has
 	// registered its runtimes and can now claim and run tasks. Flip /health
@@ -2169,7 +2193,7 @@ func (d *Daemon) run(ctx context.Context, healthLn net.Listener) error {
 	// readiness wait blocks on, so success is reported only after startup
 	// actually completed, not merely because the health port came up.
 	d.ready.Store(true)
-	d.logger.Debug("background loops launched (workspace-sync, terminal-report-replay, task-wakeup, heartbeat, gc, auto-update, token-renewal); health now reporting ready")
+	d.logger.Debug("background loops launched (workspace-sync, terminal-report-replay, task-wakeup, heartbeat, gc, auto-update, token-renewal, delivery-worker); health now reporting ready")
 	err = d.pollLoop(ctx, taskWakeups)
 	d.logger.Debug("daemon main loop returning", "error", err)
 	return err
@@ -2230,6 +2254,19 @@ func (d *Daemon) allRuntimeIDs() []string {
 	for _, ws := range d.workspaces {
 		ids = append(ids, ws.runtimeIDs...)
 	}
+	return ids
+}
+
+// allWorkspaceIDs returns the workspaces this daemon currently watches, sorted
+// for deterministic per-workspace mailbox polling.
+func (d *Daemon) allWorkspaceIDs() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ids := make([]string, 0, len(d.workspaces))
+	for id := range d.workspaces {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	return ids
 }
 
@@ -2643,7 +2680,8 @@ probeLoop:
 			// daemon may be the stale side of the skew. A probe that merely
 			// failed is transient, on the same rule every other provider's
 			// version probe gets.
-			switch probeDshMulticaProfile(ctx, resolved.Path) {
+			profileVerdict, diagnostic := probeDshMulticaProfile(ctx, resolved.Path)
+			switch profileVerdict {
 			case dshProbeOK:
 			case dshProbeMissingProfile:
 				d.logger.Warn("skip registering runtime: DSH Multica runtime profile is not installed",
@@ -2663,8 +2701,11 @@ probeLoop:
 				// is. The labelled break matters: a bare one would leave only
 				// the switch and fall through to registering a runtime whose
 				// profile answered nothing.
-				lastErr = errors.New(dshProbeFailedReason)
 				transientReason = dshProbeFailedReason
+				if diagnostic != "" {
+					transientReason += ": " + diagnostic
+				}
+				lastErr = errors.New(transientReason)
 				if time.Since(startedAt) >= runtimeVersionProbeRetryWindow {
 					break probeLoop
 				}
@@ -5021,7 +5062,7 @@ const (
 	serverUpdateRuntimeBusy
 )
 
-// tryBeginServerUpdate atomically claims update ownership, pauses new claims,
+// tryBeginServerUpdate atomically claims update ownership, pauses new claims and waits,
 // and lets any claim already in flight finish its handoff. An empty claim can
 // therefore never starve an update; a claim that returns work increments
 // activeTasks before exitClaim, so the final check still defers safely.
@@ -5031,7 +5072,7 @@ func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireRe
 	}
 
 	d.claimMu.Lock()
-	if d.pauseClaims || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.activeTasks.Load() > 0 || d.activeBackgroundWaits() > 0 {
 		d.claimMu.Unlock()
 		d.updating.Store(false)
 		return serverUpdateRuntimeBusy
@@ -5044,7 +5085,7 @@ func (d *Daemon) tryBeginServerUpdate(ctx context.Context) serverUpdateAcquireRe
 	for {
 		d.claimMu.Lock()
 		if d.claimsInFlight == 0 {
-			if d.activeTasks.Load() == 0 {
+			if d.activeTasks.Load() == 0 && d.activeBackgroundWaits() == 0 {
 				d.claimMu.Unlock()
 				return serverUpdateAcquired
 			}
@@ -5167,7 +5208,7 @@ func (d *Daemon) exitClaim() {
 }
 
 // trySetClaimBarrier atomically pauses new ClaimTask calls if the daemon is
-// fully idle (no claims in flight, no tasks running). Returns true if the
+// fully idle (no claims in flight, no tasks or waits running). Returns true if the
 // caller now holds the barrier and must release it with releaseClaimBarrier
 // on every non-restart exit path; false if the daemon is busy and the caller
 // should defer to the next tick. Used by tryAutoUpdate to close the race
@@ -5180,7 +5221,7 @@ func (d *Daemon) trySetClaimBarrier() bool {
 	// double-acquires: two holders both believe they own it, and whichever
 	// finishes first releases it out from under the other. tryBeginServerUpdate
 	// makes the same check for the same reason.
-	if d.pauseClaims || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 {
+	if d.pauseClaims || d.claimsInFlight > 0 || d.activeTasks.Load() > 0 || d.activeBackgroundWaits() > 0 {
 		return false
 	}
 	d.pauseClaims = true
@@ -5662,6 +5703,9 @@ func (d *Daemon) watchTaskCancellation(ctx context.Context, taskID string, pollI
 }
 
 func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
+	generation := &terminalTurnGeneration{}
+	generation.value.Store(task.SessionPinGeneration)
+	ctx = context.WithValue(ctx, terminalTurnGenerationKey{}, generation)
 	d.mu.Lock()
 	rt, tracked := d.runtimeIndex[task.RuntimeID]
 	d.mu.Unlock()
@@ -5756,7 +5800,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		defer d.unmarkActiveEnvRoot(resolvedEnvRoot)
 	}
 	if task.PriorWorkDir != "" {
-		if priorRoot := filepath.Dir(task.PriorWorkDir); priorRoot != "" && priorRoot != resolvedEnvRoot {
+		if priorRoot := managedRootForWorkDir(d.cfg.WorkspacesRoot, task.PriorWorkDir); priorRoot != "" && priorRoot != resolvedEnvRoot {
 			d.markActiveEnvRoot(priorRoot)
 			defer d.unmarkActiveEnvRoot(priorRoot)
 		}
@@ -5786,7 +5830,21 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	}()
 
 	result, err := d.runner.run(runCtx, task, provider, slot, taskLog)
+	terminalConfirmed := false
+	defer func() {
+		if terminalConfirmed {
+			d.releaseCompletedWorktree(context.WithoutCancel(ctx), result.completedWorktree)
+		}
+	}()
 	if errors.Is(err, errStartClaimRejected) {
+
+		if errors.Is(err, errStartClaimCancelled) {
+			if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{RuntimeID: task.RuntimeID, DispatchedAt: task.DispatchedAt}); ackErr != nil {
+				taskLog.Warn("cancelled start claim exit acknowledgement failed", "error", ackErr)
+			} else {
+				terminalConfirmed = true
+			}
+		}
 		// The row belongs to another claim (or is terminal). A task-id-only
 		// failure callback from this stale delivery could kill its new owner.
 		taskLog.Info("discarding rejected start claim", "error", err)
@@ -5799,7 +5857,11 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// runCtx is cancelled, so dropping this on the cancelled path silently
 	// under-reports billing.
 	if len(result.Usage) > 0 {
-		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, result.Usage); usageErr != nil {
+		usage := result.Usage
+		if task.BackgroundWait != nil {
+			usage = mergeWaitUsage(task.UsageBaseline, usage)
+		}
+		if usageErr := d.client.ReportTaskUsage(ctx, task.ID, usage); usageErr != nil {
 			taskLog.Warn("report task usage failed", "error", usageErr)
 		}
 	}
@@ -5807,6 +5869,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// Check if we were cancelled by the polling goroutine.
 	select {
 	case <-cancelledByPoll:
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		taskLog.Info("task cancelled during execution, discarding result",
 			"branch_name", result.BranchName, "error", err)
 		// runner.run has returned, so the transcript flush is complete —
@@ -5830,6 +5895,8 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		}
 		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, ack); ackErr != nil {
 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+		} else {
+			terminalConfirmed = true
 		}
 		return
 	default:
@@ -5837,6 +5904,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		// runTask may have reached worktree finalization before returning the
 		// error. Preserve any delivery metadata that defer attached to the named
 		// result, especially the actual/preserved workdir and delivered branch.
@@ -5855,6 +5925,8 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 			retiredSessionID: result.RetiredSessionID,
 		}); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
+		} else {
+			terminalConfirmed = true
 		}
 		return
 	}
@@ -5867,6 +5939,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 	// anyway. Reuse shouldInterruptAgent so this guard honors the same
 	// signals as the in-flight watcher.
 	if status, err := d.client.GetTaskStatus(ctx, task.ID); shouldInterruptAgent(status, err) {
+		if d.backgroundWaits != nil {
+			d.backgroundWaits.CancelTask(task.ID)
+		}
 		taskLog.Info("task cancelled during execution, discarding result",
 			"status", status, "error", err, "branch_name", result.BranchName)
 		// Same contract as the poll-cancelled path above: the transcript is
@@ -5880,11 +5955,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		// them.
 		if ackErr := d.client.AckTaskCancelled(ctx, task.ID, TaskCancelAck{BranchName: result.BranchName, DurableWorkDir: result.DurableWorkDir, RetiredSessionID: result.RetiredSessionID}); ackErr != nil {
 			taskLog.Warn("cancel ack failed; server sweeper will finalize", "error", ackErr)
+		} else {
+			terminalConfirmed = true
 		}
 		return
 	}
 
-	d.reportTaskResult(ctx, task.ID, result, taskLog)
+	terminalConfirmed = d.reportTaskResult(ctx, task.ID, result, taskLog)
 
 	// Write GC metadata after the task finishes so the periodic GC loop
 	// can look up the parent record (issue / chat session / autopilot run /
@@ -5900,13 +5977,13 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 			// access).
 			//
 			// Worktree mode is excluded: its workdir is a disposable
-			// worktree INSIDE envRoot, already removed by Finalize, and
+			// worktree INSIDE envRoot, retained until release is authorized, and
 			// the deliverable lives on as a branch in the user's repo.
 			// Stamping it would hand every worktree task a permanently
 			// exempt env root, so the directory would accumulate one env
 			// root per task forever — the exact cost the exemption was
 			// meant to trade away for a user's own files.
-			if assignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID); assignment != nil && !assignment.UsesWorktree() {
+			if assignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID); !task.RequireResume && assignment != nil && !assignment.UsesWorktree() {
 				meta.LocalDirectory = true
 			}
 			if err := execenv.WriteGCMeta(result.EnvRoot, meta, taskLog); err != nil {
@@ -6051,6 +6128,9 @@ func withoutWorktreePreserved(err error) error {
 //  4. The blocking wait is cancelled (daemon shutdown, server-side cancel)
 //     — fail the task with the ctx error.
 func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Task, taskLog *slog.Logger) (release func(), abort bool) {
+	if task.RequireResume {
+		return nil, false
+	}
 	if len(task.ProjectResources) == 0 || d.cfg.DaemonID == "" {
 		return nil, false
 	}
@@ -6095,6 +6175,16 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 			failureReason: "local_directory_error",
 		}); failErr != nil {
 			taskLog.Error("fail task after local_directory validation error", "error", failErr)
+		}
+		return nil, true
+	}
+
+	if err := execenv.ValidateUserWorkDir(d.cfg.WorkspacesRoot, assignment.AbsPath); err != nil {
+		if failErr := d.reportTerminalTask(ctx, terminalTaskReport{
+			kind: terminalTaskReportFail, taskID: task.ID,
+			errorMessage: err.Error(), failureReason: "local_directory_error",
+		}); failErr != nil {
+			taskLog.Error("fail task after local_directory ownership check", "error", failErr)
 		}
 		return nil, true
 	}
@@ -6242,7 +6332,10 @@ func (d *Daemon) acquireLocalDirectoryLockIfNeeded(ctx context.Context, task Tas
 // the agent may have built a real session before getting stuck, and we want
 // the next chat turn to resume there rather than start over and "forget"
 // the conversation.
-func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result TaskResult, taskLog *slog.Logger) {
+func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result TaskResult, taskLog *slog.Logger) bool {
+	if result.Status != "completed" && d.backgroundWaits != nil {
+		d.backgroundWaits.CancelTask(taskID)
+	}
 	switch result.Status {
 	case "completed":
 		taskLog.Info("task completed", "status", result.Status)
@@ -6258,7 +6351,7 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			retiredSessionID:      result.RetiredSessionID,
 		})
 		if err == nil {
-			return
+			return true
 		}
 		// The original completion is already durable. Never overwrite it with a
 		// synthetic failure: a temporary auth/config skew can make a 4xx recover
@@ -6302,8 +6395,11 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 			retiredSessionID:      result.RetiredSessionID,
 		}); err != nil {
 			taskLog.Error("report failed task failed", "error", err)
+			return false
 		}
+		return true
 	}
+	return false
 }
 
 // reportTerminalTask is the only path that sends complete/fail callbacks. It
@@ -6318,10 +6414,20 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 // 30-second drain, but terminal callbacks must still use that remaining window.
 // The explicit timeout keeps this detached work bounded during normal runs.
 func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTaskReport) error {
+	if current, ok := parentCtx.Value(terminalTurnGenerationKey{}).(*terminalTurnGeneration); ok {
+		report.generation = current.value.Load().(string)
+		if d.backgroundWaits != nil {
+			ids := d.backgroundWaits.KnownTaskIDs(report.taskID)
+			sort.Strings(ids)
+			encoded, _ := json.Marshal(ids)
+			report.knownWaitIDs = string(encoded)
+		}
+	}
+
 	if _, err := persistedTerminalReport(report, time.Now()); err != nil {
 		return err
 	}
-	release, ok := d.beginTerminalReportDelivery(report.taskID)
+	release, ok := d.beginTerminalReportDelivery(report.queueID())
 	if !ok {
 		return fmt.Errorf("terminal task report for %s is already being delivered", report.taskID)
 	}
@@ -6349,7 +6455,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 	if err != nil {
 		quarantined := false
 		if persisted {
-			item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.taskID), report: report}
+			item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.queueID()), report: report}
 			quarantined = d.handleTerminalReportDeliveryError(ctx, item, err)
 		}
 		if persisted && !quarantined {
@@ -6360,7 +6466,7 @@ func (d *Daemon) reportTerminalTask(parentCtx context.Context, report terminalTa
 	if !persisted {
 		return nil
 	}
-	item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.taskID), report: report}
+	item := pendingTerminalTaskReport{fileName: terminalReportFileName(report.queueID()), report: report}
 	if err := d.terminalReports.acknowledge(item); err != nil {
 		d.signalTerminalReportReplay()
 		return fmt.Errorf("acknowledge terminal task report: %w", err)
@@ -6397,6 +6503,13 @@ func (d *Daemon) sendTerminalTaskReport(ctx context.Context, report terminalTask
 	if d.terminalReportSend != nil {
 		return d.terminalReportSend(ctx, report, schedule)
 	}
+	var ids []string
+	if report.knownWaitIDs != "" {
+		if err := json.Unmarshal([]byte(report.knownWaitIDs), &ids); err != nil {
+			return err
+		}
+	}
+	ctx = context.WithValue(ctx, taskTurnContextKey{}, protocol.TaskTurn{Generation: report.generation, KnownWaitIDs: ids})
 	switch report.kind {
 	case terminalTaskReportComplete:
 		return d.client.completeTaskWithRetrySchedule(ctx, report.taskID, report.output, report.branchName, report.sessionID, report.workDir, report.sessionRolloutMissing, report.retiredSessionID, report.durableWorkDir, schedule)
@@ -6427,7 +6540,7 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 	case task.IssueID != "":
 		meta.Kind = execenv.GCKindIssue
 		meta.IssueID = task.IssueID
-	case task.QuickCreatePrompt != "":
+	case task.QuickCreatePrompt != "" || (task.DelegationResult != nil && task.DelegationResult.ScopeTaskID != ""):
 		// Quick-create tasks reach WriteGCMeta before the server runs
 		// LinkTaskToIssue, so IssueID is always empty here. Persist the
 		// task ID instead and let the GC loop ask the server for terminal
@@ -6785,24 +6898,12 @@ func sessionHomeReachable(provider string, env *execenv.Environment, envReused b
 	return envReused
 }
 
-// shouldReusePriorWorkdir keeps the local_directory lock and cross-agent
-// isolation invariants without forcing managed follow-ups onto a fresh
-// provider session. Every managed issue or chat task may reuse only directories
-// that resolve to the two-segment managed root shape, carry Prepare-time
-// managed-env provenance for the same workspace/scope/agent, and carry a
-// matching daemon task-context marker. Other task kinds have no durable scope
-// with which to prove ownership and therefore start fresh.
-//
-// Reuse eligibility is deliberately keyed off .managed_env.json (written by
-// execenv.Prepare) and NOT .gc_meta.json (written only after the task reaches
-// terminal state). The server's task-complete handler reconciles a follow-up
-// and wakes the runtime before the prior task's daemon handler writes the GC
-// file, so a successor can be claimed inside that window; keying off the
-// terminal file raced and dropped the session (MUL-4886). Both proofs this
-// function reads — the env-root provenance and the workdir task-context marker
-// — are written at Prepare time, so neither depends on completion ordering.
+// shouldReusePriorWorkdir verifies workspace, agent, and source scope before
+// reusing a managed directory. Strict returns additionally accept retained
+// local worktrees and the original task-only scope. Completion metadata is not
+// required: a successor can arrive before the prior handler writes GC metadata.
 func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignment, workspacesRoot string) (string, bool) {
-	if task.PriorWorkDir == "" || localAssignment != nil {
+	if task.PriorWorkDir == "" || (localAssignment != nil && !task.RequireResume) {
 		return "", false
 	}
 
@@ -6827,31 +6928,56 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 		return "", false
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] != "workdir" {
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || (parts[2] != "workdir" && !(task.RequireResume && parts[2] == "worktree")) || (parts[2] == "workdir" && len(parts) != 3) {
 		return "", false
 	}
-	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "") {
+	if task.AgentID == "" || (task.IssueID == "" && task.ChatSessionID == "" && !(task.RequireResume && (task.AutopilotRunID != "" || originalTaskScopeID(task) != ""))) {
 		return "", false
 	}
-	// Managed-env provenance is written only for non-local resumable envs, so
-	// its presence (plus the workspace/scope/agent match) proves this is a
-	// safe daemon-managed reuse target and not a residual local_directory path.
-	prov, err := execenv.ReadManagedEnvProvenance(filepath.Dir(workdir))
+	// A task-only legacy root can prove its original scope through the stable
+	// creator and task marker. Missing business-scope evidence is never promoted
+	// into this fallback.
+	envRoot := filepath.Join(root, parts[0], parts[1])
+	scopeTaskID := originalTaskScopeID(task)
+	legacyTaskScope := false
+	prov, err := execenv.ReadManagedEnvProvenance(envRoot)
+	if errors.Is(err, os.ErrNotExist) && task.RequireResume && scopeTaskID != "" {
+		owner, ownerErr := execenv.ReadEnvRootOwner(envRoot)
+		if ownerErr == nil && owner != nil && owner.TaskID == scopeTaskID && owner.WorkspaceID == task.WorkspaceID {
+			prov = &execenv.ManagedEnvProvenance{ManagedBy: execenv.ManagedEnvProvenanceManagedBy, WorkspaceID: task.WorkspaceID, AgentID: task.AgentID, ScopeTaskID: scopeTaskID}
+			legacyTaskScope = true
+			err = nil
+		}
+	}
 	if err != nil || prov.ManagedBy != execenv.ManagedEnvProvenanceManagedBy ||
 		prov.WorkspaceID != task.WorkspaceID ||
 		prov.AgentID != task.AgentID {
 		return "", false
 	}
 
+	if task.RequireResume && parts[2] == "worktree" {
+		if task.IssueID != "" && prov.IssueID == task.IssueID {
+			return workdir, true
+		}
+		if task.ChatSessionID != "" && prov.ChatSessionID == task.ChatSessionID {
+			return workdir, true
+		}
+		if scopeTaskID != "" && prov.ScopeTaskID == scopeTaskID && prov.IssueID == "" && prov.ChatSessionID == "" && prov.AutopilotRunID == "" {
+			return workdir, true
+		}
+		return "", false
+	}
 	data, err := os.ReadFile(filepath.Join(workdir, execenv.TaskContextMarkerRelPath))
 	if err != nil {
 		return "", false
 	}
 	var marker struct {
-		ManagedBy     string `json:"managed_by"`
-		AgentID       string `json:"agent_id"`
-		IssueID       string `json:"issue_id"`
-		ChatSessionID string `json:"chat_session_id"`
+		ScopeTaskID    string `json:"scope_task_id"`
+		ManagedBy      string `json:"managed_by"`
+		AgentID        string `json:"agent_id"`
+		IssueID        string `json:"issue_id"`
+		ChatSessionID  string `json:"chat_session_id"`
+		AutopilotRunID string `json:"autopilot_run_id"`
 	}
 	if json.Unmarshal(data, &marker) != nil {
 		return "", false
@@ -6859,11 +6985,18 @@ func shouldReusePriorWorkdir(task Task, localAssignment *localDirectoryAssignmen
 	if marker.ManagedBy != execenv.TaskContextMarkerManagedBy || marker.AgentID != task.AgentID {
 		return "", false
 	}
+	if task.RequireResume && scopeTaskID != "" {
+		markerMatches := marker.ScopeTaskID == scopeTaskID || (legacyTaskScope && marker.ScopeTaskID == "")
+		return workdir, markerMatches && prov.ScopeTaskID == scopeTaskID && prov.IssueID == "" && prov.ChatSessionID == "" && prov.AutopilotRunID == "" && marker.IssueID == "" && marker.ChatSessionID == "" && marker.AutopilotRunID == ""
+	}
 	if task.IssueID != "" {
 		if prov.IssueID != task.IssueID || marker.IssueID != task.IssueID {
 			return "", false
 		}
 		return workdir, true
+	}
+	if task.RequireResume && task.AutopilotRunID != "" {
+		return workdir, prov.AutopilotRunID == task.AutopilotRunID && marker.AutopilotRunID == task.AutopilotRunID
 	}
 	if prov.ChatSessionID != task.ChatSessionID || marker.ChatSessionID != task.ChatSessionID {
 		return "", false
@@ -7259,7 +7392,7 @@ func (d *Daemon) lockReusablePriorEnvRoot(ctx context.Context, task Task, localA
 	if !ok {
 		return nil, "", nil, false, nil
 	}
-	priorRoot := filepath.Dir(workDir)
+	priorRoot := managedRootForWorkDir(d.cfg.WorkspacesRoot, workDir)
 	// workDir came back through util.ResolveSymlinks, so the root it is
 	// measured against has to be resolved the same way — otherwise a symlinked
 	// workspaces root (macOS /tmp -> /private/tmp, a home on a linked volume,
@@ -7335,7 +7468,7 @@ func (d *Daemon) lockReusablePriorEnvRoot(ctx context.Context, task Task, localA
 	}
 	// ...and the directory we are about to hand to Reuse has to be that same
 	// one, so the object locked and the object used cannot diverge.
-	currentInfo, err := os.Stat(filepath.Dir(recheckedWorkDir))
+	currentInfo, err := os.Stat(managedRootForWorkDir(d.cfg.WorkspacesRoot, recheckedWorkDir))
 	if err != nil || !os.SameFile(lockedInfo, currentInfo) {
 		d.logger.Info("prior workdir changed identity while being claimed; starting a fresh environment",
 			"task", task.ID)
@@ -7387,7 +7520,7 @@ func (d *Daemon) lockEnvRootForReuseWaitingOutTheBusyWindow(
 	waited := false
 	for {
 		claim, info, err := execenv.LockEnvRootForReuse(wsRoot, rel, priorRoot)
-		if !errors.Is(err, execenv.ErrEnvRootBusy) || !time.Now().Before(deadline) {
+		if !errors.Is(err, execenv.ErrEnvRootBusy) || (!task.RequireResume && !time.Now().Before(deadline)) {
 			// The wait's real duration is logged, not the budget: 15s is a
 			// reasoned guess (one cancel-poll interval plus the agent's exit),
 			// and these lines are how it gets checked against production
@@ -7401,6 +7534,11 @@ func (d *Daemon) lockEnvRootForReuseWaitingOutTheBusyWindow(
 		}
 		if !waited {
 			waited = true
+			if task.RequireResume {
+				if err := d.client.MarkTaskWaitingLocalDirectory(ctx, task.ID, "waiting for accepted result return workdir"); err != nil {
+					return nil, nil, err
+				}
+			}
 			d.logger.Info("prior workdir is still held by the previous run; waiting for it",
 				"task", task.ID, "prior_root", filepath.Base(priorRoot),
 				"budget", d.envRootBusyWait)
@@ -7680,6 +7818,42 @@ func qualifyTaskModel(
 }
 
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot int, taskLog *slog.Logger) (taskResult TaskResult, returnErr error) {
+	providerInvoked := false
+	strictRefused := false
+	defer func() {
+		if !task.RequireResume && task.DelegationResult == nil {
+			return
+		}
+		if errors.Is(returnErr, errStartClaimRejected) {
+			return
+		}
+		if returnErr == nil && taskResult.Status == "completed" {
+			return
+		}
+		taskResult.Status = "blocked"
+		taskResult.RetiredSessionID = ""
+		taskResult.FailureReason = protocol.DelegationResultInputUnknown
+		if !providerInvoked || strictRefused {
+			taskResult.FailureReason = protocol.DelegationResultUnavailable
+		}
+		if returnErr != nil {
+			taskResult.Comment = returnErr.Error()
+			returnErr = nil
+		}
+	}()
+	if err := validateDelegationResultTask(task, provider); err != nil {
+		return TaskResult{}, err
+	}
+	if task.BackgroundWait != nil && d.backgroundWaits != nil {
+		if err := d.backgroundWaits.MarkHandled(task.ID, task.BackgroundWait.ID); err != nil {
+			taskLog.Warn("server owns the resumed wait receipt", "error", err)
+		}
+	}
+	if task.DelegationResult != nil || task.BackgroundWait != nil {
+		task.QuickCreatePrompt = ""
+		task.QuickCreateAttachmentIDs = nil
+		task.RegenerateQuickActionsFor = ""
+	}
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	phaseRecorder.Mark(taskPhasePrepareStarted)
 	// A claim carries the task-row agent id both at the top level and inside
@@ -7701,6 +7875,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 
 	prepareTimeout := d.effectiveTaskPrepareTimeout()
 	prepareCtx, cancelPrepare := context.WithTimeoutCause(ctx, prepareTimeout, errTaskPrepareTimeout)
+	if task.RequireResume {
+		cancelPrepare()
+		prepareCtx, cancelPrepare = context.WithCancel(ctx)
+	}
 	prepareComplete := false
 	defer func() {
 		cancelPrepare()
@@ -7789,6 +7967,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Repos are passed as metadata only — the agent checks them out on demand
 	// via `multica repo checkout <url>`.
 	taskCtx := execenv.TaskContextForEnv{
+		ResultHandling:      task.RequireResume,
+		ScopeTaskID:         originalTaskScopeID(task),
 		IssueID:             task.IssueID,
 		TriggerCommentID:    task.TriggerCommentID,
 		TriggerThreadID:     task.TriggerThreadID,
@@ -7884,7 +8064,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	d.markActiveEnvRoot(resolvedRoot)
 	defer d.unmarkActiveEnvRoot(resolvedRoot)
 	if task.PriorWorkDir != "" {
-		priorRoot := filepath.Dir(task.PriorWorkDir)
+		priorRoot := managedRootForWorkDir(d.cfg.WorkspacesRoot, task.PriorWorkDir)
 		if priorRoot != resolvedRoot {
 			d.markActiveEnvRoot(priorRoot)
 			defer d.unmarkActiveEnvRoot(priorRoot)
@@ -7900,9 +8080,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// *os.File cannot cross its JSON response back to us. Claiming there would
 	// leave the agent running with no protection at all — which is exactly the
 	// re-dispatch window this guards.
-	envClaim, err := execenv.ClaimEnvRoot(taskRootDirParams(d.cfg.WorkspacesRoot, task))
-	if err != nil {
-		return TaskResult{}, fmt.Errorf("claim execution environment: %w", err)
+	var envClaim *execenv.EnvRootClaim
+	heldRoot := ""
+	if !task.RequireResume {
+		envClaim, err = execenv.ClaimEnvRoot(taskRootDirParams(d.cfg.WorkspacesRoot, task))
+		if err != nil {
+			return TaskResult{}, fmt.Errorf("claim execution environment: %w", err)
+		}
+		heldRoot = envClaim.RootDir()
 	}
 	defer envClaim.Release()
 
@@ -7926,6 +8111,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// LocalWorkDir into execenv. handleTask already validated + locked the
 	// path for worker tasks; leader tasks intentionally skip the assignment.
 	localAssignment, _ := localDirectoryAssignmentForTask(task, d.cfg.DaemonID)
+	if task.RequireResume {
+		localAssignment = nil
+	}
 	// Reuse intentionally skipped for local_directory tasks: the prior
 	// WorkDir is the user's own path (always present) but the reuse path
 	// loses the envRoot association the GC loop needs, and re-running
@@ -8105,6 +8293,32 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			defer d.unmarkActiveStore(store)
 		}
 	}
+	if provider == "hermes" {
+		for _, store := range []string{hermesMemoryStore, hermesSessionStore} {
+			if store == "" {
+				continue
+			}
+			onWait := func() {
+				taskLog.Info("hermes: waiting for provider store", "store", store)
+				if task.RequireResume {
+					if err := d.client.MarkTaskWaitingLocalDirectory(prepareCtx, task.ID, "waiting for original provider store"); err != nil {
+						taskLog.Warn("mark result return resource wait", "error", err)
+					}
+				}
+			}
+			var lock *execenv.ProviderStoreWriterLock
+			var err error
+			if store == hermesMemoryStore {
+				lock, err = execenv.AcquireHermesMemoryUseLock(prepareCtx, store, onWait)
+			} else {
+				lock, err = execenv.AcquireProviderStoreWriterLock(prepareCtx, provider, store, onWait)
+			}
+			if err != nil {
+				return TaskResult{}, err
+			}
+			defer lock.Release()
+		}
+	}
 	// Reasonix locates its user config from the environment (REASONIX_HOME, and
 	// the platform config dirs behind it), which an agent's custom_env may
 	// re-point or clear. The per-task reasonix.toml has to restate the
@@ -8116,7 +8330,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		reasonixEnv = sanitizeAgentEnv(agentEnvOverrides)
 	}
 	envReused := false
-	priorClaim, priorWorkDir, lockedPriorInfo, reusable, reuseErr := d.lockReusablePriorEnvRoot(ctx, task, localAssignment, envClaim.RootDir())
+	priorClaim, priorWorkDir, lockedPriorInfo, reusable, reuseErr := d.lockReusablePriorEnvRoot(ctx, task, localAssignment, heldRoot)
 	if reuseErr != nil {
 		// Cancelled while waiting for the previous run to let go of its
 		// directory. Ending here IS the behaviour: falling through would
@@ -8132,8 +8346,30 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		if reuseBeforeUseTestHook != nil {
 			reuseBeforeUseTestHook()
 		}
+		var retained *execenv.LocalWorktree
+		priorRoot := managedRootForWorkDir(d.cfg.WorkspacesRoot, priorWorkDir)
+		if task.RequireResume {
+			rel, _ := filepath.Rel(priorRoot, priorWorkDir)
+			if strings.Split(rel, string(filepath.Separator))[0] == "worktree" {
+				scope := task.IssueID
+				if scope == "" {
+					scope = task.ChatSessionID
+				}
+				if scope == "" {
+					scope = originalTaskScopeID(task)
+				}
+				var err error
+				retained, err = execenv.LoadRetainedWorktree(priorRoot, priorWorkDir, task.WorkspaceID, task.AgentID, scope, taskLog)
+				if err != nil {
+					return TaskResult{}, err
+				}
+			}
+		}
 		var err error
 		env, err = d.reuseExecutionEnvironment(prepareCtx, execenv.ReuseParams{
+			RootDir:        priorRoot,
+			RequireResume:  task.RequireResume,
+			LocalWorktree:  retained,
 			WorkspacesRoot: d.cfg.WorkspacesRoot,
 			Profile:        d.cfg.Profile,
 			// The canonical path the lock was taken on. Handing Reuse the raw
@@ -8166,7 +8402,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// into "declined and started clean". See lockReusablePriorEnvRoot for
 		// what remains uncovered.
 		if env != nil && lockedPriorInfo != nil {
-			usedInfo, statErr := os.Stat(filepath.Dir(env.WorkDir))
+			usedInfo, statErr := os.Stat(env.RootDir)
 			if statErr != nil || !os.SameFile(lockedPriorInfo, usedInfo) {
 				// No "task" field here: taskLog already carries the full id.
 				taskLog.Info("reused workdir is not the directory that was claimed; starting a fresh environment")
@@ -8177,6 +8413,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		// Whether it did decides whether an env-root-scoped session store — the
 		// Hermes overlay's task-local state.db — carried over from the prior task.
 		envReused = env != nil
+	}
+	if env == nil && task.RequireResume {
+		return TaskResult{}, errors.New("strict result return workdir could not be reused")
 	}
 	if env == nil {
 		var err error
@@ -8283,6 +8522,48 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			}
 		}
 	}
+	if task.RequireResume {
+		frozenInfo, frozenErr := os.Stat(strictTaskWorkDir(task))
+		actualInfo, actualErr := os.Stat(env.WorkDir)
+		if frozenErr != nil || actualErr != nil || !os.SameFile(frozenInfo, actualInfo) {
+			return TaskResult{}, errors.New("strict result return workdir identity changed")
+		}
+		env.WorkDir = strictTaskWorkDir(task)
+	}
+	stores := []string{hermesMemoryStore, hermesSessionStore}
+	if provider == "codex" {
+		stores = []string{execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx)}
+	}
+	for _, store := range stores {
+		if store == "" {
+			continue
+		}
+		resource := resourceForTask(task, provider, store, env.WorkDir, task.PriorSessionID)
+		resource.Address.Kind = "provider_store"
+		resource.Address.SourceTaskID = ""
+		resource.Address.SessionID, resource.Address.WorkDir = "", ""
+		if store == hermesMemoryStore {
+			resource.Address.ScopeType, resource.Address.ScopeID = "agent", ""
+		}
+		if err := writeManagedResource(store, resource); err != nil {
+			taskLog.Warn("store identity could not be recorded; retain store", "error", err)
+		}
+	}
+	resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, task.PriorSessionID)
+	if err := writeManagedResource(env.RootDir, resource); err != nil && task.RequireResume {
+		return TaskResult{}, err
+	}
+	pendingFinalization := false
+	defer func() {
+		resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+		resource.FinalizationPending = pendingFinalization
+		if env.LocalWorktree != nil {
+			resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
+		}
+		if err := writeManagedResource(env.RootDir, resource); err != nil {
+			taskLog.Warn("resource identity could not be saved; retain environment", "error", err)
+		}
+	}()
 	phaseRecorder.Mark(taskPhaseEnvironmentReady)
 	// Belt-and-suspenders: also mark whatever root we ended up with, in case
 	// future changes diverge from ResolveRootDir.
@@ -8290,16 +8571,8 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		d.markActiveEnvRoot(env.RootDir)
 		defer d.unmarkActiveEnvRoot(env.RootDir)
 	}
-	// Finalize the worktree on EVERY exit path, success or failure: commit
-	// whatever the agent left uncommitted, then unregister the worktree from
-	// the user's repo. Deferred against the named return so a task that fails
-	// mid-run still hands back the branch holding its partial work instead of
-	// letting `git worktree remove --force` delete it. A failing task is
-	// exactly when the user most wants to see how far the agent got.
-	//
-	// In-place local_directory runs never enter this block: their WorkDir is
-	// already durable, so DurableWorkDir deliberately stays absent instead of
-	// duplicating the same path under two lifecycle meanings.
+	// Persist partial work on every exit. Deletion follows the acknowledged
+	// terminal report and a separate dependency check under the env-root lock.
 	if env.LocalWorktree != nil {
 		defer func() {
 			if taskResult.WorkDir == "" {
@@ -8308,23 +8581,42 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			if taskResult.EnvRoot == "" {
 				taskResult.EnvRoot = env.RootDir
 			}
+			if returnErr == nil && taskResult.Status == "completed" && ctx.Err() == nil && d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
+				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
+					returnErr = errors.Join(returnErr, err)
+				}
+				pendingFinalization = true
+				taskResult.BranchName = env.LocalWorktree.Branch
+				resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+				resource.FinalizationPending = true
+				resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
+				taskResult.completedWorktree = &completedWorktree{tree: env.LocalWorktree, resource: resource, root: env.RootDir, durableWorkDir: resource.DurableWorkDir}
+				return
+			}
+			if d.backgroundWaits != nil {
+				d.backgroundWaits.CancelTask(task.ID)
+			}
 			outcome, finalizeErr := env.LocalWorktree.Finalize(taskLog)
 			if outcome.Branch != "" {
 				taskResult.BranchName = outcome.Branch
 			}
 			if finalizeErr == nil {
-				// The configured local_directory becomes authoritative only after
-				// Finalize confirms the disposable task worktree is actually gone.
-				if localAssignment != nil {
-					taskResult.DurableWorkDir = localAssignment.AbsPath
+				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
+					taskLog.Warn("cannot persist worktree reuse descriptor", "error", err)
+					return
 				}
+				resource := resourceForTask(task, provider, env.RootDir, env.WorkDir, taskResult.SessionID)
+				resource.DurableWorkDir = durableWorktreePath(env.LocalWorktree)
+				if err := writeManagedResource(env.RootDir, resource); err != nil {
+					taskLog.Warn("cannot record worktree resource identity; retaining it", "error", err)
+					return
+				}
+				taskResult.completedWorktree = &completedWorktree{tree: env.LocalWorktree, resource: resource, root: env.RootDir, durableWorkDir: durableWorktreePath(env.LocalWorktree)}
 				return
 			}
 			// Finalize could not complete its delivery contract, so the task
-			// worktree remains authoritative. This covers both an uncommitted
-			// change set and a committed branch whose worktree removal could not
-			// be confirmed. Fail the task: reporting success or a durable project
-			// directory here would hide the path that still needs attention.
+			// worktree remains authoritative. Reporting success would hide an
+			// uncommitted change set or a branch whose delivery cannot be proven.
 			//
 			// Wrapped in worktreePreservedError so the cancel path can
 			// recognise it: a cancelled task discards its result and error, but
@@ -8472,20 +8764,27 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// agent.Config.BuiltinRuntime: it separates the provider's own discovered
 	// binary from an arbitrary command speaking its protocol. Reused here so
 	// the gate and the backend cannot disagree about which one is running.
-	resumeReachable := gateResumeToReachableSession(
-		&task, &taskCtx, provider, env.WorkDir,
-		sessionHomeReachable(provider, env, envReused),
-		providerRefusesMissingSessionCwd(provider, !usesCustomProfileCommand),
-		provider == "codex" && codexWorktreeResumeEligible(env, execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx)),
-		taskLog,
-	)
-	// A reachable workdir or continued local worktree is not sufficient for a
-	// Codex resume: the prior thread's rollout must be in this task's CODEX_HOME
-	// sessions (MUL-4424 isolates them). Drop the resume before the brief is
-	// generated below if it isn't, so we never tell the agent it is continuing a
-	// conversation Codex will silently restart from scratch.
-	if resumeReachable {
-		gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
+	resumeReachable := task.RequireResume
+	if !task.RequireResume {
+		resumeReachable = gateResumeToReachableSession(
+			&task, &taskCtx, provider, env.WorkDir,
+			sessionHomeReachable(provider, env, envReused),
+			providerRefusesMissingSessionCwd(provider, !usesCustomProfileCommand),
+			provider == "codex" && codexWorktreeResumeEligible(env, execenv.CodexSessionStorePath(d.cfg.Profile, taskCtx)),
+			taskLog,
+		)
+		// A reachable workdir or continued local worktree is not sufficient for a
+		// Codex resume: the prior thread's rollout must be in this task's CODEX_HOME
+		// sessions (MUL-4424 isolates them). Drop the resume before the brief is
+		// generated below if it isn't, so we never tell the agent it is continuing a
+		// conversation Codex will silently restart from scratch.
+		if resumeReachable {
+			gateCodexResumeToRolloutPresence(&task, &taskCtx, provider, env.CodexHome, taskLog)
+		}
+
+	}
+	if task.RequireResume && task.PriorSessionID == "" {
+		return TaskResult{}, errors.New("strict result return session is unavailable")
 	}
 
 	// Inject runtime-specific config (meta skill) so the agent discovers .agent_context/.
@@ -8748,6 +9047,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		idleWatchdogTimeout = d.cfg.OpenCodeIdleWatchdog
 	}
 	execOpts := agent.ExecOptions{
+		RequireResume:              task.RequireResume,
 		EnableTaskSupplement:       taskSupplementNegotiated,
 		CursorHookCommand:          cursorHookCommand,
 		Cwd:                        env.WorkDir,
@@ -8830,13 +9130,20 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// fields or ambient process environment. Register only for the provider
 	// execution window and always remove the credential afterwards.
 	d.registerActiveRepoCheckoutTask(agentToken, activeRepoCheckoutTask{
-		WorkspaceID: task.WorkspaceID,
-		TaskID:      task.ID,
-		AgentID:     task.AgentID,
-		AgentName:   task.Agent.Name,
-		WorkDir:     env.WorkDir,
+		LocalWorktree: env.LocalWorktree,
+		EnvRoot:       env.RootDir,
+		WorkspaceID:   task.WorkspaceID,
+		TaskID:        task.ID,
+		AgentID:       task.AgentID,
+		AgentName:     task.Agent.Name,
+		WorkDir:       env.WorkDir,
 	})
-	defer d.clearActiveRepoCheckoutTask(agentToken)
+	defer func() {
+		d.clearActiveRepoCheckoutTask(agentToken)
+		readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		d.reconcileWaitReads(readCtx, task, agentToken)
+	}()
 
 	taskLog.Debug("invoking backend",
 		"provider", provider,
@@ -8854,15 +9161,40 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// Shared across the resume-retry below so the retry's transcript rows
 	// keep ascending seq values for the same task.
 	var msgSeq atomic.Int32
+	msgSeq.Store(task.MessageSeqOffset)
 	d.reportThinkingLevelWarning(ctx, task.ID, selection.ThinkingLevelWarning, &msgSeq, taskLog)
 	outputObserver := &taskOutputObserver{}
 	ctx = withTaskOutputObserver(ctx, outputObserver)
-	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
+	ctx = withSessionPinGeneration(ctx, task.SessionPinGeneration)
+	providerInvoked = true
+	if env.LocalDirectory {
+		if err := execenv.ValidateUserWorkDir(d.cfg.WorkspacesRoot, env.WorkDir); err != nil {
+			return TaskResult{}, asEnvironmentSetupFailure(err)
+		}
+	}
+	result, tools, err := d.executeTaskInput(ctx, backend, prompt, execOpts, taskLog, task.ID, env.CodexHome, &msgSeq)
+	strictRefused = (result.ResumeRejectedTransient && result.StrictResumeUnmet) || errors.Is(err, agent.ErrResumeRequired)
 	if err != nil {
 		return TaskResult{}, err
 	}
 
-	if shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
+	if task.RequireResume && (result.ResumeRejected || result.StrictResumeUnmet || (result.SessionID != "" && result.SessionID != task.PriorSessionID) || (result.Status == "completed" && result.SessionID == "")) {
+		if result.Error == "" {
+			result.Error = "provider did not report the accepted session address"
+			if result.Output != "" {
+				result.Error += "\nObserved response:\n" + result.Output
+			}
+		}
+		result.Status = "failed"
+		result.Error = fmt.Sprintf("strict result return did not retain the accepted session: %s", result.Error)
+		result.SessionID = ""
+	}
+	if !task.RequireResume && shouldRetryWithFreshSession(result, task.PriorSessionID, tools, provider) {
+		var invalidateErr error
+		ctx, invalidateErr = d.invalidateSessionPin(ctx, task.ID)
+		if invalidateErr != nil {
+			return TaskResult{WorkDir: env.WorkDir, EnvRoot: env.RootDir, SessionID: result.SessionID}, fmt.Errorf("fresh retry refused: current session pin could not be invalidated: %w", invalidateErr)
+		}
 		firstResult := result
 		firstUsage := result.Usage
 		firstTools := tools
@@ -8927,7 +9259,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// branch — give it one turn to put the work back before failing the task
 	// (#9404). The delivery guard itself is untouched: the repaired state must
 	// pass the very same check in Finalize.
-	if env.LocalWorktree != nil && result.Status == "completed" {
+	if !task.RequireResume && env.LocalWorktree != nil && result.Status == "completed" {
 		if problem := env.LocalWorktree.CheckDelivery(); problem != nil {
 			result, tools = d.repairWorktreeDelivery(ctx, backend, execOpts, result, tools, problem, env, taskLog, task.ID, &msgSeq)
 		}
@@ -8938,7 +9270,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// silence resumed a session the runtime cannot drive. Retire it so the
 	// next trigger starts fresh instead of re-entering the same hang; the
 	// cancel-ack (or the fail callback on daemon shutdown) carries it.
-	if retiredSessionID == "" {
+	if !task.RequireResume && retiredSessionID == "" {
 		silent, wasSilent := outputObserver.silentFor()
 		if shouldRetireSilentResume(result.Status, task.PriorSessionID, silent, wasSilent) {
 			taskLog.Warn("resumed session produced no output before cancellation; retiring it so the next run starts fresh",
@@ -9250,6 +9582,15 @@ func shouldRetryWithFreshSession(result agent.Result, priorSessionID string, too
 	if result.Status != "failed" || priorSessionID == "" || tools > 0 {
 		return false
 	}
+	// A strict run forbids starting over, so its failure must not be
+	// reinterpreted as a fresh-retry opportunity by any legacy signal below.
+	// This check sits before ResumeRejected, the history/auth classifiers and
+	// the undetectable-backend compatibility path on purpose: the strict
+	// failure result still carries ResumeRejected for its own meaning, and a
+	// caller that forgets its guard must not be able to re-enable the retry.
+	if result.StrictResumeUnmet {
+		return false
+	}
 	// Positive evidence: the backend proved the resume was refused.
 	if result.ResumeRejected || result.ResumeRejectedTransient {
 		return true
@@ -9376,6 +9717,12 @@ func (d *Daemon) repairWorktreeDelivery(ctx context.Context, backend agent.Backe
 	if opts.Timeout <= 0 || opts.Timeout > worktreeRepairTimeout {
 		opts.Timeout = worktreeRepairTimeout
 	}
+	var invalidateErr error
+	ctx, invalidateErr = d.invalidateSessionPin(ctx, taskID)
+	if invalidateErr != nil {
+		taskLog.Warn("worktree repair refused: session pin reset not acknowledged", "error", invalidateErr)
+		return result, tools
+	}
 	repair, repairTools, repairErr := d.executeAndDrain(ctx, backend, BuildWorktreeDeliveryRepairPrompt(problem), opts, taskLog, taskID, env.CodexHome, msgSeq)
 	if repairErr != nil {
 		taskLog.Error("local_directory: worktree delivery repair turn failed to start", "error", repairErr)
@@ -9459,7 +9806,17 @@ func freshSessionMayHelp(errText string) bool {
 // messages and is owned by the caller so a same-task retry continues the
 // sequence instead of restarting at 1 — the server orders the transcript by
 // seq alone, and duplicate seqs would interleave the two attempts' rows.
-func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID, codexHome string, msgSeq *atomic.Int32) (agent.Result, int32, error) {
+func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, prompt string, opts agent.ExecOptions, taskLog *slog.Logger, taskID, codexHome string, msgSeq *atomic.Int32) (out agent.Result, count int32, returnErr error) {
+	var strictSessionMismatch atomic.Bool
+	defer func() {
+		if strictSessionMismatch.Load() {
+			out.Status = "failed"
+			out.Error = "strict result return provider reported a different session"
+			out.SessionID = ""
+			out.StrictResumeUnmet = false
+		}
+	}()
+
 	phaseRecorder := taskPhaseRecorderFromContext(ctx)
 	// Wrap the caller's ctx so the idle watchdog (below) can interrupt both
 	// the agent subprocess (via the ctx passed to backend.Execute) AND the
@@ -9735,9 +10092,14 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					// preserved), while a session whose rollout never lands is never
 					// pinned. The terminal report is the authoritative writer.
 					// Non-Codex providers (codexHome == "") pin immediately.
-					if msg.SessionID != "" && !sessionPinned.Swap(true) {
+					if opts.RequireResume && msg.SessionID != "" && msg.SessionID != opts.ResumeSessionID {
+						strictSessionMismatch.Store(true)
+					}
+					if msg.SessionID != "" && (!opts.RequireResume || msg.SessionID == opts.ResumeSessionID) && !sessionPinned.Swap(true) {
 						sid := msg.SessionID
 						wd := opts.Cwd
+						client := d.client
+						generation := sessionPinGenerationFromContext(ctx)
 						go func() {
 							if !waitCodexRolloutPresent(drainCtx, codexHome, sid) {
 								taskLog.Debug("skip pinning codex session: rollout not present before run ended",
@@ -9746,7 +10108,7 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 							}
 							pinCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 							defer cancel()
-							if err := d.client.PinTaskSession(pinCtx, taskID, sid, wd); err != nil {
+							if err := client.PinTaskSession(pinCtx, taskID, sid, wd, generation); err != nil {
 								taskLog.Debug("pin session failed", "error", err)
 							}
 						}()

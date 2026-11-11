@@ -18,7 +18,6 @@ import {
   type AgentActivity,
   agentRunCounts30dOptions,
   effectiveAccessScope,
-  isAgentRuntimeBound,
   useWorkspaceActivityMap,
   useWorkspacePresenceMap,
   VISIBILITY_TOOLTIP,
@@ -33,6 +32,10 @@ import {
   type AgentsScope,
   type AgentSortField,
 } from "@multica/core/agents/stores";
+import {
+  agentExecutionKind,
+  agentNeedsRuntime,
+} from "@multica/core/agents/execution-kind";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
@@ -63,6 +66,7 @@ import { useNavigation, useRowLink } from "../../navigation";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { docsLocalePrefix } from "../../common/docs-locale";
 import { ProviderLogo } from "../../runtimes/components/provider-logo";
+import { ExternalSessionLink } from "../../issues/components/external-session-link";
 import {
   CollectionPageHeader,
   CollectionPageHeaderAction,
@@ -424,7 +428,28 @@ function StatusCell({ row }: { row: AgentListRow }) {
       </ListGridCell>
     );
   }
-  if (!isAgentRuntimeBound(agent)) {
+  const executionKind = agentExecutionKind(agent);
+  if (executionKind === "external") {
+    return (
+      <ListGridCell className="gap-1.5">
+        <span className="size-1.5 shrink-0 rounded-full bg-sky-500" />
+        <span className="truncate text-caption text-muted-foreground">
+          {t(($) => $.row.external)}
+        </span>
+      </ListGridCell>
+    );
+  }
+  if (executionKind === "unknown") {
+    return (
+      <ListGridCell className="gap-1.5">
+        <AlertCircle className="size-3.5 shrink-0 text-destructive" />
+        <span className="truncate text-caption text-destructive">
+          {t(($) => $.row.execution_unknown)}
+        </span>
+      </ListGridCell>
+    );
+  }
+  if (agentNeedsRuntime(agent)) {
     return (
       <ListGridCell className="gap-1.5">
         <AlertCircle className="size-3.5 shrink-0 text-amber-500" />
@@ -512,7 +537,31 @@ export function AccessCell({ row }: { row: AgentListRow }) {
 
 function RuntimeCell({ row }: { row: AgentListRow }) {
   const { t } = useT("agents");
-  if (!isAgentRuntimeBound(row.agent)) {
+  const executionKind = agentExecutionKind(row.agent);
+  if (executionKind === "external") {
+    return (
+      <ListGridCell className="hidden @2xl:flex">
+        {row.agent.external_session ? (
+          <ExternalSessionLink
+            session={row.agent.external_session}
+            className="max-w-full"
+          />
+        ) : (
+          <span className="truncate text-caption text-muted-foreground">
+            {t(($) => $.row.external_session_unavailable)}
+          </span>
+        )}
+      </ListGridCell>
+    );
+  }
+  if (executionKind === "unknown") {
+    return (
+      <ListGridCell className="hidden @2xl:flex">
+        <span className="text-caption text-faint-foreground">—</span>
+      </ListGridCell>
+    );
+  }
+  if (agentNeedsRuntime(row.agent)) {
     return (
       <ListGridCell className="hidden @2xl:flex">
         <span className="truncate text-caption text-amber-600 dark:text-amber-400">

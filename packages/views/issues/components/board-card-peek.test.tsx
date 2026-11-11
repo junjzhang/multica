@@ -36,7 +36,7 @@ vi.mock("@multica/core/issues/stores/view-store-context", () => ({
       viewMode: "board",
       grouping: "status",
       swimlaneGrouping: "assignee",
-      cardProperties: {},
+      cardProperties: { childProgress: true },
       cardPropertyIds: [],
     }),
 }));
@@ -97,13 +97,15 @@ const issue = {
   updated_at: "2026-09-27T00:00:00Z",
 } as unknown as Issue;
 
-function renderCard({ withPeek = true, peekedId = null as string | null } = {}) {
+function renderCard({ withPeek = true, peekedId = null as string | null, withChildren = false, onPointerDown = vi.fn() } = {}) {
   const card = (
+    <div onPointerDown={onPointerDown}>
     <DndContext>
       <SortableContext items={[issue.id]}>
-        <DraggableBoardCard issue={issue} />
+        <DraggableBoardCard issue={issue} childProgress={withChildren ? { done: 1, total: 3 } : undefined} />
       </SortableContext>
     </DndContext>
+    </div>
   );
   return render(
     <NavigationProvider value={navigation}>
@@ -133,6 +135,27 @@ describe("DraggableBoardCard side peek", () => {
     expect(fireEvent.click(link(), { shiftKey: true })).toBe(false);
     expect(peek.toggle).toHaveBeenCalledWith("issue-1");
     expect(navigation.push).not.toHaveBeenCalled();
+  });
+
+  it("opens children in the sidebar without nesting the action in a link or starting card navigation", () => {
+    const pointer = vi.fn();
+    renderCard({ withChildren: true, onPointerDown: pointer });
+    const children = screen.getByRole("button", { name: "Translated 3" });
+    expect(children.closest("a")).toBeNull();
+    fireEvent.pointerDown(children);
+    fireEvent.click(children);
+    expect(pointer).not.toHaveBeenCalled();
+    expect(peek.open).toHaveBeenCalledWith("issue-1", "sub-issues");
+    expect(peek.toggle).not.toHaveBeenCalled();
+    expect(navigation.push).not.toHaveBeenCalled();
+    fireEvent.keyDown(children, { key: " " });
+    expect(peek.toggle).not.toHaveBeenCalled();
+  });
+
+  it("keeps the card body clickable after separating its controls from the title link", () => {
+    renderCard({ withChildren: true });
+    fireEvent.click(screen.getByText("MUL-1"));
+    expect(navigation.push).toHaveBeenCalledWith("/acme/issues/issue-1");
   });
 
   it("still navigates on a plain click", () => {

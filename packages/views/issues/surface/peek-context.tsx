@@ -37,10 +37,12 @@ export const PEEKED_ROW_CLASS =
  * (list, table, gantt) publish a single column in display order.
  */
 export type IssuePeekColumns = readonly (readonly string[])[];
+export type IssuePeekSection = "sub-issues";
+export interface IssuePeekSectionRequest { section: IssuePeekSection }
 
 export interface IssuePeekActions {
   /** Open the peek on `issueId`, replacing whatever is peeked. */
-  open: (issueId: string) => void;
+  open: (issueId: string, section?: IssuePeekSection) => void;
   /** Open on `issueId`, or close when it is already the peeked issue. */
   toggle: (issueId: string) => void;
   close: () => void;
@@ -144,14 +146,15 @@ export function useIssuePeekPosition() {
  * whether it handled the click; when it did not, the caller's own navigation
  * (a plain full-page open, or a tab) proceeds.
  */
-export function useIssuePeekClick() {
+export function useIssuePeekClick(preferredMode?: IssueOpenMode) {
   const peek = useIssuePeekActions();
   const openMode = useIssueOpeningStore((s) => s.openMode);
   const { push } = useNavigation();
   const paths = useWorkspacePaths();
   return useCallback((issueId: string, event?: React.MouseEvent) => {
     if (!peek || event?.defaultPrevented) return false;
-    const target = event ? resolveIssueClick(event, openMode) : openMode;
+    const mode = preferredMode ?? openMode;
+    const target = event ? resolveIssueClick(event, mode) : mode;
     if (target === "peek") {
       event?.preventDefault();
       // A plain click opens (or keeps open) the issue. Shift+Click is the
@@ -168,7 +171,7 @@ export function useIssuePeekClick() {
       return true;
     }
     return false;
-  }, [peek, openMode, push, paths]);
+  }, [peek, openMode, preferredMode, push, paths]);
 }
 
 /** Empty outside a peek host, so other issue links retain normal navigation. */

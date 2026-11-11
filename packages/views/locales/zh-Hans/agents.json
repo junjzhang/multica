@@ -80,6 +80,9 @@
     "you": "你",
     "archived": "已归档",
     "needs_runtime": "需绑定运行时",
+    "external": "外部",
+    "execution_unknown": "不支持的执行类型",
+    "external_session_unavailable": "无法获取会话详情",
     "no_description": "暂无描述",
     "fallback_runtime_cloud": "云端",
     "fallback_runtime_local": "本地",
@@ -138,6 +141,7 @@
     "try_again": "重试",
     "archived_banner": "该智能体已归档，无法被分配或提及。",
     "runtime_required_banner": "该智能体的配置和历史记录已保留，但需要绑定运行时后才能运行。",
+    "execution_unknown_banner": "该智能体的执行类型无法识别，已停用运行操作。",
     "bind_runtime": "绑定运行时",
     "restore": "恢复",
     "archive_dialog_title": "归档智能体？",
@@ -862,6 +866,7 @@
     "composio_switch_hint": "提示——该智能体已启用 Composio 应用。共享后，所有获得访问权限的人都可以通过该智能体使用这些应用。"
   },
   "profile_card": {
+    "session_label": "外部会话",
     "unavailable": "智能体不可用",
     "detail_link": "详情 →",
     "runtime_label": "运行时",

@@ -36,7 +36,7 @@ Pendant l'exécution, l'agent peut :
 
 Ce qu'il peut réellement faire reste limité par la configuration de l'agent, l'environnement du runtime et votre droit de l'exécuter.
 
-Les agents mettent à jour le statut au fil du travail. Par défaut, ils indiquent le travail en cours au démarrage et la relecture à la livraison. Si le projet utilise un workflow, ils suivent ses étapes et ses consignes. La fin d’une exécution ne termine pas la tâche à elle seule ; répondre à une question ne signifie pas que tout le travail est livré.
+Les agents mettent à jour le statut au fil du travail. Par défaut, ils indiquent le travail en cours au démarrage et la relecture à la livraison. Si le projet utilise un workflow, ils suivent ses étapes et @mentionnent explicitement le prochain responsable pour transmettre le travail. La fin d’une exécution ne termine pas la tâche à elle seule ; répondre à une question ne signifie pas que tout le travail est livré.
 
 Si le projet passe régulièrement le travail entre plusieurs personnes ou agents, utilisez un [workflow](/workflows) pour organiser les relais. Pour enregistrer une demande fréquente sans changer le responsable, utilisez une [action rapide](/quick-actions).
 
@@ -44,9 +44,7 @@ Si le projet passe régulièrement le travail entre plusieurs personnes ou agent
 
 **Ne pas démarrer maintenant** dans la boîte de dialogue de confirmation enregistre l'assigné sans créer d'exécution cette fois-ci. Utilisez-le pour régler d'abord la question du responsable, puis démarrer une fois le contexte ou les dépendances prêts.
 
-`backlog` ne lance pas non plus d'exécution lors de l'assignation. L'exécution ne suit qu'une fois la tâche sortie de `backlog`, ou après une demande adressée à l'assigné dans un commentaire ultérieur.
-
-Lorsque la tâche a déjà un agent ou un squad comme responsable, la sortir de `backlog` ouvre la même boîte de dialogue : c'est ce changement de statut qui lance l'exécution, elle propose donc le même bouton **Ne pas démarrer maintenant**, qui déplace la tâche sans réveiller l'agent. La boîte de dialogue apparaît pour toute cible autre que `backlog` lui-même et que les statuts des catégories `done` ou `closed`.
+`backlog` ne lance pas non plus d'exécution lors de l'assignation. Utilisez-le pour parquer le travail : l'assignation enregistre le responsable, puis une exécution ne démarre que si vous @mentionnez explicitement l'assigné dans un commentaire ou relancez la tâche. Sortir la tâche de `backlog` ne change que son statut.
 
 Seul le statut fixe `backlog` fonctionne ainsi. Un [statut personnalisé](/issues#statuts-personnalisés) de la catégorie `unstarted` ne met **pas** le travail en attente — assigner un agent à une tâche dans ce statut lance immédiatement une exécution. Les tâches déjà en `done` ou `cancelled` lancent quand même une exécution immédiatement lorsqu'elles sont assignées ou réassignées à un agent.
 
@@ -73,13 +71,14 @@ Changer ou retirer le responsable n’arrête généralement pas une exécution 
 ```bash
 multica issue assign MUL-42 --to "Agent name"
 multica issue assign MUL-42 --to-id <agent-uuid> --no-start
-multica issue status MUL-42 in_progress --no-start
+multica issue status MUL-42 in_progress
+multica issue rerun MUL-42
 multica issue assign MUL-42 --unassign
 ```
 
 Dans les scripts, utilisez `--to-id <uuid>` pour éviter de cibler un mauvais objet portant le même nom. Retrouvez les UUID avec `multica agent list --output json` ou `multica workspace member list --output json`.
 
-Utilisez `--no-start` lorsque l'assignation doit enregistrer le responsable sans créer de nouvelle exécution — par exemple lorsque le même agent traite déjà la tâche depuis une autre exécution. La même option est disponible sur `issue update` et `issue status`. Si un flux qui ne fait qu'enregistrer le responsable modifie à la fois l'assignation et le statut, passez-la aux deux commandes : neutraliser le déclenchement de l'assignation ne neutralise pas une exécution déclenchée ensuite par le changement de statut.
+Utilisez `--no-start` lorsque l'assignation doit enregistrer le responsable sans créer de nouvelle exécution — par exemple lorsque le même agent traite déjà la tâche depuis une autre exécution. La même option est disponible sur `issue update` et `issue status`. Un changement de statut ne démarre jamais d'exécution : l'option ne compte donc que sur la commande qui change l'assigné. `issue rerun` démarre explicitement l'assignation actuelle.
 
 ## Étapes suivantes
 

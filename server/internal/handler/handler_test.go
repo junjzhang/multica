@@ -287,11 +287,19 @@ func createHandlerTestTaskForAgentOnIssue(t *testing.T, agentID, issueID string)
 		issueArg = issueID
 	}
 
+	// A task that is allowed to delegate must have recorded its provider
+	// session and work directory; the asynchronous pin is the run's return
+	// address, and a handler acting as this task is held to that gate.
 	taskID := dbfx.Task(t, agentID, testutil.Cols{
-		"runtime_id": handlerTestRuntimeID(t),
-		"status":     "running",
-		"issue_id":   issueArg,
-		"started_at": testutil.Raw("now()"),
+		"runtime_id":                handlerTestRuntimeID(t),
+		"status":                    "running",
+		"issue_id":                  issueArg,
+		"started_at":                testutil.Raw("now()"),
+		"session_id":                "handler-test-provider-session",
+		"work_dir":                  "/work/handler-test",
+		"resource_control_required": true,
+		"session_pin_confirmed":     true,
+		"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 	})
 	return taskID
 }
@@ -2663,7 +2671,7 @@ func TestBacklogNoTriggerOnCreate(t *testing.T) {
 // TestBacklogToTodoTriggersAgent verifies that moving an agent-assigned issue
 // from "backlog" to "todo" enqueues exactly one agent task (none on creation,
 // one on status transition).
-func TestBacklogToTodoTriggersAgent(t *testing.T) {
+func TestBacklogToTodoDoesNotTriggerAgent(t *testing.T) {
 	ctx := context.Background()
 
 	var agentID string
@@ -2687,7 +2695,8 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 	var created IssueResponse
 	json.NewDecoder(w.Body).Decode(&created)
 
-	// Move the issue from backlog to todo — should trigger.
+	// Move the issue from backlog to todo — a state-only transition, so it
+	// must not start a run.
 	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{
 		"status": "todo",
 	})
@@ -2703,8 +2712,8 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to count tasks: %v", err)
 	}
-	if taskCount != 1 {
-		t.Fatalf("expected exactly 1 task after backlog->todo transition, got %d", taskCount)
+	if taskCount != 0 {
+		t.Fatalf("backlog->todo is state-only and must not enqueue a run, got %d", taskCount)
 	}
 
 	// Cleanup
@@ -2720,7 +2729,7 @@ func TestBacklogToTodoTriggersAgent(t *testing.T) {
 // child's task is enqueued. Previously the backlog→active trigger was
 // gated on `actorType == "member"`, which silently dropped agent-driven
 // promotions and broke the serial sub-task workflow.
-func TestBacklogToTodoByAgentTriggersDifferentAssignee(t *testing.T) {
+func TestBacklogToTodoByAgentDoesNotTriggerDifferentAssignee(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
@@ -2748,11 +2757,13 @@ func TestBacklogToTodoByAgentTriggersDifferentAssignee(t *testing.T) {
 	})
 
 	// Parent agent promotes backlog → todo on behalf of the X-Task it is
-	// currently running. Must enqueue exactly one task for the child agent.
+	// currently running. A status transition never launches work; only an
+	// explicit assignment does.
 	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": "todo"})
 	req = withURLParam(req, "id", created.ID)
 	req.Header.Set("X-Agent-ID", parentAgent)
 	req.Header.Set("X-Task-ID", parentTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 
 	var childTasks int
@@ -2760,8 +2771,8 @@ func TestBacklogToTodoByAgentTriggersDifferentAssignee(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		created.ID, childAgent,
 	).Scan(&childTasks)
-	if childTasks != 1 {
-		t.Fatalf("expected exactly 1 task enqueued for child agent after agent-driven backlog→todo, got %d", childTasks)
+	if childTasks != 0 {
+		t.Fatalf("agent-driven backlog→todo must not enqueue a run, got %d", childTasks)
 	}
 }
 
@@ -2805,6 +2816,7 @@ func TestBacklogToTodoByAgentSameIssueDoesNotSelfTrigger(t *testing.T) {
 	req = withURLParam(req, "id", created.ID)
 	req.Header.Set("X-Agent-ID", selfAgent)
 	req.Header.Set("X-Task-ID", selfTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 
 	var tasks int
@@ -2823,7 +2835,7 @@ func TestBacklogToTodoByAgentSameIssueDoesNotSelfTrigger(t *testing.T) {
 // itself), I2 must be enqueued. This was over-blocked by the previous
 // agent-id-based self-loop guard, which made the same-agent serial
 // workflow silently break.
-func TestBacklogToTodoByAgentSameAgentDifferentIssue(t *testing.T) {
+func TestBacklogToTodoByAgentSameAgentDifferentIssueDoesNotLaunch(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
@@ -2868,6 +2880,7 @@ func TestBacklogToTodoByAgentSameAgentDifferentIssue(t *testing.T) {
 	req = withURLParam(req, "id", step2.ID)
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Task-ID", step1Task)
+	req.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 
 	var step2Tasks int
@@ -2875,8 +2888,8 @@ func TestBacklogToTodoByAgentSameAgentDifferentIssue(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		step2.ID, agentID,
 	).Scan(&step2Tasks)
-	if step2Tasks != 1 {
-		t.Fatalf("expected exactly 1 task enqueued on step2 for same-agent serial chain, got %d", step2Tasks)
+	if step2Tasks != 0 {
+		t.Fatalf("promoting a different issue is still a status-only transition, got %d tasks", step2Tasks)
 	}
 }
 
@@ -2900,6 +2913,7 @@ func TestAssignIssueToSelfWithActiveTargetRunDoesNotDuplicate(t *testing.T) {
 	})
 	previewReq.Header.Set("X-Agent-ID", agentID)
 	previewReq.Header.Set("X-Task-ID", runningTask)
+	previewReq.Header.Set("X-Actor-Source", "task_token")
 	previewRecorder := testutil.Call(t, testHandler.PreviewIssueTrigger, previewReq).Want(http.StatusOK)
 	var preview IssueTriggerPreviewResponse
 	previewRecorder.JSON(&preview)
@@ -2913,6 +2927,7 @@ func TestAssignIssueToSelfWithActiveTargetRunDoesNotDuplicate(t *testing.T) {
 	}), "id", issue.ID)
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Task-ID", runningTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 	if got := queuedTaskCountFor(t, issue.ID, agentID); got != 0 {
 		t.Fatalf("self-assignment duplicated an active target run: got %d queued task(s)", got)
@@ -2960,6 +2975,7 @@ func TestAssignDifferentIssueToSelfStillEnqueues(t *testing.T) {
 	}), "id", target.ID)
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Task-ID", sourceTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 	if got := queuedTaskCountFor(t, target.ID, agentID); got != 1 {
 		t.Fatalf("cross-issue self-assignment should enqueue one run, got %d", got)
@@ -2988,6 +3004,7 @@ func TestBatchAssignFreshIssuesToSelfEnqueuesEach(t *testing.T) {
 	})
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Task-ID", sourceTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.BatchUpdateIssues, req).Want(http.StatusOK)
 	for _, target := range []IssueResponse{target1, target2} {
 		if got := queuedTaskCountFor(t, target.ID, agentID); got != 1 {
@@ -3014,6 +3031,7 @@ func TestAssignActiveIssueToDifferentAgentStillEnqueues(t *testing.T) {
 	}), "id", issue.ID)
 	req.Header.Set("X-Agent-ID", actorAgent)
 	req.Header.Set("X-Task-ID", actorTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 	if got := queuedTaskCountFor(t, issue.ID, targetAgent); got != 1 {
 		t.Fatalf("new assignee should get one queued run, got %d", got)
@@ -3028,7 +3046,7 @@ func TestAssignActiveIssueToDifferentAgentStillEnqueues(t *testing.T) {
 // member-only gate would silently drop agent-driven batch promotions; the
 // task-issue self-loop guard must let cross-issue (same-agent) batch
 // promotions through.
-func TestBatchBacklogToTodoByAgentTriggersAssignee(t *testing.T) {
+func TestBatchBacklogToTodoByAgentDoesNotTriggerAssignee(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
@@ -3059,6 +3077,7 @@ func TestBatchBacklogToTodoByAgentTriggersAssignee(t *testing.T) {
 	})
 	req.Header.Set("X-Agent-ID", parentAgent)
 	req.Header.Set("X-Task-ID", parentTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.BatchUpdateIssues, req).Want(http.StatusOK)
 
 	var childTasks int
@@ -3066,8 +3085,8 @@ func TestBatchBacklogToTodoByAgentTriggersAssignee(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		created.ID, childAgent,
 	).Scan(&childTasks)
-	if childTasks != 1 {
-		t.Fatalf("expected exactly 1 task enqueued for child agent after batch agent-driven backlog→todo, got %d", childTasks)
+	if childTasks != 0 {
+		t.Fatalf("batch status transition must not enqueue a run, got %d", childTasks)
 	}
 }
 
@@ -3077,7 +3096,7 @@ func TestBatchBacklogToTodoByAgentTriggersAssignee(t *testing.T) {
 // promoted by another agent (or by the leader itself acting from a task
 // on a different issue). The task-issue self-loop guard must allow this —
 // only a true same-issue self-loop should be suppressed.
-func TestBacklogToTodoByAgentTriggersSquadLeader(t *testing.T) {
+func TestBacklogToTodoByAgentDoesNotTriggerSquadLeader(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
@@ -3109,6 +3128,7 @@ func TestBacklogToTodoByAgentTriggersSquadLeader(t *testing.T) {
 	req = withURLParam(req, "id", created.ID)
 	req.Header.Set("X-Agent-ID", driverAgent)
 	req.Header.Set("X-Task-ID", driverTask)
+	req.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
 
 	var leaderTasks int
@@ -3116,8 +3136,8 @@ func TestBacklogToTodoByAgentTriggersSquadLeader(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		created.ID, leaderAgent,
 	).Scan(&leaderTasks)
-	if leaderTasks != 1 {
-		t.Fatalf("expected exactly 1 squad-leader task after agent-driven backlog→todo on squad issue, got %d", leaderTasks)
+	if leaderTasks != 0 {
+		t.Fatalf("a status transition must not wake the squad leader, got %d tasks", leaderTasks)
 	}
 }
 
@@ -3139,122 +3159,6 @@ func TestDaemonRegisterMissingWorkspaceReturns404(t *testing.T) {
 // TestRootMentionOwnerRoutesMemberReplyButNotAgentReply verifies that a member
 // root @mention owns later member replies, while agent-authored acknowledgments
 // still do not self-expand the route.
-func TestRootMentionOwnerRoutesMemberReplyButNotAgentReply(t *testing.T) {
-	if testHandler == nil {
-		t.Skip("database not available")
-	}
-	ctx := context.Background()
-
-	// Create two agents.
-	agentA := createHandlerTestAgent(t, "Loop Agent A", nil)
-	agentB := createHandlerTestAgent(t, "Loop Agent B", nil)
-
-	// Create an unassigned issue so on_comment doesn't fire.
-	w := httptest.NewRecorder()
-	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
-		"title":  "Agent mention inheritance test",
-		"status": "todo",
-	})
-	testHandler.CreateIssue(w, req)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	var issue IssueResponse
-	json.NewDecoder(w.Body).Decode(&issue)
-	issueID := issue.ID
-
-	t.Cleanup(func() {
-		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
-		testPool.Exec(ctx, `DELETE FROM comment WHERE issue_id = $1`, issueID)
-		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
-	})
-
-	// Helper: count queued tasks for a given agent on this issue.
-	countTasks := func(agentID string) int {
-		var n int
-		err := testPool.QueryRow(ctx,
-			`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
-			issueID, agentID,
-		).Scan(&n)
-		if err != nil {
-			t.Fatalf("failed to count tasks: %v", err)
-		}
-		return n
-	}
-
-	// Helper: cancel all tasks for an agent on this issue.
-	cancelTasks := func(agentID string) {
-		_, err := testPool.Exec(ctx,
-			`UPDATE agent_task_queue SET status = 'cancelled' WHERE issue_id = $1 AND agent_id = $2`,
-			issueID, agentID,
-		)
-		if err != nil {
-			t.Fatalf("failed to cancel tasks: %v", err)
-		}
-	}
-
-	postComment := func(issueID string, body map[string]any, headers map[string]string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		r := newRequest("POST", "/api/issues/"+issueID+"/comments", body)
-		r = withURLParam(r, "id", issueID)
-		for k, v := range headers {
-			r.Header.Set(k, v)
-		}
-		testHandler.CreateComment(w, r)
-		return w
-	}
-
-	// 1. Member posts top-level comment mentioning Agent B.
-	mentionB := fmt.Sprintf("[@Agent B](mention://agent/%s) please review", agentB)
-	w = postComment(issueID, map[string]any{"content": mentionB}, nil)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("member mention comment: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	var parentComment CommentResponse
-	json.NewDecoder(w.Body).Decode(&parentComment)
-	if countTasks(agentB) != 1 {
-		t.Fatalf("expected 1 task for Agent B after member mention, got %d", countTasks(agentB))
-	}
-
-	// 2. Cancel Agent B's task so it's free to be re-triggered.
-	cancelTasks(agentB)
-	if countTasks(agentB) != 0 {
-		t.Fatalf("expected 0 tasks for Agent B after cancel, got %d", countTasks(agentB))
-	}
-
-	// 3. Agent A posts a reply in the same thread with NO mentions.
-	// Agent-authored comments still do not inherit the root mention of Agent B.
-	// resolveActor requires X-Task-ID paired with X-Agent-ID to trust the
-	// agent identity, so we seed a task that belongs to agent A.
-	agentATask := createHandlerTestTaskForAgent(t, agentA)
-	w = postComment(issueID, map[string]any{
-		"content":   "No reply needed — just an acknowledgment.",
-		"parent_id": parentComment.ID,
-	}, map[string]string{"X-Agent-ID": agentA, "X-Task-ID": agentATask})
-	if w.Code != http.StatusCreated {
-		t.Fatalf("agent A reply: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	if countTasks(agentB) != 0 {
-		t.Fatalf("expected 0 tasks for Agent B after agent reply (no parent inheritance), got %d", countTasks(agentB))
-	}
-
-	// 4. Cancel any stray tasks.
-	cancelTasks(agentB)
-
-	// 5. Member posts a reply in the same thread with NO mentions.
-	// The member-authored root @mention owns the thread, so this routes to B.
-	w = postComment(issueID, map[string]any{
-		"content":   "Thanks for the review.",
-		"parent_id": parentComment.ID,
-	}, nil)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("member reply: expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	if countTasks(agentB) != 1 {
-		t.Fatalf("expected 1 task for Agent B after member reply (root owner), got %d", countTasks(agentB))
-	}
-}
-
 // TestMemberReplyToAgentRootDoesNotInheritParentMentions is the regression
 // for MUL-1535. When an agent posts a comment that @mentions another agent
 // (e.g. J posting a PR completion that @mentions a reviewer agent), a later
@@ -3308,6 +3212,7 @@ func TestMemberReplyToAgentRootDoesNotInheritParentMentions(t *testing.T) {
 	r = withURLParam(r, "id", issueID)
 	r.Header.Set("X-Agent-ID", jAgent)
 	r.Header.Set("X-Task-ID", jAgentTask)
+	r.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.CreateComment, r).Want(http.StatusCreated)
 	var rootComment CommentResponse
 	json.NewDecoder(w.Body).Decode(&rootComment)
@@ -3341,85 +3246,6 @@ func TestMemberReplyToAgentRootDoesNotInheritParentMentions(t *testing.T) {
 // for parent-root write normalization leaking root mentions into plain nested
 // replies. Stored parent_id keeps the direct parent, and trigger logic routes
 // to that direct agent parent rather than the thread root's explicit mention.
-func TestNestedMemberReplyUsesDirectParentForMentionInheritance(t *testing.T) {
-	if testHandler == nil || testPool == nil {
-		t.Skip("database not available")
-	}
-
-	assigneeAgent := createHandlerTestAgent(t, "Nested Mention Assignee", nil)
-	mentionedAgent := createHandlerTestAgent(t, "Nested Mention Target", nil)
-	parentAgent := createHandlerTestAgent(t, "Nested Direct Parent", nil)
-
-	var number int
-	dbfx.QueryRow(t, `
-		UPDATE workspace
-		SET issue_counter = GREATEST(issue_counter, (SELECT COALESCE(MAX(number), 0) FROM issue WHERE workspace_id = $1)) + 1
-		WHERE id = $1 RETURNING issue_counter
-	`, testWorkspaceID).Scan(&number)
-
-	issueID := dbfx.Insert(t, "issue", testutil.Cols{
-		"workspace_id":  testWorkspaceID,
-		"creator_type":  "member",
-		"creator_id":    testUserID,
-		"title":         "nested mention inheritance regression",
-		"assignee_type": "agent",
-		"assignee_id":   assigneeAgent,
-		"number":        number,
-	})
-	t.Cleanup(func() {
-		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
-		testPool.Exec(context.Background(), `DELETE FROM comment WHERE issue_id = $1`, issueID)
-		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
-	})
-
-	countQueued := func(agentID string) int {
-		t.Helper()
-		var n int
-		dbfx.QueryRow(t, `
-			SELECT count(*) FROM agent_task_queue
-			WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'
-		`, issueID, agentID).Scan(&n)
-		return n
-	}
-	postMemberComment := func(body map[string]any) CommentResponse {
-		t.Helper()
-		r := newRequest("POST", "/api/issues/"+issueID+"/comments", body)
-		r = withURLParam(r, "id", issueID)
-		w := testutil.Call(t, testHandler.CreateComment, r).Want(http.StatusCreated)
-		var resp CommentResponse
-		w.JSON(&resp)
-		return resp
-	}
-
-	root := postMemberComment(map[string]any{
-		"content": fmt.Sprintf("[@Mentioned](mention://agent/%s) please look", mentionedAgent),
-	})
-	if got := countQueued(mentionedAgent); got != 1 {
-		t.Fatalf("expected root mention to queue mentioned agent once, got %d", got)
-	}
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'cancelled' WHERE issue_id = $1`, issueID)
-
-	directParentID := dbfx.Comment(t, issueID, "looks like redirect config", testutil.Cols{
-		"author_type": "agent",
-		"author_id":   parentAgent,
-		"parent_id":   root.ID,
-	})
-
-	nested := postMemberComment(map[string]any{
-		"content":   "can you also check session expiry?",
-		"parent_id": directParentID,
-	})
-	if nested.ParentID == nil || *nested.ParentID != directParentID {
-		t.Fatalf("stored nested reply parent_id should keep direct parent %s, got %v", directParentID, nested.ParentID)
-	}
-	if got := countQueued(mentionedAgent); got != 0 {
-		t.Fatalf("plain nested reply must not inherit root mention from non-direct parent; got %d queued tasks", got)
-	}
-	if got := countQueued(parentAgent); got != 1 {
-		t.Fatalf("plain nested reply should route to direct agent parent; got %d queued tasks", got)
-	}
-}
-
 // TestNestedMemberReplyUnderMemberSkipsAssigneeFallback verifies that a nested
 // reply whose direct parent is human-owned neither routes to a sibling agent
 // reply nor falls back to the issue assignee. A sibling agent comment alone
@@ -3547,6 +3373,7 @@ func TestAgentExplicitMentionStillTriggers(t *testing.T) {
 	r = withURLParam(r, "id", issueID)
 	r.Header.Set("X-Agent-ID", agentA)
 	r.Header.Set("X-Task-ID", agentATask)
+	r.Header.Set("X-Actor-Source", "task_token")
 	w = testutil.Call(t, testHandler.CreateComment, r).Want(http.StatusCreated)
 	if got := countTasks(agentB); got != 1 {
 		t.Fatalf("expected 1 task for Agent B after explicit mention by Agent A, got %d", got)
