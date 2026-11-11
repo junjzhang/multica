@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,13 @@ func TestHandoffExplicitAndLegacyAPI(t *testing.T) {
 			t.Fatalf("root activity count=%d", n)
 		}
 		testutil.Call(t, f.h.HandoffIssueExecutor, withURLParam(newRequest(http.MethodPost, "/api/issues/"+root.ID+"/executor/handoff", req), "id", root.ID)).Want(409)
+		req.ClientRequestID = uuidToString(dbid.NewV7())
+		req.PreviousSessionID = f.b
+		req.ExpectedIssueRevision = current.Revision
+		rec := testutil.Call(t, f.h.HandoffIssueExecutor, withURLParam(newRequest(http.MethodPost, "/api/issues/"+root.ID+"/executor/handoff", req), "id", root.ID)).Want(409)
+		if !strings.Contains(rec.Body.String(), "executor or issue revision changed") {
+			t.Fatalf("wrong endpoint returned unexpected error: %s", rec.Body.String())
+		}
 	})
 	t.Run("legacy leader", func(t *testing.T) {
 		root := f.root(t)
