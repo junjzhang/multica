@@ -87,6 +87,7 @@ SELECT * FROM external_agent_session WHERE id = ANY(@ids::uuid[]);
 -- an error; the UI shows the agent's sessions without a current target.
 SELECT s.*,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
@@ -113,12 +114,12 @@ RETURNING *;
 -- Revocation is idempotent and scoped to one session: siblings and the agent
 -- identity keep working. Auth re-reads this column on every request.
 UPDATE external_agent_session
-SET revoked_at = now(),
+SET revoked_at = COALESCE(revoked_at, now()),
     updated_at = now()
 WHERE id = @id
   AND agent_id = @agent_id
   AND workspace_id = @workspace_id
-  AND revoked_at IS NULL
+
 RETURNING *;
 
 -- name: WorkspaceDaemonOwnedByUser :one

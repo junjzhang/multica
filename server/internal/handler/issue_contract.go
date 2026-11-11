@@ -16,11 +16,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
-	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
 	"github.com/multica-ai/multica/server/internal/service"
+	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -87,13 +88,62 @@ func contractRepresentative(basis json.RawMessage) *issuecontract.Actor {
 	return fields.Representative
 }
 
-func representsContractExecutor(actor, executor issuecontract.Actor, representative *issuecontract.Actor) bool {
-	return actor == executor || representative != nil && actor == *representative
+func contractActor(r *http.Request, kind, id string) issuecontract.Actor {
+	actor := issuecontract.Actor{Type: kind, ID: id}
+	if session, ok := externalActorSessionID(r); isExternalAgentActor(r) && ok {
+		actor.SessionID = uuidToString(session)
+	}
+	return actor
+}
+
+func contractParty(basis json.RawMessage, key string) issuecontract.Actor {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(basis, &fields)
+	var actor issuecontract.Actor
+	_ = json.Unmarshal(fields[key], &actor)
+	return actor
+}
+
+func sameContractEntity(a, b issuecontract.Actor) bool { return a.Type == b.Type && a.ID == b.ID }
+
+// A pre-session contract keeps its stored basis and authors. Its legacy
+// principal is usable only through the exact binding or a proven sole session.
+func contractActorMatches(ctx context.Context, q *db.Queries, issue db.Issue, actual, expected issuecontract.Actor) bool {
+	if actual == expected {
+		return true
+	}
+	if !sameContractEntity(actual, expected) || expected.SessionID != "" || actual.SessionID == "" || issue.LeadershipRootIssueID.Valid || issue.CreatorSessionID.Valid || issue.SessionSemantics {
+		return false
+	}
+	if binding, err := sessionroute.Resolve(ctx, q, uuidToString(issue.WorkspaceID), actual.ID, uuidToString(issue.ID)); err == nil {
+		return binding.SessionID == actual.SessionID
+	}
+	rows, err := q.ListExternalAgentSessionsForRead(ctx, db.ListExternalAgentSessionsForReadParams{WorkspaceID: issue.WorkspaceID, AgentID: parseUUID(actual.ID)})
+	if err != nil {
+		return false
+	}
+	count := 0
+	matched := false
+	for _, row := range rows {
+		if !row.RevokedAt.Valid {
+			count++
+			matched = uuidToString(row.ID) == actual.SessionID
+		}
+	}
+	return count == 1 && matched
+}
+
+func contractExecutorMatches(ctx context.Context, q *db.Queries, issue db.Issue, actor, executor issuecontract.Actor, representative *issuecontract.Actor) bool {
+	return contractActorMatches(ctx, q, issue, actor, executor) || representative != nil && contractActorMatches(ctx, q, issue, actor, *representative)
+}
+
+func isContractExecutorIdentity(actor, executor issuecontract.Actor, representative *issuecontract.Actor) bool {
+	return sameContractEntity(actor, executor) || representative != nil && sameContractEntity(actor, *representative)
 }
 
 func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State) (ContractView, error) {
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
-	actor := issuecontract.Actor{Type: actorType, ID: actorID}
+	actor := contractActor(r, actorType, actorID)
 	executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
 	basis, err := contractBasis(ctx, q, issue)
 	if err != nil {
@@ -102,10 +152,12 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	active := issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) != "cancelled" && !issue.TriageState.Valid
 	view := ContractView{Accepted: []int{}, CanEdit: active && h.canMaintainContract(ctx, r, q, issue, state, basis), MergeAuthorization: mergeAuthorizationResponse(issue)}
 	if issue.AssigneeID.Valid {
+		executor = contractParty(basis, "executor")
 		view.Executor = &executor
 	}
 	if issue.CoordinatorID.Valid {
-		view.Acceptor = &issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
+		acceptor := contractParty(basis, "acceptor")
+		view.Acceptor = &acceptor
 	}
 	view.ExecutorRepresentative = contractRepresentative(basis)
 	v := state.Current()
@@ -126,10 +178,10 @@ func (h *Handler) contractView(ctx context.Context, r *http.Request, q *db.Queri
 	}
 	if state.Pending() != nil {
 		view.PendingActor = &v.Acceptor
-		view.CanReview = actor == v.Acceptor && !representsContractExecutor(actor, v.Executor, view.ExecutorRepresentative) && actor != state.Pending().Author
+		view.CanReview = contractActorMatches(ctx, q, issue, actor, v.Acceptor) && !isContractExecutorIdentity(actor, v.Executor, view.ExecutorRepresentative) && !sameContractEntity(actor, state.Pending().Author)
 	} else {
 		view.PendingActor = &v.Executor
-		view.CanSubmit = representsContractExecutor(actor, v.Executor, view.ExecutorRepresentative)
+		view.CanSubmit = contractExecutorMatches(ctx, q, issue, actor, v.Executor, view.ExecutorRepresentative)
 	}
 	return view, nil
 }
@@ -195,15 +247,13 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	actorType, actorID := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
-	actor := issuecontract.Actor{Type: actorType, ID: actorID}
+	actor := contractActor(r, actorType, actorID)
 	if isMachineCredentialActor(r) && actor.Type != "agent" {
 		writeError(w, 403, "contract actions require a concrete agent identity")
 		return
 	}
 	// A contract write is session-sensitive: a template credential must name
-	// the session it acts for. Binding a contract version/author to that exact
-	// session is slice 2; this slice refuses credentials that name no session
-	// at all.
+	// the session it acts for; authors retain that exact authenticated session.
 	if _, ok := h.requireExternalActorSession(w, r); !ok {
 		return
 	}
@@ -238,6 +288,32 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "issue changed; reload")
 		return
 	}
+	// Pin related roots only for the write transaction. Read-only capability
+	// projections use committed snapshots and never contend on the root row.
+	roots := []string{uuidToString(issue.LeadershipRootIssueID), uuidToString(issue.RequesterLeadershipRootID)}
+	slices.Sort(roots)
+	if _, err = tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
+		writeError(w, 500, "set contract write timeout failed")
+		return
+	}
+	previousRoot := ""
+	for _, rootID := range roots {
+		if rootID == "" || rootID == previousRoot || rootID == uuidToString(issue.ID) {
+			continue
+		}
+		previousRoot = rootID
+		if _, err = q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: parseUUID(rootID), WorkspaceID: issue.WorkspaceID}); err != nil {
+			writeError(w, 409, "task responsibility is changing; reload")
+			return
+		}
+	}
+	if conflict, err := h.issueSessionConflict(r, q, issue); err != nil {
+		writeError(w, 500, "load contract session failed")
+		return
+	} else if conflict {
+		writeError(w, 409, "task belongs to another session; reload after handoff")
+		return
+	}
 	if issue.AssigneeType.String == "squad" {
 		// NOWAIT preserves archive/leader protection without waiting in the
 		// opposite order from runtime teardown's Agent-to-task locks.
@@ -246,7 +322,12 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, "squad is changing; reload before retrying")
 			return
 		}
-		if _, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: squad.LeaderID, WorkspaceID: issue.WorkspaceID}); err != nil {
+		leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+		if leaderErr != nil {
+			writeError(w, 409, leaderErr.Error())
+			return
+		}
+		if _, err := q.LockAgentForContract(ctx, db.LockAgentForContractParams{ID: leader.Agent.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
 			writeError(w, 409, "squad leader is changing; reload before retrying")
 			return
 		}
@@ -279,6 +360,34 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	if issuestatus.Effective(ctx, q, issue.WorkspaceID, issue.Status) == "cancelled" || issue.TriageState.Valid {
 		writeError(w, 409, "reopen or accept triage before changing the contract")
 		return
+	}
+	if req.Action == "revise" {
+		if isExternalAgentActor(r) {
+			basis, err := contractBasis(ctx, q, issue)
+			if err != nil {
+				writeError(w, 500, "load contract responsibility failed")
+				return
+			}
+			if !h.canMaintainContract(ctx, r, q, issue, state, basis) {
+				writeError(w, 403, "only the verified original requester session may revise")
+				return
+			}
+		}
+		if isExternalAgentActor(r) && issue.CreatorType == actor.Type && uuidToString(issue.CreatorID) == actor.ID && !issue.CreatorSessionID.Valid {
+			if err = q.SetIssueCreatorSession(ctx, db.SetIssueCreatorSessionParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, SessionID: parseUUID(actor.SessionID)}); err != nil {
+				writeError(w, 500, "pin requester session failed")
+				return
+			}
+		}
+		if err = q.AdoptIssueSessionSemantics(ctx, db.AdoptIssueSessionSemanticsParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
+			writeError(w, 500, "adopt contract session basis failed")
+			return
+		}
+		issue, err = q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			writeError(w, 500, "reload contract responsibility failed")
+			return
+		}
 	}
 	effects := contractEffects{}
 	status, err := h.applyContractRequest(ctx, r, q, issue, &state, req, actor, &effects)
@@ -336,9 +445,9 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 	}
 	h.broadcastCancelledWakeups(ctx, issue.WorkspaceID, append(cancelled, effects.cancelled...))
 	h.recordIssueActivity(ctx, updated, actor.Type, actor.ID, "issue_contract_"+req.Action, map[string]any{"sequence": state.Sequence, "version": state.Current().Number})
-	h.publishContractIssue(ctx, updated, issue.Status, actor)
+	h.publishIssueChange(ctx, updated, issue.Status, actor.Type, actor.ID)
 	for _, child := range effects.children {
-		h.publishContractIssue(ctx, child, "in_review", actor)
+		h.publishIssueChange(ctx, child, "in_review", actor.Type, actor.ID)
 	}
 	view, err := h.contractView(ctx, r, h.Queries, updated, state)
 	if err != nil {
@@ -360,12 +469,12 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		if !h.canMaintainContract(ctx, r, q, issue, *state, basis) {
 			return "", contractFail(403, "contract maintenance requires a verified original requester in scope; the executor cannot change its agreement")
 		}
-		executor := issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}
-		if representsContractExecutor(actor, executor, representative) {
+		executor := contractParty(basis, "executor")
+		if isContractExecutorIdentity(actor, executor, representative) {
 			return "", contractFail(403, "the executor cannot revise its own agreement")
 		}
-		acceptor := issuecontract.Actor{Type: issue.CoordinatorType.String, ID: uuidToString(issue.CoordinatorID)}
-		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent" && executor.Type != "squad") || representsContractExecutor(acceptor, executor, representative) {
+		acceptor := contractParty(basis, "acceptor")
+		if !issue.AssigneeID.Valid || !issue.CoordinatorID.Valid || (executor.Type != "member" && executor.Type != "agent" && executor.Type != "squad") || isContractExecutorIdentity(acceptor, executor, representative) {
 			return "", contractFail(400, "choose distinct executor and coordinator before creating a contract")
 		}
 		if executor.Type == "squad" {
@@ -377,6 +486,17 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		}
 		if _, _, msg := h.validateCoordinator(ctx, uuidToString(issue.WorkspaceID), IssueCoordinatorInput{Type: acceptor.Type, ID: acceptor.ID}); msg != "" {
 			return "", contractFail(400, msg)
+		}
+		for _, party := range []issuecontract.Actor{executor, acceptor} {
+			if party.Type == "agent" && party.SessionID == "" {
+				agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: parseUUID(party.ID), WorkspaceID: issue.WorkspaceID})
+				if err != nil {
+					return "", err
+				}
+				if agent.ExecutionKind == "external" {
+					return "", contractFail(400, "bind an explicit external executor/acceptor session before revising the contract")
+				}
+			}
 		}
 		if strings.TrimSpace(req.Goal) == "" || strings.TrimSpace(req.AuthorizationNote) == "" || len(req.Requirements) == 0 || len(req.Requirements) > 50 {
 			return "", contractFail(400, "goal, authorization note and 1–50 criteria are required")
@@ -408,7 +528,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	pending := state.Pending()
 	switch req.Action {
 	case "submit":
-		if !representsContractExecutor(actor, v.Executor, representative) {
+		if !contractExecutorMatches(ctx, q, issue, actor, v.Executor, representative) {
 			return "", contractFail(403, "only the executor may submit delivery")
 		}
 		if pending != nil {
@@ -423,7 +543,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		state.Deliveries = append(state.Deliveries, issuecontract.Delivery{ID: req.ClientRequestID, Version: v.Number, Criteria: req.Criteria, Evidence: req.Evidence, ChildIDs: append([]string{}, req.ChildIDs...), Author: actor, CreatedAt: now})
 		return "in_review", nil
 	case "accept", "return":
-		if actor != v.Acceptor || representsContractExecutor(actor, v.Executor, representative) || pending != nil && actor == pending.Author {
+		if !contractActorMatches(ctx, q, issue, actor, v.Acceptor) || isContractExecutorIdentity(actor, v.Executor, representative) || pending != nil && sameContractEntity(actor, pending.Author) {
 			return "", contractFail(403, "only the specified acceptor may decide delivery")
 		}
 		if pending == nil || pending.ID != req.DeliveryID {
@@ -491,9 +611,8 @@ func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, s
 	return nil
 }
 
-func (h *Handler) publishContractIssue(ctx context.Context, issue db.Issue, previous string, actor issuecontract.Actor) {
+func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previous, actorType, actorID string) {
 	resp := issueToResponse(issue, h.getIssuePrefix(ctx, issue.WorkspaceID))
 	h.fillStatusCategory(ctx, issue.WorkspaceID, &resp)
-	h.Bus.Publish(events.Event{Type: protocol.EventIssueUpdated, WorkspaceID: uuidToString(issue.WorkspaceID), ActorType: actor.Type, ActorID: actor.ID,
-		Payload: map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous}})
+	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous})
 }

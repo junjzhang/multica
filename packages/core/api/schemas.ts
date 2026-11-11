@@ -1426,6 +1426,7 @@ export const AgentSessionBindingResponseSchema = z
   .loose();
 
 export const CommentSchema = z.object({
+  actor_session_id: z.string().optional().catch(undefined),
   id: z.string(),
   issue_id: z.string(),
   author_type: z.string(),
@@ -1635,6 +1636,10 @@ export const CommentSubIssueTaskResponseSchema = z.object({
 }).loose();
 
 export const IssueSchema = z.object({
+  leadership_root_issue_id: z.string().optional().catch(undefined),
+  leader_agent_id: z.string().optional().catch(undefined),
+  leader_external_session_id: z.string().optional().catch(undefined),
+  leadership_revision: z.number().int().nonnegative().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),
@@ -2649,6 +2654,7 @@ const SquadMemberPreviewSchema = z.object({
 }).loose();
 
 export const SquadSchema = z.object({
+  default_leader_unavailable_reason: z.string().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   name: z.string(),

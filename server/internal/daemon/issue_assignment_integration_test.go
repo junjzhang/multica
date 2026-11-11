@@ -76,7 +76,9 @@ func TestExternalSquadAssignmentHTTPToHostReceipt(t *testing.T) {
 		"workspace_id": f.WorkspaceID, "agent_id": agentID, "owner_user_id": f.UserID,
 		"provider": "paseo", "host_id": "another-host", "session_id": "never-select-this-session", "daemon_id": "other-daemon",
 	})
-	squadID := f.Squad(t, "Integration squad", agentID, testutil.Cols{"instructions": "Integration squad instruction"})
+	defaultLeader := f.Agent(t, "Managed integration default", "")
+	squadID := f.Squad(t, "Integration squad", defaultLeader, testutil.Cols{"instructions": "Integration squad instruction"})
+	f.SquadMember(t, squadID, "agent", agentID)
 	memberID := f.Agent(t, "Do not start member", "")
 	f.SquadMember(t, squadID, "agent", memberID)
 	q := db.New(pool)
@@ -96,6 +98,12 @@ func TestExternalSquadAssignmentHTTPToHostReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	externalToken, err := auth.GenerateExternalAgentToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Insert(t, "external_agent_token", testutil.Cols{"workspace_id": f.WorkspaceID, "agent_id": agentID, "owner_user_id": f.UserID, "token_hash": auth.HashToken(externalToken), "external_session_id": sessionID, "expires_at": time.Now().Add(time.Hour)})
+	requestToken := externalToken
 	request := func(method, path string, body any, status int) map[string]any {
 		t.Helper()
 		data, err := json.Marshal(body)
@@ -106,7 +114,7 @@ func TestExternalSquadAssignmentHTTPToHostReceipt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+requestToken)
 		req.Header.Set("X-Workspace-ID", f.WorkspaceID)
 		response, err := server.Client().Do(req)
 		if err != nil {
@@ -125,8 +133,11 @@ func TestExternalSquadAssignmentHTTPToHostReceipt(t *testing.T) {
 	}
 	created := request(http.MethodPost, "/api/issues", map[string]any{"title": "External integration assignment", "assignee_type": "squad", "assignee_id": squadID, "recipient_session_id": sessionID}, http.StatusCreated)
 	issueID := created["id"].(string)
+	requestToken = token
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM agent_mailbox_message WHERE issue_id=$1`, issueID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM issue_delegation_return WHERE issue_id=$1`, issueID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM external_agent_session_binding WHERE issue_id=$1`, issueID)
 		_, _ = pool.Exec(context.Background(), `DELETE FROM issue WHERE id=$1`, issueID)
 	})
 	// Reassignment and @squad share the exact issue binding and squad context.

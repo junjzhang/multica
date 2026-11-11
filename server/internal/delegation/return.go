@@ -336,6 +336,11 @@ func Ensure(ctx context.Context, q *db.Queries, workspaceID, issueID string, add
 		if parseErr != nil {
 			return db.IssueDelegationReturn{}, fmt.Errorf("%w: external session id", ErrReturnInvalid)
 		}
+		if conflict, err := q.IssueActorSessionConflict(ctx, db.IssueActorSessionConflictParams{WorkspaceID: ws, IssueID: issue, AgentID: dispatcher, SessionID: sessionID}); err != nil {
+			return db.IssueDelegationReturn{}, err
+		} else if conflict {
+			return db.IssueDelegationReturn{}, ErrReturnConflict
+		}
 		// Reuse the reviewed binding. The first accepted target for
 		// (agent, issue) is fixed, so an ordinary dispatch from a different
 		// physical session cannot retarget it. A routing rebind does not
@@ -525,6 +530,15 @@ func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatch
 	}
 	if err := validateManagedSource(ctx, q, ws, dispatcher, task, actor); err != nil {
 		return db.AgentTaskQueue{}, db.AgentRuntime{}, err
+	}
+	if task.LeadershipRootIssueID.Valid {
+		root, err := q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: task.LeadershipRootIssueID, WorkspaceID: ws})
+		if err != nil {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, err
+		}
+		if root.LeadershipRevision != task.LeadershipRevision.Int64 || root.LeaderAgentID != task.AgentID {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, ErrReturnSourceClosed
+		}
 	}
 	return task, runtime, nil
 }

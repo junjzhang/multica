@@ -32,7 +32,7 @@ WHERE id = $3
     $6::uuid IS NULL
     OR target_session_id = $6::uuid
   )
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type AckAgentMailboxProcessingParams struct {
@@ -87,6 +87,8 @@ func (q *Queries) AckAgentMailboxProcessing(ctx context.Context, arg AckAgentMai
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -96,7 +98,7 @@ UPDATE agent_task_queue SET status='cancelled', completed_at=now(),
  error='Mailbox result handled before execution'
 WHERE id= $1 AND status IN ('queued','deferred','dispatched','waiting_local_directory')
  AND started_at IS NULL
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation, leadership_root_issue_id, leadership_revision
 `
 
 func (q *Queries) CancelHandledMailboxResultTask(ctx context.Context, taskID pgtype.UUID) (AgentTaskQueue, error) {
@@ -168,6 +170,8 @@ func (q *Queries) CancelHandledMailboxResultTask(ctx context.Context, taskID pgt
 		&i.TerminalReportedAt,
 		&i.SessionPinConfirmed,
 		&i.SessionPinGeneration,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -182,7 +186,7 @@ INSERT INTO agent_mailbox_message (
     $7, $8
 )
 ON CONFLICT (recipient_agent_id, comment_id) DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type CreateAgentMailboxMessageParams struct {
@@ -241,6 +245,8 @@ func (q *Queries) CreateAgentMailboxMessage(ctx context.Context, arg CreateAgent
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -258,7 +264,7 @@ INSERT INTO agent_mailbox_message (
     $14, $15
 )
 ON CONFLICT DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type CreateDeliveryParams struct {
@@ -346,6 +352,8 @@ func (q *Queries) CreateDelivery(ctx context.Context, arg CreateDeliveryParams) 
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -356,7 +364,7 @@ INSERT INTO agent_mailbox_message (
  kind, notification_key, payload
 ) VALUES ($1, $2, $3, $4, 'delegation_result',
  $5, 'delegation_result', $5, $6)
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type CreateManagedResultMailboxParams struct {
@@ -408,6 +416,8 @@ func (q *Queries) CreateManagedResultMailbox(ctx context.Context, arg CreateMana
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -431,7 +441,7 @@ func (q *Queries) DeleteAgentMailboxMessagesForIssue(ctx context.Context, issueI
 }
 
 const getAgentMailboxMessage = `-- name: GetAgentMailboxMessage :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetAgentMailboxMessageParams struct {
@@ -472,12 +482,14 @@ func (q *Queries) GetAgentMailboxMessage(ctx context.Context, arg GetAgentMailbo
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
 
 const getAgentMailboxMessageByComment = `-- name: GetAgentMailboxMessageByComment :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -519,12 +531,14 @@ func (q *Queries) GetAgentMailboxMessageByComment(ctx context.Context, arg GetAg
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
 
 const getDelivery = `-- name: GetDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetDeliveryParams struct {
@@ -565,12 +579,14 @@ func (q *Queries) GetDelivery(ctx context.Context, arg GetDeliveryParams) (Agent
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
 
 const getDeliveryByNotificationKey = `-- name: GetDeliveryByNotificationKey :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
 WHERE workspace_id = $1
   AND notification_key = $2
 `
@@ -614,12 +630,14 @@ func (q *Queries) GetDeliveryByNotificationKey(ctx context.Context, arg GetDeliv
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
 
 const getLegacyCommentDelivery = `-- name: GetLegacyCommentDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -665,6 +683,8 @@ func (q *Queries) GetLegacyCommentDelivery(ctx context.Context, arg GetLegacyCom
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -735,6 +755,10 @@ SET delivery_status = 'leased',
 WHERE agent_mailbox_message.id = $4
   AND agent_mailbox_message.workspace_id = $5
   AND agent_mailbox_message.target_session_id = $6
+  AND (agent_mailbox_message.delivery_status<>'pending' OR agent_mailbox_message.leadership_root_issue_id IS NULL OR EXISTS
+    (SELECT 1 FROM issue r WHERE r.id=agent_mailbox_message.leadership_root_issue_id
+     AND r.workspace_id=agent_mailbox_message.workspace_id AND r.leadership_revision=agent_mailbox_message.leadership_revision
+     AND r.leader_agent_id=agent_mailbox_message.recipient_agent_id AND r.leader_external_session_id=agent_mailbox_message.target_session_id))
   AND (
       (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
       OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
@@ -749,6 +773,7 @@ WHERE agent_mailbox_message.id = $4
         AND a.workspace_id = agent_mailbox_message.workspace_id
         AND a.execution_kind = 'external'
         AND a.archived_at IS NULL
+        AND s.revoked_at IS NULL
         AND s.owner_user_id = $7
         AND s.daemon_id = $8
   )
@@ -760,7 +785,7 @@ WHERE agent_mailbox_message.id = $4
         AND inflight.delivery_status = 'leased'
         AND inflight.lease_expires_at > now()
   )
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type LeaseClaimableDeliveryParams struct {
@@ -834,12 +859,14 @@ func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimable
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
 
 const listAgentMailboxMessages = `-- name: ListAgentMailboxMessages :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
 WHERE recipient_agent_id = $1
   AND workspace_id = $2
   AND source_type = $3
@@ -922,6 +949,8 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 			&i.NotificationKey,
 			&i.WithdrawnAt,
 			&i.HandledByTaskID,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -948,10 +977,15 @@ WITH ranked AS (
     JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = $2
       AND m.target_session_id IS NOT NULL
+      AND (m.delivery_status<>'pending' OR m.leadership_root_issue_id IS NULL OR EXISTS
+        (SELECT 1 FROM issue r WHERE r.id=m.leadership_root_issue_id AND r.workspace_id=m.workspace_id
+         AND r.leadership_revision=m.leadership_revision AND r.leader_agent_id=m.recipient_agent_id
+         AND r.leader_external_session_id=m.target_session_id))
       AND s.workspace_id = $2
       AND a.workspace_id = $2
       AND a.execution_kind = 'external'
       AND a.archived_at IS NULL
+      AND s.revoked_at IS NULL
       AND s.owner_user_id = $3
       AND s.daemon_id = $4
       AND (
@@ -1164,7 +1198,7 @@ func (q *Queries) ListIssueExternalParticipants(ctx context.Context, arg ListIss
 }
 
 const listIssueMailboxDeliveries = `-- name: ListIssueMailboxDeliveries :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
 WHERE issue_id = $1 AND workspace_id = $2
 ORDER BY created_at DESC, id DESC
 LIMIT 50
@@ -1219,6 +1253,8 @@ func (q *Queries) ListIssueMailboxDeliveries(ctx context.Context, arg ListIssueM
 			&i.NotificationKey,
 			&i.WithdrawnAt,
 			&i.HandledByTaskID,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -1266,7 +1302,7 @@ func (q *Queries) LockClaimableDelivery(ctx context.Context, arg LockClaimableDe
 }
 
 const lockMailboxConsumptionTasks = `-- name: LockMailboxConsumptionTasks :many
-SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation, EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.notification_delivery_id = $1 AND l.notification_task_id = t.id) AS is_wakeup
+SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation, t.leadership_root_issue_id, t.leadership_revision, EXISTS (SELECT 1 FROM agent_task_delegation_return l WHERE l.notification_delivery_id = $1 AND l.notification_task_id = t.id) AS is_wakeup
 FROM agent_task_queue t
 WHERE t.id = $2 OR t.id IN (
  SELECT l.notification_task_id FROM agent_task_delegation_return l WHERE l.notification_delivery_id = $1
@@ -1359,6 +1395,8 @@ func (q *Queries) LockMailboxConsumptionTasks(ctx context.Context, arg LockMailb
 			&i.AgentTaskQueue.TerminalReportedAt,
 			&i.AgentTaskQueue.SessionPinConfirmed,
 			&i.AgentTaskQueue.SessionPinGeneration,
+			&i.AgentTaskQueue.LeadershipRootIssueID,
+			&i.AgentTaskQueue.LeadershipRevision,
 			&i.IsWakeup,
 		); err != nil {
 			return nil, err
@@ -1375,7 +1413,7 @@ const recordCancelledClaimExit = `-- name: RecordCancelledClaimExit :one
 UPDATE agent_task_queue SET terminal_reported_at = COALESCE(terminal_reported_at, now())
 WHERE id = $1 AND runtime_id = $2 AND dispatched_at = $3
  AND status = 'cancelled' AND started_at IS NULL
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, workflow_step, delegation_outcome_final, resource_control_required, terminal_reported_at, session_pin_confirmed, session_pin_generation, leadership_root_issue_id, leadership_revision
 `
 
 type RecordCancelledClaimExitParams struct {
@@ -1453,6 +1491,8 @@ func (q *Queries) RecordCancelledClaimExit(ctx context.Context, arg RecordCancel
 		&i.TerminalReportedAt,
 		&i.SessionPinConfirmed,
 		&i.SessionPinGeneration,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }
@@ -1487,7 +1527,7 @@ WHERE id = $5
   AND lease_token_hash = $7
   AND lease_expires_at > now()
   AND lease_owner = $8
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
 `
 
 type RecordDeliveryOutcomeParams struct {
@@ -1555,6 +1595,8 @@ func (q *Queries) RecordDeliveryOutcome(ctx context.Context, arg RecordDeliveryO
 		&i.NotificationKey,
 		&i.WithdrawnAt,
 		&i.HandledByTaskID,
+		&i.LeadershipRootIssueID,
+		&i.LeadershipRevision,
 	)
 	return i, err
 }

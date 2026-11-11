@@ -2,6 +2,8 @@ package squadbriefing
 
 import (
 	"context"
+	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -204,10 +206,14 @@ func ProtocolFor(ownsIssueStatus bool) string {
 // to delegate to a retired agent. Members whose underlying record can't be
 // loaded (deleted user/agent races, FK weirdness) are also skipped silently.
 func Build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool) string {
+	return build(ctx, q, squad, ownsIssueStatus, squad.LeaderID)
+}
+
+func build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool, leaderID pgtype.UUID) string {
 	var sb strings.Builder
 	sb.WriteString(ProtocolFor(ownsIssueStatus))
 	sb.WriteString("\n\n")
-	sb.WriteString(buildSquadRoster(ctx, q, squad))
+	sb.WriteString(buildSquadRoster(ctx, q, squad, leaderID))
 
 	if trimmed := strings.TrimSpace(squad.Instructions); trimmed != "" {
 		sb.WriteString("\n\n## Squad Instructions (")
@@ -220,20 +226,29 @@ func Build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus b
 
 // buildSquadRoster renders the "## Squad Roster" section: a leader self-row
 // plus one row per non-archived member, with literal mention markdown.
-func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad) string {
+func BuildForIssue(ctx context.Context, q *db.Queries, issue db.Issue, squad db.Squad, owns bool) string {
+	leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+	if err != nil {
+		return "Task leader unavailable: explicit handoff required."
+	}
+	text := build(ctx, q, squad, owns, leader.Agent.ID)
+	return fmt.Sprintf("Task leadership: root %s; revision %d; session %s. Default leader %s applies only to new tasks.\n\n%s", util.UUIDToString(leader.RootID), leader.Revision, util.UUIDToString(leader.SessionID), util.UUIDToString(squad.LeaderID), text)
+}
+
+func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad, leaderID pgtype.UUID) string {
 	var sb strings.Builder
 	sb.WriteString("## Squad Roster\n\n")
 
 	// Leader self-row. Leaders are always agents (FK enforced in schema).
 	leaderName := "Leader"
-	if leader, err := q.GetAgent(ctx, squad.LeaderID); err == nil {
+	if leader, err := q.GetAgent(ctx, leaderID); err == nil {
 		leaderName = leader.Name
 	}
 	sb.WriteString("Leader (you):\n")
 	sb.WriteString("- ")
 	sb.WriteString(leaderName)
 	sb.WriteString(" — agent — `")
-	sb.WriteString(formatMention(leaderName, "agent", util.UUIDToString(squad.LeaderID)))
+	sb.WriteString(formatMention(leaderName, "agent", util.UUIDToString(leaderID)))
 	sb.WriteString("`\n")
 
 	members, err := q.ListSquadMembers(ctx, squad.ID)
@@ -241,13 +256,13 @@ func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad) string
 		members = nil
 	}
 
-	skillNamesByAgentID, skillsLoaded := loadSquadMemberSkillNames(ctx, q, members, util.UUIDToString(squad.LeaderID))
+	skillNamesByAgentID, skillsLoaded := loadSquadMemberSkillNames(ctx, q, members, util.UUIDToString(leaderID))
 
 	rows := make([]string, 0, len(members))
 	for _, m := range members {
 		// Skip the leader if they happen to also be in the member list —
 		// they're already shown above and we don't want self-delegation.
-		if m.MemberType == "agent" && util.UUIDToString(m.MemberID) == util.UUIDToString(squad.LeaderID) {
+		if m.MemberType == "agent" && util.UUIDToString(m.MemberID) == util.UUIDToString(leaderID) {
 			continue
 		}
 		row := renderMemberRow(ctx, q, m, skillNamesByAgentID, skillsLoaded)

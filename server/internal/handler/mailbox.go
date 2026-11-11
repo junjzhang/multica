@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"net/http"
 	"strconv"
 	"strings"
@@ -506,12 +507,13 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID)}
 		if target.TargetType == "squad" {
 			squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: parseUUID(target.TargetID), WorkspaceID: issue.WorkspaceID})
-			if err != nil || squad.ArchivedAt.Valid || squad.LeaderID != agent.ID {
+			leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+			if err != nil || leaderErr != nil || leader.Agent.ID != agent.ID {
 				out[agentID] = ReasonTargetUnavailable
 				continue
 			}
 			payload.SquadID = uuidToString(squad.ID)
-			payload.Briefing = squadbriefing.Build(ctx, q, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID)
+			payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID)
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {

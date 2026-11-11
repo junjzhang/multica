@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/multica-ai/multica/server/internal/delivery"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -32,7 +33,11 @@ func ResolveAssignmentTarget(ctx context.Context, q *db.Queries, issue db.Issue)
 			return AssignmentTarget{}, &RecipientSessionError{Message: "squad is unavailable"}
 		}
 		squad = &row
-		id = row.LeaderID
+		leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, row)
+		if err != nil {
+			return AssignmentTarget{}, &RecipientSessionError{Message: err.Error()}
+		}
+		id = leader.Agent.ID
 	default:
 		return AssignmentTarget{}, nil
 	}
@@ -72,6 +77,19 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	if !dispatch && sessionID == nil {
 		return nil
 	}
+	if target.Squad != nil {
+		leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, *target.Squad)
+		if err != nil {
+			return err
+		}
+		if leader.SessionID.Valid {
+			id := util.UUIDToString(leader.SessionID)
+			if sessionID != nil && *sessionID != id {
+				return &RecipientSessionError{Message: "recipient session differs from task leader", Conflict: true}
+			}
+			sessionID = &id
+		}
+	}
 	workspaceID, issueID, agentID := util.UUIDToString(issue.WorkspaceID), util.UUIDToString(issue.ID), util.UUIDToString(target.Agent.ID)
 	var binding sessionroute.Binding
 	var err error
@@ -92,6 +110,9 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	if err != nil {
 		return err
 	}
+	if err := q.AdoptIssueSessionSemantics(ctx, db.AdoptIssueSessionSemanticsParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
+		return err
+	}
 	if !dispatch {
 		return nil
 	}
@@ -101,7 +122,7 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	payload := protocol.ExternalIssueRequest{Schema: "issue_assignment.v1", IssueID: issueID}
 	if target.Squad != nil {
 		payload.SquadID = util.UUIDToString(target.Squad.ID)
-		payload.Briefing = squadbriefing.Build(ctx, q, *target.Squad, true)
+		payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, *target.Squad, true)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

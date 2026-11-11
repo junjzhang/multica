@@ -16,18 +16,18 @@ import (
 // capability. Human membership and dedicated merge grants keep their own gates.
 func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *db.Queries, issue db.Issue, state issuecontract.State, basis json.RawMessage) bool {
 	t, id := h.resolveActor(r, requestUserID(r), uuidToString(issue.WorkspaceID))
-	actor := issuecontract.Actor{Type: t, ID: id}
-	if actor == (issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}) {
+	actor := contractActor(r, t, id)
+	if sameContractEntity(actor, issuecontract.Actor{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)}) {
 		return false
 	}
-	if version := state.Current(); version != nil && actor == version.Executor {
+	if version := state.Current(); version != nil && sameContractEntity(actor, version.Executor) {
 		return false
 	}
-	if representative := contractRepresentative(basis); representative != nil && actor == *representative {
+	if representative := contractRepresentative(basis); representative != nil && sameContractEntity(actor, *representative) {
 		return false
 	}
 	for _, version := range state.Versions {
-		if representative := contractRepresentative(version.Basis); representative != nil && actor == *representative {
+		if representative := contractRepresentative(version.Basis); representative != nil && sameContractEntity(actor, *representative) {
 			return false
 		}
 	}
@@ -51,7 +51,29 @@ func (h *Handler) canMaintainContract(ctx context.Context, r *http.Request, q *d
 	}
 	switch r.Header.Get("X-Actor-Source") {
 	case "external_agent":
-		return agent.ExecutionKind == "external" && agent.OwnerID == userID
+		if agent.ExecutionKind != "external" || agent.OwnerID != userID || actor.SessionID == "" {
+			return false
+		}
+		if issue.CreatorSessionID.Valid && actor.SessionID != uuidToString(issue.CreatorSessionID) {
+			return false
+		}
+		for _, version := range state.Versions {
+			if version.Author.Type == actor.Type && version.Author.ID == actor.ID && version.Author.SessionID != "" && version.Author.SessionID != actor.SessionID {
+				return false
+			}
+		}
+		if !issue.CreatorSessionID.Valid {
+			pinned := false
+			for _, version := range state.Versions {
+				if version.Author.ID == actor.ID && version.Author.Type == actor.Type && version.Author.SessionID == actor.SessionID {
+					pinned = true
+				}
+			}
+			if !pinned && !contractActorMatches(ctx, q, issue, actor, issuecontract.Actor{Type: actor.Type, ID: actor.ID}) {
+				return false
+			}
+		}
+		return true
 	case "task_token":
 		if agent.ExecutionKind != "managed" || !issue.OriginID.Valid || (issue.OriginType.String != "agent_create" && issue.OriginType.String != "quick_create") {
 			return false

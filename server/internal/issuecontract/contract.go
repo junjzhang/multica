@@ -9,8 +9,9 @@ import (
 )
 
 type Actor struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type Version struct {

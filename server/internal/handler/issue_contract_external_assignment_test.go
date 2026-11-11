@@ -2,7 +2,9 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/pkg/dbid"
@@ -56,5 +58,27 @@ func TestContractExternalAssignmentKeepsRecipientAndAtomicWrites(t *testing.T) {
 	}
 	if n := dbfx.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1", issue.ID); n != 0 {
 		t.Fatalf("external contract started %d managed tasks", n)
+	}
+}
+
+func TestLegacyExternalContractContinuesWithoutRewritingBasis(t *testing.T) {
+	agent, session, owner := externalAgentFixture(t, "Legacy agreement executor", "legacy-agreement")
+	issue := dbfx.Issue(t, "Legacy agreement", testutil.Cols{"assignee_type": "agent", "assignee_id": agent, "coordinator_type": "member", "coordinator_id": testUserID})
+	bindExternalSession(t, agent, session, issue)
+	dbfx.Exec(t, `UPDATE issue SET acceptance_criteria='["Legacy criterion"]'::jsonb WHERE id=$1`, issue)
+	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	dbfx.Exec(t, `INSERT INTO issue_contract(issue_id,workspace_id,data)
+ SELECT id,workspace_id,jsonb_build_object('sequence',1,'versions',jsonb_build_array(jsonb_build_object('number',1,'goal','Legacy goal','scope','','authorization_note','Legacy note','criteria',jsonb_build_array('Legacy criterion'),'executor',jsonb_build_object('type','agent','id',assignee_id),'acceptor',jsonb_build_object('type','member','id',coordinator_id),'basis',issue_contract_basis(issue),'author',jsonb_build_object('type','member','id',coordinator_id),'created_at',now())),'deliveries','[]'::jsonb,'decisions','[]'::jsonb,'requests','[]'::jsonb) FROM issue WHERE id=$1`, issue)
+	token := externalSessionTokenFixture(t, agent, session, owner, time.Now().Add(time.Hour))
+	submit := contractRequest{Action: "submit", Version: 1, ExpectedSequence: 1, ClientRequestID: uuidToString(dbid.NewV7()), Criteria: []int{0}, Evidence: "Legacy executor evidence"}
+	var view ContractView
+	authenticatedContractCall(t, issue, submit, token).Want(200).JSON(&view)
+	if view.Stale || view.Contract.Pending().Author.SessionID != session || view.Contract.Current().Author.SessionID != "" {
+		t.Fatal("legacy continuation changed basis or historical authors")
+	}
+	var raw string
+	dbfx.QueryRow(t, "SELECT data->'versions'->0->'basis' FROM issue_contract WHERE issue_id=$1", issue).Scan(&raw)
+	if strings.Contains(raw, "session_id") || strings.Contains(raw, "leadership") {
+		t.Fatal("legacy basis was rewritten")
 	}
 }

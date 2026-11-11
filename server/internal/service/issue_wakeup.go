@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"slices"
 	"strings"
@@ -502,11 +503,22 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 	// without one the rule could never be delivered, so refuse it at
 	// registration instead of queueing notifications that no host can claim.
 	// There is no fallback to another session of the same agent.
+	var targetSession pgtype.UUID
 	if agent.ExecutionKind == "external" {
 		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(agent.ID), util.UUIDToString(issue.ID)); err != nil {
 			if errors.Is(err, sessionroute.ErrNotBound) {
 				return out, fmt.Errorf("%w: agent has no session bound to this issue", ErrWakeupInput)
 			}
+			return out, err
+		}
+	}
+	if agent.ExecutionKind == "external" {
+		binding, err := sessionroute.Resolve(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(agent.ID), util.UUIDToString(issue.ID))
+		if err != nil {
+			return out, err
+		}
+		targetSession, err = util.ParseUUID(binding.SessionID)
+		if err != nil {
 			return out, err
 		}
 	}
@@ -615,6 +627,19 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 	} else {
 		out, err = q.CreateIssueWakeup(ctx, params)
 	}
+	if err != nil {
+		return out, err
+	}
+	root, err := q.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+	if err != nil {
+		return out, err
+	}
+	rootID, revision := pgtype.UUID{}, pgtype.Int8{}
+	if root.LeaderAgentID == agent.ID {
+		rootID = root.ID
+		revision = pgtype.Int8{Int64: root.LeadershipRevision, Valid: true}
+	}
+	out, err = q.PinIssueWakeupLeadership(ctx, db.PinIssueWakeupLeadershipParams{ID: out.ID, WorkspaceID: out.WorkspaceID, TargetSessionID: targetSession, RootID: rootID, LeadershipRevision: revision})
 	if err != nil {
 		return out, err
 	}
@@ -1077,12 +1102,27 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	// leave a notification no host can claim, so the rule ends like one whose
 	// target is no longer allowed to run.
 	if authErr == nil && agent.ID.Valid && agent.ExecutionKind == "external" {
-		if _, err = sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID)); err != nil {
+		binding, bindErr := sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID))
+		err = bindErr
+		if err == nil && w.TargetSessionID.Valid && binding.SessionID != util.UUIDToString(w.TargetSessionID) {
+			err = sessionroute.ErrNotBound
+		}
+		if err != nil {
 			if !errors.Is(err, sessionroute.ErrNotBound) {
 				return err
 			}
 			authErr = ErrWakeupForbidden
 			disableReason = "Wakeup disabled: external host session binding is no longer active"
+		}
+	}
+	if w.LeadershipRootIssueID.Valid {
+		root, err := q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: w.LeadershipRootIssueID, WorkspaceID: w.WorkspaceID})
+		if err != nil {
+			return err
+		}
+		if root.LeadershipRevision != w.LeadershipRevision.Int64 || root.LeaderAgentID != w.AgentID {
+			authErr = ErrWakeupForbidden
+			disableReason = "Wakeup disabled: task leadership changed; explicitly revise the rule"
 		}
 	}
 	if w.DisabledAt.Valid || !active || authErr != nil {
@@ -1447,7 +1487,8 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 			}
 			// Only the issue's current, active squad leader gets leader authority.
 			// Other wakeup targets remain ordinary agent turns.
-			if squadErr == nil && !squad.ArchivedAt.Valid && squad.LeaderID == agent.ID {
+			leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+			if squadErr == nil && leaderErr == nil && leader.Agent.ID == agent.ID {
 				squadID = squad.ID
 			}
 		}

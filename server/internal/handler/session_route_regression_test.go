@@ -194,7 +194,7 @@ func oldestExternalSessionID(t *testing.T, agentID string) string {
 // delivery. Source.SessionID is the sender's route when the notification was
 // created, not part of its logical identity: before the fix the edit returned
 // 500 because the re-resolved source session no longer matched.
-func TestCommentEditReplayAfterSenderRebindKeepsOriginalRoute(t *testing.T) {
+func TestCommentEditAfterSenderRebindRejectsOldSessionAndKeepsRoute(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -253,8 +253,8 @@ func TestCommentEditReplayAfterSenderRebindKeepsOriginalRoute(t *testing.T) {
 		t.Fatalf("rebind sender: %v", err)
 	}
 
-	// A real content edit through the production handler re-plans the same
-	// mention and re-enqueues the same logical notification.
+	// An old session cannot dispatch through an edit after the binding moves.
+	// Refusal leaves both the comment and its frozen envelope unchanged.
 	w = httptest.NewRecorder()
 	r = externalAgentRequest(t, sender, http.MethodPut, "/api/comments/"+created.ID, map[string]any{
 		"content":           content + " edited",
@@ -262,16 +262,13 @@ func TestCommentEditReplayAfterSenderRebindKeepsOriginalRoute(t *testing.T) {
 	})
 	r = withURLParam(r, "commentId", created.ID)
 	testHandler.UpdateComment(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("edit after sender rebind status = %d, want 200: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusConflict {
+		t.Fatalf("old session edit after rebind=%d want409: %s", w.Code, w.Body.String())
 	}
-	var edited CommentResponse
-	if err := json.NewDecoder(w.Body).Decode(&edited); err != nil {
-		t.Fatalf("decode edited comment: %v", err)
-	}
-	outcome = findCommentOutcome(t, edited.TriggerOutcomes, recipient)
-	if outcome.Status != DispatchQueued || outcome.DispatchKind != "mailbox" {
-		t.Fatalf("edit outcome = %+v, want queued/mailbox replay", outcome)
+	var savedContent string
+	dbfx.QueryRow(t, "SELECT content FROM comment WHERE id=$1", created.ID).Scan(&savedContent)
+	if savedContent != content {
+		t.Fatal("refused old-session dispatch changed its comment")
 	}
 
 	var replayedID, replayedTarget, replayedSource string

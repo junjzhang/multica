@@ -81,6 +81,11 @@ func (h *Handler) prepareDelegationReturn(r *http.Request, issue db.Issue, actor
 	// An issue-level return is not evidence for THIS dispatch: always resolve
 	// the current trusted actor context. A stale or second dispatcher's row
 	// must never let a new delegation skip the address check.
+	if conflict, err := h.issueSessionConflict(r, h.Queries, issue); err != nil {
+		return nil, err
+	} else if conflict {
+		return nil, delegation.ErrReturnConflict
+	}
 	address, err := h.resolveDelegationAddress(r, util.UUIDToString(issue.WorkspaceID), actorType, actorID)
 	if err != nil {
 		return nil, err

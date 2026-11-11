@@ -2,6 +2,8 @@ package handler
 
 import (
 	"errors"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"net/http"
 
 	"github.com/multica-ai/multica/server/internal/service"
@@ -32,6 +34,28 @@ func validateRecipientSessionInput(id *string, assignmentInput bool) error {
 }
 
 func (h *Handler) externalAssignmentInTx(r *http.Request, q *db.Queries, issue db.Issue, sessionID *string, dispatch bool, actorType, actorID string) error {
+	if issue.AssigneeType.String == "squad" {
+		squad, err := q.LockSquadForAutopilotAssignment(r.Context(), db.LockSquadForAutopilotAssignmentParams{ID: issue.AssigneeID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			return err
+		}
+		actor, session := pgtype.UUID{}, pgtype.UUID{}
+		if isExternalAgentActor(r) {
+			session, _ = externalActorSessionID(r)
+			actor = parseUUID(r.Header.Get("X-Agent-ID"))
+		}
+		leader, err := issueleader.Ensure(r.Context(), q, issue, squad, actor, session, requestUserID(r))
+		if err != nil {
+			return &service.RecipientSessionError{Message: err.Error(), Conflict: errors.Is(err, issueleader.ErrConflict)}
+		}
+		if leader.SessionID.Valid {
+			id := uuidToString(leader.SessionID)
+			if sessionID != nil && *sessionID != id {
+				return &service.RecipientSessionError{Message: "recipient session differs from task leader; use explicit handoff", Conflict: true}
+			}
+			sessionID = &id
+		}
+	}
 	target, err := service.ResolveAssignmentTarget(r.Context(), q, issue)
 	if err != nil {
 		return err

@@ -248,6 +248,11 @@ func (h *Handler) recordIssueExternalUpdateActivity(ctx context.Context, prev, i
 func (h *Handler) recordIssueActivity(ctx context.Context, issue db.Issue, actorType, actorID, action string, details map[string]any) {
 	payload, _ := json.Marshal(details)
 	activity, err := h.Queries.CreateActivity(ctx, db.CreateActivityParams{
+		ActorSessionID: func() pgtype.UUID {
+			actor, _ := ctx.Value(wakeupActorKey{}).(wakeupActor)
+			id, _ := util.ParseUUID(actor.session)
+			return id
+		}(),
 		ID:          dbid.NewV7(),
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     issue.ID,

@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-const Actor = z.object({ type: z.string(), id: z.string() });
+const Actor = z.object({
+  type: z.string(),
+  id: z.string(),
+  session_id: z.string().optional().catch(undefined),
+});
 const Indices = z.array(z.number().int().nonnegative());
 const MergeAuthorization = z.object({
   allowed: z.boolean().default(false),

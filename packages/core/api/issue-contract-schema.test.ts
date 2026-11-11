@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { ContractViewSchema } from "./issue-contract-schema";
 import { parseWithFallback } from "./schema";
-import { IssueSchema } from "./schemas";
+import { IssueSchema, SquadSchema } from "./schemas";
 
 describe("contract API boundary", () => {
   it("keeps additive issue summaries optional and isolates malformed contracts", () => {
@@ -58,5 +58,20 @@ describe("contract API boundary", () => {
     expect(view.executor).toEqual({ type: "squad", id: "squad" });
     expect(view.executor_representative).toEqual({ type: "agent", id: "leader" });
     expect(view.pending_actor).toEqual(view.executor);
+  });
+  it("keeps session authors and ignores malformed additive session fields", () => {
+    const view = ContractViewSchema.parse({
+      contract: null,
+      executor_representative: { type: "agent", id: "template", session_id: "session-a" },
+    });
+    expect(view.executor_representative?.session_id).toBe("session-a");
+    const malformed = ContractViewSchema.parse({
+      contract: null,
+      executor_representative: { type: "agent", id: "template", session_id: 42 },
+    });
+    expect(malformed.executor_representative?.session_id).toBeUndefined();
+    expect(SquadSchema.shape.default_leader_unavailable_reason.parse(42)).toBeUndefined();
+    expect(IssueSchema.shape.leadership_revision.parse(-1)).toBeUndefined();
+    expect(IssueSchema.shape.leadership_revision.parse(undefined)).toBeUndefined();
   });
 });

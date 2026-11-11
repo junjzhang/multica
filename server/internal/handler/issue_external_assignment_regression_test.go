@@ -17,7 +17,7 @@ func TestExternalMixedMentions(t *testing.T) {
 			agent, session, _ := externalAgentFixture(t, "Review mixed leader", "review-mixed")
 			squad := dbfx.Squad(t, "Review mixed squad", agent)
 			issue := dbfx.Issue(t, "Review mixed issue")
-			bindExternalSession(t, agent, session, issue)
+			bindTaskLeadership(t, issue, squad, agent, session)
 			a := fmt.Sprintf("[@Leader](mention://agent/%s)", agent)
 			s := fmt.Sprintf("[@Squad](mention://squad/%s)", squad)
 			content := a + " " + s + " please handle"
@@ -40,7 +40,7 @@ func TestExternalSquadEditAfterBriefingChange(t *testing.T) {
 	agent, session, _ := externalAgentFixture(t, "Review edited leader", "review-edit")
 	squad := dbfx.Squad(t, "Review edit squad", agent)
 	issue := dbfx.Issue(t, "Review edit issue")
-	bindExternalSession(t, agent, session, issue)
+	bindTaskLeadership(t, issue, squad, agent, session)
 	content := fmt.Sprintf("[@Squad](mention://squad/%s) please handle", squad)
 	var comment CommentResponse
 	testutil.Call(t, testHandler.CreateComment, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/comments", map[string]any{"content": content}), "id", issue)).Want(http.StatusCreated).JSON(&comment)
@@ -152,6 +152,9 @@ func TestExternalBatchAssignments(t *testing.T) {
 	agent, session, _ := externalAgentFixture(t, "Review batch leader", "review-batch")
 	squad := dbfx.Squad(t, "Review batch squad", agent)
 	issues := []string{dbfx.Issue(t, "Review batch one"), dbfx.Issue(t, "Review batch two")}
+	for _, issue := range issues {
+		bindTaskLeadership(t, issue, squad, agent, session)
+	}
 	body := map[string]any{"issue_ids": issues, "updates": map[string]any{"assignee_type": "squad", "assignee_id": squad, "recipient_session_id": session}}
 	testutil.Call(t, testHandler.BatchUpdateIssues, newRequest(http.MethodPost, "/api/issues/batch", body)).Want(http.StatusOK)
 	for _, issue := range issues {

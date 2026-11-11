@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
@@ -24,6 +23,9 @@ func squadContractFixture(t *testing.T, external bool) (issue, squad, leader, to
 	dbfx.SquadMember(t, squad, "agent", leader, testutil.Cols{"role": "leader"})
 	issue = dbfx.Issue(t, "Squad agreement", testutil.Cols{"assignee_type": "squad", "assignee_id": squad, "coordinator_type": "member", "coordinator_id": testUserID})
 	dbfx.Cleanup(t, "DELETE FROM issue_contract WHERE issue_id=$1", issue)
+	if external {
+		bindTaskLeadership(t, issue, squad, leader, oldestExternalSessionID(t, leader))
+	}
 	if !external {
 		task := dbfx.Task(t, leader, testutil.Cols{"runtime_id": testRuntimeID, "issue_id": issue, "status": "running", "originator_user_id": testUserID, "accountable_user_id": testUserID})
 		token = taskTokenFixture(t, leader, task)
@@ -51,7 +53,7 @@ func TestContractSquadAuthenticatedDelivery(t *testing.T) {
 			authenticatedContractCall(t, issue, submit, taskTokenFixture(t, worker, workerTask)).Want(403)
 			authenticatedContractCall(t, issue, definition(1), token).Want(403)
 			authenticatedContractCall(t, issue, submit, token).Want(200).JSON(&view)
-			if view.Contract.Pending().Author != (issuecontract.Actor{Type: "agent", ID: leader}) || view.Executor.ID != squad || view.CanReview {
+			if view.Contract.Pending().Author.ID != leader || view.Contract.Pending().Author.Type != "agent" || view.Executor.ID != squad || view.CanReview {
 				t.Fatalf("delivery must retain the real author and squad executor: %+v", view)
 			}
 			accept := contractRequest{Action: "accept", Version: 1, ExpectedSequence: 2, ClientRequestID: uuidToString(dbid.NewV7()), DeliveryID: submit.ClientRequestID, Criteria: []int{0}}
@@ -77,7 +79,7 @@ func TestContractSquadAuthenticatedDelivery(t *testing.T) {
 	}
 }
 
-func TestContractSquadLeaderChangeInvalidatesPendingAndAuthority(t *testing.T) {
+func TestContractSquadHandoffInvalidatesPendingAndAuthority(t *testing.T) {
 	issue, squad, leader, token := squadContractFixture(t, true)
 	dbfx.Exec(t, "UPDATE issue SET creator_type='agent',creator_id=$2 WHERE id=$1", issue, leader)
 	authenticatedContractCall(t, issue, definition(0), token).Want(403)
@@ -85,7 +87,10 @@ func TestContractSquadLeaderChangeInvalidatesPendingAndAuthority(t *testing.T) {
 	submit := contractRequest{Action: "submit", Version: 1, ExpectedSequence: 1, ClientRequestID: uuidToString(dbid.NewV7()), Criteria: []int{0, 1}, Evidence: "Original leader evidence"}
 	authenticatedContractCall(t, issue, submit, token).Want(200)
 	newLeader := dbfx.Agent(t, "Replacement leader", testRuntimeID)
-	testutil.Call(t, testHandler.UpdateSquad, squadScopeReq(testUserID, http.MethodPatch, "/api/squads", map[string]any{"leader_id": newLeader}, map[string]string{"id": squad})).Want(200)
+	dbfx.SquadMember(t, squad, "agent", newLeader)
+	var rev int64
+	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&rev)
+	testutil.Call(t, testHandler.HandoffIssueLeadership, withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+"/leadership/handoff", leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: rev, PreviousAgentID: leader, PreviousSessionID: oldestExternalSessionID(t, leader), AgentID: newLeader, Reason: "Explicit contract representative handoff"}), "id", issue)).Want(200)
 	var view ContractView
 	testutil.Call(t, testHandler.GetIssueContract, withURLParam(newRequest(http.MethodGet, "/", nil), "id", issue)).Want(200).JSON(&view)
 	if !view.Stale || view.CanSubmit || view.CanReview || view.ExecutorRepresentative.ID != newLeader || view.Contract.Pending().Author.ID != leader {
@@ -94,10 +99,10 @@ func TestContractSquadLeaderChangeInvalidatesPendingAndAuthority(t *testing.T) {
 	accept := contractRequest{Action: "accept", Version: 1, ExpectedSequence: 2, ClientRequestID: uuidToString(dbid.NewV7()), DeliveryID: submit.ClientRequestID, Criteria: []int{0, 1}}
 	contractCall(t, issue, accept, "").Want(409)
 	// The former representative remains excluded from maintaining its own agreement.
-	authenticatedContractCall(t, issue, definition(2), token).Want(403)
+	authenticatedContractCall(t, issue, definition(2), token).Want(409)
 	contractCall(t, issue, definition(2), "").Want(200)
 	submit.Version, submit.ExpectedSequence, submit.ClientRequestID = 2, 3, uuidToString(dbid.NewV7())
-	authenticatedContractCall(t, issue, submit, token).Want(403)
+	authenticatedContractCall(t, issue, submit, token).Want(409)
 	contractCall(t, issue, submit, newLeader).Want(200).JSON(&view)
 	if len(view.Contract.Deliveries) != 2 || view.Contract.Deliveries[0].Author.ID != leader || view.Contract.Deliveries[0].Evidence != "Original leader evidence" || view.Contract.Deliveries[1].Author.ID != newLeader {
 		t.Fatalf("rotation rewrote delivery authors or evidence: %+v", view.Contract)
@@ -125,7 +130,11 @@ func TestContractSquadRejectsInactiveRepresentativeAndSelfAcceptance(t *testing.
 				status = 401 // Auth rejects archived external identities first.
 			}
 			authenticatedContractCall(t, issue, submit, token).Want(status)
-			contractCall(t, issue, definition(1), "").Want(400)
+			wantRevise := 409
+			if invalidation == "leader is acceptor" {
+				wantRevise = 400
+			}
+			contractCall(t, issue, definition(1), "").Want(wantRevise)
 			if dbfx.Count(t, "SELECT count(*) FROM issue_contract WHERE issue_id=$1 AND jsonb_array_length(data->'deliveries')<>0", issue) != 0 {
 				t.Fatal("invalid representative appended delivery")
 			}
@@ -133,7 +142,7 @@ func TestContractSquadRejectsInactiveRepresentativeAndSelfAcceptance(t *testing.
 	}
 }
 
-func TestContractSquadSubmitConflictsWithLeaderChange(t *testing.T) {
+func TestContractSquadSubmitConflictsWithConcurrentConfigurationWrite(t *testing.T) {
 	issue, squad, _, token := squadContractFixture(t, true)
 	contractCall(t, issue, definition(0), "").Want(200)
 	newLeader := dbfx.Agent(t, "Concurrent replacement", testRuntimeID)
@@ -152,7 +161,7 @@ func TestContractSquadSubmitConflictsWithLeaderChange(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	authenticatedContractCall(t, issue, submit, token).Want(409)
+	authenticatedContractCall(t, issue, submit, token).Want(200)
 }
 
 func TestContractSquadManagedRevisionDoesNotInvertRuntimeTeardownLocks(t *testing.T) {

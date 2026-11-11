@@ -128,10 +128,15 @@ WITH ranked AS (
     JOIN agent a ON a.id = s.agent_id
     WHERE m.workspace_id = @workspace_id
       AND m.target_session_id IS NOT NULL
+      AND (m.delivery_status<>'pending' OR m.leadership_root_issue_id IS NULL OR EXISTS
+        (SELECT 1 FROM issue r WHERE r.id=m.leadership_root_issue_id AND r.workspace_id=m.workspace_id
+         AND r.leadership_revision=m.leadership_revision AND r.leader_agent_id=m.recipient_agent_id
+         AND r.leader_external_session_id=m.target_session_id))
       AND s.workspace_id = @workspace_id
       AND a.workspace_id = @workspace_id
       AND a.execution_kind = 'external'
       AND a.archived_at IS NULL
+      AND s.revoked_at IS NULL
       AND s.owner_user_id = @owner_user_id
       AND s.daemon_id = @daemon_id
       AND (
@@ -206,6 +211,10 @@ SET delivery_status = 'leased',
 WHERE agent_mailbox_message.id = @id
   AND agent_mailbox_message.workspace_id = @workspace_id
   AND agent_mailbox_message.target_session_id = @target_session_id
+  AND (agent_mailbox_message.delivery_status<>'pending' OR agent_mailbox_message.leadership_root_issue_id IS NULL OR EXISTS
+    (SELECT 1 FROM issue r WHERE r.id=agent_mailbox_message.leadership_root_issue_id
+     AND r.workspace_id=agent_mailbox_message.workspace_id AND r.leadership_revision=agent_mailbox_message.leadership_revision
+     AND r.leader_agent_id=agent_mailbox_message.recipient_agent_id AND r.leader_external_session_id=agent_mailbox_message.target_session_id))
   AND (
       (agent_mailbox_message.delivery_status = 'pending' AND agent_mailbox_message.next_attempt_at <= now())
       OR (agent_mailbox_message.delivery_status = 'leased' AND agent_mailbox_message.lease_expires_at <= now())
@@ -220,6 +229,7 @@ WHERE agent_mailbox_message.id = @id
         AND a.workspace_id = agent_mailbox_message.workspace_id
         AND a.execution_kind = 'external'
         AND a.archived_at IS NULL
+        AND s.revoked_at IS NULL
         AND s.owner_user_id = @owner_user_id
         AND s.daemon_id = @daemon_id
   )

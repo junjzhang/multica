@@ -105,7 +105,7 @@ thread_stats AS (
     FROM membership
     GROUP BY root_id
 )
-SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type,
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.actor_session_id, c.content, c.type,
        c.created_at, c.updated_at, c.parent_id, c.workspace_id,
        c.resolved_at, c.resolved_by_type, c.resolved_by_id,
        c.source_task_id, c.quick_action_id, c.revision, c.deleted_at,
@@ -151,7 +151,7 @@ thread_stats AS (
     FROM membership
     GROUP BY root_id
 )
-SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type,
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.actor_session_id, c.content, c.type,
        c.created_at, c.updated_at, c.parent_id, c.workspace_id,
        c.resolved_at, c.resolved_by_type, c.resolved_by_id,
        c.source_task_id, c.quick_action_id, c.revision, c.deleted_at,
@@ -192,14 +192,14 @@ thread_root AS (
     SELECT id FROM root_of WHERE parent_id IS NULL LIMIT 1
 ),
 descendants AS (
-    SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type,
+    SELECT c.id, c.issue_id, c.author_type, c.author_id, c.actor_session_id, c.content, c.type,
            c.created_at, c.updated_at, c.parent_id, c.workspace_id,
            c.resolved_at, c.resolved_by_type, c.resolved_by_id,
            c.source_task_id, c.quick_action_id, c.revision, c.deleted_at
     FROM comment c
     JOIN thread_root tr ON c.id = tr.id
     UNION
-    SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type,
+    SELECT c.id, c.issue_id, c.author_type, c.author_id, c.actor_session_id, c.content, c.type,
            c.created_at, c.updated_at, c.parent_id, c.workspace_id,
            c.resolved_at, c.resolved_by_type, c.resolved_by_id,
            c.source_task_id, c.quick_action_id, c.revision, c.deleted_at
@@ -208,7 +208,7 @@ descendants AS (
     WHERE c.issue_id = @issue_id AND c.workspace_id = @workspace_id
 ),
 reply_page AS (
-    SELECT d.id, d.issue_id, d.author_type, d.author_id, d.content, d.type,
+    SELECT d.id, d.issue_id, d.author_type, d.author_id, d.actor_session_id, d.content, d.type,
            d.created_at, d.updated_at, d.parent_id, d.workspace_id,
            d.resolved_at, d.resolved_by_type, d.resolved_by_id,
            d.source_task_id, d.quick_action_id, d.revision, d.deleted_at
@@ -221,19 +221,19 @@ reply_page AS (
     ORDER BY d.created_at DESC, d.id DESC
     LIMIT @reply_limit
 )
-SELECT id, issue_id, author_type, author_id, content, type,
+SELECT id, issue_id, author_type, author_id, actor_session_id, content, type,
        created_at, updated_at, parent_id, workspace_id,
        resolved_at, resolved_by_type, resolved_by_id,
        source_task_id, quick_action_id, revision, deleted_at
 FROM (
-    SELECT d.id, d.issue_id, d.author_type, d.author_id, d.content, d.type,
+    SELECT d.id, d.issue_id, d.author_type, d.author_id, d.actor_session_id, d.content, d.type,
            d.created_at, d.updated_at, d.parent_id, d.workspace_id,
            d.resolved_at, d.resolved_by_type, d.resolved_by_id,
            d.source_task_id, d.quick_action_id, d.revision, d.deleted_at
     FROM descendants d
     JOIN thread_root tr ON d.id = tr.id
     UNION ALL
-    SELECT id, issue_id, author_type, author_id, content, type,
+    SELECT id, issue_id, author_type, author_id, actor_session_id, content, type,
            created_at, updated_at, parent_id, workspace_id,
            resolved_at, resolved_by_type, resolved_by_id,
            source_task_id, quick_action_id, revision, deleted_at
@@ -298,7 +298,7 @@ picked AS (
     ORDER BY ts.last_activity_at DESC, ts.root_id DESC
     LIMIT @thread_limit
 )
-SELECT c.id, c.issue_id, c.author_type, c.author_id, c.content, c.type,
+SELECT c.id, c.issue_id, c.author_type, c.author_id, c.actor_session_id, c.content, c.type,
        c.created_at, c.updated_at, c.parent_id, c.workspace_id,
        c.resolved_at, c.resolved_by_type, c.resolved_by_id,
        c.source_task_id, c.quick_action_id, c.revision, c.deleted_at,
@@ -476,8 +476,8 @@ WITH touched_issue AS (
     WHERE issue.id = sqlc.arg(issue_id) AND issue.workspace_id = sqlc.arg(workspace_id)
     RETURNING issue.id, issue.workspace_id, issue.revision
 ), inserted_comment AS (
-    INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id, source_task_id, external_originator_user_id, quick_action_id, via_plugin_id, suppressed_agent_ids, id)
-    SELECT ti.id, ti.workspace_id, sqlc.arg(author_type), sqlc.arg(author_id), sqlc.arg(content), sqlc.arg(type), sqlc.narg(parent_id), sqlc.narg(source_task_id), sqlc.narg(external_originator_user_id), sqlc.narg(quick_action_id), sqlc.narg(via_plugin_id), sqlc.narg(suppressed_agent_ids)::uuid[], COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
+    INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, parent_id, source_task_id, external_originator_user_id, actor_session_id, quick_action_id, via_plugin_id, suppressed_agent_ids, id)
+    SELECT ti.id, ti.workspace_id, sqlc.arg(author_type), sqlc.arg(author_id), sqlc.arg(content), sqlc.arg(type), sqlc.narg(parent_id), sqlc.narg(source_task_id), sqlc.narg(external_originator_user_id), sqlc.narg(actor_session_id), sqlc.narg(quick_action_id), sqlc.narg(via_plugin_id), sqlc.narg(suppressed_agent_ids)::uuid[], COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
     FROM touched_issue ti
     RETURNING *
 )
@@ -561,7 +561,7 @@ WITH locked_issue AS MATERIALIZED (
         updated_at = CASE WHEN target.did_change THEN now() ELSE comment.updated_at END
     FROM target
     WHERE comment.id = target.id
-    RETURNING comment.id, comment.issue_id, comment.author_type, comment.author_id,
+    RETURNING comment.id, comment.issue_id, comment.author_type, comment.author_id, comment.actor_session_id,
               comment.content, comment.type, comment.created_at, comment.updated_at,
               comment.parent_id, comment.workspace_id, comment.resolved_at,
               comment.resolved_by_type, comment.resolved_by_id, comment.source_task_id,
@@ -578,7 +578,7 @@ WITH locked_issue AS MATERIALIZED (
     RETURNING issue.id, issue.revision
 )
 SELECT updated_comment.id, updated_comment.issue_id, updated_comment.author_type,
-       updated_comment.author_id, updated_comment.content, updated_comment.type,
+       updated_comment.author_id, updated_comment.actor_session_id, updated_comment.content, updated_comment.type,
        updated_comment.created_at, updated_comment.updated_at, updated_comment.parent_id,
        updated_comment.workspace_id, updated_comment.resolved_at,
        updated_comment.resolved_by_type, updated_comment.resolved_by_id,
@@ -818,7 +818,7 @@ WITH RECURSIVE ancestor_path AS (
     AND path.depth <= 256
     AND NOT path.cycle
 )
-SELECT id, issue_id, author_type, author_id, content, type, created_at,
+SELECT id, issue_id, author_type, author_id, actor_session_id, content, type, created_at,
        updated_at, workspace_id, parent_id, resolved_at, resolved_by_type,
        resolved_by_id, source_task_id, revision, quick_action_id, via_plugin_id,
        deleted_at, depth, cycle

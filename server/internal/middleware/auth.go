@@ -137,6 +137,20 @@ func Auth(queries *db.Queries, patCache *auth.PATCache, cloudPAT *auth.CloudPATV
 				if checkTaskTokenWorkspaceTarget(w, r, queries, boundWorkspaceID) {
 					return
 				}
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					task, err := queries.GetAgentTask(r.Context(), tt.TaskID)
+					if err != nil {
+						http.Error(w, `{"error":"task unavailable"}`, http.StatusUnauthorized)
+						return
+					}
+					if task.LeadershipRootIssueID.Valid {
+						root, err := queries.GetIssueInWorkspace(r.Context(), db.GetIssueInWorkspaceParams{ID: task.LeadershipRootIssueID, WorkspaceID: tt.WorkspaceID})
+						if err != nil || root.LeadershipRevision != task.LeadershipRevision.Int64 || root.LeaderAgentID != task.AgentID {
+							http.Error(w, `{"error":"task leadership changed; explicit handoff and contract revision required"}`, http.StatusConflict)
+							return
+						}
+					}
+				}
 				r.Header.Set("X-User-ID", userID)
 				r.Header.Set("X-Agent-ID", uuidToString(tt.AgentID))
 				r.Header.Set("X-Task-ID", uuidToString(tt.TaskID))

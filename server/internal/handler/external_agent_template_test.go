@@ -511,3 +511,26 @@ func TestExternalRegistrationRejectsForeignHostSession(t *testing.T) {
 		t.Fatalf("foreign host attach = %d %s, want 400", code, raw)
 	}
 }
+
+func TestRevokedSessionRegistrationAndRevokeNotFound(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemon := "revoked-registration-" + suffix
+	dbfx.Runtime(t, "Revoked registration daemon", testutil.Cols{"daemon_id": daemon})
+	body := templateBody("Revocation template "+suffix, "revocation-host-"+suffix, "revocation-session-"+suffix, "Session", daemon)
+	code, created, raw := registerExternal(t, h, body)
+	if code != 201 {
+		t.Fatalf("register %d %s", code, raw)
+	}
+	defer cleanupExternalAgent(t, created.ID)
+	for range 2 {
+		testutil.Call(t, h.RevokeExternalAgentSession, testutil.WithURLParams(newRequest(http.MethodDelete, "/", nil), "id", created.ID, "sessionId", created.ExternalSession.ID)).Want(204)
+	}
+	if code, _, raw := registerExternal(t, h, body); code != 409 || !strings.Contains(raw, "revoked") {
+		t.Fatalf("revoked re-registration %d %s", code, raw)
+	}
+	testutil.Call(t, h.RevokeExternalAgentSession, testutil.WithURLParams(newRequest(http.MethodDelete, "/", nil), "id", created.ID, "sessionId", "00000000-0000-0000-0000-000000000123")).Want(404)
+	other, session, _ := externalAgentFixture(t, "Foreign revoked session", "foreign-revocation")
+	_ = other
+	testutil.Call(t, h.RevokeExternalAgentSession, testutil.WithURLParams(newRequest(http.MethodDelete, "/", nil), "id", created.ID, "sessionId", session)).Want(404)
+}

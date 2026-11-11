@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -1689,6 +1690,24 @@ func (s *TaskService) EnqueueSquadLeaderTaskInTx(ctx context.Context, q *db.Quer
 func (s *TaskService) insertMentionTask(ctx context.Context, q *db.Queries, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, delegationReturns []delegation.ReturnIntent, invocation *attribution.Result) (db.AgentTaskQueue, attribution.Result, error) {
 	if err := guardIssueNotInTriage(ctx, q, issue.ID, origin); err != nil {
 		return db.AgentTaskQueue{}, attribution.Result{}, err
+	}
+	if isLeader && squadID.Valid {
+		squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: squadID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, err
+		}
+		var leader issueleader.Leader
+		if issue.AssigneeType.String == "squad" && issue.AssigneeID == squadID {
+			leader, err = issueleader.Ensure(ctx, q, issue, squad, pgtype.UUID{}, pgtype.UUID{}, "")
+		} else {
+			leader, err = issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+		}
+		if err != nil {
+			return db.AgentTaskQueue{}, attribution.Result{}, err
+		}
+		if leader.Agent.ID != agentID {
+			return db.AgentTaskQueue{}, attribution.Result{}, issueleader.ErrConflict
+		}
 	}
 	agent, err := q.GetAgent(ctx, agentID)
 	if err != nil {
@@ -6218,7 +6237,11 @@ func (s *TaskService) RerunIssueWithDelegation(ctx context.Context, issueID pgty
 			if err != nil {
 				return nil, fmt.Errorf("issue is assigned to a squad but squad not found")
 			}
-			agentID = squad.LeaderID
+			leader, err := issueleader.ResolveIssueLeader(ctx, s.Queries, issue, squad)
+			if err != nil {
+				return nil, err
+			}
+			agentID = leader.Agent.ID
 			isLeader = true
 			squadID = issue.AssigneeID
 		default:

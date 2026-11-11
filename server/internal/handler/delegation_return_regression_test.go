@@ -277,6 +277,7 @@ func TestSquadCreateCommitsLeaderTaskWithReturn(t *testing.T) {
 		"leader_id":    leader,
 		"creator_id":   testUserID,
 	})
+	dbfx.SquadMember(t, squadID, "agent", leader)
 	title := fmt.Sprintf("squad delegation %d", time.Now().UnixNano())
 	bumpIssueCounter(t)
 	body := createIssueBody(title, squadID)

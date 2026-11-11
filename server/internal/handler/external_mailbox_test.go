@@ -229,6 +229,8 @@ func TestExternalAgentsAreDistinctAuthors(t *testing.T) {
 		r := newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{"content": content})
 		r.Header.Set("X-Actor-Source", "external_agent")
 		r.Header.Set("X-Agent-ID", agentID)
+		r.Header.Set(ActorSessionHeader, oldestExternalSessionID(t, agentID))
+		r.Header.Set(ActorSessionHeader, oldestExternalSessionID(t, agentID))
 		r = withURLParam(r, "id", issueID)
 		testHandler.CreateComment(w, r)
 		if w.Code != http.StatusCreated {

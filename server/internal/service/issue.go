@@ -18,6 +18,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/entitlement"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/issueguard"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issueposition"
 	"github.com/multica-ai/multica/server/internal/issueproperty"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -63,23 +64,25 @@ func NewIssueService(q *db.Queries, tx TxStarter, bus *events.Bus, ac analytics.
 // to IssueService.Create. The handler owns the parsing step that turns its
 // request payload into this struct; the service stays transport-agnostic.
 type IssueCreateParams struct {
-	WorkspaceID        pgtype.UUID
-	Title              string
-	Description        pgtype.Text
-	Status             string
-	Priority           string
-	AssigneeType       pgtype.Text
-	AssigneeID         pgtype.UUID
-	RecipientSessionID *string
-	CreatorType        string // "agent" or "member"
-	CreatorID          pgtype.UUID
-	ParentIssueID      pgtype.UUID
-	ProjectID          pgtype.UUID
-	StartDate          pgtype.Date
-	DueDate            pgtype.Date
-	OriginType         pgtype.Text
-	OriginID           pgtype.UUID
-	AttachmentIDs      []pgtype.UUID
+	WorkspaceID           pgtype.UUID
+	Title                 string
+	Description           pgtype.Text
+	Status                string
+	Priority              string
+	AssigneeType          pgtype.Text
+	AssigneeID            pgtype.UUID
+	RecipientSessionID    *string
+	LeadershipRootIssueID pgtype.UUID
+	CreatorSessionID      pgtype.UUID
+	CreatorType           string // "agent" or "member"
+	CreatorID             pgtype.UUID
+	ParentIssueID         pgtype.UUID
+	ProjectID             pgtype.UUID
+	StartDate             pgtype.Date
+	DueDate               pgtype.Date
+	OriginType            pgtype.Text
+	OriginID              pgtype.UUID
+	AttachmentIDs         []pgtype.UUID
 	// LabelIDs are the issue-scoped labels to attach to the new issue. They
 	// are validated and written inside the create transaction (see Create),
 	// so the issue is never committed with a partial or wrong label set. An
@@ -567,6 +570,68 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 	actorID := opts.ActorID
 	if actorID == "" {
 		actorID = util.UUIDToString(issue.CreatorID)
+	}
+	if p.LeadershipRootIssueID.Valid {
+		root, err := qtx.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: p.LeadershipRootIssueID, WorkspaceID: issue.WorkspaceID})
+		if err != nil || (issue.AssigneeType.String == "squad" && issue.AssigneeID != root.LeadershipSquadID) {
+			return IssueCreateResult{}, &RecipientSessionError{Message: "leadership root must be a root in this workspace for the assigned squad"}
+		}
+		if p.CreatorType == "agent" && (p.DelegationReturn == nil || p.DelegationReturn.DispatcherAgentID != util.UUIDToString(root.LeaderAgentID) || (root.LeaderExternalSessionID.Valid && p.DelegationReturn.ExternalSessionID != util.UUIDToString(root.LeaderExternalSessionID))) {
+			return IssueCreateResult{}, &RecipientSessionError{Message: "only the task leader may join this leadership chain", Forbidden: true}
+		}
+		issue, err = qtx.AttachIssueLeadershipRoot(ctx, db.AttachIssueLeadershipRootParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, RootID: root.ID})
+		if err != nil {
+			return IssueCreateResult{}, err
+		}
+	}
+	if p.CreatorSessionID.Valid {
+		if err := qtx.SetIssueCreatorSession(ctx, db.SetIssueCreatorSessionParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, SessionID: p.CreatorSessionID}); err != nil {
+			return IssueCreateResult{}, err
+		}
+		issue.CreatorSessionID = p.CreatorSessionID
+	}
+	if p.DelegationReturn != nil && p.DelegationReturn.ExternalSessionID != "" {
+		session, err := util.ParseUUID(p.DelegationReturn.ExternalSessionID)
+		if err != nil {
+			return IssueCreateResult{}, err
+		}
+		if err := qtx.SetIssueCreatorSession(ctx, db.SetIssueCreatorSessionParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, SessionID: session}); err != nil {
+			return IssueCreateResult{}, err
+		}
+		issue.CreatorSessionID = session
+
+		if issue.ParentIssueID.Valid {
+			parent, err := qtx.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{ID: issue.ParentIssueID, WorkspaceID: issue.WorkspaceID})
+			if err != nil {
+				return IssueCreateResult{}, err
+			}
+			if parent.LeaderExternalSessionID == session && util.UUIDToString(parent.LeaderAgentID) == p.DelegationReturn.DispatcherAgentID {
+				if err = qtx.SetIssueRequesterLeadership(ctx, db.SetIssueRequesterLeadershipParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, RequesterLeadershipRootID: parent.ID}); err != nil {
+					return IssueCreateResult{}, err
+				}
+			}
+		}
+	}
+	if issue.AssigneeType.String == "squad" {
+		squad, err := qtx.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: issue.AssigneeID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			return IssueCreateResult{}, err
+		}
+		actor, session := pgtype.UUID{}, pgtype.UUID{}
+		if p.DelegationReturn != nil && p.DelegationReturn.ExternalSessionID != "" {
+			actor, err = util.ParseUUID(p.DelegationReturn.DispatcherAgentID)
+			if err != nil {
+				return IssueCreateResult{}, err
+			}
+			session = issue.CreatorSessionID
+		}
+		if _, err := issueleader.Ensure(ctx, qtx, issue, squad, actor, session, p.DelegationCreatedBy); err != nil {
+			return IssueCreateResult{}, &RecipientSessionError{Message: err.Error(), Conflict: errors.Is(err, issueleader.ErrConflict)}
+		}
+	}
+	issue, err = qtx.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+	if err != nil {
+		return IssueCreateResult{}, err
 	}
 	target, err := ResolveAssignmentTarget(ctx, qtx, issue)
 	if err != nil {
@@ -1138,7 +1203,8 @@ func (s *IssueService) isSquadLeaderReadyWithQueries(ctx context.Context, q *db.
 	if err != nil {
 		return false
 	}
-	agent, err := q.GetAgent(ctx, squad.LeaderID)
+	leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+	agent := leader.Agent
 	if err != nil {
 		return false
 	}
@@ -1161,22 +1227,26 @@ func (s *IssueService) enqueueSquadLeaderTaskInTx(ctx context.Context, q *db.Que
 	if err != nil {
 		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
+	leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+	if err != nil {
+		return db.AgentTaskQueue{}, attribution.Result{}, false, err
+	}
 	hasPending, err := q.HasPendingTaskForIssueAndAgent(ctx, db.HasPendingTaskForIssueAndAgentParams{
 		IssueID: issue.ID,
-		AgentID: squad.LeaderID,
+		AgentID: leader.Agent.ID,
 		// Key dedup on the reviewed head (TEN-356).
 		HeadSha: headShaText(s.TaskService.ResolveIssueReviewSHA(ctx, issue.ID)),
 	})
 	if err != nil || hasPending {
 		return db.AgentTaskQueue{}, attribution.Result{}, false, nil
 	}
-	task, attr, err := s.TaskService.EnqueueSquadLeaderTaskInTx(ctx, q, issue, squad.LeaderID, squad.ID, triggerCommentID, OriginDerived, delegationReturns, invocation)
+	task, attr, err := s.TaskService.EnqueueSquadLeaderTaskInTx(ctx, q, issue, leader.Agent.ID, squad.ID, triggerCommentID, OriginDerived, delegationReturns, invocation)
 	if err != nil {
 		if errors.Is(err, ErrDuplicatePendingTask) {
 			// The assignment coalesces into the pending leader run. Keep its
 			// accepted returns; do not start a second run.
 			if pending, loadErr := q.GetPendingAssignmentTaskForIssueAndAgent(ctx, db.GetPendingAssignmentTaskForIssueAndAgentParams{
-				IssueID: issue.ID, AgentID: squad.LeaderID,
+				IssueID: issue.ID, AgentID: leader.Agent.ID,
 			}); loadErr == nil {
 				if linkErr := delegation.LinkRun(ctx, q, pending.ID, delegationReturns...); linkErr != nil {
 					return db.AgentTaskQueue{}, attribution.Result{}, false, linkErr
