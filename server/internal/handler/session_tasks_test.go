@@ -216,6 +216,19 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	// A cancelled issue can never materialize its result.
 	cancelledIssue := dbfx.Issue(t, "session tasks cancelled "+suffix, testutil.Cols{"status": "cancelled"})
 	dispatchReturn(cancelledIssue, agentID, sessionID)
+	// A result takeover re-points the same outcome task onto this session's
+	// accepted return with a takeover link. Once materialized the address is
+	// returned; treating the takeover link as "no run" would show it pending
+	// forever.
+	takeoverIssue := dbfx.Issue(t, "session tasks takeover "+suffix)
+	takeoverReturn := dispatchReturn(takeoverIssue, agentID, sessionID)
+	takeoverTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": takeoverIssue, "status": "completed", "runtime_id": testRuntimeID})
+	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, takeover_id, materialized_at) VALUES ($1, $2, gen_random_uuid(), now())", takeoverTask, takeoverReturn)
+	// A takeover that has not materialized yet is still pending.
+	pendingTakeoverIssue := dbfx.Issue(t, "session tasks pending takeover "+suffix)
+	pendingTakeoverReturn := dispatchReturn(pendingTakeoverIssue, agentID, sessionID)
+	pendingTakeoverTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": pendingTakeoverIssue, "status": "running", "runtime_id": testRuntimeID})
+	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, takeover_id) VALUES ($1, $2, gen_random_uuid())", pendingTakeoverTask, pendingTakeoverReturn)
 
 	code, resp := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, true, sessionID))
 	if code != http.StatusOK {
@@ -266,15 +279,15 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	for _, item := range resp.Returning {
 		returningByIssue[item.IssueID] = item
 	}
-	if len(resp.Returning) != 3 {
-		t.Fatalf("returning = %+v, want the three pending issues", resp.Returning)
+	if len(resp.Returning) != 4 {
+		t.Fatalf("returning = %+v, want the four pending issues", resp.Returning)
 	}
-	for _, want := range []string{returnIssue, acceptedIssue, reopenedIssue} {
+	for _, want := range []string{returnIssue, acceptedIssue, reopenedIssue, pendingTakeoverIssue} {
 		if _, ok := returningByIssue[want]; !ok {
 			t.Fatalf("returning %s missing: %+v", want, resp.Returning)
 		}
 	}
-	for _, unwanted := range []string{returnedIssue, otherSessionIssue, otherDispatcherIssue, cancelledIssue} {
+	for _, unwanted := range []string{returnedIssue, otherSessionIssue, otherDispatcherIssue, cancelledIssue, takeoverIssue} {
 		if _, ok := returningByIssue[unwanted]; ok {
 			t.Fatalf("returning includes %s: %+v", unwanted, resp.Returning)
 		}

@@ -52,6 +52,10 @@ type SessionTasksResponse struct {
 // GetAgentSessionTasks reads the task summary for one agent's session. It is a
 // read projection only: no obligation changes, and the caller must present the
 // agent's own session-bound external credential.
+//
+// Owned and accepting items are agent-scoped: an external agent registers one
+// session per conversation, so its work is this session's work. A multi-session
+// agent would need a session-scoped projection instead.
 func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 	// The projection is the session's own view: a human manager, a task token
 	// or a sibling agent credential has no session to summarize for.

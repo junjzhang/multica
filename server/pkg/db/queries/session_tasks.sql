@@ -49,7 +49,7 @@ LEFT JOIN LATERAL (
     SELECT t.status AS task_status, l.materialized_at
     FROM agent_task_delegation_return l
     JOIN agent_task_queue t ON t.id = l.task_id
-    WHERE l.delegation_return_id = r.id AND l.takeover_id IS NULL
+    WHERE l.delegation_return_id = r.id
     ORDER BY t.created_at DESC, t.id DESC
     LIMIT 1
 ) latest ON true

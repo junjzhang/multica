@@ -41,7 +41,9 @@ lists them with status and task links:
 
 The data comes from the read-only `GET /api/agents/{id}/session-tasks`
 projection, scoped to the credential's own agent and requiring a session-bound
-`mea_` credential. Everything outside that happy path degrades to an
+`mea_` credential. Owned and acceptance lists are agent-scoped because an
+external agent registers one session per conversation; a multi-session agent
+would need a session-scoped projection. Everything outside that happy path degrades to an
 explanation instead of an error: a session with no local binding, an unreadable
 context, an expired or revoked credential, a legacy token whose agent has no
 registered session, a server that does not expose the projection, and a
