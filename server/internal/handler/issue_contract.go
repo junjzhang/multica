@@ -289,6 +289,32 @@ func (h *Handler) UpdateIssueContract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "issue changed; reload")
 		return
 	}
+	// Pin related roots only for the write transaction. Read-only capability
+	// projections use committed snapshots and never contend on the root row.
+	roots := []string{uuidToString(issue.LeadershipRootIssueID), uuidToString(issue.RequesterLeadershipRootID)}
+	slices.Sort(roots)
+	if _, err = tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
+		writeError(w, 500, "set contract write timeout failed")
+		return
+	}
+	previousRoot := ""
+	for _, rootID := range roots {
+		if rootID == "" || rootID == previousRoot || rootID == uuidToString(issue.ID) {
+			continue
+		}
+		previousRoot = rootID
+		if _, err = q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: parseUUID(rootID), WorkspaceID: issue.WorkspaceID}); err != nil {
+			writeError(w, 409, "task responsibility is changing; reload")
+			return
+		}
+	}
+	if conflict, err := h.issueSessionConflict(r, q, issue); err != nil {
+		writeError(w, 500, "load contract session failed")
+		return
+	} else if conflict {
+		writeError(w, 409, "task belongs to another session; reload after handoff")
+		return
+	}
 	if issue.AssigneeType.String == "squad" {
 		// NOWAIT preserves archive/leader protection without waiting in the
 		// opposite order from runtime teardown's Agent-to-task locks.

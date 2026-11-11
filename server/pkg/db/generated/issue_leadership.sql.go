@@ -107,9 +107,14 @@ func (q *Queries) CancelExecutorQueuedTasks(ctx context.Context, arg CancelExecu
 }
 
 const cancelLeadershipQueuedTasks = `-- name: CancelLeadershipQueuedTasks :exec
-UPDATE agent_task_queue SET status='cancelled',completed_at=now()
-WHERE issue_id= $1 AND agent_id= $2 AND is_leader_task=true
- AND status IN ('queued','deferred','waiting_local_directory') AND started_at IS NULL
+WITH queued AS MATERIALIZED (
+ SELECT t.id FROM agent_task_queue t WHERE t.issue_id= $1 AND t.agent_id= $2 AND t.is_leader_task=true
+ AND t.leadership_root_issue_id=(SELECT COALESCE(i.leadership_root_issue_id,i.id) FROM issue i WHERE i.id= $1)
+ AND t.status IN ('queued','deferred','waiting_local_directory') AND t.started_at IS NULL
+ FOR UPDATE OF t NOWAIT
+)
+UPDATE agent_task_queue t SET status='cancelled',completed_at=now(),prepare_lease_expires_at=NULL
+WHERE t.id IN (SELECT queued.id FROM queued)
 `
 
 type CancelLeadershipQueuedTasksParams struct {
@@ -578,7 +583,7 @@ func (q *Queries) ListLeadershipReferencingIssues(ctx context.Context, arg ListL
 
 const lockBoundLeadershipRoot = `-- name: LockBoundLeadershipRoot :one
 SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE id=$1 AND workspace_id=$2 AND leadership_root_issue_id=id
-FOR SHARE NOWAIT
+FOR SHARE
 `
 
 type LockBoundLeadershipRootParams struct {

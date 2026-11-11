@@ -512,7 +512,16 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 			return out, err
 		}
 	}
-	if agent.ExecutionKind=="external" {binding,err:=sessionroute.Resolve(ctx,q,util.UUIDToString(issue.WorkspaceID),util.UUIDToString(agent.ID),util.UUIDToString(issue.ID));if err!=nil{return out,err};targetSession,err=util.ParseUUID(binding.SessionID);if err!=nil{return out,err}}
+	if agent.ExecutionKind == "external" {
+		binding, err := sessionroute.Resolve(ctx, q, util.UUIDToString(issue.WorkspaceID), util.UUIDToString(agent.ID), util.UUIDToString(issue.ID))
+		if err != nil {
+			return out, err
+		}
+		targetSession, err = util.ParseUUID(binding.SessionID)
+		if err != nil {
+			return out, err
+		}
+	}
 	filterAgent, err := wakeupUUID(in.FilterAgentID)
 	if err != nil {
 		return out, err
@@ -621,12 +630,19 @@ func (s *IssueWakeupService) save(ctx context.Context, issueID, member, source, 
 	if err != nil {
 		return out, err
 	}
-	root,err:=q.GetIssueLeadershipRoot(ctx,db.GetIssueLeadershipRootParams{ID:issue.ID,WorkspaceID:issue.WorkspaceID})
-    if err!=nil{return out,err}
-    rootID,revision:=pgtype.UUID{},pgtype.Int8{}
-    if root.LeaderAgentID==agent.ID {rootID=root.ID;revision=pgtype.Int8{Int64:root.LeadershipRevision,Valid:true}}
-    out,err=q.PinIssueWakeupLeadership(ctx,db.PinIssueWakeupLeadershipParams{ID:out.ID,WorkspaceID:out.WorkspaceID,TargetSessionID:targetSession,RootID:rootID,LeadershipRevision:revision})
-    if err!=nil{return out,err}
+	root, err := q.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+	if err != nil {
+		return out, err
+	}
+	rootID, revision := pgtype.UUID{}, pgtype.Int8{}
+	if root.LeaderAgentID == agent.ID {
+		rootID = root.ID
+		revision = pgtype.Int8{Int64: root.LeadershipRevision, Valid: true}
+	}
+	out, err = q.PinIssueWakeupLeadership(ctx, db.PinIssueWakeupLeadershipParams{ID: out.ID, WorkspaceID: out.WorkspaceID, TargetSessionID: targetSession, RootID: rootID, LeadershipRevision: revision})
+	if err != nil {
+		return out, err
+	}
 	if len(out.Condition) > 0 && conditionFiresOnChange(out.Condition) {
 		if err = s.baselineCondition(ctx, tx, q, out, now); err != nil {
 			return out, err
@@ -1086,9 +1102,11 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 	// leave a notification no host can claim, so the rule ends like one whose
 	// target is no longer allowed to run.
 	if authErr == nil && agent.ID.Valid && agent.ExecutionKind == "external" {
-		binding,bindErr:=sessionroute.Resolve(ctx,q,util.UUIDToString(w.WorkspaceID),util.UUIDToString(w.AgentID),util.UUIDToString(w.IssueID))
-        err=bindErr
-        if err==nil && w.TargetSessionID.Valid && binding.SessionID!=util.UUIDToString(w.TargetSessionID) {err=sessionroute.ErrNotBound}
+		binding, bindErr := sessionroute.Resolve(ctx, q, util.UUIDToString(w.WorkspaceID), util.UUIDToString(w.AgentID), util.UUIDToString(w.IssueID))
+		err = bindErr
+		if err == nil && w.TargetSessionID.Valid && binding.SessionID != util.UUIDToString(w.TargetSessionID) {
+			err = sessionroute.ErrNotBound
+		}
 		if err != nil {
 			if !errors.Is(err, sessionroute.ErrNotBound) {
 				return err
@@ -1098,10 +1116,15 @@ func (s *IssueWakeupService) dispatch(ctx context.Context, prev db.IssueWakeup) 
 		}
 	}
 	if w.LeadershipRootIssueID.Valid {
-        root,err:=q.LockBoundLeadershipRoot(ctx,db.LockBoundLeadershipRootParams{ID:w.LeadershipRootIssueID,WorkspaceID:w.WorkspaceID})
-        if err!=nil{return err}
-        if root.LeadershipRevision!=w.LeadershipRevision.Int64 || root.LeaderAgentID!=w.AgentID {authErr=ErrWakeupForbidden;disableReason="Wakeup disabled: task leadership changed; explicitly revise the rule"}
-    }
+		root, err := q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: w.LeadershipRootIssueID, WorkspaceID: w.WorkspaceID})
+		if err != nil {
+			return err
+		}
+		if root.LeadershipRevision != w.LeadershipRevision.Int64 || root.LeaderAgentID != w.AgentID {
+			authErr = ErrWakeupForbidden
+			disableReason = "Wakeup disabled: task leadership changed; explicitly revise the rule"
+		}
+	}
 	if w.DisabledAt.Valid || !active || authErr != nil {
 		if authErr != nil && !errors.Is(authErr, ErrWakeupForbidden) {
 			return authErr

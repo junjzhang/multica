@@ -51,3 +51,26 @@ Search scope: tracked repository source for `leader_id` and `LeaderID`, excludin
 - Migration up/down was exercised only on this worktree's isolated database, created by `make up`; no production data or configuration was changed.
 
 The delivery comment and PR record the final revision, completed checks, review conclusions, and any remaining validation gaps.
+
+## Review regression and execution fences
+
+The first independent review reproduced root-row `NOWAIT` contention on ordinary title/comment writes. Resolution now reads committed state without a row lock. Enqueue/start triggers and the delivery-claim transaction take waiting locks bounded by three seconds; the leadership revision is checked under that lock. Contract writes pin their referenced roots and recheck their authenticated session. A handoff uses nonblocking queue-row cancellation so it cannot deadlock a claim that already owns the task row.
+
+`TestTaskLeadershipOrdinaryWriteDoesNotBreakDispatch` failed before this correction and passed afterward for managed claim, managed start, external Mailbox claim, and `@squad` preview. `TestTaskLeadershipHandoffConflictsWithAClaimedQueueRow` verifies rollback and safe retry. Replacement runs carry the existing assignment intent's frozen upstream returns. Same-template handoff advances only the current dispatcher version; old run obligations keep their original version, and the new session can delegate afterward.
+
+## Accepted host limitation
+
+The local host runs Linux `6.6.119-49.20.tl4.x86_64`. Four pre-existing Cursor process-group tests require the pidfd group-signalling facility used by `pkg/agent/cursor_background_process_linux.go`. The same failure (`retain Cursor shell process group: invalid argument`) was reproduced from archived baseline `3d2f38f8` with:
+
+```sh
+go test -race ./pkg/agent -run '^TestCaptureCursorBackgroundLateDescendant$' -count=1 -v
+```
+
+A signal-0 syscall probe on a test-created process group succeeded with flags 0 and returned `EINVAL` with flags 4. WORK-275 requester comment `01a1c8ac-44e7-7cd0-9bcc-62c8e5f2df06` accepted this as a baseline host limitation; the Cursor implementation and default tests were not weakened. The remaining agent tests passed with the repository's executable guard and `-parallel 2`, excluding exactly:
+
+- `TestCaptureCursorBackgroundLateDescendant`
+- `TestCaptureCursorBackgroundProcessReapsLeaderExitedGroup`
+- `TestCaptureCursorBackgroundSurvivesRootExitDuringCapture`
+- `TestCursorBackgroundLifecycle`
+
+Real-agent smoke tests, production migration/deployment, mobile verification, and platform-specific macOS/Windows checks are outside this slice's local run. GitHub PR ingestion is unavailable in this workspace; the requester explicitly accepted the PR URL and revision SHA as delivery evidence in comment `01a1c8a0-486b-7b96-8a43-f9c5ba5158b6` and asked not to retry linkage.

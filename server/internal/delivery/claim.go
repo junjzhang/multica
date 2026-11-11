@@ -221,6 +221,9 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		return nil, fmt.Errorf("delivery: begin claim: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
+		return nil, err
+	}
 	qtx := q.q.WithTx(tx)
 
 	candidates, err := qtx.ListClaimableDeliveryIDs(ctx, db.ListClaimableDeliveryIDsParams{
@@ -250,7 +253,13 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		}
 		if message.DeliveryStatus == "pending" && message.LeadershipRootIssueID.Valid {
 			root, err := qtx.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: message.LeadershipRootIssueID, WorkspaceID: workspaceID})
-			if err != nil || root.LeadershipRevision != message.LeadershipRevision.Int64 || root.LeaderExternalSessionID != message.TargetSessionID {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("delivery: lock task leadership: %w", err)
+			}
+			if root.LeadershipRevision != message.LeadershipRevision.Int64 || root.LeaderExternalSessionID != message.TargetSessionID {
 				continue
 			}
 		}

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,10 +12,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/dbid"
 )
 
 type leadershipRequest struct {
@@ -70,6 +73,10 @@ func (h *Handler) ClaimIssueLeadership(w http.ResponseWriter, r *http.Request) {
 	}
 	if issue.Revision != req.ExpectedIssueRevision {
 		writeError(w, 409, "issue changed")
+		return
+	}
+	if issue.LeadershipRootIssueID.Valid {
+		writeError(w, 409, "task already has a leadership root; use explicit handoff")
 		return
 	}
 	actor := parseUUID(r.Header.Get("X-Agent-ID"))
@@ -205,29 +212,37 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "external targets require a session; managed targets do not accept one")
 		return
 	}
+	intent, err := delegation.LoadAssignmentIntent(r.Context(), q, root.ID, delegation.Assignee{Type: root.AssigneeType.String, ID: uuidToString(root.AssigneeID)})
+	if err != nil {
+		writeError(w, 500, "load accepted assignment return failed")
+		return
+	}
+	var returns []delegation.ReturnIntent
+	if intent != nil {
+		returns = intent.Returns
+	}
 	updated, err := q.HandoffIssueLeadership(r.Context(), db.HandoffIssueLeadershipParams{ID: root.ID, WorkspaceID: root.WorkspaceID, AgentID: agentID, SessionID: sessionID, ExpectedRevision: req.ExpectedRevision, ExpectedIssueRevision: req.ExpectedIssueRevision})
 	if err != nil {
 		writeError(w, 409, "leadership or issue revision changed")
 		return
 	}
 	contracts := []string{}
+	advancedReturns := []map[string]string{}
 	for _, row := range issues {
-		if _, err = q.RevokeActiveAgentSessionBindings(r.Context(), db.RevokeActiveAgentSessionBindingsParams{WorkspaceID: row.WorkspaceID, AgentID: previous, IssueID: row.ID}); err != nil {
-			writeError(w, 500, "revoke old executor binding failed")
+		before, after, err := advanceHandoffReturn(r.Context(), q, row, previous, previousSession, agentID, sessionID)
+		if err != nil {
+			writeError(w, 409, "current return differs from the previous leader; explicitly resolve the return before handoff")
 			return
 		}
-		if sessionID.Valid {
-			if _, err = sessionroute.Bind(r.Context(), q, sessionroute.BindRequest{WorkspaceID: uuidToString(row.WorkspaceID), IssueID: uuidToString(row.ID), AgentID: req.AgentID, SessionID: req.SessionID, CreatedBy: requestUserID(r)}); err != nil {
-				writeError(w, 409, err.Error())
-				return
+		if after.Valid {
+			advancedReturns = append(advancedReturns, map[string]string{"issue_id": uuidToString(row.ID), "previous_return_id": uuidToString(before), "current_return_id": uuidToString(after)})
+		}
+		if err = issueleader.RetireExecution(r.Context(), q, row, previous); err != nil {
+			status := 500
+			if errors.Is(err, issueleader.ErrConflict) {
+				status = 409
 			}
-		}
-		if err = q.WithdrawLeadershipDeliveries(r.Context(), db.WithdrawLeadershipDeliveriesParams{WorkspaceID: row.WorkspaceID, IssueID: row.ID, AgentID: previous}); err != nil {
-			writeError(w, 500, "withdraw old dispatch failed")
-			return
-		}
-		if err = q.CancelLeadershipQueuedTasks(r.Context(), db.CancelLeadershipQueuedTasksParams{IssueID: row.ID, AgentID: previous}); err != nil {
-			writeError(w, 500, "cancel queued dispatch failed")
+			writeError(w, status, "task execution is changing; retry handoff")
 			return
 		}
 		if has, err := q.IssueHasContract(r.Context(), db.IssueHasContractParams{IssueID: row.ID, WorkspaceID: row.WorkspaceID}); err != nil {
@@ -237,6 +252,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 			contracts = append(contracts, uuidToString(row.ID))
 		}
 	}
+	var queued db.AgentTaskQueue
 	if updated.Status != "backlog" && !updated.TriageState.Valid {
 		target := service.AssignmentTarget{Agent: agent, Squad: &squad}
 		var recipient *string
@@ -248,10 +264,16 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if agent.ExecutionKind == "managed" {
-			if _, _, err = h.TaskService.EnqueueSquadLeaderTaskInTx(r.Context(), q, updated, agentID, squad.ID, pgtype.UUID{}, service.OriginDerived, nil, nil); err != nil {
+			if queued, _, err = h.TaskService.EnqueueSquadLeaderTaskInTx(r.Context(), q, updated, agentID, squad.ID, pgtype.UUID{}, service.OriginDerived, returns, nil); err != nil {
 				writeError(w, 409, err.Error())
 				return
 			}
+		}
+	}
+	if intent != nil {
+		if err = delegation.StoreAssignmentIntent(r.Context(), q, updated.WorkspaceID, updated.ID, delegation.Assignee{Type: updated.AssigneeType.String, ID: uuidToString(updated.AssigneeID)}, returns, queued.ID); err != nil {
+			writeError(w, 500, "preserve accepted assignment return failed")
+			return
 		}
 	}
 	affected, err := q.ListLeadershipAffectedContracts(r.Context(), db.ListLeadershipAffectedContractsParams{WorkspaceID: root.WorkspaceID, RootID: root.ID})
@@ -263,7 +285,7 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	for _, id := range affected {
 		contracts = append(contracts, uuidToString(id))
 	}
-	response := map[string]any{"root_issue_id": uuidToString(root.ID), "revision": updated.LeadershipRevision, "issue_revision": updated.Revision, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "agent_id": req.AgentID, "session_id": req.SessionID, "reason": req.Reason, "request_digest": digest, "stale_contract_ids": contracts, "historical_results": "explicit_result_takeover_required"}
+	response := map[string]any{"root_issue_id": uuidToString(root.ID), "revision": updated.LeadershipRevision, "issue_revision": updated.Revision, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "agent_id": req.AgentID, "session_id": req.SessionID, "reason": req.Reason, "request_digest": digest, "stale_contract_ids": contracts, "advanced_returns": advancedReturns, "historical_results": "explicit_result_takeover_required"}
 	details, _ := json.Marshal(response)
 	if _, err = q.CreateActivity(r.Context(), db.CreateActivityParams{ID: requestID, WorkspaceID: root.WorkspaceID, IssueID: root.ID, ActorType: pgtype.Text{String: "member", Valid: true}, ActorID: member.UserID, Action: "leadership_handoff", Details: details}); err != nil {
 		writeError(w, 500, "record handoff failed")
@@ -272,6 +294,9 @@ func (h *Handler) HandoffIssueLeadership(w http.ResponseWriter, r *http.Request)
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 409, "handoff conflicted")
 		return
+	}
+	if queued.ID.Valid {
+		h.TaskService.NotifyTaskEnqueued(r.Context(), queued)
 	}
 	writeJSON(w, 200, response)
 }
@@ -320,6 +345,20 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 		writeError(w, 409, "previous executor session changed")
 		return
 	}
+	intent, err := delegation.LoadAssignmentIntent(ctx, q, issue.ID, delegation.Assignee{Type: issue.AssigneeType.String, ID: uuidToString(issue.AssigneeID)})
+	if err != nil {
+		writeError(w, 500, "load accepted assignment return failed")
+		return
+	}
+	var returns []delegation.ReturnIntent
+	if intent != nil {
+		returns = intent.Returns
+	}
+	previousReturn, currentReturn, err := advanceHandoffReturn(ctx, q, issue, previous, previousSession, agentID, sessionID)
+	if err != nil {
+		writeError(w, 409, "current return differs from the previous executor; explicitly resolve it before handoff")
+		return
+	}
 	updated, err := q.HandoffIssueExecutor(ctx, db.HandoffIssueExecutorParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID, AgentID: agentID, PreviousAgentID: previous, ExpectedIssueRevision: req.ExpectedIssueRevision})
 	if err != nil {
 		writeError(w, 409, "executor or issue revision changed")
@@ -354,14 +393,24 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if target.ExecutionKind == "managed" {
-			queued, _, err = h.TaskService.EnqueueAssignedTaskInTx(ctx, q, updated, nil, nil)
+			queued, _, err = h.TaskService.EnqueueAssignedTaskInTx(ctx, q, updated, returns, nil)
 			if err != nil {
 				writeError(w, 409, err.Error())
 				return
 			}
 		}
 	}
+	if intent != nil {
+		if err = delegation.StoreAssignmentIntent(ctx, q, updated.WorkspaceID, updated.ID, delegation.Assignee{Type: updated.AssigneeType.String, ID: uuidToString(updated.AssigneeID)}, returns, queued.ID); err != nil {
+			writeError(w, 500, "preserve accepted assignment return failed")
+			return
+		}
+	}
 	response := map[string]any{"issue_id": uuidToString(issue.ID), "issue_revision": updated.Revision, "agent_id": req.AgentID, "session_id": req.SessionID, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "reason": req.Reason, "request_digest": digest, "historical_results": "explicit_result_takeover_required"}
+	if currentReturn.Valid {
+		response["previous_return_id"] = uuidToString(previousReturn)
+		response["current_return_id"] = uuidToString(currentReturn)
+	}
 	data, _ := json.Marshal(response)
 	if _, err = q.CreateActivity(ctx, db.CreateActivityParams{ID: requestID, WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, ActorType: strToText("member"), ActorID: member.UserID, Action: "executor_handoff", Details: data}); err != nil {
 		writeError(w, 500, "record executor handoff failed")
@@ -375,4 +424,36 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 		h.TaskService.NotifyTaskEnqueued(ctx, queued)
 	}
 	writeJSON(w, 200, response)
+}
+
+// Same-template handoff advances the current dispatcher address. Existing run
+// obligations keep the old immutable return version until explicitly received.
+func advanceHandoffReturn(ctx context.Context, q *db.Queries, issue db.Issue, previous, previousSession, next, nextSession pgtype.UUID) (pgtype.UUID, pgtype.UUID, error) {
+	if previous != next || !nextSession.Valid {
+		return pgtype.UUID{}, pgtype.UUID{}, nil
+	}
+	current, err := q.LockIssueDelegationReturnForDispatcher(ctx, db.LockIssueDelegationReturnForDispatcherParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, DispatcherAgentID: previous})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pgtype.UUID{}, pgtype.UUID{}, nil
+	}
+	if err != nil {
+		return pgtype.UUID{}, pgtype.UUID{}, err
+	}
+	if current.ReturnKind != string(delegation.KindExternalSession) || current.ExternalSessionID != previousSession {
+		return pgtype.UUID{}, pgtype.UUID{}, issueleader.ErrConflict
+	}
+	if previousSession == nextSession {
+		return current.ID, current.ID, nil
+	}
+	target, err := q.CreateDelegationReturnVersion(ctx, db.CreateDelegationReturnVersionParams{ID: dbid.NewV7(), WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, DispatcherAgentID: next, ReturnKind: string(delegation.KindExternalSession), ExternalSessionID: nextSession})
+	if err != nil {
+		return pgtype.UUID{}, pgtype.UUID{}, err
+	}
+	if err = q.RetireCurrentDelegationReturn(ctx, db.RetireCurrentDelegationReturnParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, DispatcherAgentID: previous}); err != nil {
+		return pgtype.UUID{}, pgtype.UUID{}, err
+	}
+	if err = q.SetCurrentDelegationReturn(ctx, target.ID); err != nil {
+		return pgtype.UUID{}, pgtype.UUID{}, err
+	}
+	return current.ID, target.ID, nil
 }

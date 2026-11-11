@@ -165,6 +165,8 @@ func TestTaskLeadershipHandoffIsExplicitAndStalesContract(t *testing.T) {
 	issue := f.create(t, f.tokenA)
 	dbfx.Exec(t, `UPDATE issue SET coordinator_type='member',coordinator_id=$2 WHERE id=$1`, issue, testUserID)
 	contractCall(t, issue, definition(0), "").Want(200)
+	var originalReturn string
+	dbfx.QueryRow(t, "SELECT id FROM issue_delegation_return WHERE issue_id=$1 AND is_current", issue).Scan(&originalReturn)
 	var revision int64
 	dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
 	req := leadershipRequest{ClientRequestID: uuidToString(dbid.NewV7()), ExpectedRevision: 1, ExpectedIssueRevision: revision, PreviousAgentID: f.agent, PreviousSessionID: f.a, AgentID: f.agent, SessionID: f.b, Reason: "Human explicitly changes the responsible session"}
@@ -188,10 +190,21 @@ func TestTaskLeadershipHandoffIsExplicitAndStalesContract(t *testing.T) {
 	authenticatedContractCall(t, issue, submit, f.tokenA).Want(409)
 	authenticatedContractCall(t, issue, submit, f.tokenB).Want(409)
 	var frozen string
-	dbfx.QueryRow(t, "SELECT external_session_id FROM issue_delegation_return WHERE issue_id=$1", issue).Scan(&frozen)
+	dbfx.QueryRow(t, "SELECT external_session_id FROM issue_delegation_return WHERE id=$1", originalReturn).Scan(&frozen)
 	if frozen != f.a {
 		t.Fatal("handoff rewrote accepted return")
 	}
+	var currentSession string
+	dbfx.QueryRow(t, "SELECT external_session_id FROM issue_delegation_return WHERE issue_id=$1 AND is_current", issue).Scan(&currentSession)
+	if currentSession != f.b {
+		t.Fatal("handoff did not advance the current dispatcher session")
+	}
+	worker, _ := executableTarget(t, "New handoff worker")
+	rec = serveAuthenticated(t, f.tokenB, http.HandlerFunc(testHandler.CreateComment), http.MethodPost, "/api/issues/"+issue+"/comments", map[string]any{"content": fmt.Sprintf("[@Worker](mention://agent/%s) continue after handoff", worker)}, map[string]string{"id": issue}, nil)
+	if rec.Code != 201 {
+		t.Fatalf("new leader could not delegate after handoff: %d %s", rec.Code, rec.Body.String())
+	}
+
 }
 
 func TestTaskLeadershipRejectsExternalDefaultConfiguration(t *testing.T) {

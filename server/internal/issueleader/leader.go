@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -42,10 +43,6 @@ func ResolveIssueLeader(ctx context.Context, q *db.Queries, issue db.Issue, squa
 	id := squad.LeaderID
 	result := Leader{}
 	if root.LeadershipSquadID == squad.ID {
-		root, err = q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: root.ID, WorkspaceID: issue.WorkspaceID})
-		if err != nil {
-			return Leader{}, ErrConflict
-		}
 		id = root.LeaderAgentID
 		result.RootID, result.SessionID, result.Revision = root.ID, root.LeaderExternalSessionID, root.LeadershipRevision
 	}
@@ -125,6 +122,9 @@ func Ensure(ctx context.Context, q *db.Queries, issue db.Issue, squad db.Squad, 
 	if root.LeadershipSquadID == squad.ID {
 		return ResolveIssueLeader(ctx, q, issue, squad)
 	}
+	if root.ID != issue.ID && root.LeadershipSquadID.Valid {
+		return Leader{}, fmt.Errorf("%w: child still references leadership root %s", ErrConflict, util.UUIDToString(root.ID))
+	}
 	if root.ID == issue.ID && root.LeadershipSquadID.Valid {
 		children, err := q.ListLeadershipReferencingIssues(ctx, db.ListLeadershipReferencingIssuesParams{WorkspaceID: issue.WorkspaceID, RootID: issue.ID})
 		if err != nil {
@@ -139,13 +139,7 @@ func Ensure(ctx context.Context, q *db.Queries, issue db.Issue, squad db.Squad, 
 		}
 	}
 	if root.ID == issue.ID && root.LeadershipSquadID.Valid {
-		if _, err := q.RevokeActiveAgentSessionBindings(ctx, db.RevokeActiveAgentSessionBindingsParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: root.LeaderAgentID}); err != nil {
-			return Leader{}, err
-		}
-		if err := q.WithdrawLeadershipDeliveries(ctx, db.WithdrawLeadershipDeliveriesParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: root.LeaderAgentID}); err != nil {
-			return Leader{}, err
-		}
-		if err := q.CancelLeadershipQueuedTasks(ctx, db.CancelLeadershipQueuedTasksParams{IssueID: issue.ID, AgentID: root.LeaderAgentID}); err != nil {
+		if err := RetireExecution(ctx, q, issue, root.LeaderAgentID); err != nil {
 			return Leader{}, err
 		}
 	}
@@ -164,4 +158,23 @@ func Ensure(ctx context.Context, q *db.Queries, issue db.Issue, squad db.Squad, 
 		}
 	}
 	return Claim(ctx, q, issue, squad, id, session, issue.LeadershipRevision, createdBy)
+}
+
+// RetireExecution withdraws only execution obligations; accepted returns and
+// ambiguous receipts keep their immutable targets and history.
+func RetireExecution(ctx context.Context, q *db.Queries, issue db.Issue, agentID pgtype.UUID) error {
+	if _, err := q.RevokeActiveAgentSessionBindings(ctx, db.RevokeActiveAgentSessionBindingsParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: agentID}); err != nil {
+		return err
+	}
+	if err := q.WithdrawLeadershipDeliveries(ctx, db.WithdrawLeadershipDeliveriesParams{WorkspaceID: issue.WorkspaceID, IssueID: issue.ID, AgentID: agentID}); err != nil {
+		return err
+	}
+	if err := q.CancelLeadershipQueuedTasks(ctx, db.CancelLeadershipQueuedTasksParams{IssueID: issue.ID, AgentID: agentID}); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01") {
+			return fmt.Errorf("%w: executor is being claimed; retry handoff", ErrConflict)
+		}
+		return err
+	}
+	return nil
 }

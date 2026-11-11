@@ -93,11 +93,11 @@ ALTER TABLE delegation_result_takeover ALTER COLUMN expected_current_return_id D
 ALTER TABLE agent_task_queue ADD COLUMN leadership_root_issue_id UUID, ADD COLUMN leadership_revision BIGINT;
 ALTER TABLE agent_mailbox_message ADD COLUMN leadership_root_issue_id UUID, ADD COLUMN leadership_revision BIGINT;
 
-CREATE FUNCTION capture_task_leadership() RETURNS TRIGGER LANGUAGE plpgsql AS $fn$
+CREATE FUNCTION capture_task_leadership() RETURNS TRIGGER LANGUAGE plpgsql SET lock_timeout='3s' AS $fn$
 DECLARE r issue;
 BEGIN
     IF TG_OP='UPDATE' AND NEW.leadership_root_issue_id IS NOT NULL THEN
-        SELECT * INTO r FROM issue WHERE id=NEW.leadership_root_issue_id FOR SHARE NOWAIT;
+        SELECT * INTO r FROM issue WHERE id=NEW.leadership_root_issue_id FOR SHARE;
         IF r.id IS NULL OR r.leadership_revision<>NEW.leadership_revision OR r.leader_agent_id<>NEW.agent_id THEN
             RAISE EXCEPTION 'task leadership changed' USING ERRCODE='40001';
         END IF;
@@ -106,7 +106,7 @@ BEGIN
     IF NEW.is_leader_task AND NEW.issue_id IS NOT NULL THEN
         SELECT root.* INTO r FROM issue i JOIN issue root
         ON root.id=COALESCE(i.leadership_root_issue_id,i.id) AND root.workspace_id=i.workspace_id
-        WHERE i.id=NEW.issue_id AND root.leadership_squad_id=NEW.squad_id FOR SHARE OF root NOWAIT;
+        WHERE i.id=NEW.issue_id AND root.leadership_squad_id=NEW.squad_id FOR SHARE OF root;
         IF r.id IS NOT NULL THEN
             IF r.leader_agent_id<>NEW.agent_id THEN
                 RAISE EXCEPTION 'task leadership changed' USING ERRCODE='40001';
@@ -123,14 +123,14 @@ FOR EACH ROW EXECUTE FUNCTION capture_task_leadership();
 CREATE TRIGGER check_task_leadership BEFORE UPDATE OF status ON agent_task_queue
 FOR EACH ROW WHEN (NEW.status IN ('dispatched','running')) EXECUTE FUNCTION capture_task_leadership();
 
-CREATE FUNCTION capture_mailbox_leadership() RETURNS TRIGGER LANGUAGE plpgsql AS $fn$
+CREATE FUNCTION capture_mailbox_leadership() RETURNS TRIGGER LANGUAGE plpgsql SET lock_timeout='3s' AS $fn$
 DECLARE r issue;
 BEGIN
     IF NEW.kind IN ('issue_assignment','comment_mention','issue_wakeup') AND NEW.issue_id IS NOT NULL THEN
         SELECT root.* INTO r FROM issue i JOIN issue root
         ON root.id=COALESCE(i.leadership_root_issue_id,i.id) AND root.workspace_id=i.workspace_id
         WHERE i.id=NEW.issue_id AND i.workspace_id=NEW.workspace_id
-          AND root.leader_agent_id=NEW.recipient_agent_id FOR SHARE OF root NOWAIT;
+          AND root.leader_agent_id=NEW.recipient_agent_id FOR SHARE OF root;
         IF r.id IS NOT NULL THEN
             IF r.leader_external_session_id IS DISTINCT FROM NEW.target_session_id THEN
                 RAISE EXCEPTION 'task leadership changed' USING ERRCODE='40001';

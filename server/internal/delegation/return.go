@@ -531,6 +531,15 @@ func recheckManagedSourceLocked(ctx context.Context, q *db.Queries, ws, dispatch
 	if err := validateManagedSource(ctx, q, ws, dispatcher, task, actor); err != nil {
 		return db.AgentTaskQueue{}, db.AgentRuntime{}, err
 	}
+	if task.LeadershipRootIssueID.Valid {
+		root, err := q.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: task.LeadershipRootIssueID, WorkspaceID: ws})
+		if err != nil {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, err
+		}
+		if root.LeadershipRevision != task.LeadershipRevision.Int64 || root.LeaderAgentID != task.AgentID {
+			return db.AgentTaskQueue{}, db.AgentRuntime{}, ErrReturnSourceClosed
+		}
+	}
 	return task, runtime, nil
 }
 

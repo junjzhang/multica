@@ -46,13 +46,18 @@ WHERE workspace_id= @workspace_id AND issue_id= @issue_id AND recipient_agent_id
  AND delivery_status IN ('pending','leased','unknown') AND withdrawn_at IS NULL;
 
 -- name: CancelLeadershipQueuedTasks :exec
-UPDATE agent_task_queue SET status='cancelled',completed_at=now()
-WHERE issue_id= @issue_id AND agent_id= @agent_id AND is_leader_task=true
- AND status IN ('queued','deferred','waiting_local_directory') AND started_at IS NULL;
+WITH queued AS MATERIALIZED (
+ SELECT t.id FROM agent_task_queue t WHERE t.issue_id= @issue_id AND t.agent_id= @agent_id AND t.is_leader_task=true
+ AND t.leadership_root_issue_id=(SELECT COALESCE(i.leadership_root_issue_id,i.id) FROM issue i WHERE i.id= @issue_id)
+ AND t.status IN ('queued','deferred','waiting_local_directory') AND t.started_at IS NULL
+ FOR UPDATE OF t NOWAIT
+)
+UPDATE agent_task_queue t SET status='cancelled',completed_at=now(),prepare_lease_expires_at=NULL
+WHERE t.id IN (SELECT queued.id FROM queued);
 
 -- name: LockBoundLeadershipRoot :one
 SELECT * FROM issue WHERE id=$1 AND workspace_id=$2 AND leadership_root_issue_id=id
-FOR SHARE NOWAIT;
+FOR SHARE;
 
 -- name: SetIssueRequesterLeadership :exec
 UPDATE issue SET requester_leadership_root_id=$3 WHERE id=$1 AND workspace_id=$2;

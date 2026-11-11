@@ -110,7 +110,9 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	if err != nil {
 		return err
 	}
-	if err := q.AdoptIssueSessionSemantics(ctx,db.AdoptIssueSessionSemanticsParams{ID:issue.ID,WorkspaceID:issue.WorkspaceID}); err != nil {return err}
+	if err := q.AdoptIssueSessionSemantics(ctx, db.AdoptIssueSessionSemanticsParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID}); err != nil {
+		return err
+	}
 	if !dispatch {
 		return nil
 	}
