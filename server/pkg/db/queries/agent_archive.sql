@@ -72,17 +72,17 @@ WITH refs AS (
     SELECT 'assigned_issues', i.id::text
     FROM issue i
     WHERE i.assignee_type = 'agent' AND i.assignee_id = @agent_id
-      AND i.status NOT IN ('done', 'cancelled')
+      AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
     UNION ALL
     SELECT 'task_leaderships', i.id::text
     FROM issue i
     WHERE i.leader_agent_id = @agent_id
-      AND i.status NOT IN ('done', 'cancelled')
+      AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
     UNION ALL
     SELECT 'coordinated_issues', i.id::text
     FROM issue i
     WHERE i.coordinator_type = 'agent' AND i.coordinator_id = @agent_id
-      AND i.status NOT IN ('done', 'cancelled')
+      AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 )
 SELECT code, ref_id
 FROM refs

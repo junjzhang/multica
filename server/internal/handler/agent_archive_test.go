@@ -375,6 +375,35 @@ func TestExternalAgentArchiveReturnObligationHonorsCustomDoneStatus(t *testing.T
 	}
 }
 
+// Assigned, leading and coordinated references close on a workspace custom
+// done status the same way they close on the built-in done. Otherwise an agent
+// whose issues all shipped under that status could never be archived.
+func TestExternalAgentArchiveReferenceBlockersHonorCustomDoneStatus(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive custom done refs", "return-custom-refs-daemon")
+	statusKey := "shipped_refs_" + uuidToString(dbid.NewV7())[:8]
+	statusID := dbfx.Insert(t, "issue_status", testutil.Cols{
+		"workspace_id": testWorkspaceID,
+		"key":          statusKey,
+		"name":         "Shipped references",
+		"category":     "done",
+		"color":        "#123456",
+	})
+	dbfx.Cleanup(t, "DELETE FROM issue_status WHERE id=$1", statusID)
+	issue := dbfx.Issue(t, "Custom closed reference issue", testutil.Cols{
+		"assignee_type":    "agent",
+		"assignee_id":      agent,
+		"leader_agent_id":  agent,
+		"coordinator_type": "agent",
+		"coordinator_id":   agent,
+	})
+	dbfx.Exec(t, "UPDATE issue SET status=$2 WHERE id=$1", issue, statusKey)
+
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable {
+		t.Fatalf("custom done status still blocks issue references: %d %+v %s", code, resp, body)
+	}
+}
+
 // The archive revokes credentials and is confirmed by a human owner. A machine
 // credential that can manage the Agent must not archive it.
 func TestExternalAgentArchiveRequiresHumanActor(t *testing.T) {
