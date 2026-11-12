@@ -39,6 +39,9 @@ type SessionTaskItem struct {
 	ChildCount        int32  `json:"child_count"`
 	ClosedChildCount  int32  `json:"closed_child_count"`
 	PendingAcceptance bool   `json:"pending_acceptance,omitempty"`
+	BlockedReason     string `json:"blocked_reason,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	RequestAt         string `json:"request_at,omitempty"`
 }
 
 // SessionTasksResponse groups the three obligations of the credential's agent:
@@ -52,6 +55,7 @@ type SessionTasksResponse struct {
 	Accepting   []SessionTaskItem `json:"accepting"`
 	Returning   []SessionTaskItem `json:"returning"`
 	Delegated   []SessionTaskItem `json:"delegated"`
+	Requests    []SessionTaskItem `json:"requests"`
 	// Truncated is true when any list hit the per-read limit and the panel's
 	// counts therefore describe only the returned rows.
 	Truncated bool `json:"truncated"`
@@ -112,6 +116,11 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load delegated tasks")
 		return
 	}
+	requests, requestsCut, err := h.sessionRequests(r, projection, agent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load requests")
+		return
+	}
 
 	response := SessionTasksResponse{
 		AgentID:     uuidToString(agent.ID),
@@ -121,9 +130,28 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		Accepting:   accepting,
 		Returning:   returning,
 		Delegated:   delegated,
-		Truncated:   ownedCut || acceptingCut || returningCut || delegatedCut,
+		Requests:    requests,
+		Truncated:   ownedCut || acceptingCut || returningCut || delegatedCut || requestsCut,
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
+	rows, err := h.Queries.ListSessionUnansweredRequests(r.Context(), db.ListSessionUnansweredRequestsParams{
+		WorkspaceID: agent.WorkspaceID, AgentID: uuidToString(agent.ID), RowLimit: sessionTaskLimit,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	items := make([]SessionTaskItem, 0, len(rows))
+	for _, row := range rows {
+		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.Status)
+		item.Role = "return"
+		item.RequestID = uuidToString(row.CommentID)
+		item.RequestAt = timestampToString(row.CreatedAt)
+		items = append(items, item)
+	}
+	return items, len(rows) == sessionTaskLimit, nil
 }
 
 func (h *Handler) sessionDelegatedItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
@@ -141,6 +169,9 @@ func (h *Handler) sessionDelegatedItems(r *http.Request, p *sessionTaskProjectio
 		item.ExecutorName = row.ExecutorName
 		item.ActivityAt = timestampToString(row.ActivityAt)
 		item.TaskStatus = row.TaskStatus
+		if row.IssueStatus == "blocked" {
+			item.BlockedReason = row.BlockedReason
+		}
 		var state issuecontract.State
 		if len(row.ContractData) > 0 && json.Unmarshal(row.ContractData, &state) == nil {
 			if pending := state.Pending(); pending != nil {

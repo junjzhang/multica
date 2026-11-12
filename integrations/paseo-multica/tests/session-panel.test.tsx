@@ -29,3 +29,17 @@ for (const mode of ["light", "dark"]) {
     await act(async () => { renderer!.unmount(); });
   });
 }
+
+it("shows request evidence and the source of a blocked reason", async () => {
+  const base = makeTasksWire();
+  const request = { ...base.returning[0]!, request_id: "comment-1", request_at: "2026-11-11T12:00:00Z", url: "https://example.test/task" };
+  const delegated = { ...base.returning[0]!, status: "blocked", blocked_reason: "Waiting for input" };
+  getTasks.mockResolvedValueOnce(toTasksView({ ...base, requests: [request], delegated: [delegated] }, "2026-11-11T12:00:00Z"));
+  const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  const output = JSON.stringify(renderer!.toJSON());
+  expect(output).toContain("Executor mentioned you · awaiting your reply");
+  expect(output).toContain("From executor's latest comment: Waiting for input");
+  await act(async () => { renderer!.unmount(); });
+});

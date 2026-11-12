@@ -28,9 +28,10 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
       : view?.state === "ready" ? <>
         <TaskGroup title="Needs your attention" items={[
           ...view.accepting.map((item) => ({ item, detail: `Awaiting your acceptance${item.deliveryAt ? ` · ${formatDate(item.deliveryAt)}` : ""}` })),
+          ...(view.requests ?? []).map((item) => ({ item, detail: `Executor mentioned you · awaiting your reply${item.requestAt ? ` · ${formatDate(item.requestAt)}` : ""}` })),
           ...view.owned.filter((item) => item.status === "blocked").map((item) => ({ item, detail: "Your task is blocked" })),
         ]} colors={colors} />
-        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt)].filter(Boolean).join(" · ") }))} colors={colors} />
+        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
         <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
         {view.truncated ? <Text style={{ color: colors.foregroundMuted }}>Some tasks are not shown.</Text> : null}
       </> : null}
@@ -39,8 +40,8 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
 }
 
 function delegationStatus(item: SessionTaskItem): string {
-  if (item.pendingAcceptance) return "Awaiting acceptance";
   if (item.status === "blocked") return "Blocked";
+  if (item.pendingAcceptance) return "Awaiting acceptance";
   if (item.status === "in_review") return "In review";
   if (item.taskStatus === "running") return "Running";
   return taskStatusLabel(item);
@@ -50,7 +51,7 @@ function TaskGroup({ title, items, colors }: { title: string; items: { item: Ses
   return <View style={{ gap: 6 }}>
     <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title} · {items.length}</Text>
     {items.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>None</Text> : items.map(({ item, detail }) =>
-      <Pressable key={`${item.issueId}:${item.role}`} accessibilityRole={item.url ? "link" : undefined} disabled={!item.url} onPress={() => { if (item.url) void Linking.openURL(item.url); }} style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 }}>
+      <Pressable key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} accessibilityRole={item.url ? "link" : undefined} disabled={!item.url} onPress={() => { if (item.url) void Linking.openURL(item.url); }} style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 }}>
         <Text style={{ color: colors.foreground, fontWeight: "600" }}>{item.identifier ?? item.issueId} · {item.title}</Text>
         <Text style={{ color: colors.foregroundMuted }}>{detail}</Text>
       </Pressable>)}

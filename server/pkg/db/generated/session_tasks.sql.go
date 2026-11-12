@@ -73,7 +73,12 @@ const listSessionDelegatedIssues = `-- name: ListSessionDelegatedIssues :many
 SELECT r.issue_id, i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
        COALESCE(a.name, '')::text AS executor_name,
        COALESCE(latest.started_at, latest.created_at)::timestamptz AS activity_at,
-       latest.task_status, c.data AS contract_data
+       latest.task_status, c.data AS contract_data,
+       COALESCE((SELECT split_part(cm.content, E'\n', 1) FROM comment cm
+         WHERE cm.workspace_id = i.workspace_id AND cm.issue_id = i.id
+           AND cm.author_type = i.assignee_type AND cm.author_id = i.assignee_id
+           AND cm.type = 'comment' AND cm.deleted_at IS NULL
+         ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1), '')::text AS blocked_reason
 FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
 JOIN LATERAL (
@@ -112,6 +117,7 @@ type ListSessionDelegatedIssuesRow struct {
 	ActivityAt     pgtype.Timestamptz `json:"activity_at"`
 	TaskStatus     string             `json:"task_status"`
 	ContractData   []byte             `json:"contract_data"`
+	BlockedReason  string             `json:"blocked_reason"`
 }
 
 // Current accepted dispatch addresses with at least one run, including runs
@@ -140,6 +146,7 @@ func (q *Queries) ListSessionDelegatedIssues(ctx context.Context, arg ListSessio
 			&i.ActivityAt,
 			&i.TaskStatus,
 			&i.ContractData,
+			&i.BlockedReason,
 		); err != nil {
 			return nil, err
 		}
@@ -303,6 +310,76 @@ func (q *Queries) ListSessionPendingDelegationReturns(ctx context.Context, arg L
 			&i.ExecutorName,
 			&i.ActivityAt,
 			&i.TaskStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionUnansweredRequests = `-- name: ListSessionUnansweredRequests :many
+SELECT c.id AS comment_id, c.content, c.created_at, i.id AS issue_id,
+       i.number, i.title, i.status, i.updated_at
+FROM comment c
+JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
+WHERE i.workspace_id = $1
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+  AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
+  AND c.type = 'comment' AND c.deleted_at IS NULL
+  AND c.content ~ ('\[@.+?\]\(mention://agent/' || $2::text || '\)')
+  AND NOT EXISTS (
+    SELECT 1 FROM comment reply
+    WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
+      AND reply.author_type = 'agent' AND reply.author_id = $2::uuid
+      AND reply.type = 'comment' AND reply.deleted_at IS NULL
+      AND (reply.created_at, reply.id) > (c.created_at, c.id)
+      AND comment_thread_root_id(reply.id) = comment_thread_root_id(c.id)
+  )
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT $3::int
+`
+
+type ListSessionUnansweredRequestsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     string      `json:"agent_id"`
+	RowLimit    int32       `json:"row_limit"`
+}
+
+type ListSessionUnansweredRequestsRow struct {
+	CommentID pgtype.UUID        `json:"comment_id"`
+	Content   string             `json:"content"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	IssueID   pgtype.UUID        `json:"issue_id"`
+	Number    int32              `json:"number"`
+	Title     string             `json:"title"`
+	Status    string             `json:"status"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+// A request is a current executor's explicit mention, with no later comment
+// from the recipient in the same thread. Mailbox receipts do not imply reply.
+func (q *Queries) ListSessionUnansweredRequests(ctx context.Context, arg ListSessionUnansweredRequestsParams) ([]ListSessionUnansweredRequestsRow, error) {
+	rows, err := q.db.Query(ctx, listSessionUnansweredRequests, arg.WorkspaceID, arg.AgentID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionUnansweredRequestsRow{}
+	for rows.Next() {
+		var i ListSessionUnansweredRequestsRow
+		if err := rows.Scan(
+			&i.CommentID,
+			&i.Content,
+			&i.CreatedAt,
+			&i.IssueID,
+			&i.Number,
+			&i.Title,
+			&i.Status,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

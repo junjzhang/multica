@@ -28,6 +28,9 @@ const taskItemSchema = z.object({
   childCount: z.number().int().nonnegative().optional(),
   closedChildCount: z.number().int().nonnegative().optional(),
   pendingAcceptance: z.boolean().optional(),
+  blockedReason: z.string().optional(),
+  requestId: z.string().optional(),
+  requestAt: z.string().optional(),
 });
 
 export type SessionTaskItem = z.infer<typeof taskItemSchema>;
@@ -41,6 +44,7 @@ const readySchema = z.object({
   accepting: z.array(taskItemSchema),
   returning: z.array(taskItemSchema),
   delegated: z.array(taskItemSchema).optional(),
+  requests: z.array(taskItemSchema).optional(),
   truncated: z.boolean(),
   checkedAt: z.string(),
 });
@@ -88,6 +92,9 @@ const wireItemSchema = z.object({
   child_count: z.number().int().nonnegative().optional(),
   closed_child_count: z.number().int().nonnegative().optional(),
   pending_acceptance: z.boolean().optional(),
+  blocked_reason: z.string().optional(),
+  request_id: z.string().optional(),
+  request_at: z.string().optional(),
 });
 
 /**
@@ -103,6 +110,7 @@ export const sessionTasksWireSchema = z.object({
   accepting: z.array(wireItemSchema),
   returning: z.array(wireItemSchema),
   delegated: z.array(wireItemSchema).optional(),
+  requests: z.array(wireItemSchema).optional(),
   truncated: z.boolean().optional(),
 });
 
@@ -137,6 +145,9 @@ function toItem(item: z.infer<typeof wireItemSchema>): SessionTaskItem {
     ...(item.child_count !== undefined ? { childCount: item.child_count } : {}),
     ...(item.closed_child_count !== undefined ? { closedChildCount: item.closed_child_count } : {}),
     ...(item.pending_acceptance !== undefined ? { pendingAcceptance: item.pending_acceptance } : {}),
+    ...(item.blocked_reason ? { blockedReason: item.blocked_reason } : {}),
+    ...(item.request_id ? { requestId: item.request_id } : {}),
+    ...(item.request_at ? { requestAt: item.request_at } : {}),
   };
 }
 
@@ -151,6 +162,7 @@ export function toTasksView(wire: SessionTasksWire, checkedAt: string): ReadyTas
     accepting: wire.accepting.map(toItem),
     returning: wire.returning.map(toItem),
     delegated: (wire.delegated ?? wire.returning).map(toItem),
+    requests: (wire.requests ?? []).map(toItem),
     truncated: wire.truncated ?? false,
     checkedAt,
   };
@@ -187,6 +199,9 @@ export function taskSummaryLabel(view: SessionTasksView): { label: string; title
   const blocked = view.owned.filter((item) => item.status === "blocked").length;
   if (view.accepting.length > 0) {
     return { label: `${view.accepting.length} to accept`, title: `${view.accepting.length} ${view.accepting.length === 1 ? "delivery" : "deliveries"} waiting for your acceptance` };
+  }
+  if (view.requests?.length) {
+    return { label: `${view.requests.length} ${view.requests.length === 1 ? "request" : "requests"}`, title: `${view.requests.length} unanswered executor ${view.requests.length === 1 ? "request" : "requests"}` };
   }
   if (blocked > 0) {
     return { label: `${blocked} blocked`, title: `${blocked} owned tasks blocked` };

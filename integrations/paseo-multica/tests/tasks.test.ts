@@ -109,6 +109,7 @@ describe("session task views", () => {
     });
     const active = { ...ready, accepting: [] };
     expect(taskSummaryLabel(active).label).toBe("1 in progress");
+    expect(taskSummaryLabel({ ...active, requests: [item({ requestId: "comment" })] }).label).toBe("1 request");
     expect(taskSummaryLabel({ ...active, owned: [item({ status: "blocked" })] }).label).toBe("1 blocked");
     expect(taskSummaryLabel(taskSummaryZero())).toEqual({
       label: "Multica",

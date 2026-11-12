@@ -78,7 +78,12 @@ LIMIT sqlc.arg('row_limit')::int;
 SELECT r.issue_id, i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
        COALESCE(a.name, '')::text AS executor_name,
        COALESCE(latest.started_at, latest.created_at)::timestamptz AS activity_at,
-       latest.task_status, c.data AS contract_data
+       latest.task_status, c.data AS contract_data,
+       COALESCE((SELECT split_part(cm.content, E'\n', 1) FROM comment cm
+         WHERE cm.workspace_id = i.workspace_id AND cm.issue_id = i.id
+           AND cm.author_type = i.assignee_type AND cm.author_id = i.assignee_id
+           AND cm.type = 'comment' AND cm.deleted_at IS NULL
+         ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1), '')::text AS blocked_reason
 FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
 JOIN LATERAL (
@@ -97,4 +102,27 @@ WHERE r.workspace_id = @workspace_id AND r.dispatcher_agent_id = @agent_id
   AND r.external_session_id = @external_session_id AND r.is_current
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 ORDER BY i.updated_at DESC, i.id
+LIMIT sqlc.arg('row_limit')::int;
+
+-- name: ListSessionUnansweredRequests :many
+-- A request is a current executor's explicit mention, with no later comment
+-- from the recipient in the same thread. Mailbox receipts do not imply reply.
+SELECT c.id AS comment_id, c.content, c.created_at, i.id AS issue_id,
+       i.number, i.title, i.status, i.updated_at
+FROM comment c
+JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
+WHERE i.workspace_id = @workspace_id
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+  AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
+  AND c.type = 'comment' AND c.deleted_at IS NULL
+  AND c.content ~ ('\[@.+?\]\(mention://agent/' || sqlc.arg('agent_id')::text || '\)')
+  AND NOT EXISTS (
+    SELECT 1 FROM comment reply
+    WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
+      AND reply.author_type = 'agent' AND reply.author_id = sqlc.arg('agent_id')::uuid
+      AND reply.type = 'comment' AND reply.deleted_at IS NULL
+      AND (reply.created_at, reply.id) > (c.created_at, c.id)
+      AND comment_thread_root_id(reply.id) = comment_thread_root_id(c.id)
+  )
+ORDER BY c.created_at DESC, c.id DESC
 LIMIT sqlc.arg('row_limit')::int;

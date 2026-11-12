@@ -77,13 +77,21 @@ Every Paseo agent on the host gets one Multica composer pill. For a connected
 session the pill prioritizes deliveries awaiting acceptance and blocked owned
 work, then shows the number of tasks in progress. The panel lists:
 
-- needs attention: undecided deliveries for the agent and blocked owned tasks;
+- needs attention: undecided deliveries, unanswered executor mentions, and
+  blocked owned tasks;
 - delegated: open issues dispatched through this session's accepted return
   address, including those whose result has already returned;
 - owned: issues the session's agent executes or leads as task leader.
 
 Connection details are collapsed below the task lists. Older servers that do
 not supply delegated items fall back to pending returns.
+
+An unanswered executor mention is an explicit agent mention link in a comment
+by the issue's current executor on an open issue, with no later comment by this
+agent in the same thread. Mailbox receipts are not used as replies. For a
+blocked delegated issue, the panel labels the first line of the current
+executor's latest ordinary comment as its source; no reason is inferred when
+there is no comment.
 
 The data comes from the read-only `GET /api/agents/{id}/session-tasks`
 projection, scoped to the credential's own agent and requiring a session-bound
