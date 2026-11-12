@@ -191,6 +191,7 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	returnedReturn := dispatchReturn(returnedIssue, agentID, sessionID)
 	returnedTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnedIssue, "status": "completed", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, materialized_at) VALUES ($1, $2, now())", returnedTask, returnedReturn)
+	insertIssueContract(t, returnedIssue, []map[string]any{contractVersion(1, agentID, workerAgent)}, []map[string]any{pendingDelivery(1, workerAgent)}, nil)
 	// A follow-up dispatch on the same accepted address makes it pending
 	// again: the latest run has not returned its result.
 	reopenedIssue := dbfx.Issue(t, "session tasks reopened "+suffix)
@@ -318,6 +319,15 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	}
 	if pending.ExecutorName != "Session Tasks Worker "+suffix || pending.ActivityAt == "" {
 		t.Fatalf("returning executor/time = %q/%q", pending.ExecutorName, pending.ActivityAt)
+	}
+	var returnedDelegation *SessionTaskItem
+	for i := range resp.Delegated {
+		if resp.Delegated[i].IssueID == returnedIssue {
+			returnedDelegation = &resp.Delegated[i]
+		}
+	}
+	if returnedDelegation == nil || !returnedDelegation.PendingAcceptance {
+		t.Fatalf("returned issue awaiting acceptance missing from delegated list: %+v", resp.Delegated)
 	}
 	if reopened := returningByIssue[reopenedIssue]; reopened.TaskStatus != "queued" {
 		t.Fatalf("reopened returning item = %+v, want the follow-up run status", reopened)

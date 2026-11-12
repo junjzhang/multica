@@ -27,6 +27,7 @@ const taskItemSchema = z.object({
   deliveryAt: z.string().optional(),
   childCount: z.number().int().nonnegative().optional(),
   closedChildCount: z.number().int().nonnegative().optional(),
+  pendingAcceptance: z.boolean().optional(),
 });
 
 export type SessionTaskItem = z.infer<typeof taskItemSchema>;
@@ -39,6 +40,7 @@ const readySchema = z.object({
   owned: z.array(taskItemSchema),
   accepting: z.array(taskItemSchema),
   returning: z.array(taskItemSchema),
+  delegated: z.array(taskItemSchema).optional(),
   truncated: z.boolean(),
   checkedAt: z.string(),
 });
@@ -85,6 +87,7 @@ const wireItemSchema = z.object({
   delivery_at: z.string().optional(),
   child_count: z.number().int().nonnegative().optional(),
   closed_child_count: z.number().int().nonnegative().optional(),
+  pending_acceptance: z.boolean().optional(),
 });
 
 /**
@@ -99,6 +102,7 @@ export const sessionTasksWireSchema = z.object({
   owned: z.array(wireItemSchema),
   accepting: z.array(wireItemSchema),
   returning: z.array(wireItemSchema),
+  delegated: z.array(wireItemSchema).optional(),
   truncated: z.boolean().optional(),
 });
 
@@ -132,6 +136,7 @@ function toItem(item: z.infer<typeof wireItemSchema>): SessionTaskItem {
     ...(item.delivery_at ? { deliveryAt: item.delivery_at } : {}),
     ...(item.child_count !== undefined ? { childCount: item.child_count } : {}),
     ...(item.closed_child_count !== undefined ? { closedChildCount: item.closed_child_count } : {}),
+    ...(item.pending_acceptance !== undefined ? { pendingAcceptance: item.pending_acceptance } : {}),
   };
 }
 
@@ -145,6 +150,7 @@ export function toTasksView(wire: SessionTasksWire, checkedAt: string): ReadyTas
     owned: wire.owned.map(toItem),
     accepting: wire.accepting.map(toItem),
     returning: wire.returning.map(toItem),
+    delegated: (wire.delegated ?? wire.returning).map(toItem),
     truncated: wire.truncated ?? false,
     checkedAt,
   };
@@ -185,7 +191,7 @@ export function taskSummaryLabel(view: SessionTasksView): { label: string; title
   if (blocked > 0) {
     return { label: `${blocked} blocked`, title: `${blocked} owned tasks blocked` };
   }
-  const active = new Set([...view.owned, ...view.returning].filter((item) => item.statusCategory === "started").map((item) => item.issueId)).size;
+  const active = new Set([...view.owned, ...(view.delegated ?? view.returning)].filter((item) => item.statusCategory === "started").map((item) => item.issueId)).size;
   if (active === 0) {
     return { label: "Multica", title: view.owned.length || view.returning.length ? "No Multica tasks in progress" : "No Multica tasks for this session" };
   }

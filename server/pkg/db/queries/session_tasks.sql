@@ -71,3 +71,30 @@ WHERE r.workspace_id = @workspace_id
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 ORDER BY r.created_at DESC, r.id
 LIMIT sqlc.arg('row_limit')::int;
+
+-- name: ListSessionDelegatedIssues :many
+-- Current accepted dispatch addresses with at least one run, including runs
+-- whose result was already returned while the issue remains open.
+SELECT r.issue_id, i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
+       COALESCE(a.name, '')::text AS executor_name,
+       COALESCE(latest.started_at, latest.created_at)::timestamptz AS activity_at,
+       latest.task_status, c.data AS contract_data
+FROM issue_delegation_return r
+JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
+JOIN LATERAL (
+    SELECT t.status AS task_status, t.agent_id, t.started_at, t.created_at
+    FROM agent_task_delegation_return l
+    JOIN agent_task_queue t ON t.id = l.task_id
+    WHERE l.delegation_return_id = r.id
+      AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
+      AND NOT EXISTS (SELECT 1 FROM delegation_result_takeover takeover WHERE takeover.result_task_id = t.id AND takeover.from_return_id = r.id)
+    ORDER BY t.created_at DESC, t.id DESC
+    LIMIT 1
+) latest ON true
+LEFT JOIN agent a ON a.id = latest.agent_id AND a.workspace_id = i.workspace_id
+LEFT JOIN issue_contract c ON c.issue_id = i.id AND c.workspace_id = i.workspace_id
+WHERE r.workspace_id = @workspace_id AND r.dispatcher_agent_id = @agent_id
+  AND r.external_session_id = @external_session_id AND r.is_current
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+ORDER BY i.updated_at DESC, i.id
+LIMIT sqlc.arg('row_limit')::int;

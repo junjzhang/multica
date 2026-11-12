@@ -29,15 +29,16 @@ type SessionTaskItem struct {
 	StatusCategory string `json:"status_category"`
 	URL            string `json:"url,omitempty"`
 	// Role is why the item is on the list: executor, leader, acceptor, return.
-	Role             string `json:"role"`
-	UpdatedAt        string `json:"updated_at,omitempty"`
-	AcceptedAt       string `json:"accepted_at,omitempty"`
-	TaskStatus       string `json:"task_status,omitempty"`
-	ExecutorName     string `json:"executor_name,omitempty"`
-	ActivityAt       string `json:"activity_at,omitempty"`
-	DeliveryAt       string `json:"delivery_at,omitempty"`
-	ChildCount       int32  `json:"child_count"`
-	ClosedChildCount int32  `json:"closed_child_count"`
+	Role              string `json:"role"`
+	UpdatedAt         string `json:"updated_at,omitempty"`
+	AcceptedAt        string `json:"accepted_at,omitempty"`
+	TaskStatus        string `json:"task_status,omitempty"`
+	ExecutorName      string `json:"executor_name,omitempty"`
+	ActivityAt        string `json:"activity_at,omitempty"`
+	DeliveryAt        string `json:"delivery_at,omitempty"`
+	ChildCount        int32  `json:"child_count"`
+	ClosedChildCount  int32  `json:"closed_child_count"`
+	PendingAcceptance bool   `json:"pending_acceptance,omitempty"`
 }
 
 // SessionTasksResponse groups the three obligations of the credential's agent:
@@ -50,6 +51,7 @@ type SessionTasksResponse struct {
 	Owned       []SessionTaskItem `json:"owned"`
 	Accepting   []SessionTaskItem `json:"accepting"`
 	Returning   []SessionTaskItem `json:"returning"`
+	Delegated   []SessionTaskItem `json:"delegated"`
 	// Truncated is true when any list hit the per-read limit and the panel's
 	// counts therefore describe only the returned rows.
 	Truncated bool `json:"truncated"`
@@ -105,6 +107,11 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load pending returns")
 		return
 	}
+	delegated, delegatedCut, err := h.sessionDelegatedItems(r, projection, agent, sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load delegated tasks")
+		return
+	}
 
 	response := SessionTasksResponse{
 		AgentID:     uuidToString(agent.ID),
@@ -113,9 +120,37 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		Owned:       owned,
 		Accepting:   accepting,
 		Returning:   returning,
-		Truncated:   ownedCut || acceptingCut || returningCut,
+		Delegated:   delegated,
+		Truncated:   ownedCut || acceptingCut || returningCut || delegatedCut,
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) sessionDelegatedItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
+	rows, err := h.Queries.ListSessionDelegatedIssues(r.Context(), db.ListSessionDelegatedIssuesParams{
+		WorkspaceID: agent.WorkspaceID, AgentID: agent.ID, ExternalSessionID: sessionID, RowLimit: sessionTaskLimit,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	items := make([]SessionTaskItem, 0, len(rows))
+	for _, row := range rows {
+		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.IssueStatus)
+		item.Role = "return"
+		item.UpdatedAt = timestampToString(row.IssueUpdatedAt)
+		item.ExecutorName = row.ExecutorName
+		item.ActivityAt = timestampToString(row.ActivityAt)
+		item.TaskStatus = row.TaskStatus
+		var state issuecontract.State
+		if len(row.ContractData) > 0 && json.Unmarshal(row.ContractData, &state) == nil {
+			if pending := state.Pending(); pending != nil {
+				item.PendingAcceptance = true
+				item.ActivityAt = pending.CreatedAt.Format(time.RFC3339Nano)
+			}
+		}
+		items = append(items, item)
+	}
+	return items, len(rows) == sessionTaskLimit, nil
 }
 
 func (h *Handler) statusCatalog() issuestatus.Querier {

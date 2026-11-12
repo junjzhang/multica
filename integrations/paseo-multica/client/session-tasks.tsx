@@ -30,7 +30,7 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
           ...view.accepting.map((item) => ({ item, detail: `Awaiting your acceptance${item.deliveryAt ? ` · ${formatDate(item.deliveryAt)}` : ""}` })),
           ...view.owned.filter((item) => item.status === "blocked").map((item) => ({ item, detail: "Your task is blocked" })),
         ]} colors={colors} />
-        <TaskGroup title="Delegated by you" items={view.returning.map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt)].filter(Boolean).join(" · ") }))} colors={colors} />
+        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt)].filter(Boolean).join(" · ") }))} colors={colors} />
         <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
         {view.truncated ? <Text style={{ color: colors.foregroundMuted }}>Some tasks are not shown.</Text> : null}
       </> : null}
@@ -39,6 +39,7 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
 }
 
 function delegationStatus(item: SessionTaskItem): string {
+  if (item.pendingAcceptance) return "Awaiting acceptance";
   if (item.status === "blocked") return "Blocked";
   if (item.status === "in_review") return "In review";
   if (item.taskStatus === "running") return "Running";
