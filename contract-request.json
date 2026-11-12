@@ -1,0 +1,8 @@
+{
+  "action": "submit",
+  "client_request_id": "c73a5f89-1632-4939-901f-3e94474efacb",
+  "expected_sequence": 1,
+  "version": 1,
+  "criteria": [1],
+  "evidence": "部分交付：PR https://github.com/junjzhang/multica/pull/28，修订 ec423b3e41（目标 0075e6107c）。web.open 的同工作区路径白名单、外部 URL 和路径穿越拒绝以及不带 path 的旧行为由 tests/web.test.ts 覆盖；插件 pnpm typecheck 与 pnpm test（120 tests）通过。独立审查确认路径和兼容性。条目 0、2 未提交：重启后动态面板恢复的数据归属待上游决定，PR 是 Draft，复审未完成。"
+}
