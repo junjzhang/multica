@@ -12,8 +12,13 @@ export async function expansion(home: string, agentId: string, issueId?: string,
   const previous = locks.get(path) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(async () => {
     let values: string[] = [];
-    try { values = schema.parse(JSON.parse(await readFile(path, "utf8"))); }
+    let raw: string | undefined;
+    try { raw = await readFile(path, "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (raw !== undefined) {
+      try { values = schema.parse(JSON.parse(raw)); }
+      catch (error) { if (!(error instanceof SyntaxError) && !(error instanceof z.ZodError)) throw error; }
+    }
     if (issueId !== undefined && expanded !== undefined) {
       values = values.filter((id) => id !== issueId);
       if (expanded) values.push(issueId);

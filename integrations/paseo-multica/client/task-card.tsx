@@ -57,7 +57,7 @@ function Detail(props: Props & { section: DetailSection }) {
     const pending = parsed.pending_actor;
     const role = pending && parsed.acceptor?.id === pending.id && parsed.acceptor.type === pending.type ? "acceptor" : pending && parsed.executor?.id === pending.id && parsed.executor.type === pending.type ? "executor" : pending?.type;
     const delivery = parsed.contract?.deliveries.filter((d) => d.version === version.number).at(-1);
-    return <Text style={textStyle}>Contract v{version.number} · {parsed.accepted.length}/{version.criteria.length} accepted{role ? ` · Pending ${role}` : ""}{role === "acceptor" && delivery ? ` · Delivered ${formatDate(delivery.created_at)}` : ""}</Text>;
+    return <Text style={textStyle}>Contract v{version.number} · {parsed.accepted.length}/{version.criteria.length} accepted{parsed.stale ? " · Contract stale" : role ? ` · Pending ${role}` : ""}{!parsed.stale && role === "acceptor" && delivery ? ` · Delivered ${formatDate(delivery.created_at)}` : ""}</Text>;
   }
   if (section === "runs") {
     const runs = detailWireSchemas.runs.parse(data);

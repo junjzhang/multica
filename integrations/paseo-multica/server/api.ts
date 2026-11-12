@@ -90,6 +90,7 @@ const tokenResponseSchema = z.object({
 });
 
 const MAX_ERROR_BODY = 500;
+const memberNames = z.array(z.object({ id: z.string(), user_id: z.string(), name: z.string() }));
 
 export function createMulticaApi(options: {
   fetchImpl?: typeof fetch;
@@ -148,19 +149,28 @@ export function createMulticaApi(options: {
     }
   }
 
-  async function actorName(credential: ApiCredential, type: string, id: string): Promise<string> {
-    if (!isUuid(id)) return id;
-    try {
-      if (type === "agent") {
-        const data = z.object({ name: z.string() }).parse(parseJson(await request(credential, "GET", `/api/agents/${encodeURIComponent(id)}`, credential.token)));
-        return data.name || id;
-      }
-      if (type === "user" || type === "member") {
-        const members = z.array(z.object({ id: z.string(), user_id: z.string(), name: z.string() })).parse(parseJson(await request(credential, "GET", `/api/workspaces/${encodeURIComponent(credential.workspaceId)}/members`, credential.token)));
-        return members.find((member) => member.id === id || member.user_id === id)?.name || id;
-      }
-    } catch { /* Names are optional; retain the stable identity. */ }
-    return id;
+  function actorNames(credential: ApiCredential) {
+    let members: Promise<z.infer<typeof memberNames>> | undefined;
+    const agents = new Map<string, Promise<string>>();
+    async function actorName(type: string, id: string): Promise<string> {
+      if (!isUuid(id)) return id;
+      try {
+        if (type === "agent") {
+          let name = agents.get(id);
+          if (!name) {
+            name = request(credential, "GET", `/api/agents/${encodeURIComponent(id)}`, credential.token).then((text) => z.object({ name: z.string() }).parse(parseJson(text)).name || id);
+            agents.set(id, name);
+          }
+          return await name;
+        }
+        if (type === "user" || type === "member") {
+          members ??= request(credential, "GET", `/api/workspaces/${encodeURIComponent(credential.workspaceId)}/members`, credential.token).then((text) => memberNames.parse(parseJson(text)));
+          return (await members).find((member) => member.id === id || member.user_id === id)?.name || id;
+        }
+      } catch { /* Names are optional; retain the stable identity. */ }
+      return id;
+    }
+    return actorName;
   }
 
   return {
@@ -170,20 +180,21 @@ export function createMulticaApi(options: {
       const raw = parseJson(await request(credential, "GET", `/api/issues/${encodeURIComponent(issueId)}/${suffix}`, credential.token));
       const parsed = detailWireSchemas[section].safeParse(raw);
       if (!parsed.success) throw new MulticaApiError(0, `Invalid ${section} response from Multica.`);
+      const actorName = actorNames(credential);
       if (section === "runs") {
         const runs = detailWireSchemas.runs.parse(parsed.data);
         const selected = runs.find((run) => run.status === "running") ?? runs[0];
-        if (selected) selected.agent_name = await actorName(credential, "agent", selected.agent_id);
+        if (selected) selected.agent_name = await actorName("agent", selected.agent_id);
         return runs;
       }
       if (section === "comments") {
         const comments = detailWireSchemas.comments.parse(parsed.data).sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-2);
-        await Promise.all(comments.map(async (comment) => { comment.author_name = await actorName(credential, comment.author_type, comment.author_id); }));
+        await Promise.all(comments.map(async (comment) => { comment.author_name = await actorName(comment.author_type, comment.author_id); }));
         return comments;
       }
       if (section === "children") {
         const children = detailWireSchemas.children.parse(parsed.data);
-        await Promise.all(children.issues.map(async (child) => { if (child.assignee_id && child.assignee_type) child.assignee_name = await actorName(credential, child.assignee_type, child.assignee_id); }));
+        await Promise.all(children.issues.map(async (child) => { if (child.assignee_id && child.assignee_type) child.assignee_name = await actorName(child.assignee_type, child.assignee_id); }));
         return children;
       }
       return parsed.data;

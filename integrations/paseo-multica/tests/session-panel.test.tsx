@@ -111,3 +111,17 @@ it("loads one level at a time, isolates errors, and restores expanded cards", as
   expect(getDetail.mock.calls.some(([input]) => input.issueId === childId)).toBe(true);
   await act(async () => { renderer!.unmount(); });
 });
+
+it("labels stale contracts without misidentifying the pending actor", async () => {
+  getTasks.mockResolvedValueOnce(toTasksView(makeTasksWire({ accepting: [], returning: [] }), "2026-11-11T12:00:00Z"));
+  getExpansion.mockResolvedValueOnce([]);
+  getDetail.mockImplementation(async ({ section }) => ({ ok: true, data: section === "contract" ? { stale: true, contract: { versions: [{ number: 1, criteria: ["a"] }], deliveries: [] }, accepted: [], pending_actor: { type: "agent", id: "a" }, acceptor: { type: "agent", id: "a" } } : ({ runs: [], comments: [], prs: { pull_requests: [] }, children: { issues: [] } } as Record<string, unknown>)[section] }));
+  const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  await act(async () => { renderer!.root.findAll((node) => node.props.accessibilityState?.expanded === false)[0]!.props.onPress(); });
+  const output = JSON.stringify(renderer!.toJSON());
+  expect(output).toContain("Contract stale");
+  expect(output).not.toContain("Pending acceptor");
+  await act(async () => { renderer!.unmount(); });
+});
