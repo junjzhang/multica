@@ -13,7 +13,7 @@ export type MarkdownSegment =
   | { type: "code"; lang: string | undefined; code: string }
   | { type: "image"; uri: string; alt: string };
 
-type RawToken = { type: string; raw: string; href?: string; tokens?: RawToken[]; items?: RawToken[] };
+type RawToken = { type: string; raw: string; href?: string; tokens?: RawToken[]; items?: RawToken[]; header?: { tokens: RawToken[] }[]; rows?: { tokens: RawToken[] }[][] };
 
 // Annotate only parsed mention links; code spans and code blocks stay literal.
 function labelNotifications(token: RawToken, label: string): string {
@@ -22,7 +22,9 @@ function labelNotifications(token: RawToken, label: string): string {
     const marker = token.raw.lastIndexOf("](");
     if (marker >= 0) return `${token.raw.slice(0, marker)} · ${label}${token.raw.slice(marker)}`;
   }
-  const children = token.tokens ?? token.items;
+  const children = token.type === "table"
+    ? [...(token.header ?? []), ...(token.rows ?? []).flat()].flatMap((cell) => cell.tokens)
+    : token.tokens ?? token.items;
   if (!children) return token.raw;
   let result = "";
   let cursor = 0;
