@@ -39,6 +39,8 @@ describe("session task views", () => {
           url: "https://app.multica.example/acme/issues/WORK-1",
           role: "executor",
           updated_at: "2026-11-11T10:00:00Z",
+          child_count: 8,
+          closed_child_count: 7,
         },
         {
           issue_id: "0199a0b1-7777-7777-8777-777777777777",
@@ -58,9 +60,12 @@ describe("session task views", () => {
       identifier: "WORK-1",
       statusName: "Doing",
       url: "https://app.multica.example/acme/issues/WORK-1",
+      childCount: 8,
+      closedChildCount: 7,
     });
     expect(view.owned[1]?.url).toBeUndefined();
     expect(view.checkedAt).toBe(CHECKED_AT);
+    expect(view.delegated).toEqual(view.returning);
   });
 
   it("parses the wire projection and refuses a partial one", () => {
