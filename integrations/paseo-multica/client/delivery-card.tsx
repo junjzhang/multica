@@ -1,45 +1,29 @@
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import {
-  ExternalLink,
-  Markdown,
-  SettingsAction,
-  SettingsCard,
-  SettingsRow,
-} from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
-import { fencedRaw, type DeliveryData } from "../shared/delivery";
+import { Linking, Pressable, Text, View } from "react-native";
+import type { DeliveryData } from "../shared/delivery";
 
-/**
- * One Multica delivery rendered as a card. The card shows what the delivery is
- * for; the stable IDs, payload and the prompt itself stay behind the raw
- * details, so nothing the agent was asked to read is lost.
- */
-export function DeliveryCard({ item }: PluginTimelineItemProps<DeliveryData>) {
+export function DeliveryCard({ item, theme }: PluginTimelineItemProps<DeliveryData>) {
   const [expanded, setExpanded] = useState(false);
   const delivery = item.data;
+  const colors = theme.colors;
   const heading = delivery.issueIdentifier ?? delivery.issueId ?? "This session";
 
   return (
-    <SettingsCard>
-      <SettingsRow label="Multica delivery" hint={delivery.kindLabel}>
-        {heading}
-      </SettingsRow>
-      {delivery.issueTitle ? <SettingsRow label="Task">{delivery.issueTitle}</SettingsRow> : null}
+    <View style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 12, gap: 8 }}>
+      <Text style={{ color: colors.foreground, fontWeight: "600" }}>
+        {heading} <Text style={{ color: colors.foregroundMuted }}>· {delivery.kindLabel}{delivery.outcome ? ` · ${delivery.outcome}` : ""}</Text>
+      </Text>
+      {delivery.issueTitle ? <Text style={{ color: colors.foreground }}>{delivery.issueTitle}</Text> : null}
       {delivery.issueUrl ? (
-        <SettingsRow label="Link">
-          <ExternalLink href={delivery.issueUrl}>{delivery.issueUrl}</ExternalLink>
-        </SettingsRow>
+        <Text accessibilityRole="link" onPress={() => void Linking.openURL(delivery.issueUrl!)} style={{ color: colors.accent }}>
+          Open task
+        </Text>
       ) : null}
-      <SettingsAction
-        label="Raw details"
-        actionLabel={expanded ? "Hide" : "Show"}
-        onPress={() => setExpanded((open) => !open)}
-      />
-      {expanded ? (
-        <SettingsRow label="Delivered prompt">
-          <Markdown>{fencedRaw(delivery.raw)}</Markdown>
-        </SettingsRow>
-      ) : null}
-    </SettingsCard>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((open) => !open)}>
+        <Text style={{ color: colors.foregroundMuted }}>{expanded ? "Hide original" : "Show original"}</Text>
+      </Pressable>
+      {expanded ? <Text selectable style={{ color: colors.foreground, backgroundColor: colors.surface2, padding: 8 }}>{delivery.raw}</Text> : null}
+    </View>
   );
 }

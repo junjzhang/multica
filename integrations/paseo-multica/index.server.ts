@@ -6,6 +6,8 @@ import { ConfigurationError } from "./server/owner-profile";
 import { paseoHostAdapter } from "./server/host";
 import { createSessionService, type ConnectionConfig } from "./server/service";
 import { sessionOpenEnv } from "./server/session-open";
+import { openWeb } from "./shared/web";
+import { webSignInLink } from "./server/web";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(connectionSettings);
@@ -28,6 +30,7 @@ export default function contribute(server: PluginServerContext) {
     });
   }
 
+  server.handle(openWeb, async () => webSignInLink());
   server.handle(connectSession, async ({ agentId }, context) => service(context).connect(agentId));
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));

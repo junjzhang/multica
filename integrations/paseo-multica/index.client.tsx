@@ -1,7 +1,9 @@
 import type {
   PluginButtonRegistration,
   PluginClientContext,
+  PluginSidebarItemProps,
 } from "@getpaseo/plugin/client";
+import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { STATUS_PANEL_ID, runMulticaCommand, type SessionContract } from "./shared/commands";
 import { connectSession, tasksSummary, type StatusView } from "./shared/contracts";
 import { DELIVERY_ITEM_KIND, DELIVERY_ITEM_VERSION, deliveryDataSchema } from "./shared/delivery";
@@ -10,10 +12,33 @@ import { ConnectionSettingsScreen } from "./client/settings-screen";
 import { DeliveryCard } from "./client/delivery-card";
 import { deliveryTransformer } from "./client/timeline";
 import { StatusPanel } from "./client/status-panel";
+import { MulticaSurface } from "./client/surface";
+import { WEB_PANEL_ID, WEB_SCREEN_ID } from "./shared/web";
 
 const TASKS_PILL_ID = "multica-tasks";
 
+function MulticaSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+  return (
+    <SidebarRow
+      icon="ListTodo"
+      active={currentScreen?.screenId === WEB_SCREEN_ID}
+      onPress={() => openScreen({ screenId: WEB_SCREEN_ID })}
+    />
+  );
+}
+
 export default function contribute(client: PluginClientContext) {
+  client.addScreen({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSurface });
+  client.addSidebarHeaderItem({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSidebarItem });
+  client.addWorkspacePanel({
+    id: WEB_PANEL_ID, title: "Multica", icon: "ListTodo", context: "workspace",
+    locations: ["workspace", "explorer"], Component: MulticaSurface,
+  });
+  client.addCommandCenterItem({
+    id: "open-multica", title: "Open Multica", icon: "ListTodo",
+    keywords: ["multica", "issues", "board", "任务"], context: "global",
+    onSelect: ({ openScreen }) => openScreen({ screenId: WEB_SCREEN_ID }),
+  });
   client.addSlashCommand({
     name: "multica",
     description: "Connect this Paseo session to Multica",
@@ -35,7 +60,7 @@ export default function contribute(client: PluginClientContext) {
 
   client.addWorkspacePanel({
     id: STATUS_PANEL_ID,
-    title: "Multica",
+    title: "Multica connection",
     icon: "Plug",
     context: "agent",
     locations: ["workspace", "explorer"],

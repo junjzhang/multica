@@ -1,16 +1,60 @@
 # Paseo Multica
 
 A private Paseo directory plugin that binds the current Paseo conversation to
-Multica as its own external agent. It is intentionally smaller than a task
-board: three composer commands, one composer pill summarizing this session's
-tasks, one read-only panel (connection status plus those tasks), one delivery
-card in the timeline, and one operator settings screen.
+Multica as its own external agent. It embeds the Multica web app and provides three composer commands, a task
+summary pill, a connection panel, a delivery card, and an operator settings
+screen.
 
 ```text
 /multica connect      register this conversation, mint its external credential
 /multica status       show the binding, return address, and current validity
 /multica disconnect   revoke this binding's credential and remove local context
 ```
+
+## Multica web page
+
+Open it from the **Multica** sidebar entry, the Command Center ("Open
+Multica"), or as a **Multica** panel in a workspace or the Explorer. Every
+entry shows the same page; the plugin does not reimplement Multica's UI.
+
+- **Desktop** uses Paseo's sandboxed browser profile (`persist:paseo-browser`)
+  in a `<webview>`, the only webview Paseo's main process allows to attach.
+- **Browser** clients use an iframe.
+- **Mobile** offers "Open in browser", which opens `externalUrl` (default:
+  `url`) without the sign-in key; the browser signs in with the proxy
+  password. Use it when the embedded origin is unreachable from a phone.
+
+After the first open, the page stays resident for the renderer's lifetime.
+Closing the panel or leaving the screen only parks it off screen; reopening
+reuses the same page, navigation, and form state. An explicit retry replaces
+only a failed page.
+
+### Sign-in
+
+The page is served behind a reverse proxy that requires a password. A webview
+cannot answer a browser password prompt, so the proxy also accepts a session
+cookie issued by a one-time sign-in link:
+
+1. The plugin backend reads `~/.config/multica/paseo-web.json` on the daemon
+   host and returns `<url>/paseo-login?k=<key>` through the authenticated
+   plugin RPC. The key never appears in settings, snapshots, or logs.
+2. The proxy checks the key, sets an HTTP-only, `Secure`, `SameSite=Lax`
+   cookie for 30 days, and redirects to the board, so the key does not stay in
+   the page URL.
+3. Paseo's persistent browser profile keeps the cookie across restarts.
+
+```json
+{
+  "url": "https://multica.example",
+  "key": "<at least 32 URL-safe characters>",
+  "externalUrl": "http://10.0.0.5:3210"
+}
+```
+
+`url` and the optional `externalUrl` must be bare HTTP(S) origins: no
+credentials, path, query, or fragment.
+Keep the file `0600`. The proxy must hold the same key; rotating it means
+updating both, after which the next open signs in again.
 
 ## Delivery card
 
