@@ -69,9 +69,100 @@ func (q *Queries) ListSessionAcceptingContractIssues(ctx context.Context, arg Li
 	return items, nil
 }
 
+const listSessionDelegatedIssues = `-- name: ListSessionDelegatedIssues :many
+SELECT r.issue_id, i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
+       COALESCE(a.name, '')::text AS executor_name,
+       COALESCE(latest.started_at, latest.created_at)::timestamptz AS activity_at,
+       latest.task_status, c.data AS contract_data,
+       COALESCE((SELECT split_part(cm.content, E'\n', 1) FROM comment cm
+         WHERE cm.workspace_id = i.workspace_id AND cm.issue_id = i.id
+           AND cm.author_type = i.assignee_type AND cm.author_id = i.assignee_id
+           AND cm.type = 'comment' AND cm.deleted_at IS NULL
+         ORDER BY cm.created_at DESC, cm.id DESC LIMIT 1), '')::text AS blocked_reason
+FROM issue_delegation_return r
+JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
+JOIN LATERAL (
+    SELECT t.status AS task_status, t.agent_id, t.started_at, t.created_at
+    FROM agent_task_delegation_return l
+    JOIN agent_task_queue t ON t.id = l.task_id
+    WHERE l.delegation_return_id = r.id
+      AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
+      AND NOT EXISTS (SELECT 1 FROM delegation_result_takeover takeover WHERE takeover.result_task_id = t.id AND takeover.from_return_id = r.id)
+    ORDER BY t.created_at DESC, t.id DESC
+    LIMIT 1
+) latest ON true
+LEFT JOIN agent a ON a.id = latest.agent_id AND a.workspace_id = i.workspace_id
+LEFT JOIN issue_contract c ON c.issue_id = i.id AND c.workspace_id = i.workspace_id
+WHERE r.workspace_id = $1 AND r.dispatcher_agent_id = $2
+  AND r.external_session_id = $3 AND r.is_current
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+ORDER BY i.updated_at DESC, i.id
+LIMIT $4::int
+`
+
+type ListSessionDelegatedIssuesParams struct {
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	AgentID           pgtype.UUID `json:"agent_id"`
+	ExternalSessionID pgtype.UUID `json:"external_session_id"`
+	RowLimit          int32       `json:"row_limit"`
+}
+
+type ListSessionDelegatedIssuesRow struct {
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	Number         int32              `json:"number"`
+	Title          string             `json:"title"`
+	IssueStatus    string             `json:"issue_status"`
+	IssueUpdatedAt pgtype.Timestamptz `json:"issue_updated_at"`
+	ExecutorName   string             `json:"executor_name"`
+	ActivityAt     pgtype.Timestamptz `json:"activity_at"`
+	TaskStatus     string             `json:"task_status"`
+	ContractData   []byte             `json:"contract_data"`
+	BlockedReason  string             `json:"blocked_reason"`
+}
+
+// Current accepted dispatch addresses with at least one run, including runs
+// whose result was already returned while the issue remains open.
+func (q *Queries) ListSessionDelegatedIssues(ctx context.Context, arg ListSessionDelegatedIssuesParams) ([]ListSessionDelegatedIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listSessionDelegatedIssues,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.ExternalSessionID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionDelegatedIssuesRow{}
+	for rows.Next() {
+		var i ListSessionDelegatedIssuesRow
+		if err := rows.Scan(
+			&i.IssueID,
+			&i.Number,
+			&i.Title,
+			&i.IssueStatus,
+			&i.IssueUpdatedAt,
+			&i.ExecutorName,
+			&i.ActivityAt,
+			&i.TaskStatus,
+			&i.ContractData,
+			&i.BlockedReason,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessionOwnedIssues = `-- name: ListSessionOwnedIssues :many
 
 SELECT i.id, i.number, i.title, i.status, i.updated_at,
+       (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id) AS child_count,
+       (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id AND issue_effective_status(child.workspace_id, child.status) IN ('done', 'cancelled')) AS closed_child_count,
        COALESCE(i.assignee_type = 'agent' AND i.assignee_id = $1, false)::boolean AS is_executor
 FROM issue i
 LEFT JOIN issue r ON r.id = COALESCE(i.leadership_root_issue_id, i.id) AND r.workspace_id = i.workspace_id
@@ -92,12 +183,14 @@ type ListSessionOwnedIssuesParams struct {
 }
 
 type ListSessionOwnedIssuesRow struct {
-	ID         pgtype.UUID        `json:"id"`
-	Number     int32              `json:"number"`
-	Title      string             `json:"title"`
-	Status     string             `json:"status"`
-	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
-	IsExecutor bool               `json:"is_executor"`
+	ID               pgtype.UUID        `json:"id"`
+	Number           int32              `json:"number"`
+	Title            string             `json:"title"`
+	Status           string             `json:"status"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ChildCount       int32              `json:"child_count"`
+	ClosedChildCount int32              `json:"closed_child_count"`
+	IsExecutor       bool               `json:"is_executor"`
 }
 
 // Read projections for the Paseo session task panel. Each read is scoped to
@@ -121,6 +214,8 @@ func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwn
 			&i.Title,
 			&i.Status,
 			&i.UpdatedAt,
+			&i.ChildCount,
+			&i.ClosedChildCount,
 			&i.IsExecutor,
 		); err != nil {
 			return nil, err
@@ -136,11 +231,13 @@ func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwn
 const listSessionPendingDelegationReturns = `-- name: ListSessionPendingDelegationReturns :many
 SELECT r.id AS delegation_return_id, r.issue_id, r.created_at AS accepted_at,
        i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
+       COALESCE(a.name, '')::text AS executor_name,
+       COALESCE(latest.started_at, r.created_at)::timestamptz AS activity_at,
        COALESCE(latest.task_status, '')::text AS task_status
 FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
 JOIN LATERAL (
-    SELECT t.status AS task_status
+    SELECT t.status AS task_status, t.agent_id, t.started_at
     FROM agent_task_delegation_return l
     JOIN agent_task_queue t ON t.id = l.task_id
     WHERE l.delegation_return_id = r.id
@@ -154,6 +251,7 @@ JOIN LATERAL (
     ORDER BY t.created_at DESC, t.id DESC
     LIMIT 1
 ) latest ON true
+LEFT JOIN agent a ON a.id = latest.agent_id AND a.workspace_id = i.workspace_id
 WHERE r.workspace_id = $1
   AND r.dispatcher_agent_id = $2
   AND r.external_session_id = $3
@@ -178,6 +276,8 @@ type ListSessionPendingDelegationReturnsRow struct {
 	Title              string             `json:"title"`
 	IssueStatus        string             `json:"issue_status"`
 	IssueUpdatedAt     pgtype.Timestamptz `json:"issue_updated_at"`
+	ExecutorName       string             `json:"executor_name"`
+	ActivityAt         pgtype.Timestamptz `json:"activity_at"`
 	TaskStatus         string             `json:"task_status"`
 }
 
@@ -207,7 +307,81 @@ func (q *Queries) ListSessionPendingDelegationReturns(ctx context.Context, arg L
 			&i.Title,
 			&i.IssueStatus,
 			&i.IssueUpdatedAt,
+			&i.ExecutorName,
+			&i.ActivityAt,
 			&i.TaskStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionUnansweredRequests = `-- name: ListSessionUnansweredRequests :many
+SELECT c.id AS comment_id, c.content, c.created_at, i.id AS issue_id,
+       i.number, i.title, i.status, i.updated_at
+FROM comment c
+JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
+WHERE i.workspace_id = $1
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+  AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
+  AND c.type IN ('comment', 'progress_update') AND c.deleted_at IS NULL
+  AND lower(c.content) LIKE ('%mention://agent/' || lower($2::text) || ')%')
+  AND c.content ~* ('\[@(?:(?!\]\()[^[:cntrl:]])+\]\(mention://agent/' || $2::text || '\)')
+  AND NOT EXISTS (SELECT 1 FROM comment root WHERE root.id = comment_thread_root_id(c.id) AND root.resolved_at IS NOT NULL)
+  AND NOT EXISTS (
+    SELECT 1 FROM comment reply
+    WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
+      AND reply.author_type = 'agent' AND reply.author_id = $2::uuid
+      AND reply.type IN ('comment', 'progress_update') AND reply.deleted_at IS NULL
+      AND (reply.created_at, reply.id) > (c.created_at, c.id)
+      AND comment_thread_root_id(reply.id) = comment_thread_root_id(c.id)
+  )
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT $3::int
+`
+
+type ListSessionUnansweredRequestsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     string      `json:"agent_id"`
+	RowLimit    int32       `json:"row_limit"`
+}
+
+type ListSessionUnansweredRequestsRow struct {
+	CommentID pgtype.UUID        `json:"comment_id"`
+	Content   string             `json:"content"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	IssueID   pgtype.UUID        `json:"issue_id"`
+	Number    int32              `json:"number"`
+	Title     string             `json:"title"`
+	Status    string             `json:"status"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
+// A request is a current executor's explicit mention, with no later comment
+// from the recipient in the same thread. Mailbox receipts do not imply reply.
+func (q *Queries) ListSessionUnansweredRequests(ctx context.Context, arg ListSessionUnansweredRequestsParams) ([]ListSessionUnansweredRequestsRow, error) {
+	rows, err := q.db.Query(ctx, listSessionUnansweredRequests, arg.WorkspaceID, arg.AgentID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSessionUnansweredRequestsRow{}
+	for rows.Next() {
+		var i ListSessionUnansweredRequestsRow
+		if err := rows.Scan(
+			&i.CommentID,
+			&i.Content,
+			&i.CreatedAt,
+			&i.IssueID,
+			&i.Number,
+			&i.Title,
+			&i.Status,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

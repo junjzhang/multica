@@ -1,120 +1,74 @@
 import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import {
-  ExternalLink,
-  SettingsAction,
-  SettingsCard,
-  SettingsRow,
-  SettingsSection,
-} from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
+import { Linking, Pressable, Text, View } from "react-native";
 import { tasksSummary } from "../shared/contracts";
-import {
-  TASK_GROUPS,
-  taskCounts,
-  taskGroupTitle,
-  taskStatusLabel,
-  type SessionTaskItem,
-  type SessionTasksView,
-} from "../shared/tasks";
+import { taskStatusLabel, type SessionTaskItem, type SessionTasksView } from "../shared/tasks";
 
-/**
- * The three lists of this session's Multica obligations. The section is
- * read-only; it explains a disconnected or unavailable state instead of
- * presenting an empty list that would look like "no work".
- */
-export function SessionTasksSection({ agentId }: Pick<PluginAgentPanelProps, "agentId">) {
+type Colors = PluginAgentPanelProps["theme"]["colors"];
+
+export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelProps, "agentId" | "theme">) {
   const getTasks = useRpc(tasksSummary);
   const [view, setView] = useState<SessionTasksView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      setView(await getTasks({ agentId }));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
+    try { setView(await getTasks({ agentId })); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
   }, [agentId, getTasks]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  return (
-    <SettingsSection
-      title="This session's tasks"
-      info="Read-only Multica work for this session: tasks you own as executor or leader, deliveries waiting for your acceptance, and delegations you dispatched whose result has not come back."
-    >
-      {loading ? (
-        <SettingsCard>
-          <SettingsRow label="Status">Loading…</SettingsRow>
-        </SettingsCard>
-      ) : error ? (
-        <SettingsCard>
-          <SettingsRow label="Could not read this session's tasks" error={error} />
-        </SettingsCard>
-      ) : view?.state === "disconnected" ? (
-        <SettingsCard>
-          <SettingsRow label="Multica is not connected" hint={view.reason} />
-        </SettingsCard>
-      ) : view?.state === "unavailable" ? (
-        <SettingsCard>
-          <SettingsRow label="Tasks unavailable" error={view.reason} />
-        </SettingsCard>
-      ) : view?.state === "ready" ? (
-        <>
-          <SettingsCard>
-            <SettingsRow label="Counts" hint={countsLabel(view)} />
-            <SettingsRow label="Session" hint={view.sessionId ?? "—"} />
-            {view.truncated ? (
-              <SettingsRow label="Showing the first 50 items of each list; a list may therefore be incomplete." />
-            ) : null}
-          </SettingsCard>
-          {TASK_GROUPS.map((group) => (
-            <SettingsCard key={group}>
-              <SettingsRow label={taskGroupTitle(group)} hint={String(view[group].length)} />
-              {view[group].length === 0 ? (
-                <SettingsRow label="None" />
-              ) : (
-                view[group].map((item) => <SessionTaskRow key={item.issueId + ":" + item.role} item={item} />)
-              )}
-            </SettingsCard>
-          ))}
-          <SettingsAction
-            label="Task list"
-            actionLabel={loading ? "Refreshing…" : "Refresh"}
-            disabled={loading}
-            onPress={() => void load()}
-          />
-        </>
-      ) : null}
-    </SettingsSection>
-  );
+  useEffect(() => { void load(); }, [load]);
+  const colors = theme.colors;
+  return <View style={{ gap: 12 }}>
+    {loading ? <Text style={{ color: colors.foregroundMuted }}>Loading tasks…</Text>
+      : error ? <Text style={{ color: colors.statusDanger }}>{error}</Text>
+      : view && view.state !== "ready" ? <Text style={{ color: colors.foregroundMuted }}>{view.reason}</Text>
+      : view?.state === "ready" ? <>
+        <TaskGroup title="Needs your attention" items={[
+          ...view.accepting.map((item) => ({ item, detail: `Awaiting your acceptance${item.deliveryAt ? ` · ${formatDate(item.deliveryAt)}` : ""}` })),
+          ...(view.requests ?? []).map((item) => ({ item, detail: `Executor mentioned you · awaiting your reply${item.requestAt ? ` · ${formatDate(item.requestAt)}` : ""}` })),
+          ...view.owned.filter((item) => item.status === "blocked").map((item) => ({ item, detail: "Your task is blocked" })),
+        ]} colors={colors} />
+        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
+        <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
+        {view.truncated ? <Text style={{ color: colors.foregroundMuted }}>Some tasks are not shown.</Text> : null}
+      </> : null}
+    <Pressable accessibilityRole="button" disabled={loading} onPress={() => void load()}><Text style={{ color: colors.accent }}>Refresh</Text></Pressable>
+  </View>;
 }
 
-function SessionTaskRow({ item }: { item: SessionTaskItem }) {
-  const title = item.title.trim() === "" ? item.issueId : item.title;
-  return (
-    <SettingsRow label={item.identifier ?? title} hint={hintFor(item)}>
-      {item.url ? <ExternalLink href={item.url}>{title}</ExternalLink> : title}
-    </SettingsRow>
-  );
+function delegationStatus(item: SessionTaskItem): string {
+  if (item.status === "blocked") return "Blocked";
+  if (item.pendingAcceptance) return "Awaiting acceptance";
+  if (item.status === "in_review") return "In review";
+  if (item.taskStatus === "running") return "Running";
+  return taskStatusLabel(item);
 }
 
-function hintFor(item: SessionTaskItem): string {
-  const status = taskStatusLabel(item);
-  if (item.role === "return" && item.taskStatus) {
-    return `${status} · return ${item.taskStatus}`;
-  }
-  return status;
+function TaskGroup({ title, items, colors }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors }) {
+  return <View style={{ gap: 6 }}>
+    <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title} · {items.length}</Text>
+    {items.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>None</Text> : items.map(({ item, detail }) =>
+      <Pressable key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} accessibilityRole={item.url ? "link" : undefined} disabled={!item.url} onPress={() => { if (item.url) void Linking.openURL(item.url); }} style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 }}>
+        <Text style={{ color: colors.foreground, fontWeight: "600" }}>{item.identifier ?? item.issueId} · {item.title}</Text>
+        <Text style={{ color: colors.foregroundMuted }}>{detail}</Text>
+      </Pressable>)}
+  </View>;
 }
 
-function countsLabel(view: Extract<SessionTasksView, { state: "ready" }>): string {
-  const counts = taskCounts(view);
-  return `${counts.owned} owned · ${counts.accepting} to accept · ${counts.returning} to return`;
+function formatDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+}
+
+function elapsed(value?: string): string {
+  if (!value) return "";
+  const milliseconds = Date.now() - new Date(value).valueOf();
+  if (!Number.isFinite(milliseconds)) return "";
+  const minutes = Math.max(0, Math.floor(milliseconds / 60000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
 }

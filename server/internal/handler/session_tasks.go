@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
@@ -27,11 +28,20 @@ type SessionTaskItem struct {
 	StatusName     string `json:"status_name,omitempty"`
 	StatusCategory string `json:"status_category"`
 	URL            string `json:"url,omitempty"`
-	// Role is why the item is on the list: executor, leader, acceptor, return.
-	Role       string `json:"role"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
-	AcceptedAt string `json:"accepted_at,omitempty"`
-	TaskStatus string `json:"task_status,omitempty"`
+	// Role is why the item is on the list: executor, leader, acceptor, return, request.
+	Role              string `json:"role"`
+	UpdatedAt         string `json:"updated_at,omitempty"`
+	AcceptedAt        string `json:"accepted_at,omitempty"`
+	TaskStatus        string `json:"task_status,omitempty"`
+	ExecutorName      string `json:"executor_name,omitempty"`
+	ActivityAt        string `json:"activity_at,omitempty"`
+	DeliveryAt        string `json:"delivery_at,omitempty"`
+	ChildCount        int32  `json:"child_count"`
+	ClosedChildCount  int32  `json:"closed_child_count"`
+	PendingAcceptance bool   `json:"pending_acceptance,omitempty"`
+	BlockedReason     string `json:"blocked_reason,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	RequestAt         string `json:"request_at,omitempty"`
 }
 
 // SessionTasksResponse groups the three obligations of the credential's agent:
@@ -44,6 +54,8 @@ type SessionTasksResponse struct {
 	Owned       []SessionTaskItem `json:"owned"`
 	Accepting   []SessionTaskItem `json:"accepting"`
 	Returning   []SessionTaskItem `json:"returning"`
+	Delegated   []SessionTaskItem `json:"delegated"`
+	Requests    []SessionTaskItem `json:"requests"`
 	// Truncated is true when any list hit the per-read limit and the panel's
 	// counts therefore describe only the returned rows.
 	Truncated bool `json:"truncated"`
@@ -99,6 +111,16 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load pending returns")
 		return
 	}
+	delegated, delegatedCut, err := h.sessionDelegatedItems(r, projection, agent, sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load delegated tasks")
+		return
+	}
+	requests, requestsCut, err := h.sessionRequests(r, projection, agent)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load requests")
+		return
+	}
 
 	response := SessionTasksResponse{
 		AgentID:     uuidToString(agent.ID),
@@ -107,9 +129,59 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		Owned:       owned,
 		Accepting:   accepting,
 		Returning:   returning,
-		Truncated:   ownedCut || acceptingCut || returningCut,
+		Delegated:   delegated,
+		Requests:    requests,
+		Truncated:   ownedCut || acceptingCut || returningCut || delegatedCut || requestsCut,
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
+	rows, err := h.Queries.ListSessionUnansweredRequests(r.Context(), db.ListSessionUnansweredRequestsParams{
+		WorkspaceID: agent.WorkspaceID, AgentID: uuidToString(agent.ID), RowLimit: sessionTaskLimit,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	items := make([]SessionTaskItem, 0, len(rows))
+	for _, row := range rows {
+		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.Status)
+		item.Role = "request"
+		item.RequestID = uuidToString(row.CommentID)
+		item.RequestAt = timestampToString(row.CreatedAt)
+		items = append(items, item)
+	}
+	return items, len(rows) == sessionTaskLimit, nil
+}
+
+func (h *Handler) sessionDelegatedItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
+	rows, err := h.Queries.ListSessionDelegatedIssues(r.Context(), db.ListSessionDelegatedIssuesParams{
+		WorkspaceID: agent.WorkspaceID, AgentID: agent.ID, ExternalSessionID: sessionID, RowLimit: sessionTaskLimit,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	items := make([]SessionTaskItem, 0, len(rows))
+	for _, row := range rows {
+		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.IssueStatus)
+		item.Role = "return"
+		item.UpdatedAt = timestampToString(row.IssueUpdatedAt)
+		item.ExecutorName = row.ExecutorName
+		item.ActivityAt = timestampToString(row.ActivityAt)
+		item.TaskStatus = row.TaskStatus
+		if row.IssueStatus == "blocked" {
+			item.BlockedReason = row.BlockedReason
+		}
+		var state issuecontract.State
+		if len(row.ContractData) > 0 && json.Unmarshal(row.ContractData, &state) == nil {
+			if pending := state.Pending(); pending != nil {
+				item.PendingAcceptance = true
+				item.ActivityAt = pending.CreatedAt.Format(time.RFC3339Nano)
+			}
+		}
+		items = append(items, item)
+	}
+	return items, len(rows) == sessionTaskLimit, nil
 }
 
 func (h *Handler) statusCatalog() issuestatus.Querier {
@@ -184,6 +256,8 @@ func (h *Handler) sessionOwnedItems(r *http.Request, p *sessionTaskProjection, a
 			item.Role = "executor"
 		}
 		item.UpdatedAt = timestampToString(row.UpdatedAt)
+		item.ChildCount = row.ChildCount
+		item.ClosedChildCount = row.ClosedChildCount
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
@@ -211,6 +285,7 @@ func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjectio
 		item := p.item(uuidToString(row.ID), row.Number, row.Title, row.Status)
 		item.Role = "acceptor"
 		item.UpdatedAt = timestampToString(row.UpdatedAt)
+		item.DeliveryAt = state.Pending().CreatedAt.Format(time.RFC3339Nano)
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
@@ -236,8 +311,9 @@ func (h *Handler) sessionReturnItems(r *http.Request, p *sessionTaskProjection, 
 		item.UpdatedAt = timestampToString(row.IssueUpdatedAt)
 		item.AcceptedAt = timestampToString(row.AcceptedAt)
 		item.TaskStatus = row.TaskStatus
+		item.ExecutorName = row.ExecutorName
+		item.ActivityAt = timestampToString(row.ActivityAt)
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
 }
-

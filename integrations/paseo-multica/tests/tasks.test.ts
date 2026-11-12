@@ -39,6 +39,8 @@ describe("session task views", () => {
           url: "https://app.multica.example/acme/issues/WORK-1",
           role: "executor",
           updated_at: "2026-11-11T10:00:00Z",
+          child_count: 8,
+          closed_child_count: 7,
         },
         {
           issue_id: "0199a0b1-7777-7777-8777-777777777777",
@@ -58,9 +60,12 @@ describe("session task views", () => {
       identifier: "WORK-1",
       statusName: "Doing",
       url: "https://app.multica.example/acme/issues/WORK-1",
+      childCount: 8,
+      closedChildCount: 7,
     });
     expect(view.owned[1]?.url).toBeUndefined();
     expect(view.checkedAt).toBe(CHECKED_AT);
+    expect(view.delegated).toEqual(view.returning);
   });
 
   it("parses the wire projection and refuses a partial one", () => {
@@ -74,6 +79,8 @@ describe("session task views", () => {
         owned: [{ issue_id: "x", title: "t", status: "todo", status_category: "unstarted", role: "nope" }],
       }).success,
     ).toBe(false);
+    expect(sessionTasksWireSchema.safeParse({ ...makeTasksWire(), requests: "invalid" }).success).toBe(false);
+    expect(sessionTasksWireSchema.safeParse({ ...makeTasksWire(), delegated: [{ ...makeTasksWire().returning[0], blocked_reason: 42 }] }).success).toBe(false);
   });
 
   it("keeps every view state parseable by the RPC contract", () => {
@@ -99,9 +106,13 @@ describe("session task views", () => {
   it("labels the composer pill for work, idle, disconnected and unavailable sessions", () => {
     const ready = toTasksView(makeTasksWire(), CHECKED_AT);
     expect(taskSummaryLabel(ready)).toEqual({
-      label: "3 tasks",
-      title: "Multica tasks: 1 owned, 1 to accept, 1 to return",
+      label: "1 to accept",
+      title: "1 delivery waiting for your acceptance",
     });
+    const active = { ...ready, accepting: [] };
+    expect(taskSummaryLabel(active).label).toBe("1 in progress");
+    expect(taskSummaryLabel({ ...active, requests: [item({ requestId: "comment" })] }).label).toBe("1 request");
+    expect(taskSummaryLabel({ ...active, owned: [item({ status: "blocked" })] }).label).toBe("1 blocked");
     expect(taskSummaryLabel(taskSummaryZero())).toEqual({
       label: "Multica",
       title: "No Multica tasks for this session",

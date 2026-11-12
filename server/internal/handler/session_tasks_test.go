@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,6 +192,7 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	returnedReturn := dispatchReturn(returnedIssue, agentID, sessionID)
 	returnedTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnedIssue, "status": "completed", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, materialized_at) VALUES ($1, $2, now())", returnedTask, returnedReturn)
+	insertIssueContract(t, returnedIssue, []map[string]any{contractVersion(1, agentID, workerAgent)}, []map[string]any{pendingDelivery(1, workerAgent)}, nil)
 	// A follow-up dispatch on the same accepted address makes it pending
 	// again: the latest run has not returned its result.
 	reopenedIssue := dbfx.Issue(t, "session tasks reopened "+suffix)
@@ -273,6 +275,11 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	if executorItem.Status != "in_progress" || executorItem.StatusCategory != "started" {
 		t.Fatalf("executor status = %q/%q, want in_progress in the started category", executorItem.Status, executorItem.StatusCategory)
 	}
+	for _, item := range resp.Owned {
+		if item.IssueID == rootIssue && (item.ChildCount != 1 || item.ClosedChildCount != 0) {
+			t.Fatalf("root child counts = %d/%d, want 0/1", item.ClosedChildCount, item.ChildCount)
+		}
+	}
 
 	acceptingRoles := sessionTaskRoles(resp.Accepting)
 	if acceptingRoles[acceptingIssue] != "acceptor" {
@@ -283,6 +290,11 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	}
 	if _, ok := acceptingRoles[reassignedIssue]; ok {
 		t.Fatalf("contract whose current acceptor moved appeared: %+v", resp.Accepting)
+	}
+	for _, item := range resp.Accepting {
+		if item.IssueID == acceptingIssue && item.DeliveryAt == "" {
+			t.Fatal("pending delivery has no delivery time")
+		}
 	}
 
 	returningByIssue := map[string]SessionTaskItem{}
@@ -305,6 +317,18 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	pending := returningByIssue[returnIssue]
 	if pending.Role != "return" || pending.TaskStatus != "running" || pending.AcceptedAt == "" {
 		t.Fatalf("returning item = %+v, want role, task status and accepted time", pending)
+	}
+	if pending.ExecutorName != "Session Tasks Worker "+suffix || pending.ActivityAt == "" {
+		t.Fatalf("returning executor/time = %q/%q", pending.ExecutorName, pending.ActivityAt)
+	}
+	var returnedDelegation *SessionTaskItem
+	for i := range resp.Delegated {
+		if resp.Delegated[i].IssueID == returnedIssue {
+			returnedDelegation = &resp.Delegated[i]
+		}
+	}
+	if returnedDelegation == nil || !returnedDelegation.PendingAcceptance {
+		t.Fatalf("returned issue awaiting acceptance missing from delegated list: %+v", resp.Delegated)
 	}
 	if reopened := returningByIssue[reopenedIssue]; reopened.TaskStatus != "queued" {
 		t.Fatalf("reopened returning item = %+v, want the follow-up run status", reopened)
@@ -414,4 +438,66 @@ func TestSessionReturnsFollowDelegationLifecycle(t *testing.T) {
 		t.Fatalf("close: %d %s", w.Code, w.Body.String())
 	}
 	assertPending(issue, false)
+}
+
+func TestSessionTasksAttentionEvidence(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	agent, session, owner := externalAgentFixture(t, "Attention recipient", "attention-recipient")
+	worker := dbfx.Agent(t, "Attention executor", testRuntimeID)
+	other := dbfx.Agent(t, "Attention other", testRuntimeID)
+	issue := dbfx.Issue(t, "Open delegated issue", testutil.Cols{"assignee_type": "agent", "assignee_id": worker, "status": "blocked"})
+	address := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{"workspace_id": testWorkspaceID, "issue_id": issue, "dispatcher_agent_id": agent, "return_kind": "external_session", "external_session_id": session})
+	task := dbfx.Task(t, worker, testutil.Cols{"issue_id": issue, "status": "running", "runtime_id": testRuntimeID})
+	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", task, address)
+	at := time.Now().UTC().Add(-time.Hour)
+	comment := func(issueID, author, content string, when time.Time, parent string) string {
+		cols := testutil.Cols{"author_type": "agent", "author_id": author, "created_at": when}
+		if parent != "" {
+			cols["parent_id"] = parent
+		}
+		return dbfx.Comment(t, issueID, content, cols)
+	}
+	mention := fmt.Sprintf("[@Recipient](mention://agent/%s)", agent)
+	pending := comment(issue, worker, fmt.Sprintf("[@Recipient](mention://agent/%s) please decide", strings.ToUpper(agent)), at, "")
+	replied := comment(issue, worker, mention+" answered", at.Add(time.Minute), "")
+	nested := comment(issue, other, "context", at.Add(2*time.Minute), replied)
+	answer := comment(issue, agent, "answer", at.Add(3*time.Minute), nested)
+	dbfx.Exec(t, "UPDATE comment SET type = 'progress_update' WHERE id = $1", answer)
+	comment(issue, worker, "plain @Recipient", at.Add(4*time.Minute), "")
+	comment(issue, worker, "[@Someone](other)\n[Recipient](mention://agent/"+agent+")", at.Add(4*time.Minute), "")
+	comment(issue, worker, "[@Someone](other) [Recipient](mention://agent/"+agent+")", at.Add(4*time.Minute), "")
+	comment(issue, other, mention+" other author", at.Add(5*time.Minute), "")
+	comment(issue, agent, "reply in another thread", at.Add(5*time.Minute), "")
+	resolved := comment(issue, worker, mention+" resolved", at.Add(5*time.Minute), "")
+	dbfx.Exec(t, "UPDATE comment SET resolved_at = now(), resolved_by_type = 'agent', resolved_by_id = $1 WHERE id = $2", agent, resolved)
+	comment(issue, worker, "Waiting for input\nmore detail", at.Add(6*time.Minute), "")
+	closed := dbfx.Issue(t, "Closed issue", testutil.Cols{"assignee_type": "agent", "assignee_id": worker, "status": "done"})
+	comment(closed, worker, mention+" closed", at, "")
+	foreignWorkspace := dbfx.Workspace(t, "Attention foreign workspace", fmt.Sprintf("attention-%d", time.Now().UnixNano()))
+	dbfx.Cleanup(t, "DELETE FROM workspace WHERE id = $1", foreignWorkspace)
+	foreignIssue := dbfx.Issue(t, "Foreign request", testutil.Cols{"workspace_id": foreignWorkspace, "assignee_type": "agent", "assignee_id": worker})
+	dbfx.Comment(t, foreignIssue, mention+" foreign", testutil.Cols{"workspace_id": foreignWorkspace, "author_type": "agent", "author_id": worker})
+	owned := dbfx.Issue(t, "Production-shaped parent", testutil.Cols{"assignee_type": "agent", "assignee_id": agent, "status": "in_progress"})
+	for i := 0; i < 8; i++ {
+		status := "done"
+		if i < 2 {
+			status = "cancelled"
+		}
+		dbfx.Issue(t, fmt.Sprintf("Closed child %d", i), testutil.Cols{"parent_issue_id": owned, "assignee_type": "agent", "assignee_id": agent, "status": status})
+	}
+	code, response := getSessionTasks(t, sessionTasksRequest(owner, agent, true, session))
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if len(response.Requests) != 1 || response.Requests[0].RequestID != pending || response.Requests[0].IssueID != issue || response.Requests[0].Role != "request" {
+		t.Fatalf("requests = %+v, want only %s", response.Requests, pending)
+	}
+	if len(response.Delegated) != 1 || response.Delegated[0].BlockedReason != "Waiting for input" {
+		t.Fatalf("delegated = %+v, want executor comment first line", response.Delegated)
+	}
+	if len(response.Owned) != 1 || response.Owned[0].IssueID != owned || response.Owned[0].ChildCount != 8 || response.Owned[0].ClosedChildCount != 8 {
+		t.Fatalf("owned = %+v, want only open parent with 8/8 closed children", response.Owned)
+	}
 }
