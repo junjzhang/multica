@@ -462,12 +462,21 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	pending := comment(issue, worker, mention+" please decide", at, "")
 	replied := comment(issue, worker, mention+" answered", at.Add(time.Minute), "")
 	nested := comment(issue, other, "context", at.Add(2*time.Minute), replied)
-	comment(issue, agent, "answer", at.Add(3*time.Minute), nested)
+	answer := comment(issue, agent, "answer", at.Add(3*time.Minute), nested)
+	dbfx.Exec(t, "UPDATE comment SET type = 'progress_update' WHERE id = $1", answer)
 	comment(issue, worker, "plain @Recipient", at.Add(4*time.Minute), "")
 	comment(issue, other, mention+" other author", at.Add(5*time.Minute), "")
 	comment(issue, worker, "Waiting for input\nmore detail", at.Add(6*time.Minute), "")
 	closed := dbfx.Issue(t, "Closed issue", testutil.Cols{"assignee_type": "agent", "assignee_id": worker, "status": "done"})
 	comment(closed, worker, mention+" closed", at, "")
+	owned := dbfx.Issue(t, "Production-shaped parent", testutil.Cols{"assignee_type": "agent", "assignee_id": agent, "status": "in_progress"})
+	for i := 0; i < 8; i++ {
+		status := "done"
+		if i < 2 {
+			status = "cancelled"
+		}
+		dbfx.Issue(t, fmt.Sprintf("Closed child %d", i), testutil.Cols{"parent_issue_id": owned, "assignee_type": "agent", "assignee_id": agent, "status": status})
+	}
 	code, response := getSessionTasks(t, sessionTasksRequest(owner, agent, true, session))
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
@@ -477,5 +486,8 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	}
 	if len(response.Delegated) != 1 || response.Delegated[0].BlockedReason != "Waiting for input" {
 		t.Fatalf("delegated = %+v, want executor comment first line", response.Delegated)
+	}
+	if len(response.Owned) != 1 || response.Owned[0].IssueID != owned || response.Owned[0].ChildCount != 8 || response.Owned[0].ClosedChildCount != 8 {
+		t.Fatalf("owned = %+v, want only open parent with 8/8 closed children", response.Owned)
 	}
 }
