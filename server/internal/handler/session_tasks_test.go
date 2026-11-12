@@ -467,6 +467,7 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	dbfx.Exec(t, "UPDATE comment SET type = 'progress_update' WHERE id = $1", answer)
 	comment(issue, worker, "plain @Recipient", at.Add(4*time.Minute), "")
 	comment(issue, worker, "[@Someone](other)\n[Recipient](mention://agent/"+agent+")", at.Add(4*time.Minute), "")
+	comment(issue, worker, "[@Someone](other) [Recipient](mention://agent/"+agent+")", at.Add(4*time.Minute), "")
 	comment(issue, other, mention+" other author", at.Add(5*time.Minute), "")
 	comment(issue, agent, "reply in another thread", at.Add(5*time.Minute), "")
 	resolved := comment(issue, worker, mention+" resolved", at.Add(5*time.Minute), "")
