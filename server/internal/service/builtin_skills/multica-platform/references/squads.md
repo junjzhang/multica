@@ -40,6 +40,25 @@ Squad-routed work runs through the squad's `leader_id` agent. Consequences:
 - squad members are not automatically fanned out;
 - squad `instructions` are leader briefing content, not member prompts.
 
+## Parent contracts
+
+A squad-assigned issue may have a Contract. Keep its executor as the squad;
+`executor_representative` identifies the current active leader who can submit
+using its own authenticated Agent identity. The specified upstream coordinator
+accepts or returns the overall delivery. Squad membership alone grants no
+contract authority. Maintenance follows the existing workspace-member or verified
+original-requester rules, excluding current and versioned representatives.
+A representative cannot accept its own squad's delivery.
+
+Read the current version and capabilities with `multica issue contract get`.
+Leader changes invalidate the basis: an authorized requester must revise before
+the new leader submits. Old versions, real submission authors, evidence and
+accepted return destinations stay unchanged. Archived squads/leaders and leaders
+without squad membership cannot represent the squad. Concurrent representative
+changes may return 409; reload before retrying. Member subcontracts still require
+their own acceptance; parent acceptance cannot bypass them. Run completion,
+`child_done` and Mailbox handled are not acceptance.
+
 ## CLI
 
 Squad commands:
@@ -168,13 +187,16 @@ Current behavior:
 - assignment routes work to `squad.leader_id`;
 - it does not enqueue every squad member;
 - assignment while status is `backlog` does not immediately start work;
-- moving a squad-assigned issue out of `backlog` can trigger the leader;
-- changing assignee cancels existing tasks for the issue before enqueueing the
-  new assignee path;
+- moving a squad-assigned issue out of `backlog` changes only its status; it
+  does not start the leader. To start parked work, explicitly @-mention the
+  leader (or the squad), or rerun the issue;
+- changing assignee does not cancel existing runs; an explicit assignment may
+  enqueue the new assignee path alongside work already in flight;
 - parent issue status is agent-managed (same model as direct agent assignment):
   the leader's first assignment turn should move the parent to `in_progress`
   and keep it there while members work; the leader moves the parent to
-  `in_review` only when a later re-trigger confirms the overall goal is met.
+  `in_review` only on a later turn started by an explicit @mention or the
+  separate stage-barrier wakeup, when it confirms the overall goal is met.
   Completing a leader task (including the first dispatch) does not itself
   change issue status;
 - that status authority is granted only when the issue's `assignee_type` /
@@ -191,13 +213,18 @@ it.
 
 ## Comment and mention behavior
 
-If an issue is assigned to a squad, a new comment can wake the squad leader. This
-is leader routing, not member fan-out.
+Only an explicit `@squad` or `@leader` mention wakes the squad leader. A plain
+comment on a squad-assigned issue is discussion, not a request, and starts no
+run. This is leader routing, not member fan-out.
 
-A worker's reply also wakes the assigned leader without an explicit mention. If
-the leader's current run started before the reply arrived, the reply is
-delivered in a follow-up run after that run completes, so the worker does not
-need to mention the leader again.
+A worker's result also does not wake the assigned leader without an explicit
+mention. When the leader, coordinator, or next executor needs to act on a
+result, the worker must `@`-mention that agent in the result comment. An
+ordinary reply, read receipt, or status change is not an implied wake.
+
+The separate sub-issue/stage-barrier system wakeup can still start a run for the
+parent issue's assignee; that is a configured platform mechanism, not comment
+routing.
 
 Squad mention format:
 
@@ -205,9 +232,10 @@ Squad mention format:
 [@Squad Name](mention://squad/<squad-id>)
 ```
 
-Current behavior: resolve the squad, read `leader_id`, enqueue a leader task,
-and use the current comment as the trigger comment. It does not enqueue every
-squad member.
+Current behavior: resolve the squad, read `leader_id`, then enqueue a leader
+task for a managed leader, or persist one mailbox request for an external
+leader. The current comment is the trigger comment. It does not enqueue every
+squad member. A leader hosted outside Multica is never given a fake native run.
 
 ## Autopilot behavior
 
@@ -232,10 +260,9 @@ These actions can trigger agent work or mutate durable state:
 - changing `leader_id`;
 - adding/removing members;
 - changing member roles;
-- assigning an issue to a squad;
-- moving a squad-assigned issue out of backlog;
-- commenting on a squad-assigned issue;
-- mentioning a squad;
+- assigning an issue to a squad (an explicit initial launch);
+- explicitly mentioning a squad or its leader in a comment;
+- moving a squad-assigned issue out of backlog (status only; no run);
 - creating or triggering squad-assigned autopilots;
 - recording squad activity with `multica squad activity`;
 - deleting/archiving a squad.
@@ -250,11 +277,15 @@ These actions can trigger agent work or mutate durable state:
 - `instructions` are leader briefing content, not automatic member prompts.
 - `description` has no proven runtime prompt effect.
 - `role` is roster context, not automatic scheduling.
-- Backlog assignment does not immediately start work.
+- Backlog assignment does not immediately start work, and moving the issue out
+  later does not start it either; use an explicit `@` mention or rerun.
+- A worker's ordinary reply does not wake the leader. If the leader or another
+  agent needs to act, the worker must mention it explicitly.
 - First leader dispatch is not parent completion — parent stays `in_progress`
   until the leader later confirms the overall goal and moves it to `in_review`.
-- The server does not auto-flip parent status when child issues finish; it only
-  wakes the leader with an explicit ask (including `in_review` when wrapping up).
+- The server does not auto-flip parent status when child issues finish; the
+  sub-issue wakeup starts a leader run, and its instruction still asks for an
+  explicit `@`/rerun before the next stage starts.
 - Getting the leader briefing does NOT imply status authority. A squad
   `@`-mentioned into an issue assigned to someone else is a guest: roster and
   delegation rules yes, `multica issue status` no.

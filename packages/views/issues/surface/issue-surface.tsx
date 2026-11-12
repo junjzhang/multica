@@ -268,6 +268,7 @@ function IssueSurfaceContent({
         ) : (
           <IssuesHeader
             scopedIssues={controller.surfaceIssues}
+            showSubIssues={controller.activeFilters.showSubIssues}
             workingAgents={controller.workingAgents}
             allowGantt={controller.allowGantt}
             isRefreshing={controller.isRefreshing}

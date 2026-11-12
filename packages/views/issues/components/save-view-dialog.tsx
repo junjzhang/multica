@@ -45,6 +45,7 @@ import {
   viewStoreSlice,
   viewStorePersistOptions,
   mergeViewStatePersisted,
+  effectiveShowSubIssues,
   GROUPING_OPTIONS,
   SWIMLANE_GROUPINGS,
   cardPropertyOptionsForView,
@@ -456,6 +457,7 @@ export function SaveViewDialog({
   scope,
   editView = null,
   seedFromDefinition = false,
+  showSubIssues,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -467,6 +469,7 @@ export function SaveViewDialog({
    *  may not have it open); in-view edits keep seeding from the live panel
    *  so the user's current additions are part of the draft. */
   seedFromDefinition?: boolean;
+  showSubIssues?: boolean;
 }) {
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
@@ -502,11 +505,16 @@ export function SaveViewDialog({
       // blob, never trusted wholesale.
       const defaults = viewStoreSlice(store.setState);
       store.setState(
-        mergeViewStatePersisted({ ...editView.query, ...editView.display }, defaults),
+        { ...mergeViewStatePersisted({ ...editView.query, ...editView.display }, defaults), showSubIssuesExplicit: true },
         true,
       );
     } else {
-      store.setState(snapshotState(liveStore.getState()));
+      const live = liveStore.getState();
+      store.setState({
+        ...snapshotState(live),
+        showSubIssues: showSubIssues ?? effectiveShowSubIssues(live),
+        showSubIssuesExplicit: true,
+      });
     }
     setDraftStore(store);
     setName(editView?.name ?? "");

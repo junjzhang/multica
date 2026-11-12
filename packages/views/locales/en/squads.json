@@ -99,7 +99,8 @@
     "members": "Members",
     "created_by": "Created by",
     "created": "Created",
-    "updated": "Updated"
+    "updated": "Updated",
+    "default_leader_migration": "Default leader must be a managed agent; choose one before new dispatch."
   },
   "toasts": {
     "member_added": "Member added",

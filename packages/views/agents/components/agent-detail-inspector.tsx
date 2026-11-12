@@ -17,6 +17,7 @@ import {
   isRuntimeUsableForUser,
   runtimeModelsOptions,
 } from "@multica/core/runtimes";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { useConfigStore } from "@multica/core/config";
 import { isImeComposing } from "@multica/core/utils";
 import { Input } from "@multica/ui/components/ui/input";
@@ -44,6 +45,7 @@ import {
 import { RuntimePicker } from "./inspector/runtime-picker";
 import { ThinkingSettingField } from "./inspector/thinking-prop-row";
 import { ServiceTierSettingField } from "./inspector/service-tier-setting-field";
+import { AgentExecutionStatus } from "../../issues/components/agent-execution-identity";
 
 interface InspectorProps {
   agent: Agent;
@@ -149,10 +151,15 @@ export function AgentDetailInspector({
   // the server either rejects or the bridge refuses, so neither direction is
   // offered here. It also never opens a chat, so nothing chat-facing applies.
   const qoderRuntime = runtime?.provider === "qoder_cloud";
+  // Managed-only execution controls. External identities run in their host
+  // session, so a runtime/model/concurrency form here would offer a fake
+  // rebind; an unknown kind exposes nothing executable either.
+  const managedExecution = agentExecutionKind(agent) === "managed";
   const conversationStartersEnabled = useConfigStore(
     (state) => state.agentConversationStartersSupported,
   );
-  const showStarters = conversationStartersEnabled && !qoderRuntime;
+  const showStarters =
+    conversationStartersEnabled && !qoderRuntime && managedExecution;
   const startersComplete = starters.every(
     (item) => item.label.trim() && item.prompt.trim(),
   );
@@ -333,6 +340,7 @@ export function AgentDetailInspector({
               qoderRuntime ? t(($) => $.inspector.qoder_execution_note) : undefined
             }
           >
+            {managedExecution ? (
             <SettingsCard>
               <SettingsRow
                 label={t(($) => $.inspector.prop_runtime)}
@@ -412,10 +420,17 @@ export function AgentDetailInspector({
                 />
               </SettingsRow>
             </SettingsCard>
+            ) : (
+              <SettingsCard>
+                <div className="p-3">
+                  <AgentExecutionStatus agent={agent} detailed />
+                </div>
+              </SettingsCard>
+            )}
           </SettingsSection>
         </div>
 
-        {qoderRuntime ? null : (
+        {qoderRuntime || !managedExecution ? null : (
           <SettingsSection
             title={t(($) => $.conversation_starters.preview_label)}
             className="hidden @4xl:sticky @4xl:top-0 @4xl:block"

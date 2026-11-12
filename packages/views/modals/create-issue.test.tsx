@@ -467,7 +467,9 @@ vi.mock("../issues/components", () => ({
     <div data-testid="priority-picker" onClick={() => onUpdate({ priority: "high" })} />
   ),
   StagePicker: () => <div data-testid="stage-picker" />,
-  AssigneePicker: () => <div data-testid="assignee-picker" />,
+  AssigneePicker: ({ onUpdate }: { onUpdate: (u: { assignee_type: "squad"; assignee_id: string; suppress_run: boolean }) => void }) => (
+    <button data-testid="assignee-picker" onClick={() => onUpdate({ assignee_type: "squad", assignee_id: "external-squad", suppress_run: true })} />
+  ),
   // Surface open/onOpenChange so tests can assert progressive-disclosure
   // behavior (mounted only when the user has opted in or has a value).
   StartDatePicker: ({ open, onOpenChange }: { open?: boolean; onOpenChange?: (v: boolean) => void }) => (
@@ -781,6 +783,15 @@ describe("CreateIssueModal", () => {
     renderModal(<CreateIssueModal onClose={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "Upload file" })).toHaveAttribute("data-size", "sm");
+  });
+
+  it.each(["todo", "backlog"] as const)("parks a %s draft for an external squad without a session", async (status) => {
+    mockDraftStore.draft.manual.status = status;
+    renderModal(<CreateIssueModal onClose={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText("Issue title"), { target: { value: "Parked external work" } });
+    fireEvent.click(screen.getByTestId("assignee-picker"));
+    fireEvent.click(screen.getByRole("button", { name: "Create Issue" }));
+    await waitFor(() => expect(mockCreateIssue).toHaveBeenCalledWith(expect.objectContaining({ title: "Parked external work", status: "backlog", assignee_type: "squad", assignee_id: "external-squad", recipient_session_id: undefined })));
   });
 
   it("shows success feedback with a direct path to the new issue", async () => {

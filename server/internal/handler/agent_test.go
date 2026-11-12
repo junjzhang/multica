@@ -242,6 +242,7 @@ func TestListWorkspaceWorkingAgents(t *testing.T) {
 		).Scan(&squadID); err != nil {
 			t.Fatalf("insert squad %q: %v", name, err)
 		}
+		dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 		insertedSquadIDs = append(insertedSquadIDs, squadID)
 		return squadID
 	}

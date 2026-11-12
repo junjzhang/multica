@@ -133,7 +133,9 @@ func TestWorktreeDeliveryMetadataRoundTripsThroughBothTerminalPaths(t *testing.T
 
 	var agentID, runtimeID string
 	if err := testPool.QueryRow(ctx, `
-		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+		SELECT a.id, a.runtime_id FROM agent a
+		WHERE a.workspace_id = $1 AND a.runtime_id IS NOT NULL
+		ORDER BY a.created_at, a.id LIMIT 1
 	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
 		t.Fatalf("setup: get agent: %v", err)
 	}
@@ -249,7 +251,9 @@ func TestWorktreeDeliveryMetadataSurvivesEveryTerminalPath(t *testing.T) {
 
 	var agentID, runtimeID string
 	if err := testPool.QueryRow(ctx, `
-		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+		SELECT a.id, a.runtime_id FROM agent a
+		WHERE a.workspace_id = $1 AND a.runtime_id IS NOT NULL
+		ORDER BY a.created_at, a.id LIMIT 1
 	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
 		t.Fatalf("setup: get agent: %v", err)
 	}
@@ -504,7 +508,9 @@ func TestWorktreeClaimGateCancelPersistsReason(t *testing.T) {
 
 	var agentID, runtimeID string
 	if err := testPool.QueryRow(ctx, `
-		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+		SELECT a.id, a.runtime_id FROM agent a
+		WHERE a.workspace_id = $1 AND a.runtime_id IS NOT NULL
+		ORDER BY a.created_at, a.id LIMIT 1
 	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
 		t.Fatalf("setup: get agent: %v", err)
 	}

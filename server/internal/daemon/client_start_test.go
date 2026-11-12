@@ -177,3 +177,43 @@ func TestStartTaskBudgetAndMissingClaim(t *testing.T) {
 		t.Fatalf("deadline: %v, calls=%d", err, calls)
 	}
 }
+
+func TestHandleTaskCancelledStartAcknowledgesOnlyOriginalClaim(t *testing.T) {
+	var acknowledgements atomic.Int32
+	claim := startTestClaim()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/start") {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"claim cancelled","cancelled_claim":true}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/cancel-ack") {
+			var body struct {
+				RuntimeID    string `json:"runtime_id"`
+				DispatchedAt string `json:"dispatched_at"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.RuntimeID != claim.RuntimeID || body.DispatchedAt != claim.DispatchedAt {
+				t.Errorf("unfenced exit receipt: %+v", body)
+			}
+			acknowledgements.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	d := &Daemon{client: NewClient(srv.URL), logger: slog.New(slog.NewTextHandler(io.Discard, nil)), workspaces: make(map[string]*workspaceState), runtimeIndex: map[string]Runtime{claim.RuntimeID: {ID: claim.RuntimeID, Provider: "claude"}}, activeEnvRoots: make(map[string]int), cancelPollInterval: time.Hour, cfg: Config{WorkspacesRoot: t.TempDir()}}
+	d.runner = taskRunnerFunc(func(ctx context.Context, task Task, _ string, _ int, _ *slog.Logger) (TaskResult, error) {
+		_, err := d.client.StartTask(ctx, task)
+		return TaskResult{}, err
+	})
+	claim.Agent = &AgentData{Name: "test-agent"}
+	claim.WorkspaceID = "workspace"
+	d.handleTask(context.Background(), claim, 0)
+	if acknowledgements.Load() != 1 {
+		t.Fatalf("cancelled prepare exit receipts=%d", acknowledgements.Load())
+	}
+}

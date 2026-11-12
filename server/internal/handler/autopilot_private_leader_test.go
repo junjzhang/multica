@@ -27,6 +27,7 @@ func TestCreateAutopilot_SquadPrivateLeader_PlainMemberBlocked(t *testing.T) {
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -65,6 +66,7 @@ func TestUpdateAutopilot_SquadPrivateLeader_PlainMemberBlocked(t *testing.T) {
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -120,6 +122,7 @@ func TestCreateAutopilot_SquadPrivateLeader_OwnerAllowed(t *testing.T) {
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -165,6 +168,7 @@ func TestTriggerAutopilot_SquadPrivateLeader_OwnerCanDispatch(t *testing.T) {
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -237,6 +241,7 @@ func TestTriggerAutopilot_SquadPrivateLeader_NonOwnerClicker_Blocked(t *testing.
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -308,6 +313,7 @@ func TestTriggerAutopilot_SquadPrivateLeader_PlainMemberCreator_Blocked(t *testi
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})
@@ -369,6 +375,7 @@ func TestTriggerAutopilot_RunOnly_SquadPrivateLeader_PlainMemberCreator_Blocked(
 	`, testWorkspaceID, agentID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() {
 		testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID)
 	})

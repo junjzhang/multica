@@ -8,6 +8,7 @@ import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { isImeComposing } from "@multica/core/utils";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { getShortcut, shortcutMatchesEvent } from "@multica/core/shortcuts";
 import { useTimeAgo } from "../../i18n";
 import { agentListOptions, memberListOptions, squadMemberStatusOptions, workspaceKeys } from "@multica/core/workspace/queries";
@@ -191,6 +192,10 @@ export function SquadDetailPage() {
   const isLeader = (m: SquadMember) => m.member_type === "agent" && squad.leader_id === m.member_id;
   const isArchived = (m: SquadMember) =>
     m.member_type === "agent" && !!agents.find((a: Agent) => a.id === m.member_id)?.archived_at;
+  const isManagedAgent = (agentId: string) => {
+    const agent = agents.find((a: Agent) => a.id === agentId);
+    return !!agent && agentExecutionKind(agent) === "managed";
+  };
 
   const initials = squad.name
     .split(" ")
@@ -241,6 +246,7 @@ export function SquadDetailPage() {
           canManage={canManage}
           isLeader={isLeader}
           isArchived={isArchived}
+          isManagedAgent={isManagedAgent}
           getEntityName={getEntityName}
           onAddMemberClick={() => setShowAddMember(true)}
           createAgentHref={canManage ? `${p.newAgent()}?squad=${encodeURIComponent(squadId)}` : undefined}
@@ -789,9 +795,16 @@ function SquadDetailInspector({
         </div>
         <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
           <InspectorRow label={t(($) => $.details.leader)}>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <ActorAvatar actorType="agent" actorId={squad.leader_id} size="xs" />
-              <span className="truncate">{leaderName}</span>
+            <span className="flex min-w-0 flex-col gap-0.5">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <ActorAvatar actorType="agent" actorId={squad.leader_id} size="xs" />
+                <span className="truncate">{leaderName}</span>
+              </span>
+              {squad.default_leader_unavailable_reason && (
+                <span className="text-micro text-destructive" role="status">
+                  {t(($) => $.details.default_leader_migration)}
+                </span>
+              )}
             </span>
           </InspectorRow>
           <InspectorRow label={t(($) => $.details.members)}>
@@ -946,6 +959,7 @@ function SquadOverviewPane({
   canManage,
   isLeader,
   isArchived,
+  isManagedAgent,
   getEntityName,
   onAddMemberClick,
   createAgentHref,
@@ -964,6 +978,8 @@ function SquadOverviewPane({
   canManage: boolean;
   isLeader: (m: SquadMember) => boolean;
   isArchived: (m: SquadMember) => boolean;
+  /** Default leaders must be managed agents; external members never qualify. */
+  isManagedAgent: (agentId: string) => boolean;
   getEntityName: (type: string, id: string) => string;
   onAddMemberClick: () => void;
   // Optional — only passed when the current user can manage the squad
@@ -1024,6 +1040,7 @@ function SquadOverviewPane({
               canManage={canManage}
               isLeader={isLeader}
               isArchived={isArchived}
+              isManagedAgent={isManagedAgent}
               getEntityName={getEntityName}
               onAddMemberClick={onAddMemberClick}
               createAgentHref={createAgentHref}
@@ -1089,6 +1106,7 @@ function SquadMembersTab({
   canManage,
   isLeader,
   isArchived,
+  isManagedAgent,
   getEntityName,
   onAddMemberClick,
   createAgentHref,
@@ -1104,6 +1122,8 @@ function SquadMembersTab({
   canManage: boolean;
   isLeader: (m: SquadMember) => boolean;
   isArchived: (m: SquadMember) => boolean;
+  /** Default leaders must be managed agents; external members never qualify. */
+  isManagedAgent: (agentId: string) => boolean;
   getEntityName: (type: string, id: string) => string;
   onAddMemberClick: () => void;
   // Hidden for viewers who can't manage — see SquadOverviewPane.
@@ -1254,7 +1274,11 @@ function SquadMembersTab({
                   </TooltipContent>
                 </Tooltip>
               )}
-              {canManage && m.member_type === "agent" && !isLeader(m) && !isArchived(m) && (
+              {canManage &&
+                m.member_type === "agent" &&
+                !isLeader(m) &&
+                !isArchived(m) &&
+                isManagedAgent(m.member_id) && (
                 <Tooltip>
                   <TooltipTrigger
                     render={

@@ -35,6 +35,8 @@ export interface Comment {
   resolved_by_type: CommentAuthorType | null;
   resolved_by_id: string | null;
   source_task_id?: string | null;
+  /** What an explicit mention of this target does; absent means a native run. */
+  dispatch_kind?: string;
   // The quick action that produced this comment (MUL-5465). A quick action
   // posts an ORDINARY comment and marks it with this id; the collapsed card
   // keys off the id rather than a dedicated `type`, because `type` is
@@ -83,11 +85,14 @@ export interface CommentTriggerOutcome {
   target_id: string;
   status: CommentTriggerStatus | string;
   reason_code: string;
+  dispatch_kind?: string;
+  mode?: string;
 }
 
 export type CommentTriggerSource =
   | "issue_assignee"
   | "mention_agent"
+  | "mention_notify"
   | "mention_squad_leader";
 
 export interface CommentTriggerPreviewAgent {
@@ -95,7 +100,10 @@ export interface CommentTriggerPreviewAgent {
   name: string;
   avatar_url?: string;
   source: CommentTriggerSource | string;
+  mode?: string;
   reason: string;
+  /** "mailbox" targets receive the comment in their session mailbox, not as a run. */
+  dispatch_kind?: string;
 }
 
 export interface CommentTriggerPreview {

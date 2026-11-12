@@ -1,3 +1,5 @@
+import type { ResultTakeoverRequest, ResultTakeoverResponse, ResultTakeoverOptions } from "../types/result-takeover";
+import { ResultTakeoverResponseSchema, ResultTakeoverOptionsSchema } from "./result-takeover-schema";
 import type { ZodType } from "zod";
 import { AgentRuntimeSchema, EMPTY_RUNTIME } from "../runtimes/schema";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
@@ -14,6 +16,8 @@ import type {
   MoveIssueRequest,
   UpdateIssueRequest,
   IssueDuplicates,
+  IssueLeadershipHandoffRequest,
+  IssueLeadershipHandoffResponse,
   GroupedIssuesResponse,
   ListIssuesResponse,
   SearchIssuesResponse,
@@ -33,6 +37,11 @@ import type {
   IssueTableRowsRequest,
   IssueTableRowsResponse,
   Agent,
+  AgentArchivePreflight,
+  AgentSessionPage,
+  AgentSessionSummary,
+  AgentSessionBinding,
+  IssueSessionBinding,
   MikaBootstrapResponse,
   CreateAgentRequest,
   AgentBuilderRuntimeSwitch,
@@ -256,9 +265,14 @@ import { type Logger, noopLogger } from "../logger";
 import { createRequestId, createSafeId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
+import { ContractViewSchema, type ContractView, type ContractRequest } from "./issue-contract-schema";
 import {
   RuntimeProfileSchema,
   RuntimeProfileListSchema,
+  AgentListSchema,
+  AgentSessionListResponseSchema,
+  AgentSessionBindingSchema,
+  AgentSessionBindingResponseSchema,
   AgentTaskListSchema,
   AgentTaskPageSchema,
   AgentActivityBucketListSchema,
@@ -335,7 +349,10 @@ import {
   ListIssuesResponseSchema,
   CreateIssueResponseSchema,
   IssueSchema,
+  IssueLeadershipHandoffResponseSchema,
+  IssueExecutorHandoffResponseSchema,
   AgentTaskSchema,
+  AgentArchivePreflightSchema,
   SourceContextPreviewSchema,
   CommentSubIssueTaskResponseSchema,
   ListWebhookDeliveriesResponseSchema,
@@ -1406,6 +1423,20 @@ export class ApiClient {
     await this.fetch(`/api/issues/${encodeURIComponent(issueId)}/wakeups/${encodeURIComponent(wakeupId)}/disable`, { method: "POST" });
   }
 
+  async getIssueContract(id: string): Promise<ContractView> {
+    const raw = await this.fetch<unknown>(`/api/issues/${encodeURIComponent(id)}/contract`);
+    const value = parseWithFallback<ContractView | null>(raw, ContractViewSchema, null, { endpoint: "GET /api/issues/:id/contract" });
+    if (!value) throw new Error("Unable to read the contract response");
+    return value;
+  }
+
+  async updateIssueContract(id: string, request: ContractRequest): Promise<ContractView> {
+    const raw = await this.fetch<unknown>(`/api/issues/${encodeURIComponent(id)}/contract`, { method: "POST", body: JSON.stringify(request) });
+    const value = parseWithFallback<ContractView | null>(raw, ContractViewSchema, null, { endpoint: "POST /api/issues/:id/contract" });
+    if (!value) throw new Error("Unable to read the saved contract response; refresh before retrying");
+    return value;
+  }
+
   async getIssue(id: string, options?: { signal?: AbortSignal }): Promise<Issue> {
     const raw = await this.fetch<unknown>(
       `/api/issues/${encodeURIComponent(id)}`,
@@ -1846,11 +1877,157 @@ export class ApiClient {
     const search = new URLSearchParams();
     if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
-    return this.fetch(`/api/agents?${search}`);
+    const raw = await this.fetch<unknown>(`/api/agents?${search}`);
+    return parseWithFallback<Agent[]>(raw, AgentListSchema, [], {
+      endpoint: "GET /api/agents",
+    });
+  }
+
+  async getResultTakeoverOptions(issueId: string, resultTaskId: string, fromReturnId: string): Promise<ResultTakeoverOptions> {
+    const params = new URLSearchParams({ result_task_id: resultTaskId, from_return_id: fromReturnId });
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeover-options?${params}`);
+    const parsed = parseWithFallback<ResultTakeoverOptions | null>(raw, ResultTakeoverOptionsSchema, null, {
+      endpoint: "GET /api/issues/{id}/result-takeover-options",
+    });
+    if (!parsed || !parsed.returns.some((version) => version.return_id === fromReturnId)) {
+      throw new Error("Return session information is unavailable.");
+    }
+    return parsed;
+  }
+
+  async takeoverIssueResult(issueId: string, data: ResultTakeoverRequest): Promise<ResultTakeoverResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/result-takeovers`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<ResultTakeoverResponse | null>(raw, ResultTakeoverResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/result-takeovers",
+    });
+    if (!parsed || parsed.client_request_id !== data.client_request_id
+      || parsed.result_task_id !== data.result_task_id || parsed.from_return_id !== data.from_return_id) {
+      throw new Error("The server did not confirm this result takeover.");
+    }
+    return parsed;
+  }
+
+  /**
+   * Explicit task-leader handoff. The server resolves the leadership root and
+   * checks previous/revision CAS; an external target must carry its registered
+   * session, a managed target none.
+   */
+  async handoffIssueLeadership(issueId: string, data: IssueLeadershipHandoffRequest): Promise<IssueLeadershipHandoffResponse> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/task-leader/handoff`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<IssueLeadershipHandoffResponse | null>(raw, IssueLeadershipHandoffResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/task-leader/handoff",
+    });
+    if (!parsed || !parsed.root_issue_id) {
+      throw new Error("The server did not confirm this task-leader handoff.");
+    }
+    return {
+      ...parsed,
+      stale_contract_ids: parsed.stale_contract_ids ?? [],
+      advanced_returns: parsed.advanced_returns ?? [],
+      historical_results: parsed.historical_results ?? "",
+    };
+  }
+
+  async handoffIssueExecutor(issueId: string, data: Omit<IssueLeadershipHandoffRequest, "expected_revision">): Promise<{ issue_id: string; issue_revision: number }> {
+    const raw = await this.fetch<unknown>(`/api/issues/${issueId}/executor/handoff`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<{ issue_id: string; issue_revision: number } | null>(raw, IssueExecutorHandoffResponseSchema, null, {
+      endpoint: "POST /api/issues/{id}/executor/handoff",
+    });
+    if (!parsed) throw new Error("The server did not confirm this executor handoff.");
+    return parsed;
   }
 
   async getAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}`);
+  }
+
+  /** All registered host sessions of one external agent, never a single guess. */
+  async listAgentSessions(agentId: string): Promise<AgentSessionSummary[]> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions`);
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[] } | null>(
+      raw,
+      AgentSessionListResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return parsed.sessions;
+  }
+  /**
+   * One page of an agent's registered sessions. The agents list expands a
+   * template row lazily, so the page size is bounded here and the total is the
+   * server's, not the page's.
+   */
+  async listAgentSessionsPage(
+    agentId: string,
+    params: { limit?: number; offset?: number } = {},
+  ): Promise<AgentSessionPage> {
+    const search = new URLSearchParams();
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    if (params.offset !== undefined) search.set("offset", String(params.offset));
+    const query = search.size > 0 ? `?${search.toString()}` : "";
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/sessions${query}`);
+    const parsed = parseWithFallback<{ sessions: AgentSessionSummary[]; total?: number } | null>(
+      raw,
+      AgentSessionListResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/sessions" },
+    );
+    if (!parsed) throw new Error("Invalid session list response");
+    return { sessions: parsed.sessions, total: parsed.total ?? parsed.sessions.length };
+  }
+
+  /** The exact active (agent, issue) target. Null means no binding, not failure. */
+  async getAgentIssueSessionBinding(
+    agentId: string,
+    issueId: string,
+  ): Promise<IssueSessionBinding | null> {
+    const search = new URLSearchParams({ issue_id: issueId });
+    const raw = await this.fetch<unknown>(
+      `/api/agents/${agentId}/session-bindings?${search}`,
+    );
+    const parsed = parseWithFallback<{ binding: IssueSessionBinding | null } | null>(
+      raw,
+      AgentSessionBindingResponseSchema,
+      null,
+      { endpoint: "GET /api/agents/{id}/session-bindings" },
+    );
+    if (!parsed) throw new Error("Invalid issue session binding response");
+    return parsed.binding;
+  }
+
+  /**
+   * Saves the target for FUTURE notifications. No local cache is changed here:
+   * callers must surface a failed save instead of pretending the old binding
+   * moved, and a successful save never rewrites an existing delivery.
+   */
+  async bindAgentSession(
+    agentId: string,
+    data: { issue_id: string; session_id: string },
+  ): Promise<AgentSessionBinding> {
+    const raw = await this.fetch<unknown>(`/api/agents/${agentId}/session-bindings`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    const parsed = parseWithFallback<AgentSessionBinding | null>(
+      raw,
+      AgentSessionBindingSchema,
+      null,
+      { endpoint: "POST /api/agents/{id}/session-bindings" },
+    );
+    if (!parsed) {
+      throw new Error("The server did not confirm the session binding.");
+    }
+    return parsed;
   }
 
   async createAgent(data: CreateAgentRequest): Promise<Agent> {
@@ -1979,6 +2156,21 @@ export class ApiClient {
 
   async archiveAgent(id: string): Promise<Agent> {
     return this.fetch(`/api/agents/${id}/archive`, { method: "POST" });
+  }
+
+  /**
+   * Read-only archive preview for an external agent. Throws ApiError with
+   * status 404 on a server that predates the endpoint; callers treat that as
+   * "no preview available" and keep the previous confirm flow.
+   */
+  async getAgentArchivePreflight(id: string): Promise<AgentArchivePreflight> {
+    const raw = await this.fetch<unknown>(`/api/agents/${id}/archive-preflight`);
+    return parseWithFallback<AgentArchivePreflight>(
+      raw,
+      AgentArchivePreflightSchema,
+      { agent_id: id, archivable: false, blockers: [] },
+      { endpoint: "GET /api/agents/{id}/archive-preflight" },
+    );
   }
 
   /**

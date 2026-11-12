@@ -65,7 +65,7 @@ func init() {
 }
 
 func runUserProfileGet(cmd *cobra.Command, _ []string) error {
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -111,7 +111,7 @@ func runUserProfileUpdate(cmd *cobra.Command, _ []string) error {
 
 	body := map[string]any{"profile_description": desc}
 
-	client, err := newAPIClient(cmd)
+	client, err := newOwnerAPIClient(cmd)
 	if err != nil {
 		return err
 	}

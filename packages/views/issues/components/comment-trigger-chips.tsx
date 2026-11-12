@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, type ReactElement } from "react";
-import { ChevronDown, TriangleAlert, Users } from "lucide-react";
+import { ChevronDown, Mailbox, TriangleAlert, Users } from "lucide-react";
 import type { CommentTriggerPreviewAgent, CommentTriggerOutcome } from "@multica/core/types";
 import type { AgentRunState, RecipientAction } from "@multica/core/issues/run-steering";
 import { useAgentPresenceDetail } from "@multica/core/agents";
@@ -64,6 +64,8 @@ function sourceLabel(source: string, t: IssuesT): string {
       return t(($) => $.comment.trigger_source_issue_assignee);
     case "mention_agent":
       return t(($) => $.comment.trigger_source_mention_agent);
+    case "mention_notify":
+      return t(($) => $.comment.trigger_source_mention_notify);
     case "mention_squad_leader":
       return t(($) => $.comment.trigger_source_mention_squad_leader);
     default:
@@ -155,14 +157,25 @@ export function CommentTriggerChips({
   // any interim chrome here reads as composer noise.
   if (recipients.length === 0 && blocked.length === 0 && !hasAllMembersMention) return null;
 
+  const mailboxRecipients = recipients.filter((entry) => entry.mailbox);
+  const unsupportedRecipients = recipients.filter((entry) => entry.unsupported);
+  const nativeRecipients = recipients.filter((entry) => !entry.mailbox && !entry.unsupported);
   const allowed =
-    recipients.length === 1 ? (
-      <SingleRecipientChip entry={recipients[0]!} onActionChange={onActionChange} t={t} />
-    ) : recipients.length > 1 ? (
-      <MultiRecipientChip recipients={recipients} onActionChange={onActionChange} t={t} />
+    nativeRecipients.length === 1 ? (
+      <SingleRecipientChip entry={nativeRecipients[0]!} onActionChange={onActionChange} t={t} />
+    ) : nativeRecipients.length > 1 ? (
+      <MultiRecipientChip recipients={nativeRecipients} onActionChange={onActionChange} t={t} />
+    ) : null;
+  const mailbox =
+    mailboxRecipients.length > 0 ? (
+      <MailboxRecipientChip recipients={mailboxRecipients} t={t} />
+    ) : null;
+  const unsupported =
+    unsupportedRecipients.length > 0 ? (
+      <UnsupportedRecipientChip recipients={unsupportedRecipients} t={t} />
     ) : null;
 
-  if (blocked.length === 0 && !hasAllMembersMention) return allowed;
+  if (blocked.length === 0 && !hasAllMembersMention && !mailbox && !unsupported) return allowed;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -172,6 +185,8 @@ export function CommentTriggerChips({
           <span className="truncate">{t(($) => $.comment.all_members_notice)}</span>
         </span>
       )}
+      {mailbox}
+      {unsupported}
       {allowed}
       {blocked.map((outcome) => (
         <BlockedTriggerChip
@@ -182,6 +197,77 @@ export function CommentTriggerChips({
         />
       ))}
     </div>
+  );
+}
+
+/**
+ * A future dispatch kind is neither a run nor a mailbox delivery. Render it as
+ * unavailable rather than borrowing the native "will start" language.
+ */
+function UnsupportedRecipientChip({
+  recipients,
+  t,
+}: {
+  recipients: RecipientEntry[];
+  t: IssuesT;
+}) {
+  const label =
+    recipients.length === 1
+      ? t(($) => $.comment.trigger_unsupported_target, { name: recipients[0]!.agent.name })
+      : t(($) => $.comment.trigger_unsupported_targets, { count: recipients.length });
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="inline-flex h-6 min-w-0 max-w-full animate-in fade-in items-center gap-1.5 rounded-md border border-transparent px-1.5 text-micro font-medium text-destructive"
+            aria-label={label}
+          >
+            <TriangleAlert className="size-3 shrink-0" />
+            <span className="truncate">{label}</span>
+          </span>
+        }
+      />
+      <TooltipContent side="top" className="max-w-72 text-caption">
+        {t(($) => $.comment.trigger_unsupported_hint)}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * An external target receives the comment in its session mailbox. It has no
+ * native run state or steer/skip choice, so it renders as a distinct delivery
+ * chip rather than borrowing the "will start" language.
+ */
+function MailboxRecipientChip({
+  recipients,
+  t,
+}: {
+  recipients: RecipientEntry[];
+  t: IssuesT;
+}) {
+  const label =
+    recipients.length === 1
+      ? t(($) => $.comment.trigger_mailbox_single_target, { name: recipients[0]!.agent.name })
+      : t(($) => $.comment.trigger_mailbox_multiple_targets, { count: recipients.length });
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <span
+            className="inline-flex h-6 min-w-0 max-w-full animate-in fade-in items-center gap-1.5 rounded-md border border-transparent px-1.5 text-micro font-medium text-muted-foreground"
+            aria-label={label}
+          >
+            <Mailbox className="size-3 shrink-0" />
+            <span className="truncate">{label}</span>
+          </span>
+        }
+      />
+      <TooltipContent side="top" className="max-w-72 text-caption">
+        {t(($) => $.comment.trigger_mailbox_hint)}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
