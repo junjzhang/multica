@@ -22,6 +22,11 @@ const taskItemSchema = z.object({
   updatedAt: z.string().optional(),
   acceptedAt: z.string().optional(),
   taskStatus: z.string().optional(),
+  executorName: z.string().optional(),
+  activityAt: z.string().optional(),
+  deliveryAt: z.string().optional(),
+  childCount: z.number().int().nonnegative().optional(),
+  closedChildCount: z.number().int().nonnegative().optional(),
 });
 
 export type SessionTaskItem = z.infer<typeof taskItemSchema>;
@@ -75,6 +80,11 @@ const wireItemSchema = z.object({
   updated_at: z.string().optional(),
   accepted_at: z.string().optional(),
   task_status: z.string().optional(),
+  executor_name: z.string().optional(),
+  activity_at: z.string().optional(),
+  delivery_at: z.string().optional(),
+  child_count: z.number().int().nonnegative().optional(),
+  closed_child_count: z.number().int().nonnegative().optional(),
 });
 
 /**
@@ -117,6 +127,11 @@ function toItem(item: z.infer<typeof wireItemSchema>): SessionTaskItem {
     ...(item.updated_at ? { updatedAt: item.updated_at } : {}),
     ...(item.accepted_at ? { acceptedAt: item.accepted_at } : {}),
     ...(item.task_status ? { taskStatus: item.task_status } : {}),
+    ...(item.executor_name ? { executorName: item.executor_name } : {}),
+    ...(item.activity_at ? { activityAt: item.activity_at } : {}),
+    ...(item.delivery_at ? { deliveryAt: item.delivery_at } : {}),
+    ...(item.child_count !== undefined ? { childCount: item.child_count } : {}),
+    ...(item.closed_child_count !== undefined ? { closedChildCount: item.closed_child_count } : {}),
   };
 }
 
@@ -163,17 +178,20 @@ export function taskSummaryLabel(view: SessionTasksView): { label: string; title
   if (view.state === "unavailable") {
     return { label: "Multica", title: `Multica tasks unavailable. ${view.reason}` };
   }
-  const total = view.owned.length + view.accepting.length + view.returning.length;
-  if (total === 0) {
-    return { label: "Multica", title: "No Multica tasks for this session" };
+  const blocked = view.owned.filter((item) => item.status === "blocked").length;
+  if (view.accepting.length > 0) {
+    return { label: `${view.accepting.length} to accept`, title: `${view.accepting.length} ${view.accepting.length === 1 ? "delivery" : "deliveries"} waiting for your acceptance` };
   }
-  const parts: string[] = [];
-  if (view.owned.length > 0) parts.push(`${view.owned.length} owned`);
-  if (view.accepting.length > 0) parts.push(`${view.accepting.length} to accept`);
-  if (view.returning.length > 0) parts.push(`${view.returning.length} to return`);
+  if (blocked > 0) {
+    return { label: `${blocked} blocked`, title: `${blocked} owned tasks blocked` };
+  }
+  const active = new Set([...view.owned, ...view.returning].filter((item) => item.statusCategory === "started").map((item) => item.issueId)).size;
+  if (active === 0) {
+    return { label: "Multica", title: view.owned.length || view.returning.length ? "No Multica tasks in progress" : "No Multica tasks for this session" };
+  }
   return {
-    label: `${total} task${total === 1 ? "" : "s"}`,
-    title: `Multica tasks: ${parts.join(", ")}`,
+    label: `${active} in progress`,
+    title: `${active} Multica tasks in progress`,
   };
 }
 

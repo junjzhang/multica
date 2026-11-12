@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
@@ -28,10 +29,15 @@ type SessionTaskItem struct {
 	StatusCategory string `json:"status_category"`
 	URL            string `json:"url,omitempty"`
 	// Role is why the item is on the list: executor, leader, acceptor, return.
-	Role       string `json:"role"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
-	AcceptedAt string `json:"accepted_at,omitempty"`
-	TaskStatus string `json:"task_status,omitempty"`
+	Role             string `json:"role"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+	AcceptedAt       string `json:"accepted_at,omitempty"`
+	TaskStatus       string `json:"task_status,omitempty"`
+	ExecutorName     string `json:"executor_name,omitempty"`
+	ActivityAt       string `json:"activity_at,omitempty"`
+	DeliveryAt       string `json:"delivery_at,omitempty"`
+	ChildCount       int32  `json:"child_count"`
+	ClosedChildCount int32  `json:"closed_child_count"`
 }
 
 // SessionTasksResponse groups the three obligations of the credential's agent:
@@ -184,6 +190,8 @@ func (h *Handler) sessionOwnedItems(r *http.Request, p *sessionTaskProjection, a
 			item.Role = "executor"
 		}
 		item.UpdatedAt = timestampToString(row.UpdatedAt)
+		item.ChildCount = row.ChildCount
+		item.ClosedChildCount = row.ClosedChildCount
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
@@ -211,6 +219,7 @@ func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjectio
 		item := p.item(uuidToString(row.ID), row.Number, row.Title, row.Status)
 		item.Role = "acceptor"
 		item.UpdatedAt = timestampToString(row.UpdatedAt)
+		item.DeliveryAt = state.Pending().CreatedAt.Format(time.RFC3339Nano)
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
@@ -236,8 +245,9 @@ func (h *Handler) sessionReturnItems(r *http.Request, p *sessionTaskProjection, 
 		item.UpdatedAt = timestampToString(row.IssueUpdatedAt)
 		item.AcceptedAt = timestampToString(row.AcceptedAt)
 		item.TaskStatus = row.TaskStatus
+		item.ExecutorName = row.ExecutorName
+		item.ActivityAt = timestampToString(row.ActivityAt)
 		items = append(items, item)
 	}
 	return items, len(rows) == sessionTaskLimit, nil
 }
-

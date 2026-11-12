@@ -72,6 +72,8 @@ func (q *Queries) ListSessionAcceptingContractIssues(ctx context.Context, arg Li
 const listSessionOwnedIssues = `-- name: ListSessionOwnedIssues :many
 
 SELECT i.id, i.number, i.title, i.status, i.updated_at,
+       (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id) AS child_count,
+       (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id AND issue_effective_status(child.workspace_id, child.status) IN ('done', 'cancelled')) AS closed_child_count,
        COALESCE(i.assignee_type = 'agent' AND i.assignee_id = $1, false)::boolean AS is_executor
 FROM issue i
 LEFT JOIN issue r ON r.id = COALESCE(i.leadership_root_issue_id, i.id) AND r.workspace_id = i.workspace_id
@@ -92,12 +94,14 @@ type ListSessionOwnedIssuesParams struct {
 }
 
 type ListSessionOwnedIssuesRow struct {
-	ID         pgtype.UUID        `json:"id"`
-	Number     int32              `json:"number"`
-	Title      string             `json:"title"`
-	Status     string             `json:"status"`
-	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
-	IsExecutor bool               `json:"is_executor"`
+	ID               pgtype.UUID        `json:"id"`
+	Number           int32              `json:"number"`
+	Title            string             `json:"title"`
+	Status           string             `json:"status"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ChildCount       int32              `json:"child_count"`
+	ClosedChildCount int32              `json:"closed_child_count"`
+	IsExecutor       bool               `json:"is_executor"`
 }
 
 // Read projections for the Paseo session task panel. Each read is scoped to
@@ -121,6 +125,8 @@ func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwn
 			&i.Title,
 			&i.Status,
 			&i.UpdatedAt,
+			&i.ChildCount,
+			&i.ClosedChildCount,
 			&i.IsExecutor,
 		); err != nil {
 			return nil, err
@@ -136,11 +142,13 @@ func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwn
 const listSessionPendingDelegationReturns = `-- name: ListSessionPendingDelegationReturns :many
 SELECT r.id AS delegation_return_id, r.issue_id, r.created_at AS accepted_at,
        i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
+       COALESCE(a.name, '')::text AS executor_name,
+       COALESCE(latest.started_at, r.created_at)::timestamptz AS activity_at,
        COALESCE(latest.task_status, '')::text AS task_status
 FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
 JOIN LATERAL (
-    SELECT t.status AS task_status
+    SELECT t.status AS task_status, t.agent_id, t.started_at
     FROM agent_task_delegation_return l
     JOIN agent_task_queue t ON t.id = l.task_id
     WHERE l.delegation_return_id = r.id
@@ -154,6 +162,7 @@ JOIN LATERAL (
     ORDER BY t.created_at DESC, t.id DESC
     LIMIT 1
 ) latest ON true
+LEFT JOIN agent a ON a.id = latest.agent_id AND a.workspace_id = i.workspace_id
 WHERE r.workspace_id = $1
   AND r.dispatcher_agent_id = $2
   AND r.external_session_id = $3
@@ -178,6 +187,8 @@ type ListSessionPendingDelegationReturnsRow struct {
 	Title              string             `json:"title"`
 	IssueStatus        string             `json:"issue_status"`
 	IssueUpdatedAt     pgtype.Timestamptz `json:"issue_updated_at"`
+	ExecutorName       string             `json:"executor_name"`
+	ActivityAt         pgtype.Timestamptz `json:"activity_at"`
 	TaskStatus         string             `json:"task_status"`
 }
 
@@ -207,6 +218,8 @@ func (q *Queries) ListSessionPendingDelegationReturns(ctx context.Context, arg L
 			&i.Title,
 			&i.IssueStatus,
 			&i.IssueUpdatedAt,
+			&i.ExecutorName,
+			&i.ActivityAt,
 			&i.TaskStatus,
 		); err != nil {
 			return nil, err

@@ -99,9 +99,12 @@ describe("session task views", () => {
   it("labels the composer pill for work, idle, disconnected and unavailable sessions", () => {
     const ready = toTasksView(makeTasksWire(), CHECKED_AT);
     expect(taskSummaryLabel(ready)).toEqual({
-      label: "3 tasks",
-      title: "Multica tasks: 1 owned, 1 to accept, 1 to return",
+      label: "1 to accept",
+      title: "1 delivery waiting for your acceptance",
     });
+    const active = { ...ready, accepting: [] };
+    expect(taskSummaryLabel(active).label).toBe("1 in progress");
+    expect(taskSummaryLabel({ ...active, owned: [item({ status: "blocked" })] }).label).toBe("1 blocked");
     expect(taskSummaryLabel(taskSummaryZero())).toEqual({
       label: "Multica",
       title: "No Multica tasks for this session",

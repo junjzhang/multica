@@ -273,6 +273,11 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	if executorItem.Status != "in_progress" || executorItem.StatusCategory != "started" {
 		t.Fatalf("executor status = %q/%q, want in_progress in the started category", executorItem.Status, executorItem.StatusCategory)
 	}
+	for _, item := range resp.Owned {
+		if item.IssueID == rootIssue && (item.ChildCount != 1 || item.ClosedChildCount != 0) {
+			t.Fatalf("root child counts = %d/%d, want 0/1", item.ClosedChildCount, item.ChildCount)
+		}
+	}
 
 	acceptingRoles := sessionTaskRoles(resp.Accepting)
 	if acceptingRoles[acceptingIssue] != "acceptor" {
@@ -283,6 +288,11 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	}
 	if _, ok := acceptingRoles[reassignedIssue]; ok {
 		t.Fatalf("contract whose current acceptor moved appeared: %+v", resp.Accepting)
+	}
+	for _, item := range resp.Accepting {
+		if item.IssueID == acceptingIssue && item.DeliveryAt == "" {
+			t.Fatal("pending delivery has no delivery time")
+		}
 	}
 
 	returningByIssue := map[string]SessionTaskItem{}
@@ -305,6 +315,9 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	pending := returningByIssue[returnIssue]
 	if pending.Role != "return" || pending.TaskStatus != "running" || pending.AcceptedAt == "" {
 		t.Fatalf("returning item = %+v, want role, task status and accepted time", pending)
+	}
+	if pending.ExecutorName != "Session Tasks Worker "+suffix || pending.ActivityAt == "" {
+		t.Fatalf("returning executor/time = %q/%q", pending.ExecutorName, pending.ActivityAt)
 	}
 	if reopened := returningByIssue[reopenedIssue]; reopened.TaskStatus != "queued" {
 		t.Fatalf("reopened returning item = %+v, want the follow-up run status", reopened)
