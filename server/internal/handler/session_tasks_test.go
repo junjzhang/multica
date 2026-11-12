@@ -231,6 +231,14 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	pendingTakeoverReturn := dispatchReturn(pendingTakeoverIssue, agentID, sessionID)
 	pendingTakeoverTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": pendingTakeoverIssue, "status": "running", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, takeover_id) VALUES ($1, $2, gen_random_uuid())", pendingTakeoverTask, pendingTakeoverReturn)
+	waitingIssues := []string{}
+	for _, status := range []string{"waiting_local_directory", "deferred"} {
+		issue := dbfx.Issue(t, "session tasks "+status+suffix)
+		address := dispatchReturn(issue, agentID, sessionID)
+		task := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": issue, "status": status, "runtime_id": testRuntimeID})
+		dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", task, address)
+		waitingIssues = append(waitingIssues, issue)
+	}
 
 	code, resp := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, true, sessionID))
 	if code != http.StatusOK {
@@ -281,10 +289,10 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	for _, item := range resp.Returning {
 		returningByIssue[item.IssueID] = item
 	}
-	if len(resp.Returning) != 3 {
-		t.Fatalf("returning = %+v, want the three pending issues", resp.Returning)
+	if len(resp.Returning) != 5 {
+		t.Fatalf("returning = %+v, want the five pending issues", resp.Returning)
 	}
-	for _, want := range []string{returnIssue, reopenedIssue, pendingTakeoverIssue} {
+	for _, want := range append([]string{returnIssue, reopenedIssue, pendingTakeoverIssue}, waitingIssues...) {
 		if _, ok := returningByIssue[want]; !ok {
 			t.Fatalf("returning %s missing: %+v", want, resp.Returning)
 		}

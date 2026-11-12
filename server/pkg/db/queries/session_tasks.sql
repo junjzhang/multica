@@ -50,7 +50,7 @@ JOIN LATERAL (
     JOIN agent_task_queue t ON t.id = l.task_id
     WHERE l.delegation_return_id = r.id
       AND l.materialized_at IS NULL
-      AND t.status IN ('queued', 'dispatched', 'running', 'completed', 'failed')
+      AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'deferred', 'completed', 'failed')
       AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
       AND NOT EXISTS (
           SELECT 1 FROM delegation_result_takeover takeover
