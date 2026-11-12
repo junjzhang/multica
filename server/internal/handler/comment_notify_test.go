@@ -228,3 +228,13 @@ func TestCommentNotifyMixedFreshAndFold(t *testing.T) {
 		})
 	}
 }
+
+func TestCommentNotifyPreviewMode(t *testing.T) {
+	target, _ := executableTarget(t, "notify-preview")
+	issue := dbfx.Issue(t, "Notification preview")
+	preview := previewCommentTriggersForTest(t, issue, map[string]any{"content": fmt.Sprintf("[@T](mention://agent-notify/%s)", target)})
+	requirePreviewAgents(t, preview, target)
+	if preview.Agents[0].Mode != "notify" || preview.Agents[0].Source != string(commentTriggerSourceMentionNotify) {
+		t.Fatalf("preview = %+v", preview.Agents[0])
+	}
+}
