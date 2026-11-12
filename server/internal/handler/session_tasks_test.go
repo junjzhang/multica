@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
 
@@ -181,7 +183,7 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	acceptedReturn := dispatchReturn(returnIssue, agentID, sessionID)
 	returnTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnIssue, "status": "running", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", returnTask, acceptedReturn)
-	// Accepted with no worker run yet: still pending.
+	// An address with no worker run is not an outstanding result.
 	acceptedIssue := dbfx.Issue(t, "session tasks accepted "+suffix)
 	dispatchReturn(acceptedIssue, agentID, sessionID)
 	// Returned: the latest run materialized its result.
@@ -279,15 +281,15 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	for _, item := range resp.Returning {
 		returningByIssue[item.IssueID] = item
 	}
-	if len(resp.Returning) != 4 {
-		t.Fatalf("returning = %+v, want the four pending issues", resp.Returning)
+	if len(resp.Returning) != 3 {
+		t.Fatalf("returning = %+v, want the three pending issues", resp.Returning)
 	}
-	for _, want := range []string{returnIssue, acceptedIssue, reopenedIssue, pendingTakeoverIssue} {
+	for _, want := range []string{returnIssue, reopenedIssue, pendingTakeoverIssue} {
 		if _, ok := returningByIssue[want]; !ok {
 			t.Fatalf("returning %s missing: %+v", want, resp.Returning)
 		}
 	}
-	for _, unwanted := range []string{returnedIssue, otherSessionIssue, otherDispatcherIssue, cancelledIssue, takeoverIssue} {
+	for _, unwanted := range []string{acceptedIssue, returnedIssue, otherSessionIssue, otherDispatcherIssue, cancelledIssue, takeoverIssue} {
 		if _, ok := returningByIssue[unwanted]; ok {
 			t.Fatalf("returning includes %s: %+v", unwanted, resp.Returning)
 		}
@@ -337,4 +339,71 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	if code, _ := getSessionTasks(t, foreignReq); code != http.StatusNotFound {
 		t.Fatalf("foreign workspace agent status = %d, want 404", code)
 	}
+}
+
+func TestSessionReturnsFollowDelegationLifecycle(t *testing.T) {
+	ctx := context.Background()
+	dispatcher, session, owner := externalAgentFixture(t, "Session lifecycle", "session-lifecycle-daemon")
+	var hostSession string
+	dbfx.QueryRow(t, `SELECT session_id FROM external_agent_session WHERE id=$1`, session).Scan(&hostSession)
+	token := externalTokenFixture(t, dispatcher, owner, time.Now().Add(time.Hour))
+	target, _ := executableTarget(t, "session-lifecycle")
+	create := func(assignee string) string {
+		t.Helper()
+		title := fmt.Sprintf("session lifecycle %d", time.Now().UnixNano())
+		bumpIssueCounter(t)
+		w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), http.MethodPost, "/api/issues", createIssueBody(title, assignee), nil, func(r *http.Request) { r.Header.Set(ReturnSessionHeader, hostSession) })
+		if w.Code != http.StatusCreated {
+			t.Fatalf("create: %d %s", w.Code, w.Body.String())
+		}
+		id, _ := issueIDByTitle(t, title)
+		cleanupDelegatedIssue(t, id)
+		return id
+	}
+	assertPending := func(issue string, want bool) {
+		t.Helper()
+		code, response := getSessionTasks(t, sessionTasksRequest(owner, dispatcher, true, session))
+		if code != http.StatusOK {
+			t.Fatalf("session tasks: %d", code)
+		}
+		_, got := sessionTaskRoles(response.Returning)[issue]
+		if got != want {
+			t.Fatalf("issue %s pending=%v want=%v: %+v", issue, got, want, response.Returning)
+		}
+	}
+	self := create(dispatcher)
+	assertPending(self, false)
+	issue := create(target)
+	assertPending(issue, true)
+	resultID := latestTaskIDFor(t, issue, target)
+	result, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(resultID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishResultFixture(t, result)
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(issue, false)
+	rerun := func() {
+		t.Helper()
+		w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.RerunIssue), http.MethodPost, "/api/issues/"+issue+"/rerun", map[string]any{}, map[string]string{"id": issue}, func(r *http.Request) { r.Header.Set(ReturnSessionHeader, hostSession) })
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("rerun: %d %s", w.Code, w.Body.String())
+		}
+	}
+	rerun()
+	assertPending(issue, true)
+	newID := latestTaskIDFor(t, issue, target)
+	if _, err := testHandler.TaskService.CancelTask(service.WithTerminalReport(ctx), parseUUID(newID)); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(issue, false)
+	rerun()
+	assertPending(issue, true)
+	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.UpdateIssue), http.MethodPatch, "/api/issues/"+issue, map[string]any{"status": "done"}, map[string]string{"id": issue}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("close: %d %s", w.Code, w.Body.String())
+	}
+	assertPending(issue, false)
 }

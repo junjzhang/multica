@@ -37,19 +37,25 @@ LIMIT sqlc.arg('row_limit')::int;
 -- name: ListSessionPendingDelegationReturns :many
 -- Accepted delegation returns this session dispatched and is still waiting on.
 -- The return row is the dispatcher's accepted address for one issue, so each
--- issue contributes at most one item. A delegation is "returned" once the
--- latest run carrying that address has materialized its result; a retry or a
--- follow-up dispatch makes it pending again.
+-- issue contributes at most one item. Only actual, unresolved run obligations
+-- count; an accepted address alone does not imply an outstanding result.
 SELECT r.id AS delegation_return_id, r.issue_id, r.created_at AS accepted_at,
        i.number, i.title, i.status AS issue_status, i.updated_at AS issue_updated_at,
        COALESCE(latest.task_status, '')::text AS task_status
 FROM issue_delegation_return r
 JOIN issue i ON i.id = r.issue_id AND i.workspace_id = r.workspace_id
-LEFT JOIN LATERAL (
-    SELECT t.status AS task_status, l.materialized_at
+JOIN LATERAL (
+    SELECT t.status AS task_status
     FROM agent_task_delegation_return l
     JOIN agent_task_queue t ON t.id = l.task_id
     WHERE l.delegation_return_id = r.id
+      AND l.materialized_at IS NULL
+      AND t.status IN ('queued', 'dispatched', 'running', 'completed', 'failed')
+      AND NOT EXISTS (SELECT 1 FROM agent_task_queue child WHERE child.retry_of_task_id = t.id)
+      AND NOT EXISTS (
+          SELECT 1 FROM delegation_result_takeover takeover
+          WHERE takeover.result_task_id = t.id AND takeover.from_return_id = r.id
+      )
     ORDER BY t.created_at DESC, t.id DESC
     LIMIT 1
 ) latest ON true
@@ -57,7 +63,6 @@ WHERE r.workspace_id = @workspace_id
   AND r.dispatcher_agent_id = @agent_id
   AND r.external_session_id = @external_session_id
   AND r.is_current
-  AND issue_effective_status(i.workspace_id, i.status) <> 'cancelled'
-  AND (latest.task_status IS NULL OR latest.materialized_at IS NULL)
+  AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 ORDER BY r.created_at DESC, r.id
 LIMIT sqlc.arg('row_limit')::int;
