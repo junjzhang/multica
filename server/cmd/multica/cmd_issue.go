@@ -343,6 +343,7 @@ var issueCommentListCmd = &cobra.Command{
 var issueCommentAddCmd = &cobra.Command{
 	Use:   "add <issue-id>",
 	Short: "Add a comment to an issue",
+	Long:  "Add a comment. Use [@Name](mention://agent/<uuid>) to delegate or [@Name](mention://agent-notify/<uuid>) to wake an agent without adding a result return. If both target the same agent, delegation wins.",
 	Args:  exactArgs(1),
 	RunE:  runIssueCommentAdd,
 }
