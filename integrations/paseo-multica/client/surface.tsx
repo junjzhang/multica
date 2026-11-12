@@ -6,8 +6,8 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { openWeb } from "../shared/web";
 import { resetResidentPage, ResidentWebPage } from "./web-page";
 
-export function MulticaSurface({ host, theme, layout, path }: PluginSurfaceProps & { path?: string }) {
-  const pageId = path ? `${host.id}:${path}` : host.id;
+export function MulticaSurface({ host, theme, layout, path, pageKey }: PluginSurfaceProps & { path?: string; pageKey?: string }) {
+  const pageId = path ? `${host.id}:${pageKey}:${path}` : host.id;
   const getLink = useRpc(openWeb);
   const [loadError, setLoadError] = useState("");
   const [revision, setRevision] = useState(0);

@@ -48,3 +48,26 @@ it("registers a static panel, restores state after reload, switches and goes bac
   await act(async () => { renderer.unmount(); });
   panels.dispose();
 });
+
+it("updates every mounted instance and keeps the remaining listener after one closes", async () => {
+  const client = { addWorkspacePanel: vi.fn(() => vi.fn()), openPanel: vi.fn() } as unknown as PluginClientContext;
+  const panels = createTaskPanels(client);
+  const Component = vi.mocked(client.addWorkspacePanel).mock.calls[0]![0].Component as React.ComponentType<PluginWorkspacePanelProps>;
+  const states: unknown[] = [{ paths: [a] }, { paths: [a] }];
+  function Host({ index }: { index: number }) {
+    const [state, setState] = useState(states[index]);
+    return <Component {...({ workspaceId: "ws", host: { id: "host", label: "host" }, layout: { compact: false, platform: "web" }, theme: { colors: { surface0: "white", foreground: "black", foregroundMuted: "gray", accent: "blue" } }, tab: { state, setState: (next: unknown) => { states[index] = next; setState(next); }, setModified: () => {} } } as unknown as PluginWorkspacePanelProps)} />;
+  }
+  let first: ReactTestRenderer, second: ReactTestRenderer;
+  await act(async () => { first = create(<Host index={0} />); second = create(<Host index={1} />); });
+  await act(async () => { panels.open("ws", link(b)); });
+  expect(states).toEqual([{ paths: [a, b] }, { paths: [a, b] }]);
+  const firstPage = first!.root.findByType(vi.mocked((await import("../client/surface")).MulticaSurface));
+  const secondPage = second!.root.findByType(vi.mocked((await import("../client/surface")).MulticaSurface));
+  expect(firstPage.props.pageKey).not.toBe(secondPage.props.pageKey);
+  await act(async () => { second!.unmount(); });
+  await act(async () => { panels.open("ws", link(a)); });
+  expect(states[0]).toEqual({ paths: [a, b, a] });
+  await act(async () => { first!.unmount(); });
+  panels.dispose();
+});
