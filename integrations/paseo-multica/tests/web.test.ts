@@ -80,3 +80,18 @@ describe("web sign-in link", () => {
     }
   });
 });
+
+describe("issue deep links", () => {
+  it("returns a same-workspace path and keeps the sign-in link separate", async () => {
+    const config = await configFile({ url: "https://multica.example", key: KEY, externalUrl: "https://external.example" });
+    expect(await webSignInLink(config, "/acme/issues/WORK-1", "acme")).toEqual({
+      url: "https://multica.example/acme/issues/WORK-1",
+      externalUrl: "https://external.example/acme/issues/WORK-1",
+      signInUrl: `https://multica.example/paseo-login?k=${KEY}`,
+    });
+  });
+  it.each(["https://evil.test/acme/issues/WORK-1", "//evil.test/acme/issues/WORK-1", "/acme/issues/../secret", "/acme/issues/%2e%2e", "/acme/issues/WORK-1?x=1", "/other/issues/WORK-1", "/acme/issues/WORK-1#x", "/acme/issues/a\\b"])("rejects %s", async (path) => {
+    const config = await configFile({ url: "https://multica.example", key: KEY });
+    await expect(webSignInLink(config, path, "acme")).rejects.toThrow(/Invalid/);
+  });
+});

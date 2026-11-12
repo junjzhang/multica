@@ -6,13 +6,14 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { openWeb } from "../shared/web";
 import { resetResidentPage, ResidentWebPage } from "./web-page";
 
-export function MulticaSurface({ host, theme, layout }: PluginSurfaceProps) {
+export function MulticaSurface({ host, theme, layout, path }: PluginSurfaceProps & { path?: string }) {
+  const pageId = path ? `${host.id}:${path}` : host.id;
   const getLink = useRpc(openWeb);
   const [loadError, setLoadError] = useState("");
   const [revision, setRevision] = useState(0);
   const link = useQuery({
-    queryKey: ["multica", "web", host.id],
-    queryFn: () => getLink({}),
+    queryKey: ["multica", "web", host.id, path],
+    queryFn: () => getLink(path ? { path } : {}),
     retry: false,
     gcTime: Infinity,
     staleTime: Infinity,
@@ -32,18 +33,18 @@ export function MulticaSurface({ host, theme, layout }: PluginSurfaceProps) {
 
   const failed = useCallback(() => setLoadError("Multica could not be loaded. Check the server, then retry."), []);
   const retry = useCallback(() => {
-    resetResidentPage(host.id);
+    resetResidentPage(pageId);
     setLoadError("");
     setRevision((value) => value + 1);
     void refetch();
-  }, [host.id, refetch]);
+  }, [pageId, refetch]);
   const openInBrowser = useCallback(() => {
     if (link.data)
       void openExternalUrl(link.data.externalUrl).catch(() => setLoadError("The browser could not be opened."));
   }, [link.data]);
 
   if (link.data && !error && Platform.OS === "web") {
-    return <ResidentWebPage key={revision} hostId={host.id} url={link.data.url} onError={failed} />;
+    return <ResidentWebPage key={revision} hostId={pageId} url={link.data.url} signInUrl={link.data.signInUrl} onError={failed} />;
   }
   return (
     <View style={styles.container}>

@@ -20,7 +20,7 @@ for (const mode of ["light", "dark"]) {
     const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, `${mode}-${key}`]));
     const props = { item: { type: "plugin", kind: "multica-delivery", version: 1, data }, theme: { colors } } as unknown as PluginTimelineItemProps<DeliveryData>;
     let renderer: ReactTestRenderer;
-    await act(async () => { renderer = create(<DeliveryCard {...props} />); });
+    await act(async () => { renderer = create(<DeliveryCard {...props} openTask={vi.fn()} />); });
     const before = JSON.stringify(renderer!.toJSON());
     expect(before).toContain("WORK-266");
     expect(before).toContain("A task");
