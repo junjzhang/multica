@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Agent, AgentRuntime } from "@multica/core/types";
 import { useAgentPresenceDetail } from "@multica/core/agents";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { useWorkspaceId } from "@multica/core/hooks";
 import {
   deriveRuntimeHealth,
@@ -57,6 +58,7 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
     ? members.find((m) => m.user_id === agent.owner_id) ?? null
     : null;
   const runtime = runtimes.find((r) => r.id === agent.runtime_id) ?? null;
+  const executionKind = agentExecutionKind(agent);
   const isArchived = !!agent.archived_at;
   const initials = agent.name
     .split(" ")
@@ -95,9 +97,16 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
               </span>
             )}
           </div>
-          {!isArchived && (
-            <AgentAvailabilityLine wsId={wsId} agentId={agent.id} />
-          )}
+          {!isArchived &&
+            (executionKind === "managed" ? (
+              <AgentAvailabilityLine wsId={wsId} agentId={agent.id} />
+            ) : (
+              <div className="mt-0.5 text-caption text-muted-foreground">
+                {executionKind === "external"
+                  ? t(($) => $.profile_card.session_label)
+                  : t(($) => $.row.execution_unknown)}
+              </div>
+            ))}
         </div>
         {!isArchived && (
           <AppLink
@@ -121,11 +130,24 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
           are surfaced here so a quick hover answers "which model is this
           agent running?" without opening the detail page. */}
       <div className="flex flex-col gap-1.5 text-caption">
-        <RuntimeRow agent={agent} runtime={runtime} />
-        <ModelRow model={agent.model} thinkingLevel={agent.thinking_level} />
-        {agent.skills.length > 0 && (
-          <SkillsRow skills={agent.skills.map((s) => s.name)} />
-        )}
+        {executionKind === "managed" ? (
+          <>
+            <RuntimeRow agent={agent} runtime={runtime} />
+            <ModelRow model={agent.model} thinkingLevel={agent.thinking_level} />
+            {agent.skills.length > 0 && (
+              <SkillsRow skills={agent.skills.map((s) => s.name)} />
+            )}
+          </>
+        ) : executionKind === "external" ? (
+          <MetaRow
+            label={t(($) => $.profile_card.session_label)}
+            value={
+              agent.external_session?.display_name ||
+              agent.external_session?.session_id ||
+              t(($) => $.row.external_session_unavailable)
+            }
+          />
+        ) : null}
         {owner && <MetaRow label={t(($) => $.profile_card.owner_label)} value={owner.name} />}
       </div>
     </div>

@@ -5,7 +5,10 @@ import { Lock, UserMinus } from "lucide-react";
 import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@multica/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
-import { isAgentRuntimeBound } from "@multica/core/agents";
+import {
+  agentExecutionKind,
+  agentNeedsRuntime,
+} from "@multica/core/agents/execution-kind";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -20,6 +23,8 @@ import {
   PICKER_TRIGGER_CLASS,
 } from "./property-picker";
 import { useT } from "../../../i18n";
+import { AgentSessionChoices } from "../agent-session-choices";
+import { Button } from "@multica/ui/components/ui/button";
 import { matchesPinyin } from "../../../editor/extensions/pinyin-match";
 
 /**
@@ -109,6 +114,8 @@ function AssigneePickerImpl({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
+  const [recipient, setRecipient] = useState<{ type: "agent" | "squad"; id: string; agentId: string } | null>(null);
+  const [sessionId, setSessionId] = useState("");
   const user = useAuthStore((s) => s.user);
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
@@ -141,11 +148,30 @@ function AssigneePickerImpl({
   const filteredSquads = squads
     .filter((s) => !s.archived_at && (s.name.toLowerCase().includes(query) || matchesPinyin(s.name, query)))
     .sort((a, b) => getFreq("squad", b.id) - getFreq("squad", a.id));
-  const runnableAgentIds = new Set(
-    agents
-      .filter((agent) => !agent.archived_at && isAgentRuntimeBound(agent))
-      .map((agent) => agent.id),
+  // Execution boundary per agent, not mere runtime presence: an external
+  // identity needs no runtime and keeps its session presentation, an unknown
+  // kind exposes no executable action, and a managed agent without a runtime
+  // keeps its real repair signal.
+  const liveAgentsById = new Map(
+    agents.filter((agent) => !agent.archived_at).map((agent) => [agent.id, agent]),
   );
+  const agentActionState = (agent: Agent) => {
+    const kind = agentExecutionKind(agent);
+    if (kind === "unknown") return "unsupported" as const;
+    if (kind === "external") return "ready" as const;
+    return agentNeedsRuntime(agent) ? ("needs-runtime" as const) : ("ready" as const);
+  };
+
+  const chooseAssignee = (type: "agent" | "squad", id: string, agent: Agent) => {
+    if (agentExecutionKind(agent) === "external") {
+      setFilter("");
+      setSessionId("");
+      setRecipient({ type, id, agentId: agent.id });
+      return;
+    }
+    onUpdate({ assignee_type: type, assignee_id: id });
+    setOpen(false);
+  };
 
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
@@ -160,11 +186,11 @@ function AssigneePickerImpl({
       open={open}
       onOpenChange={(v: boolean) => {
         setOpen(v);
-        if (!v) setFilter("");
+        if (!v) { setFilter(""); setRecipient(null); setSessionId(""); }
       }}
       width="w-64"
       align={align}
-      searchable
+      searchable={!recipient}
       searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
       onSearchChange={setFilter}
       triggerRender={triggerRender}
@@ -180,6 +206,25 @@ function AssigneePickerImpl({
         )
       }
     >
+      {recipient ? (
+        <div className="space-y-2 p-2">
+          <p className="text-caption font-medium">{t(($) => $.detail.external_binding_choose_title)}</p>
+          <AgentSessionChoices agentId={recipient.agentId} selected={sessionId} onSelect={setSessionId} />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" size="sm" variant="outline" onClick={() => setRecipient(null)}>{t(($) => $.detail.external_binding_cancel)}</Button>
+            <Button type="button" size="sm" disabled={!sessionId} onClick={() => {
+              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, recipient_session_id: sessionId });
+              setRecipient(null);
+              setOpen(false);
+            }}>{t(($) => $.detail.external_binding_save)}</Button>
+            <Button type="button" size="sm" variant="ghost" className="w-full" onClick={() => {
+              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, suppress_run: true });
+              setRecipient(null);
+              setOpen(false);
+            }}>{t(($) => $.pickers.assignee.assign_without_starting)}</Button>
+          </div>
+        </div>
+      ) : <>
       {/* Unassigned — always the first row, search active or not. Every
           picker in the app puts the empty value there, so "clear this field"
           never moves. */}
@@ -230,8 +275,9 @@ function AssigneePickerImpl({
                   ? memberRole
                   : null,
             });
-            const runtimeBound = isAgentRuntimeBound(a);
-            const allowed = decision.allowed && runtimeBound;
+            const actionState = agentActionState(a);
+            const kind = agentExecutionKind(a);
+            const allowed = decision.allowed && actionState === "ready";
             return (
               <PickerItem
                 key={a.id}
@@ -240,21 +286,26 @@ function AssigneePickerImpl({
                 tooltip={
                   !decision.allowed
                     ? decision.message
-                    : !runtimeBound
-                      ? t(($) => $.pickers.assignee.agent_runtime_required)
-                      : undefined
+                    : actionState === "unsupported"
+                      ? t(($) => $.pickers.assignee.agent_execution_unsupported)
+                      : actionState === "needs-runtime"
+                        ? t(($) => $.pickers.assignee.agent_runtime_required)
+                        : undefined
                 }
                 onClick={() => {
                   if (!allowed) return;
-                  onUpdate({
-                    assignee_type: "agent",
-                    assignee_id: a.id,
-                  });
-                  setOpen(false);
+                  chooseAssignee("agent", a.id, a);
                 }}
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
                 <span className={`truncate ${allowed ? "" : "text-muted-foreground"}`}>{a.name}</span>
+                {kind === "external" && (
+                  <span className="min-w-0 truncate text-micro text-muted-foreground">
+                    {a.external_session?.display_name ||
+                      a.external_session?.session_id ||
+                      t(($) => $.pickers.assignee.agent_external_session)}
+                  </span>
+                )}
                 {a.visibility === "private" && (
                   <Lock className="ml-auto h-3 w-3 text-muted-foreground" />
                 )}
@@ -269,24 +320,24 @@ function AssigneePickerImpl({
       {filteredSquads.length > 0 && (
         <PickerSection label={t(($) => $.pickers.assignee.squads_group)}>
           {filteredSquads.map((s) => {
-            const runtimeBound = runnableAgentIds.has(s.leader_id);
+            const leader = liveAgentsById.get(s.leader_id);
+            const actionState = leader ? agentActionState(leader) : "unsupported";
+            const squadAllowed = !!leader && actionState === "ready";
             return (
               <PickerItem
                 key={s.id}
                 selected={isSelected("squad", s.id)}
-                disabled={!runtimeBound}
+                disabled={!squadAllowed}
                 tooltip={
-                  runtimeBound
+                  squadAllowed
                     ? undefined
-                    : t(($) => $.pickers.assignee.squad_runtime_required)
+                    : actionState === "unsupported"
+                      ? t(($) => $.pickers.assignee.squad_execution_unsupported)
+                      : t(($) => $.pickers.assignee.squad_runtime_required)
                 }
                 onClick={() => {
-                  if (!runtimeBound) return;
-                  onUpdate({
-                    assignee_type: "squad",
-                    assignee_id: s.id,
-                  });
-                  setOpen(false);
+                  if (!squadAllowed) return;
+                  chooseAssignee("squad", s.id, leader!);
                 }}
               >
                 <ActorAvatar actorType="squad" actorId={s.id} size="sm" />
@@ -301,6 +352,7 @@ function AssigneePickerImpl({
         filteredAgents.length === 0 &&
         filteredSquads.length === 0 &&
         filter && <PickerEmpty />}
+      </>}
     </PropertyPicker>
   );
 }

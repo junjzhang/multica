@@ -131,15 +131,32 @@ type AgentResponse struct {
 	// members infer another member's integration footprint. Redacted to
 	// `nil` + `composio_toolkit_allowlist_redacted=true` for non-owners,
 	// mirroring the existing mcp_config redaction contract.
-	ComposioToolkitAllowlist         []string               `json:"composio_toolkit_allowlist,omitempty"`
-	ComposioToolkitAllowlistRedacted bool                   `json:"composio_toolkit_allowlist_redacted,omitempty"`
-	OwnerID                          *string                `json:"owner_id"`
-	Skills                           []AgentSkillSummary    `json:"skills"`
-	DisabledRuntimeSkills            []DisabledRuntimeSkill `json:"disabled_runtime_skills"`
-	CreatedAt                        string                 `json:"created_at"`
-	UpdatedAt                        string                 `json:"updated_at"`
-	ArchivedAt                       *string                `json:"archived_at"`
-	ArchivedBy                       *string                `json:"archived_by"`
+	ComposioToolkitAllowlist         []string `json:"composio_toolkit_allowlist,omitempty"`
+	ComposioToolkitAllowlistRedacted bool     `json:"composio_toolkit_allowlist_redacted,omitempty"`
+	OwnerID                          *string  `json:"owner_id"`
+	// ExecutionKind distinguishes a Multica-managed agent from one whose
+	// execution lives in a host session (Paseo). Missing/unknown on the wire
+	// is treated as managed by old clients; runtime_bound=false alone still
+	// means "managed agent waiting for a runtime".
+	ExecutionKind string `json:"execution_kind"`
+	// ExternalSession is the concrete host session behind an external agent.
+	// Null for managed agents. host_id is the Paseo server/connection id (not
+	// a hostname) and session_id is the Paseo agent id (not the underlying
+	// Codex thread id).
+	ExternalSession *ExternalSessionResponse `json:"external_session"`
+	// ExternalTemplate is the host identity this session belongs to. Null for
+	// legacy per-session agents and managed agents; old clients ignore it.
+	ExternalTemplate *ExternalAgentTemplateResponse `json:"external_template"`
+	// ExternalSessionCount is how many registered host sessions this agent
+	// owns. Undefined (0) on responses that do not load sessions; the agents
+	// list uses it to offer the expandable session view.
+	ExternalSessionCount  int                    `json:"external_session_count,omitempty"`
+	Skills                []AgentSkillSummary    `json:"skills"`
+	DisabledRuntimeSkills []DisabledRuntimeSkill `json:"disabled_runtime_skills"`
+	CreatedAt             string                 `json:"created_at"`
+	UpdatedAt             string                 `json:"updated_at"`
+	ArchivedAt            *string                `json:"archived_at"`
+	ArchivedBy            *string                `json:"archived_by"`
 }
 
 // runtimeConfigGatewayTokenMask is the placeholder the API substitutes for
@@ -207,6 +224,10 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 	// owner-only gate below can decide.
 	composioAllowlist := a.ComposioToolkitAllowlist
 
+	executionKind := a.ExecutionKind
+	if executionKind == "" {
+		executionKind = "managed"
+	}
 	return AgentResponse{
 		ID:                       uuidToString(a.ID),
 		WorkspaceID:              uuidToString(a.WorkspaceID),
@@ -235,6 +256,9 @@ func (h *Handler) agentToResponse(a db.Agent) AgentResponse {
 		ServiceTier:              a.ServiceTier.String,
 		ComposioToolkitAllowlist: composioAllowlist,
 		OwnerID:                  uuidToPtr(a.OwnerID),
+		ExecutionKind:            executionKind,
+		ExternalSession:          nil,
+		ExternalTemplate:         externalTemplateToResponse(a),
 		Skills:                   []AgentSkillSummary{},
 		DisabledRuntimeSkills:    decodeDisabledRuntimeSkills(a.DisabledRuntimeSkills),
 		CreatedAt:                timestampToString(a.CreatedAt),
@@ -368,9 +392,18 @@ type TaskCancellationActor struct {
 }
 
 type AgentTaskResponse struct {
-	StartClaimSupported      bool                   `json:"start_claim_supported,omitempty"`
-	CancelledByCommentChange bool                   `json:"cancelled_by_comment_change,omitempty"`
-	CancelledBy              *TaskCancellationActor `json:"cancelled_by,omitempty"`
+	AcceptedReturns          *[]protocol.AcceptedReturn     `json:"accepted_returns,omitempty"`
+	SessionPinGeneration     string                         `json:"session_pin_generation,omitempty"`
+	ResultNotifications      *[]ResultNotificationResponse  `json:"result_notifications,omitempty"`
+	RequireResume            bool                           `json:"require_resume,omitempty"`
+	BackgroundWait           *protocol.ManagedWait          `json:"background_wait,omitempty"`
+	MessageSeqOffset         int32                          `json:"message_seq_offset,omitempty"`
+	UsageBaseline            []TaskUsageData                `json:"usage_baseline,omitempty"`
+	DelegationResult         *protocol.DelegationResultTurn `json:"delegation_result,omitempty"`
+	ResourceControlRequired  bool                           `json:"resource_control_required,omitempty"`
+	StartClaimSupported      bool                           `json:"start_claim_supported,omitempty"`
+	CancelledByCommentChange bool                           `json:"cancelled_by_comment_change,omitempty"`
+	CancelledBy              *TaskCancellationActor         `json:"cancelled_by,omitempty"`
 
 	ID                   string                 `json:"id"`
 	AgentID              string                 `json:"agent_id"`
@@ -500,11 +533,15 @@ type AgentTaskResponse struct {
 	// old server — and a daemon must then keep telling the agent to read the
 	// issue. An empty IssueChangedFields is only "unchanged" alongside this
 	// flag; on its own it is indistinguishable from "nobody looked" (MUL-7344).
-	IssueStateDeltaKnown     bool                 `json:"issue_state_delta_known,omitempty"`
-	IssueChangedFields       []string             `json:"issue_changed_fields,omitempty"`        // subset of title,description in that order; empty alongside IssueStateDeltaKnown means unchanged. Fields outside that set (status, assignee, priority, labels, parent, due date, stage, project, metadata) are NOT compared and must never be reported as checked. Status and assignee are out because IssueStatus / IssueAssigneeType / IssueAssigneeID ship their current values on every claim, so no comparison is needed to learn them; priority is out because it does not change what the agent does
-	IssueStatus              string               `json:"issue_status,omitempty"`                // the issue's status key at claim time. Sent whether or not the delta is known: the agent needs it to decide workflow step 3 ("already in progress?") without a read
-	IssueAssigneeType        string               `json:"issue_assignee_type,omitempty"`         // "agent", "member" or "squad" at claim time; empty when unassigned. With IssueAssigneeID, lets the agent tell "mine" from "someone else's" without a read
-	IssueAssigneeID          string               `json:"issue_assignee_id,omitempty"`           // assignee UUID at claim time; empty when unassigned
+	IssueStateDeltaKnown bool     `json:"issue_state_delta_known,omitempty"`
+	IssueChangedFields   []string `json:"issue_changed_fields,omitempty"` // subset of title,description in that order; empty alongside IssueStateDeltaKnown means unchanged. Fields outside that set (status, assignee, priority, labels, parent, due date, stage, project, metadata) are NOT compared and must never be reported as checked. Status and assignee are out because IssueStatus / IssueAssigneeType / IssueAssigneeID ship their current values on every claim, so no comparison is needed to learn them; priority is out because it does not change what the agent does
+	IssueStatus          string   `json:"issue_status,omitempty"`         // the issue's status key at claim time. Sent whether or not the delta is known: the agent needs it to decide workflow step 3 ("already in progress?") without a read
+	IssueAssigneeType    string   `json:"issue_assignee_type,omitempty"`  // "agent", "member" or "squad" at claim time; empty when unassigned. With IssueAssigneeID, lets the agent tell "mine" from "someone else's" without a read
+	IssueAssigneeID      string   `json:"issue_assignee_id,omitempty"`    // assignee UUID at claim time; empty when unassigned
+	// Coordinator fields are issue metadata at claim time. They never replace
+	// the immutable return addresses accepted by an executor's dispatches.
+	CoordinatorType          string               `json:"coordinator_type,omitempty"`            // "agent" or "member"
+	CoordinatorID            string               `json:"coordinator_id,omitempty"`              // coordinator actor UUID at claim time
 	ChatSessionID            string               `json:"chat_session_id,omitempty"`             // non-empty for chat tasks
 	ChatChannelType          string               `json:"chat_channel_type,omitempty"`           // "slack" when the chat session is backed by an IM channel; empty for a web-only chat. Makes the agent channel-aware (read history from the channel, not Multica)
 	ChatChannelDeliversFiles bool                 `json:"chat_channel_delivers_files,omitempty"` // server capability: THIS deployment can put a file the agent produced into THIS conversation — the adapter goes back for the bound attachment AND object storage exists to go back to. Absent/false on a server predating it, which is the safe reading: the agent is told to describe its file in words. Never inferred daemon-side from chat_channel_type; see handler.Handler.channelDeliversFiles
@@ -843,6 +880,7 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		handoffNote = t.HandoffNote.String
 	}
 	return AgentTaskResponse{
+		ResourceControlRequired: t.ResourceControlRequired,
 		// Task-scoped provenance must not transfer through copied retry context.
 		CancelledByCommentChange: t.Status == "cancelled" && cancellation.TaskID != "" && cancellation.TaskID == uuidToString(t.ID),
 		CancelledBy:              taskCancellationActorToResponse(t),
@@ -1190,6 +1228,13 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load agent invocation targets")
 		return
 	}
+	agentIDs := make([]pgtype.UUID, 0, len(agents))
+	for _, a := range agents {
+		if a.ExecutionKind == "external" {
+			agentIDs = append(agentIDs, a.ID)
+		}
+	}
+	externalSessions, externalSessionCounts := h.externalSessionsByAgent(r.Context(), agentIDs)
 	visible := make([]AgentResponse, 0, len(agents))
 	for _, a := range agents {
 		targets := targetsByAgent[uuidToString(a.ID)]
@@ -1199,6 +1244,8 @@ func (h *Handler) ListAgents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp := h.agentToResponse(a)
+		resp.ExternalSession = externalSessions[resp.ID]
+		resp.ExternalSessionCount = externalSessionCounts[resp.ID]
 		// The map is keyed by runtime, and active + archived agents may share one.
 		// Keep the archived guard here as well as in the loader so an active sibling
 		// cannot leak its projection onto an archived response.
@@ -1255,6 +1302,7 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := h.agentToResponse(agent)
+	h.attachExternalSession(r.Context(), &resp)
 	viewerRole := ""
 	if member, ok := ctxMember(r.Context()); ok {
 		viewerRole = member.Role
@@ -2457,6 +2505,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.agentToResponse(updated)
+	h.attachExternalSession(r.Context(), &resp)
 	if err := h.enrichAgentResponseWithTargets(r.Context(), &resp, updated.ID); err != nil {
 		slog.Warn("update agent: load invocation targets for response failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to load agent invocation targets")
@@ -2721,13 +2770,46 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An external agent's archive is gated by its reference preflight and
+	// revokes its credentials; managed agents keep the existing behavior.
+	if agent.ExecutionKind == "external" {
+		h.archiveExternalAgent(w, r, agent)
+		return
+	}
+
 	userID := requestUserID(r)
-	archived, err := h.Queries.ArchiveAgent(r.Context(), db.ArchiveAgentParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		slog.Warn("begin archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	queries := h.Queries.WithTx(tx)
+	archived, err := queries.ArchiveAgent(r.Context(), db.ArchiveAgentParams{
 		ID:         agent.ID,
 		ArchivedBy: parseUUID(userID),
 	})
 	if err != nil {
 		slog.Warn("archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	// Withdraw the agent's unaccepted notifications in the same transaction as
+	// the archive. The claim re-checks the archive at the final lease, but a
+	// notification leased just before this commit would otherwise survive as a
+	// claimable retry after a known no-effect answer. The marker keeps that
+	// retry from sending to an agent that no longer exists.
+	if _, err := queries.WithdrawAgentDeliveries(r.Context(), db.WithdrawAgentDeliveriesParams{
+		AgentIds: []pgtype.UUID{agent.ID},
+		Reason:   pgtype.Text{String: "Agent archived before the notification was accepted", Valid: true},
+	}); err != nil {
+		slog.Warn("withdraw agent deliveries on archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+		writeError(w, http.StatusInternalServerError, "failed to archive agent")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		slog.Warn("commit archive agent failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 		writeError(w, http.StatusInternalServerError, "failed to archive agent")
 		return
 	}
@@ -2737,22 +2819,7 @@ func (h *Handler) ArchiveAgent(w http.ResponseWriter, r *http.Request) {
 	// the cancel committed could never be repaired. Chat tasks publish
 	// task:cancelled after commit for chat lifecycle consumers; the aggregate
 	// agent:archived event below remains unchanged.
-	if _, err := h.TaskService.CancelTasksForArchivedAgent(r.Context(), agent.ID); err != nil {
-		slog.Warn("cancel agent tasks on archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
-	}
-
-	wsID := uuidToString(archived.WorkspaceID)
-	slog.Info("agent archived", append(logger.RequestAttrs(r), "agent_id", id, "workspace_id", wsID)...)
-	resp := h.agentToResponse(archived)
-	if err := h.attachAgentSkills(r.Context(), &resp, archived.ID); err != nil {
-		slog.Warn("load agent skills after archive failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
-		writeError(w, http.StatusInternalServerError, "failed to load agent skills")
-		return
-	}
-	actorType, actorID := h.resolveActor(r, userID, wsID)
-	h.publish(protocol.EventAgentArchived, wsID, actorType, actorID, map[string]any{"agent": broadcastAgentResponse(resp)})
-	redactAgentResponseForActor(&resp, actorType)
-	writeJSON(w, http.StatusOK, resp)
+	h.completeAgentArchive(w, r, archived)
 }
 
 func (h *Handler) RestoreAgent(w http.ResponseWriter, r *http.Request) {

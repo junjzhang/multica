@@ -9,6 +9,7 @@ import {
 import { ViewStoreProvider } from "@multica/core/issues/stores/view-store-context";
 import { renderWithI18n } from "../../test/i18n";
 import { DraftDefinitionFields, SaveViewDialog } from "./save-view-dialog";
+const createView = vi.hoisted(() => vi.fn());
 
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-query")>()),
@@ -20,7 +21,7 @@ vi.mock("@multica/core/hooks", () => ({
 }));
 
 vi.mock("@multica/core/issue-views/mutations", () => ({
-  useCreateIssueView: () => ({ mutate: vi.fn(), isPending: false }),
+  useCreateIssueView: () => ({ mutate: createView, isPending: false }),
   useUpdateIssueView: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
@@ -69,6 +70,25 @@ describe("DraftDefinitionFields ordering", () => {
 });
 
 describe("SaveViewDialog draft lifecycle", () => {
+  it("saves the child visibility the user saw rather than the inactive automatic default", async () => {
+    const user = userEvent.setup();
+    const store = createStore<IssueViewState>()(viewStoreSlice);
+    store.setState({ showSubIssues: false, showSubIssuesExplicit: false });
+    createView.mockClear();
+    renderWithI18n(
+      <ViewStoreProvider store={store}>
+        <SaveViewDialog open onOpenChange={() => {}} scope={{ kind: "workspace" }} showSubIssues />
+      </ViewStoreProvider>,
+    );
+    await user.type(screen.getByLabelText("Name"), "Matching work");
+    await user.click(screen.getByRole("button", { name: "Create view" }));
+    expect(createView).toHaveBeenCalledWith(
+      expect.objectContaining({ display: expect.objectContaining({ showSubIssues: true }) }),
+      expect.anything(),
+    );
+    expect(store.getState().showSubIssuesExplicit).toBe(false);
+  });
+
   const liveStore = createStore<IssueViewState>()(viewStoreSlice);
   // Hosts build `scope` inline, so every host render passes a new object.
   const dialog = (open: boolean) => (

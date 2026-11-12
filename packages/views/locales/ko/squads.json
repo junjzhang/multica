@@ -98,7 +98,8 @@
     "members": "멤버",
     "created_by": "생성자",
     "created": "생성일",
-    "updated": "수정일"
+    "updated": "수정일",
+    "default_leader_migration": "기본 리더는 관리형 에이전트여야 합니다. 새 위임 전에 선택하세요."
   },
   "toasts": {
     "member_added": "멤버를 추가했습니다",

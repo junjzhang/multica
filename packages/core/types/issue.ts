@@ -1,5 +1,7 @@
 import type { Label } from "./label";
 import type { IssuePropertyValues } from "./property";
+import type { Agent, ExternalSession } from "./agent";
+import type { ContractView } from "../api/issue-contract-schema";
 
 /** Four lifecycle classifications. User-facing columns group by status key. */
 export type IssueStatusCategory =
@@ -167,7 +169,100 @@ export interface IssueDuplicateOf {
   status: IssueStatus;
 }
 
+/** The fixed upper-level coordinator recorded at dispatch time (WORK-9). */
+export interface IssueCoordinator {
+  type: "member" | "agent" | (string & {});
+  id: string;
+}
+
+/**
+ * Merge policy projection. It describes what the issue authorized; it is not
+ * proof that a merge happened, and absence means disallowed.
+ */
+export interface IssueMergeAuthorization {
+  allowed: boolean;
+  repository_url: string | null;
+  target_branch: string | null;
+  granted_by: string | null;
+  granted_at: string | null;
+}
+
+/** Delivery is about the host mailbox, not about execution progress. */
+export type MailboxDeliveryStatus =
+  | "pending"
+  | "leased"
+  | "delivered"
+  | "failed"
+  | "unknown";
+
+/** Read/handled are acknowledgements by the recipient, not run status. */
+export type MailboxProcessingStatus = "unread" | "read" | "handled" | "unknown";
+
+/** One mailbox delivery of a native comment to an external agent session. */
+export interface MailboxMessage {
+  payload?: Record<string, unknown>;
+  handled_by_task_id?: string;
+  id: string;
+  issue_id: string;
+  /**
+   * Empty for a generic delivery. A generic notification has no comment and
+   * must never be shown as if it carried one.
+   */
+  comment_id: string;
+  recipient_agent_id: string;
+  /** The session that sent the notification, when the producer had one. */
+  source_session: ExternalSession | null;
+  /**
+   * The session frozen at enqueue time. It never follows a later rebind, so an
+   * old notification keeps the address it was actually sent to.
+   */
+  target_session?: ExternalSession | null;
+  /** Producer family, for example `comment` or `issue_wakeup`. */
+  source_type?: string;
+  /** Notification kind, for example `comment_mention` or `issue_wakeup`. */
+  kind?: string;
+  delivery_status: MailboxDeliveryStatus;
+  processing_status: MailboxProcessingStatus;
+  created_at: string;
+  delivered_at: string | null;
+  last_error: string | null;
+}
+
+/**
+ * The active (agent, issue) target used for FUTURE notifications. A saved
+ * binding never moves an existing delivery; each message keeps its frozen
+ * target.
+ */
+export interface IssueSessionBinding {
+  id: string;
+  agent_id: string;
+  issue_id: string;
+  session: ExternalSession | null;
+  /** False when the agent is archived or the session owner left the workspace. */
+  deliverable: boolean;
+  /** `agent_archived` or `owner_not_member` when not deliverable; "" otherwise. */
+  unavailable_reason?: string;
+  created_at: string;
+}
+
 export interface Issue {
+  contract?: ContractView;
+  /**
+   * Task-level leadership root (WORK-269). Only squad task chains carry one;
+   * absent on older servers and on ordinary issues, so readers must treat it
+   * as "no task leader" rather than rebuild a global default.
+   */
+  leadership_root_issue_id?: string;
+  /** The squad whose roster owns the task chain, when it has a root. */
+  leadership_squad_id?: string;
+  /** The agent currently responsible for the task chain, when it has a root. */
+  leader_agent_id?: string;
+  /** Set only when the current task leader is an external host session. */
+  leader_external_session_id?: string;
+  /** Monotonic leadership revision; a handoff increments it. */
+  leadership_revision?: number;
+  /** The root issue's own revision, the CAS value a handoff must present. */
+  leadership_root_revision?: number;
   id: string;
   workspace_id: string;
   number: number;
@@ -231,4 +326,55 @@ export interface Issue {
   last_activity_at?: string | null;
   /** Present only on issue detail responses for issues created from a comment. */
   source_context?: IssueSourceContext;
+  /**
+   * Fixed coordinator selected at dispatch. Additive: absent on older servers
+   * and on issues created before the coordinator existed.
+   */
+  coordinator?: IssueCoordinator | null;
+  /** Projected merge policy; absent means no authorization is recorded. */
+  merge_authorization?: IssueMergeAuthorization;
+  /**
+   * External agents that participated in this issue, from the server's
+   * projection rather than inferred from one comment page.
+   */
+  external_participants?: Agent[];
+  /** Bounded recent deliveries (server caps this; mailbox API paginates). */
+  mailbox_deliveries?: MailboxMessage[];
+  /** Active targets for future notifications, one per external agent. */
+  external_session_bindings?: IssueSessionBinding[];
+}
+
+/** Parameters for an explicit task-leader handoff. */
+export interface IssueLeadershipHandoffRequest {
+  client_request_id: string;
+  /** The root's leadership revision the caller saw. */
+  expected_revision: number;
+  /** The root issue's own revision the caller saw. */
+  expected_issue_revision: number;
+  previous_agent_id: string;
+  previous_session_id?: string;
+  agent_id: string;
+  /** Required for an external target, omitted for a managed one. */
+  session_id?: string;
+  reason: string;
+}
+
+export interface IssueLeadershipAdvancedReturn {
+  issue_id: string;
+  previous_return_id?: string;
+  current_return_id?: string;
+}
+
+/**
+ * Result of one handoff. Contracts listed here are now stale (the acceptor
+ * side must revise them); earlier results stay with the previous leader and
+ * need an explicit result takeover.
+ */
+export interface IssueLeadershipHandoffResponse {
+  root_issue_id: string;
+  revision: number;
+  issue_revision: number;
+  stale_contract_ids: string[];
+  advanced_returns: IssueLeadershipAdvancedReturn[];
+  historical_results: string;
 }

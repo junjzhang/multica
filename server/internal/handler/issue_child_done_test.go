@@ -646,7 +646,7 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 		t.Fatalf("retry provenance = status:%q attempt:%d leader:%v squad:%q wakeup:%q; want queued attempt 2 with the original leader context",
 			retryStatus, retryAttempt, retryLeader, retrySquadID, retryWakeupID)
 	}
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', dispatched_at = now(), started_at = now() WHERE id = $1`, retryID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', dispatched_at = now(), started_at = now(), session_id = 'stage-leader-session', work_dir = '/work/stage-leader', resource_control_required=true, session_pin_confirmed=true, session_pin_generation=gen_random_uuid() WHERE id = $1`, retryID)
 
 	// Act through the normal issue handler with the retry task as the agent
 	// identity: the operation the stage wake asks the leader to perform.
@@ -654,6 +654,7 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 	req = newRequest("PUT", "/api/issues/"+stage2.ID, map[string]any{"status": "todo"})
 	req.Header.Set("X-Agent-ID", sq.LeaderID)
 	req.Header.Set("X-Task-ID", retryID)
+	req.Header.Set("X-Actor-Source", "task_token")
 	req = withURLParam(req, "id", stage2.ID)
 	testHandler.UpdateIssue(w, req)
 	if w.Code != http.StatusOK {
@@ -664,7 +665,31 @@ func TestStageLeaderPrepareTimeoutRetryCanAdvanceNextStage(t *testing.T) {
 	if stage2Status != "todo" {
 		t.Fatalf("Stage 2 status = %q, want todo", stage2Status)
 	}
+	// Promoting the parked child is a status-only transition; the barrier wake
+	// above is the leader's cue, and a status change starts no run of its own.
+	if got := countPendingTasksForAgent(t, stage2.ID, sq.LeaderID); got != 0 {
+		t.Fatalf("promoted Stage 2 queued %d leader tasks, want 0", got)
+	}
+	if !strings.Contains(runs[0].Note, "explicitly @mention") ||
+		!strings.Contains(runs[0].Note, "does not start a run on its own") {
+		t.Fatalf("stage barrier instruction does not require an explicit handoff: %q", runs[0].Note)
+	}
+
+	// The documented next step is an explicit @ of the next stage's executor.
+	// That — not the status write — is what starts Stage 2.
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues/"+stage2.ID+"/comments", map[string]any{
+		"content": fmt.Sprintf("[@Squad](mention://squad/%s) Stage 2 is ready; start it.", sq.SquadID),
+	})
+	req.Header.Set("X-Agent-ID", sq.LeaderID)
+	req.Header.Set("X-Task-ID", retryID)
+	req.Header.Set("X-Actor-Source", "task_token")
+	req = withURLParam(req, "id", stage2.ID)
+	testHandler.CreateComment(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("retry leader hand off Stage 2: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
 	if got := countPendingTasksForAgent(t, stage2.ID, sq.LeaderID); got != 1 {
-		t.Fatalf("promoted Stage 2 queued %d leader tasks, want 1", got)
+		t.Fatalf("explicit Stage 2 handoff queued %d leader tasks, want 1", got)
 	}
 }

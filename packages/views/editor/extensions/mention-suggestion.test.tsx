@@ -106,6 +106,15 @@ function fakeQc(data: {
     archived_at: string | null;
     runtime_id?: string;
     runtime_bound?: boolean;
+    execution_kind?: string;
+    external_session?: {
+      provider: string;
+      host_id: string;
+      session_id: string;
+      display_name: string;
+      url: string | null;
+      daemon_id: string;
+    } | null;
     visibility?: "workspace" | "private";
     owner_id?: string | null;
     permission_mode?: "private" | "public_to";
@@ -276,6 +285,67 @@ describe("createMentionSuggestion", () => {
         type: "agent",
         id: "a1",
         disabledReason: "agent_runtime_required",
+      }),
+    );
+  });
+
+  it("keeps an external agent mentionable without a managed runtime", () => {
+    const qc = fakeQc({
+      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      agents: [
+        {
+          id: "a1",
+          name: "External Reviewer",
+          archived_at: null,
+          runtime_id: "",
+          runtime_bound: false,
+          execution_kind: "external",
+          external_session: {
+            provider: "paseo",
+            host_id: "server-1",
+            session_id: "paseo-agent-1",
+            display_name: "Review session",
+            url: "paseo://h/server-1/agent/paseo-agent-1",
+            daemon_id: "daemon-1",
+          },
+          visibility: "workspace",
+          owner_id: null,
+        },
+      ],
+    });
+
+    const config = createMentionSuggestion(qc);
+    const items = config.items!(itemArgs("external")) as MentionItem[];
+
+    const agent = items.find((item) => item.type === "agent" && item.id === "a1");
+    expect(agent).toBeDefined();
+    expect(agent?.disabledReason).toBeUndefined();
+  });
+
+  it("marks an unknown execution kind unselectable", () => {
+    const qc = fakeQc({
+      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      agents: [
+        {
+          id: "a1",
+          name: "Future Agent",
+          archived_at: null,
+          runtime_id: "runtime-1",
+          execution_kind: "future_kind",
+          visibility: "workspace",
+          owner_id: null,
+        },
+      ],
+    });
+
+    const config = createMentionSuggestion(qc);
+    const items = config.items!(itemArgs("future")) as MentionItem[];
+
+    expect(items).toContainEqual(
+      expect.objectContaining({
+        type: "agent",
+        id: "a1",
+        disabledReason: "agent_execution_unsupported",
       }),
     );
   });
@@ -865,6 +935,38 @@ describe("createMentionSuggestion", () => {
         disabledReason: "agent_runtime_required",
       }),
     );
+  });
+
+  it("keeps a squad with an external leader mentionable", () => {
+    const qc = fakeQc({
+      agents: [
+        {
+          id: "leader-1",
+          name: "External Leader",
+          archived_at: null,
+          runtime_id: "",
+          runtime_bound: false,
+          execution_kind: "external",
+          visibility: "workspace",
+          owner_id: null,
+        },
+      ],
+      squads: [
+        {
+          id: "s1",
+          name: "External Squad",
+          archived_at: null,
+          leader_id: "leader-1",
+        },
+      ],
+    });
+
+    const config = createMentionSuggestion(qc);
+    const items = config.items!(itemArgs("external")) as MentionItem[];
+    const squad = items.find((item) => item.type === "squad" && item.id === "s1");
+
+    expect(squad).toBeDefined();
+    expect(squad?.disabledReason).toBeUndefined();
   });
 
   it("keeps squads discoverable while the agents cache is not ready", () => {

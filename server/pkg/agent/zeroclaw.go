@@ -222,6 +222,9 @@ func (s *zeroclawMessageStream) close() {
 }
 
 func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "zeroclaw"
@@ -436,16 +439,25 @@ func (b *zeroclawBackend) Execute(ctx context.Context, prompt string, opts ExecO
 						"requested_session", opts.ResumeSessionID,
 					)
 					resumeRejected = true
-					resCh <- Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/resume failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+					resCh <- markStrictResumeResult(Result{Status: "failed", Error: fmt.Sprintf("zeroclaw session/resume failed: %v", err), DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 					return
 				}
 				finalStatus = "failed"
 				finalError = fmt.Sprintf("zeroclaw session/resume failed: %v", err)
-				resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}
+				resCh <- markStrictResumeResult(Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds(), ResumeRejected: resumeRejected}, opts)
 				return
 			}
 			var changed bool
 			sessionID, changed = resolveResumedSessionID(opts.ResumeSessionID, result)
+			if strictErr := checkStrictACPResume(opts, result, "session/resume"); strictErr != nil {
+				b.cfg.Logger.Warn("zeroclaw strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 			if changed {
 				b.cfg.Logger.Warn("zeroclaw returned a different session id on resume — original was likely lost; continuing with the new id",
 					"backend", "zeroclaw",
