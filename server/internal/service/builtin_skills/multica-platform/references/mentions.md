@@ -254,4 +254,4 @@ runs no agent. To start an agent in the same comment, name it with an explicit
 Using the wrong `type` for a real UUID still parses — it just resolves to the
 wrong entity, or to nothing. That is why the type must match the id source.
 
-Use `[@Name](mention://agent-notify/<uuid>)` to wake an agent without creating a result return. The existing `mention://agent/<uuid>` delegates and may create a return. If both name the same agent, delegation wins.
+Use `[@Name](mention://agent-notify/<uuid>)` to wake an agent without creating a result return. The existing `mention://agent/<uuid>` delegates and may create a return. If both name the same agent, delegation wins. A squad mention delegates to its leader even if that leader is also notified.

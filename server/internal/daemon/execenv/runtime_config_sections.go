@@ -719,7 +719,7 @@ func writeMentions(b *strings.Builder) {
 	// client unfurls into the same chip) a project reference stays dead text.
 	b.WriteString("- `[Project Name](mention://project/<project-id>)` — clickable link (no side effect)\n")
 	b.WriteString("- `[@Name](mention://member/<user-id>)` — **notifies a human**\n")
-	b.WriteString("- `[@Name](mention://agent-notify/<agent-id>)` — wakes the agent without creating a new result return. Use for notifications.\n- `[@Name](mention://agent/<agent-id>)` — delegates and **enqueues a new run for that agent**; an external agent bound to a host session gets one mailbox request instead, delivered by its host adapter\n\n")
+	b.WriteString("- `[@Name](mention://agent-notify/<agent-id>)` — wakes the agent without creating a new result return. Use for notifications. If the same agent is also delegated to, delegation wins; a squad mention delegates to its leader even if the leader is also notified.\n- `[@Name](mention://agent/<agent-id>)` — delegates and **enqueues a new run for that agent**; an external agent bound to a host session gets one mailbox request instead, delivered by its host adapter\n\n")
 	// No prescriptive default here (MUL-6417): the mention syntax hides its
 	// semantics — it reads like a free social gesture but is a spawn/notify
 	// operation — so what this paragraph must supply is the facts that
