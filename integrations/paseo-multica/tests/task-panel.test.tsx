@@ -68,6 +68,8 @@ it("updates every mounted instance and keeps the remaining listener after one cl
   await act(async () => { second!.unmount(); });
   await act(async () => { panels.open("ws", link(a)); });
   expect(states[0]).toEqual({ paths: [a, b, a] });
-  await act(async () => { first!.unmount(); });
+  await act(async () => { second = create(<Host index={1} />); });
+  expect(states[1]).toEqual({ paths: [a, b, a] });
+  await act(async () => { first!.unmount(); second!.unmount(); });
   panels.dispose();
 });

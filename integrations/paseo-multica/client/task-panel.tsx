@@ -28,6 +28,7 @@ export function visitTask(state: TaskState, path: string): TaskState {
 
 export function createTaskPanels(client: PluginClientContext) {
   const pending = new Map<string, string[]>();
+  const latest = new Map<string, string>();
   const listeners = new Map<string, Set<(path: string) => void>>();
   const Component = (props: PluginWorkspacePanelProps) => {
     const instanceId = useId();
@@ -38,6 +39,7 @@ export function createTaskPanels(client: PluginClientContext) {
     useEffect(() => {
       const receive = (path: string) => {
         const next = visitTask(current.current, path);
+        if (next === current.current) return;
         current.current = next;
         setState(next);
       };
@@ -47,12 +49,14 @@ export function createTaskPanels(client: PluginClientContext) {
       const queued = pending.get(props.workspaceId) ?? [];
       pending.delete(props.workspaceId);
       for (const path of queued) receive(path);
+      const selected = latest.get(props.workspaceId);
+      if (selected && queued.length === 0) receive(selected);
       return () => { group.delete(receive); if (group.size === 0) listeners.delete(props.workspaceId); };
     }, [props.workspaceId, setState]);
     const path = state.paths.at(-1);
     return <View style={{ flex: 1, backgroundColor: props.theme.colors.surface0 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 10 }}>
-        {state.paths.length > 1 ? <Pressable accessibilityRole="button" onPress={() => { const next = { paths: current.current.paths.slice(0, -1) }; current.current = next; setState(next); }}><Text style={{ color: props.theme.colors.accent }}>Back</Text></Pressable> : null}
+        {state.paths.length > 1 ? <Pressable accessibilityRole="button" onPress={() => { const next = { paths: current.current.paths.slice(0, -1) }; current.current = next; latest.set(props.workspaceId, next.paths.at(-1)!); setState(next); }}><Text style={{ color: props.theme.colors.accent }}>Back</Text></Pressable> : null}
         <Text style={{ color: props.theme.colors.foreground, fontWeight: "600" }}>{path?.split("/").at(-1) ?? "Task details"}</Text>
       </View>
       {path ? <MulticaSurface key={path} {...props} path={path} pageKey={instanceId} /> : <Text style={{ color: props.theme.colors.foregroundMuted, padding: 10 }}>Select a task to open its details.</Text>}
@@ -64,10 +68,11 @@ export function createTaskPanels(client: PluginClientContext) {
       const path = issuePath(url);
       if (!path) return;
       client.openPanel(TASK_PANEL_ID, { workspaceId, location: "explorer" });
+      latest.set(workspaceId, path);
       const group = listeners.get(workspaceId);
       if (group?.size) for (const receive of group) receive(path);
       else pending.set(workspaceId, [...(pending.get(workspaceId) ?? []), path].slice(-MAX_HISTORY));
     },
-    dispose() { remove(); listeners.clear(); pending.clear(); },
+    dispose() { remove(); listeners.clear(); pending.clear(); latest.clear(); },
   };
 }
