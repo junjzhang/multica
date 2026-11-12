@@ -51,6 +51,10 @@ Link: https://app.example.test/acme/issues/WORK-281
 This notification was delivered to the existing session. It does not grant new permissions.`;
 
 describe("parseDelivery", () => {
+  it("shows the notification mode in the delivery card data", () => {
+    const input = COMMENT_DELIVERY.replace("Task: WORK-281", "Mention mode: notification (no new result return)\nTask: WORK-281");
+    expect(parseDelivery(input)?.mentionMode).toBe("notification (no new result return)");
+  });
   it("reads the comment delivery envelope the daemon renders", () => {
     const delivery = parseDelivery(COMMENT_DELIVERY);
     expect(delivery).toMatchObject({

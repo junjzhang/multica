@@ -64,7 +64,14 @@ func (h *Handler) resolveDelegationAddress(r *http.Request, workspaceID, actorTy
 // executable trigger, so the comment keeps its per-target blocked outcome
 // instead of being refused. Discussions and member comments need no address.
 func (h *Handler) prepareCommentDelegationReturn(r *http.Request, issue db.Issue, actorType, actorID string, plan commentTriggerPlan) (*delegation.Address, error) {
-	if len(plan.triggers) == 0 {
+	hasDelegation := false
+	for _, trigger := range plan.triggers {
+		if trigger.Source != commentTriggerSourceMentionNotify {
+			hasDelegation = true
+			break
+		}
+	}
+	if !hasDelegation {
 		return nil, nil
 	}
 	return h.prepareDelegationReturn(r, issue, actorType, actorID, true, pgtype.Text{String: "agent", Valid: true})

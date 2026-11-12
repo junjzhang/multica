@@ -343,6 +343,7 @@ var issueCommentListCmd = &cobra.Command{
 var issueCommentAddCmd = &cobra.Command{
 	Use:   "add <issue-id>",
 	Short: "Add a comment to an issue",
+	Long:  "Add a comment. Use [@Name](mention://agent/<uuid>) to delegate or [@Name](mention://agent-notify/<uuid>) to wake an agent without adding a result return. If both target the same agent, delegation wins.",
 	Args:  exactArgs(1),
 	RunE:  runIssueCommentAdd,
 }
@@ -3435,7 +3436,7 @@ func normalizeAssigneeLookupInput(raw string) string {
 	input := strings.TrimSpace(raw)
 	if m := util.MentionRe.FindStringSubmatch(input); len(m) == 4 && m[0] == input {
 		switch m[2] {
-		case "member", "agent", "squad":
+		case "member", "agent", "agent-notify", "squad":
 			return m[3]
 		}
 	}

@@ -9,6 +9,7 @@ package protocol
 // ID-only shape. Nothing downstream may depend on them for identity or
 // permission.
 type ExternalIssueRequest struct {
+	Mode            string `json:"mode,omitempty"`
 	Schema          string `json:"schema"`
 	IssueID         string `json:"issue_id"`
 	CommentID       string `json:"comment_id,omitempty"`

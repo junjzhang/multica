@@ -93,7 +93,7 @@ func (h *Handler) checkCommentSession(w http.ResponseWriter, r *http.Request, is
 		writeError(w, 500, "load task session failed")
 		return false
 	}
-	if conflict && (strings.Contains(content, "mention://agent/") || strings.Contains(content, "mention://squad/")) {
+	if conflict && (strings.Contains(content, "mention://agent/") || strings.Contains(content, "mention://agent-notify/") || strings.Contains(content, "mention://squad/")) {
 		writeError(w, 409, "this session may post ordinary comments; dispatch requires an explicit human handoff")
 		return false
 	}

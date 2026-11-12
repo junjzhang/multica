@@ -93,7 +93,7 @@ export const BaseMentionExtension = Mention.extend({
       // (ReDoS, GitHub #4881) — while still supporting bracket-containing
       // names like "David\[TF\]".
       const match = src.match(
-        /^\[@?((?:\\.|[^\]\\])+)\]\(mention:\/\/(\w+)\/([^)]+)\)/,
+        /^\[@?((?:\\.|[^\]\\])+)\]\(mention:\/\/([\w-]+)\/([^)]+)\)/,
       );
       if (!match) return undefined;
       // Reverse escapeMarkdownLabel: unescape \[ \] \\ \( \) that
