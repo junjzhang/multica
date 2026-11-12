@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
-	"github.com/multica-ai/multica/server/internal/util"
 )
 
 // sessionContinuityNoticeFor picks the notice matching what this surface
@@ -528,22 +527,6 @@ func buildQuickCreatePrompt(task Task) string {
 // The reply instructions (including the current TriggerCommentID as --parent)
 // are re-emitted on every turn so resumed sessions cannot carry forward a
 // previous turn's --parent UUID.
-func notificationMentionForAgent(content, agentID string) bool {
-	if agentID == "" {
-		return false
-	}
-	notify := false
-	for _, mention := range util.ParseMentions(content) {
-		if mention.Type == "squad" {
-			return false
-		}
-		if mention.Type == "agent-notify" && strings.EqualFold(mention.ID, agentID) {
-			notify = true
-		}
-	}
-	return notify
-}
-
 func buildCommentPrompt(task Task, provider string) string {
 	var b strings.Builder
 	b.WriteString("You are running as a local coding agent for a Multica workspace.\n\n")
@@ -561,9 +544,6 @@ func buildCommentPrompt(task Task, provider string) string {
 		}
 		fmt.Fprintf(&b, "[NEW COMMENT] %s just left a new comment. Focus on THIS comment — do not confuse it with previous ones:\n\n", authorLabel)
 		fmt.Fprintf(&b, "> %s\n\n", task.TriggerCommentContent)
-		if notificationMentionForAgent(task.TriggerCommentContent, task.AgentID) {
-			b.WriteString("This comment notified you; it did not add a result return. Existing accepted returns remain in effect.\n\n")
-		}
 		// MUL-4195: comments that arrived before this run started were folded
 		// into it rather than dropped. The trigger above is the newest; the
 		// agent must ALSO address these earlier ones so no deliberate user
@@ -598,9 +578,6 @@ func buildCommentPrompt(task Task, provider string) string {
 				}
 				b.WriteString(":\n")
 				fmt.Fprintf(&b, "  > %s\n", strings.ReplaceAll(strings.TrimSpace(cc.Content), "\n", "\n  > "))
-				if notificationMentionForAgent(cc.Content, task.AgentID) {
-					b.WriteString("  Notification: no new result return was added for this comment.\n")
-				}
 			}
 			fmt.Fprintf(&b, "\nIf you need the surrounding discussion for any of them, fetch its thread with `multica issue comment list %s --thread <thread-id> --tail 30 --compact --output json` using the thread id shown above.\n\n", task.IssueID)
 		} else if len(task.CoalescedCommentIDs) > 0 {
