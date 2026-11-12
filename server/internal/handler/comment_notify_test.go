@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/testutil"
 )
@@ -134,5 +135,46 @@ func TestCommentNotifyEditChangesIntent(t *testing.T) {
 	edit(fmt.Sprintf("[@T](mention://agent-notify/%s) again", target))
 	if n := countValue(t, `SELECT count(*) FROM comment_dispatch_obligation WHERE comment_id=$1 AND delegation_return_id IS NULL`, comment); n != 1 {
 		t.Fatalf("notification intent = %d", n)
+	}
+}
+
+func TestCommentNotifyNotDelegatedInSessionTasks(t *testing.T) {
+	dispatcher, session, owner := externalAgentFixture(t, "Notify projection", "notify-projection-daemon")
+	token := externalSessionTokenFixture(t, dispatcher, session, owner, time.Now().Add(time.Hour))
+	target, _ := executableTarget(t, "notify-projection-target")
+	issue := dbfx.Issue(t, "Notification projection")
+	t.Cleanup(func() { cleanupDelegatedIssue(t, issue) })
+	code, _, body := intentComment(t, token, issue, fmt.Sprintf("[@T](mention://agent-notify/%s)", target), "")
+	if code != http.StatusCreated {
+		t.Fatalf("comment: %d %s", code, body)
+	}
+	status, projection := getSessionTasks(t, sessionTasksRequest(owner, dispatcher, true, session))
+	if status != http.StatusOK {
+		t.Fatalf("session tasks status = %d", status)
+	}
+	for _, item := range projection.Delegated {
+		if item.IssueID == issue {
+			t.Fatal("notification appears as delegated")
+		}
+	}
+	if n := countValue(t, `SELECT count(*) FROM issue_delegation_return WHERE issue_id=$1`, issue); n != 0 {
+		t.Fatalf("returns = %d", n)
+	}
+}
+
+func TestCommentNotifySquadLeaderCoalescesAsDelegation(t *testing.T) {
+	fx := newSquadCommentTriggerFixture(t)
+	_, _, token := managedDispatcherFixture(t, "notify-squad")
+	issue := uuidToString(fx.Issue.ID)
+	code, comment, body := intentComment(t, token, issue, fmt.Sprintf("[@Leader](mention://agent-notify/%s) [@Squad](mention://squad/%s)", fx.LeaderID, fx.SquadID), "")
+	if code != http.StatusCreated {
+		t.Fatalf("comment: %d %s", code, body)
+	}
+	task := latestTaskIDFor(t, issue, fx.LeaderID)
+	if n := countValue(t, `SELECT count(*) FROM agent_task_delegation_return WHERE task_id=$1`, task); n != 1 {
+		t.Fatalf("returns = %d", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM comment_dispatch_obligation WHERE comment_id=$1 AND agent_id=$2 AND squad_id=$3 AND delegation_return_id IS NOT NULL`, comment, fx.LeaderID, fx.SquadID); n != 1 {
+		t.Fatalf("squad obligation = %d", n)
 	}
 }
