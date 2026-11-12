@@ -30,8 +30,9 @@ export function StatusPanel({ agentId, theme }: PluginAgentPanelProps) {
       <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((value) => !value)}>
         <Text style={{ color: colors.foregroundMuted }}>{loading ? "Checking connection…" : view ? STATE_LABEL[view.state] : "Connection unavailable"}{view?.expiresAt ? ` · Credential expires ${view.expiresAt.slice(0, 7)}` : ""} {expanded ? "▴" : "▾"}</Text>
       </Pressable>
+      {error ?? view?.reason ? <Text style={{ color: colors.statusDanger }}>{error ?? view?.reason}</Text> : null}
       {expanded ? <View style={{ gap: 4 }}>
-        {[error ?? view?.reason, `External agent: ${view?.agentId ?? "—"}`, `Workspace: ${view?.workspaceId ?? "—"}`, `Return address: ${view?.returnAddress ?? "—"}`, `Delivery daemon: ${view?.daemonId ?? "—"}`, `Credential expires: ${view?.expiresAt ?? "—"}`].filter(Boolean).map((line) => <Text key={line} selectable style={{ color: colors.foregroundMuted }}>{line}</Text>)}
+        {[`External agent: ${view?.agentId ?? "—"}`, `Workspace: ${view?.workspaceId ?? "—"}`, `Return address: ${view?.returnAddress ?? "—"}`, `Delivery daemon: ${view?.daemonId ?? "—"}`, `Credential expires: ${view?.expiresAt ?? "—"}`].map((line) => <Text key={line} selectable style={{ color: colors.foregroundMuted }}>{line}</Text>)}
         <Pressable accessibilityRole="button" disabled={loading} onPress={() => void load()}><Text style={{ color: colors.accent }}>Refresh connection</Text></Pressable>
       </View> : null}
     </View>

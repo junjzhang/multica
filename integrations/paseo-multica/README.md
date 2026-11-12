@@ -88,7 +88,7 @@ not supply delegated items fall back to pending returns.
 
 An unanswered executor mention is an explicit agent mention link in a comment
 by the issue's current executor on an open issue, with no later comment by this
-agent in the same thread. Mailbox receipts are not used as replies. For a
+agent in the same unresolved thread. Mailbox receipts are not used as replies. For a
 blocked delegated issue, the panel labels the first line of the current
 executor's latest ordinary comment as its source; no reason is inferred when
 there is no comment.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -459,13 +460,17 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 		return dbfx.Comment(t, issueID, content, cols)
 	}
 	mention := fmt.Sprintf("[@Recipient](mention://agent/%s)", agent)
-	pending := comment(issue, worker, mention+" please decide", at, "")
+	pending := comment(issue, worker, fmt.Sprintf("[@Recipient](mention://agent/%s) please decide", strings.ToUpper(agent)), at, "")
 	replied := comment(issue, worker, mention+" answered", at.Add(time.Minute), "")
 	nested := comment(issue, other, "context", at.Add(2*time.Minute), replied)
 	answer := comment(issue, agent, "answer", at.Add(3*time.Minute), nested)
 	dbfx.Exec(t, "UPDATE comment SET type = 'progress_update' WHERE id = $1", answer)
 	comment(issue, worker, "plain @Recipient", at.Add(4*time.Minute), "")
+	comment(issue, worker, "[@Someone](other)\n[Recipient](mention://agent/"+agent+")", at.Add(4*time.Minute), "")
 	comment(issue, other, mention+" other author", at.Add(5*time.Minute), "")
+	comment(issue, agent, "reply in another thread", at.Add(5*time.Minute), "")
+	resolved := comment(issue, worker, mention+" resolved", at.Add(5*time.Minute), "")
+	dbfx.Exec(t, "UPDATE comment SET resolved_at = now(), resolved_by_type = 'agent', resolved_by_id = $1 WHERE id = $2", agent, resolved)
 	comment(issue, worker, "Waiting for input\nmore detail", at.Add(6*time.Minute), "")
 	closed := dbfx.Issue(t, "Closed issue", testutil.Cols{"assignee_type": "agent", "assignee_id": worker, "status": "done"})
 	comment(closed, worker, mention+" closed", at, "")

@@ -24,3 +24,13 @@ for (const mode of ["light", "dark"]) {
     await act(async () => { renderer!.unmount(); });
   });
 }
+
+it("keeps connection errors visible while details are collapsed", async () => {
+  getStatus.mockRejectedValueOnce(new Error("Reconnect this session"));
+  const colors = Object.fromEntries(["surface0", "foregroundMuted", "statusDanger"].map((key) => [key, key]));
+  const props = { agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<StatusPanel {...props} />); });
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Reconnect this session");
+  await act(async () => { renderer!.unmount(); });
+});

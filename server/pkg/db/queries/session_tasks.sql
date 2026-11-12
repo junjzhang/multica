@@ -115,7 +115,8 @@ WHERE i.workspace_id = @workspace_id
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
   AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
   AND c.type IN ('comment', 'progress_update') AND c.deleted_at IS NULL
-  AND c.content ~ ('\[@.+?\]\(mention://agent/' || sqlc.arg('agent_id')::text || '\)')
+  AND c.content ~* ('\[@[^[:cntrl:]]+?\]\(mention://agent/' || sqlc.arg('agent_id')::text || '\)')
+  AND NOT EXISTS (SELECT 1 FROM comment root WHERE root.id = comment_thread_root_id(c.id) AND root.resolved_at IS NOT NULL)
   AND NOT EXISTS (
     SELECT 1 FROM comment reply
     WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
