@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { sessionTasksViewSchema } from "./tasks";
+import { detailResultSchema, detailSection } from "./task-details";
 
 export const statusViewSchema = z.object({
   state: z.enum(["connected", "invalid", "unverified", "disconnected"]),
@@ -48,4 +49,16 @@ export const tasksSummary = defineRpc({
   name: "session.tasks",
   input: agentInput,
   output: sessionTasksViewSchema,
+});
+
+export const taskDetail = defineRpc({
+  name: "session.task-detail",
+  input: agentInput.extend({ issueId: z.string().uuid(), section: detailSection }),
+  output: detailResultSchema,
+});
+
+export const taskExpansion = defineRpc({
+  name: "session.task-expansion",
+  input: agentInput.extend({ issueId: z.string().uuid().optional(), expanded: z.boolean().optional() }),
+  output: z.array(z.string().uuid()),
 });

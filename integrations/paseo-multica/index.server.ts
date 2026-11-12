@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { connectSession, disconnectSession, statusSession, tasksSummary } from "./shared/contracts";
+import { connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
 import { ConfigurationError } from "./server/owner-profile";
 import { paseoHostAdapter } from "./server/host";
@@ -8,6 +8,7 @@ import { createSessionService, type ConnectionConfig } from "./server/service";
 import { sessionOpenEnv } from "./server/session-open";
 import { openWeb } from "./shared/web";
 import { webSignInLink } from "./server/web";
+import { expansion } from "./server/task-expansion";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(connectionSettings);
@@ -35,6 +36,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));
   server.handle(tasksSummary, async ({ agentId }, context) => service(context).tasks(agentId));
+  server.handle(taskDetail, async ({ agentId, issueId, section }, context) => service(context).taskDetail(agentId, issueId, section));
+  server.handle(taskExpansion, async ({ agentId, issueId, expanded }) => expansion(homedir(), agentId, issueId, expanded));
 
   // Only the context path, only for an existing binding, and never for history
   // replay. Existing sessions already carry PASEO_AGENT_ID and need no reload.

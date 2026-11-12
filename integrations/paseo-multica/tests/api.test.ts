@@ -269,3 +269,17 @@ describe("Multica API client", () => {
     ).rejects.toThrow(/valid session task summary/);
   });
 });
+
+it("loads detail with the session credential and rejects malformed responses", async () => {
+  const issueId = "0199a0b1-4444-7444-8444-444444444444";
+  const { credential, calls } = await startServer((request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(request.url?.endsWith("/children") ? { issues: [] } : { issues: "bad" }));
+  });
+  const api = createMulticaApi();
+  const sessionCredential = { ...credential, token: EXTERNAL_TOKEN };
+  expect(await api.taskDetail(sessionCredential, issueId, "children")).toEqual({ issues: [] });
+  expect(calls[0]?.headers.authorization).toBe(`Bearer ${EXTERNAL_TOKEN}`);
+  expect(calls[0]?.headers["x-workspace-id"]).toBe(WORKSPACE_ID);
+  await expect(api.taskDetail(sessionCredential, issueId, "contract")).rejects.toThrow("Invalid contract response");
+});
