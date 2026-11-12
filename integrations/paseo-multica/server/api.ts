@@ -2,6 +2,7 @@ import { z } from "zod";
 import { redactSecrets } from "../shared/redaction";
 import { isUuid } from "../shared/session";
 import { sessionTasksWireSchema, type SessionTasksWire } from "../shared/tasks";
+import { detailWireSchemas, type DetailSection } from "../shared/task-details";
 
 export interface ApiCredential {
   serverUrl: string;
@@ -59,6 +60,7 @@ export interface MulticaApi {
   verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid">;
   /** Read-only "this session's tasks" projection; scoped by the credential. */
   listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire>;
+  taskDetail(credential: ApiCredential, issueId: string, section: DetailSection): Promise<unknown>;
 }
 
 export class MulticaApiError extends Error {
@@ -88,6 +90,7 @@ const tokenResponseSchema = z.object({
 });
 
 const MAX_ERROR_BODY = 500;
+const memberNames = z.array(z.object({ id: z.string(), user_id: z.string(), name: z.string() }));
 
 export function createMulticaApi(options: {
   fetchImpl?: typeof fetch;
@@ -146,7 +149,56 @@ export function createMulticaApi(options: {
     }
   }
 
+  function actorNames(credential: ApiCredential) {
+    let members: Promise<z.infer<typeof memberNames>> | undefined;
+    const agents = new Map<string, Promise<string>>();
+    async function actorName(type: string, id: string): Promise<string> {
+      if (!isUuid(id)) return id;
+      try {
+        if (type === "agent") {
+          let name = agents.get(id);
+          if (!name) {
+            name = request(credential, "GET", `/api/agents/${encodeURIComponent(id)}`, credential.token).then((text) => z.object({ name: z.string() }).parse(parseJson(text)).name || id);
+            agents.set(id, name);
+          }
+          return await name;
+        }
+        if (type === "user" || type === "member") {
+          members ??= request(credential, "GET", `/api/workspaces/${encodeURIComponent(credential.workspaceId)}/members`, credential.token).then((text) => memberNames.parse(parseJson(text)));
+          return (await members).find((member) => member.id === id || member.user_id === id)?.name || id;
+        }
+      } catch { /* Names are optional; retain the stable identity. */ }
+      return id;
+    }
+    return actorName;
+  }
+
   return {
+    async taskDetail(credential, issueId, section) {
+      if (!isUuid(issueId)) throw new Error("Invalid issue ID");
+      const suffix = { contract: "contract", runs: "task-runs", comments: "comments?recent=2&summary=true", prs: "pull-requests", children: "children" }[section];
+      const raw = parseJson(await request(credential, "GET", `/api/issues/${encodeURIComponent(issueId)}/${suffix}`, credential.token));
+      const parsed = detailWireSchemas[section].safeParse(raw);
+      if (!parsed.success) throw new MulticaApiError(0, `Invalid ${section} response from Multica.`);
+      const actorName = actorNames(credential);
+      if (section === "runs") {
+        const runs = detailWireSchemas.runs.parse(parsed.data);
+        const selected = runs.find((run) => run.status === "running") ?? runs[0];
+        if (selected) selected.agent_name = await actorName("agent", selected.agent_id);
+        return runs;
+      }
+      if (section === "comments") {
+        const comments = detailWireSchemas.comments.parse(parsed.data).sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-2);
+        await Promise.all(comments.map(async (comment) => { comment.author_name = await actorName(comment.author_type, comment.author_id); }));
+        return comments;
+      }
+      if (section === "children") {
+        const children = detailWireSchemas.children.parse(parsed.data);
+        await Promise.all(children.issues.map(async (child) => { if (child.assignee_id && child.assignee_type) child.assignee_name = await actorName(child.assignee_type, child.assignee_id); }));
+        return children;
+      }
+      return parsed.data;
+    },
     async registerExternalAgent(credential, input) {
       const text = await request(credential, "POST", "/api/agents/external", credential.token, {
         name: input.name,

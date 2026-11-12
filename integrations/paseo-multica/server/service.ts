@@ -1,5 +1,6 @@
 import type { StatusView } from "../shared/contracts";
 import { toTasksView, type SessionTasksView } from "../shared/tasks";
+import type { DetailResult, DetailSection } from "../shared/task-details";
 import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
 import {
@@ -45,6 +46,7 @@ export interface SessionService {
   status(agentId: string): Promise<StatusView>;
   disconnect(agentId: string): Promise<StatusView>;
   tasks(agentId: string): Promise<SessionTasksView>;
+  taskDetail(agentId: string, issueId: string, section: DetailSection): Promise<DetailResult>;
 }
 
 const DEFAULT_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -437,6 +439,16 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     status,
     disconnect,
     tasks,
+    async taskDetail(agentId, issueId, section) {
+      try {
+        if (!isLocator(agentId)) throw new ConfigurationError("Invalid session ID.");
+        const existing = await store.read(deps.home, agentId);
+        if (existing.status !== "ok" || isExpired(existing.context, now())) throw new ConfigurationError("Session is not connected. Reconnect to Multica.");
+        return { ok: true, data: await api.taskDetail(contextCredential(existing.context), issueId, section) };
+      } catch (error) {
+        return { ok: false, error: describeError(error) };
+      }
+    },
   };
 }
 

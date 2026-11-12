@@ -42,6 +42,7 @@ export async function makeHome(): Promise<string> {
 }
 
 export class FakeApi implements MulticaApi {
+  async taskDetail(): Promise<unknown> { return {}; }
   readonly registrations: RegisterExternalAgentInput[] = [];
   readonly credentialCalls: ApiCredential[] = [];
   readonly tokensRequested: { agentId: string; sessionId: string; expiresAt: string }[] = [];

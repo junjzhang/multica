@@ -1,14 +1,20 @@
 import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { useCallback, useEffect, useState } from "react";
-import { Linking, Pressable, Text, View } from "react-native";
-import { tasksSummary } from "../shared/contracts";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Pressable, Text, View } from "react-native";
+import { taskExpansion, tasksSummary } from "../shared/contracts";
+import { TaskCard } from "./task-card";
 import { taskStatusLabel, type SessionTaskItem, type SessionTasksView } from "../shared/tasks";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
 
 export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelProps, "agentId" | "theme">) {
   const getTasks = useRpc(tasksSummary);
+  const expansion = useRpc(taskExpansion);
+  const [expandedIds, setExpandedIds] = useState<string[]>([]);
+  const [expansionReady, setExpansionReady] = useState(false);
+  const [expansionError, setExpansionError] = useState("");
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
   const [view, setView] = useState<SessionTasksView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -20,9 +26,15 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
     finally { setLoading(false); }
   }, [agentId, getTasks]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { let active = true; setExpansionReady(false); void expansion({ agentId }).then((ids) => { if (active) { setExpandedIds(ids); setExpansionReady(true); } }, (cause: unknown) => { if (active) { setExpansionError(String(cause)); setExpansionReady(true); } }); return () => { active = false; }; }, [agentId, expansion]);
+  const toggle = useCallback((issueId: string, expanded: boolean) => {
+    setExpandedIds((ids) => expanded ? [...ids.filter((id) => id !== issueId), issueId] : ids.filter((id) => id !== issueId));
+    writes.current = writes.current.catch(() => {}).then(() => expansion({ agentId, issueId, expanded })).then(() => setExpansionError(""), (cause: unknown) => setExpansionError(String(cause)));
+  }, [agentId, expansion]);
   const colors = theme.colors;
   return <View style={{ gap: 12 }}>
-    {loading ? <Text style={{ color: colors.foregroundMuted }}>Loading tasks…</Text>
+    {expansionError ? <Text style={{ color: colors.statusDanger }}>Could not save expanded tasks: {expansionError}</Text> : null}
+    {loading || !expansionReady ? <Text style={{ color: colors.foregroundMuted }}>Loading tasks…</Text>
       : error ? <Text style={{ color: colors.statusDanger }}>{error}</Text>
       : view && view.state !== "ready" ? <Text style={{ color: colors.foregroundMuted }}>{view.reason}</Text>
       : view?.state === "ready" ? <>
@@ -30,9 +42,9 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
           ...view.accepting.map((item) => ({ item, detail: `Awaiting your acceptance${item.deliveryAt ? ` · ${formatDate(item.deliveryAt)}` : ""}` })),
           ...(view.requests ?? []).map((item) => ({ item, detail: `Executor mentioned you · awaiting your reply${item.requestAt ? ` · ${formatDate(item.requestAt)}` : ""}` })),
           ...view.owned.filter((item) => item.status === "blocked").map((item) => ({ item, detail: "Your task is blocked" })),
-        ]} colors={colors} />
-        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
-        <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} />
+        ]} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
+        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
+        <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
         {view.truncated ? <Text style={{ color: colors.foregroundMuted }}>Some tasks are not shown.</Text> : null}
       </> : null}
     <Pressable accessibilityRole="button" disabled={loading} onPress={() => void load()}><Text style={{ color: colors.accent }}>Refresh</Text></Pressable>
@@ -47,14 +59,12 @@ function delegationStatus(item: SessionTaskItem): string {
   return taskStatusLabel(item);
 }
 
-function TaskGroup({ title, items, colors }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors }) {
+function TaskGroup({ title, items, colors, agentId, expandedIds, toggle }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors; agentId: string; expandedIds: string[]; toggle(id: string, expanded: boolean): void }) {
+  if (items.length === 0) return <Text style={{ color: colors.foregroundMuted }}>{title} · 0</Text>;
   return <View style={{ gap: 6 }}>
     <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title} · {items.length}</Text>
-    {items.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>None</Text> : items.map(({ item, detail }) =>
-      <Pressable key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} accessibilityRole={item.url ? "link" : undefined} disabled={!item.url} onPress={() => { if (item.url) void Linking.openURL(item.url); }} style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 }}>
-        <Text style={{ color: colors.foreground, fontWeight: "600" }}>{item.identifier ?? item.issueId} · {item.title}</Text>
-        <Text style={{ color: colors.foregroundMuted }}>{detail}</Text>
-      </Pressable>)}
+    {items.map(({ item, detail }) =>
+      <TaskCard key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} item={item} detail={detail} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />)}
   </View>;
 }
 

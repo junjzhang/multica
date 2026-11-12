@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { PaseoHostAdapter } from "../server/host";
 import { MulticaApiError } from "../server/api";
 import { ConfigurationError } from "../server/owner-profile";
@@ -52,6 +52,16 @@ async function setup(options: {
 }
 
 describe("session service", () => {
+  it("uses the bound session credential for task detail and contains errors", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext({ expires_at: "2027-01-01T00:00:00Z" }));
+    const read = vi.spyOn(api, "taskDetail").mockResolvedValueOnce({ issues: [] }).mockRejectedValueOnce(new Error("unavailable"));
+    const issueId = "0199a0b1-4444-7444-8444-444444444444";
+    expect(await service.taskDetail(SESSION_A, issueId, "children")).toEqual({ ok: true, data: { issues: [] } });
+    expect(read).toHaveBeenCalledWith(expect.objectContaining({ token: EXTERNAL_TOKEN, workspaceId: WORKSPACE_ID }), issueId, "children");
+    expect(await service.taskDetail(SESSION_A, issueId, "runs")).toEqual({ ok: false, error: "unavailable" });
+    expect((await service.taskDetail(SESSION_B, issueId, "runs")).ok).toBe(false);
+  });
   it("registers the current session once and writes its v1 binding", async () => {
     const { home, api, service } = await setup();
     const view = await service.connect(SESSION_A);

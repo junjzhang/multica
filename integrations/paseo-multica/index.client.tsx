@@ -60,7 +60,7 @@ export default function contribute(client: PluginClientContext) {
 
   client.addWorkspacePanel({
     id: STATUS_PANEL_ID,
-    title: "Multica connection",
+    title: "Multica",
     icon: "Plug",
     context: "agent",
     locations: ["workspace", "explorer"],
