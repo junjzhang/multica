@@ -28,7 +28,7 @@ type SessionTaskItem struct {
 	StatusName     string `json:"status_name,omitempty"`
 	StatusCategory string `json:"status_category"`
 	URL            string `json:"url,omitempty"`
-	// Role is why the item is on the list: executor, leader, acceptor, return.
+	// Role is why the item is on the list: executor, leader, acceptor, return, request.
 	Role              string `json:"role"`
 	UpdatedAt         string `json:"updated_at,omitempty"`
 	AcceptedAt        string `json:"accepted_at,omitempty"`
@@ -146,7 +146,7 @@ func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, age
 	items := make([]SessionTaskItem, 0, len(rows))
 	for _, row := range rows {
 		item := p.item(uuidToString(row.IssueID), row.Number, row.Title, row.Status)
-		item.Role = "return"
+		item.Role = "request"
 		item.RequestID = uuidToString(row.CommentID)
 		item.RequestAt = timestampToString(row.CreatedAt)
 		items = append(items, item)

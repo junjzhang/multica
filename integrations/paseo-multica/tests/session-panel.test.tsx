@@ -32,7 +32,7 @@ for (const mode of ["light", "dark"]) {
 
 it("shows request evidence and the source of a blocked reason", async () => {
   const base = makeTasksWire();
-  const request = { ...base.returning[0]!, request_id: "comment-1", request_at: "2026-11-11T12:00:00Z", url: "https://example.test/task" };
+  const request = { ...base.returning[0]!, role: "request" as const, request_id: "comment-1", request_at: "2026-11-11T12:00:00Z", url: "https://example.test/task" };
   const delegated = { ...base.returning[0]!, status: "blocked", blocked_reason: "Waiting for input" };
   getTasks.mockResolvedValueOnce(toTasksView({ ...base, requests: [request], delegated: [delegated] }, "2026-11-11T12:00:00Z"));
   const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));

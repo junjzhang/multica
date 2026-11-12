@@ -474,6 +474,10 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	comment(issue, worker, "Waiting for input\nmore detail", at.Add(6*time.Minute), "")
 	closed := dbfx.Issue(t, "Closed issue", testutil.Cols{"assignee_type": "agent", "assignee_id": worker, "status": "done"})
 	comment(closed, worker, mention+" closed", at, "")
+	foreignWorkspace := dbfx.Workspace(t, "Attention foreign workspace", fmt.Sprintf("attention-%d", time.Now().UnixNano()))
+	dbfx.Cleanup(t, "DELETE FROM workspace WHERE id = $1", foreignWorkspace)
+	foreignIssue := dbfx.Issue(t, "Foreign request", testutil.Cols{"workspace_id": foreignWorkspace, "assignee_type": "agent", "assignee_id": worker})
+	dbfx.Comment(t, foreignIssue, mention+" foreign", testutil.Cols{"workspace_id": foreignWorkspace, "author_type": "agent", "author_id": worker})
 	owned := dbfx.Issue(t, "Production-shaped parent", testutil.Cols{"assignee_type": "agent", "assignee_id": agent, "status": "in_progress"})
 	for i := 0; i < 8; i++ {
 		status := "done"
@@ -486,7 +490,7 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
-	if len(response.Requests) != 1 || response.Requests[0].RequestID != pending || response.Requests[0].IssueID != issue {
+	if len(response.Requests) != 1 || response.Requests[0].RequestID != pending || response.Requests[0].IssueID != issue || response.Requests[0].Role != "request" {
 		t.Fatalf("requests = %+v, want only %s", response.Requests, pending)
 	}
 	if len(response.Delegated) != 1 || response.Delegated[0].BlockedReason != "Waiting for input" {

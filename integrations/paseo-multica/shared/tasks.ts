@@ -7,7 +7,7 @@ import { z } from "zod";
 export const TASK_GROUPS = ["owned", "accepting", "returning"] as const;
 export type TaskGroup = (typeof TASK_GROUPS)[number];
 
-export const TASK_ROLES = ["executor", "leader", "acceptor", "return"] as const;
+export const TASK_ROLES = ["executor", "leader", "acceptor", "return", "request"] as const;
 export type TaskRole = (typeof TASK_ROLES)[number];
 
 const taskItemSchema = z.object({
