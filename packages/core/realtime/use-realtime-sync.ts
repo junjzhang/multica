@@ -11,6 +11,7 @@ import { clearWorkspaceStorage } from "../platform/storage-cleanup";
 import { defaultStorage } from "../platform/storage";
 import { getCurrentWsId, getCurrentSlug } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
+import { resultTakeoverKeys } from "../issues/result-takeover";
 import { projectKeys } from "../projects/queries";
 import { pinKeys } from "../pins/queries";
 import { autopilotKeys } from "../autopilots/queries";
@@ -1045,7 +1046,7 @@ export function useRealtimeSync(
     // Event types handled by specific handlers below -- skip generic refresh
     const specificEvents = new Set([
       "workspace:updated",
-      "issue:updated", "issue:created", "issue:deleted", "issue_attachments:changed", "issue_labels:changed", "issue_metadata:changed", "issue_properties:changed", "property:created", "property:updated", "inbox:new",
+      "issue_mailbox:changed", "issue:updated", "issue:created", "issue:deleted", "issue_attachments:changed", "issue_labels:changed", "issue_metadata:changed", "issue_properties:changed", "property:created", "property:updated", "inbox:new",
       "comment:created", "comment:updated", "comment:deleted",
       "comment:resolved", "comment:unresolved",
       "activity:created",
@@ -1070,6 +1071,10 @@ export function useRealtimeSync(
 
     const unsubAny = ws.onAny((msg) => {
       if (specificEvents.has(msg.type)) return;
+      if (msg.type === "agent:archived" || msg.type === "agent:restored") {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "contract"] });
+      }
       const prefix = msg.type.split(":")[0] ?? "";
       if (prefix === "agent" || (prefix === "task" && msg.type !== "task:progress")) {
         const wsId = getCurrentWsId();
@@ -1083,6 +1088,16 @@ export function useRealtimeSync(
     // No self-event filtering: actor_id identifies the USER, not the TAB.
     // Filtering by actor_id would block other tabs of the same user.
     // Instead, both mutations and WS handlers use dedup checks to be idempotent.
+
+    const unsubIssueMailboxChanged = ws.on("issue_mailbox:changed", (payload) => {
+      if (!payload || typeof payload !== "object" || !("issue_id" in payload)) return;
+      const wsId = getCurrentWsId();
+      if (wsId && typeof payload.issue_id === "string" && payload.issue_id) {
+        void qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, payload.issue_id) });
+        void qc.invalidateQueries({ queryKey: issueKeys.tasks(payload.issue_id) });
+        void qc.invalidateQueries({ queryKey: resultTakeoverKeys.issue(wsId, payload.issue_id) });
+      }
+    });
 
     const unsubIssueUpdated = ws.on("issue:updated", (p) => {
       const payload = p as IssueUpdatedPayload;
@@ -1821,6 +1836,7 @@ export function useRealtimeSync(
 
     return () => {
       unsubAny();
+      unsubIssueMailboxChanged();
       unsubIssueUpdated();
       unsubIssueCreated();
       unsubIssueDeleted();

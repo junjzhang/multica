@@ -1,6 +1,6 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import type { Agent, Squad, Workspace } from "../types";
+import type { Agent, Squad, SquadMember, Workspace } from "../types";
 
 export const workspaceKeys = {
   all: (wsId: string) => ["workspaces", wsId] as const,
@@ -18,6 +18,8 @@ export const workspaceKeys = {
   // `["workspaces", wsId, "squads"]` invalidation covers it.
   squadMemberStatus: (wsId: string, squadId: string) =>
     ["workspaces", wsId, "squads", squadId, "members-status"] as const,
+  squadMembers: (wsId: string, squadId: string) =>
+    ["workspaces", wsId, "squads", squadId, "members"] as const,
   skills: (wsId: string) => ["workspaces", wsId, "skills"] as const,
   assigneeFrequency: (wsId: string) => ["workspaces", wsId, "assignee-frequency"] as const,
   mcpServers: (wsId: string) => ["workspaces", wsId, "mcp-servers"] as const,
@@ -102,6 +104,16 @@ export function squadListOptions(wsId: string) {
     queryKey: workspaceKeys.squads(wsId),
     queryFn: () => api.listSquads(),
     enabled: !!wsId,
+  });
+}
+
+/** Roster of one squad (agents and human members) for handoff/assignment UI. */
+export function squadMembersOptions(wsId: string, squadId: string) {
+  return queryOptions<SquadMember[]>({
+    queryKey: workspaceKeys.squadMembers(wsId, squadId),
+    queryFn: () => api.listSquadMembers(squadId),
+    enabled: !!wsId && !!squadId,
+    staleTime: 30 * 1000,
   });
 }
 

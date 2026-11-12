@@ -65,16 +65,6 @@ func TestListSquadMemberStatusRetainsWaiterIssueWithoutWorkingStatus(t *testing.
 	squadID := createCommentTriggerPreviewSquad(t, "Squad Status Local Directory Waiter", agentID)
 	issueID := createCommentTriggerPreviewIssue(t, "Directory waiter remains visible", "agent", agentID)
 
-	if _, err := testPool.Exec(ctx, `
-		INSERT INTO squad_member (squad_id, member_type, member_id)
-		VALUES ($1, 'agent', $2)
-	`, squadID, agentID); err != nil {
-		t.Fatalf("insert squad member: %v", err)
-	}
-	t.Cleanup(func() {
-		testPool.Exec(context.Background(), `DELETE FROM squad_member WHERE squad_id = $1 AND member_id = $2`, squadID, agentID)
-	})
-
 	var taskID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, dispatched_at)

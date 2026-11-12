@@ -262,6 +262,78 @@ describe("PullRequestList sidebar rows", () => {
     expect(verdict()).toHaveTextContent(expected);
   });
 
+  it("renders a TGit MR link without inventing a CI verdict", async () => {
+    const url = "https://git.test/org/widget/merge_requests/42";
+    mockPRs = [makePR({
+      provider: "tgit",
+      number: 42,
+      title: "Fix a TGit issue",
+      html_url: url,
+      author_login: null,
+      snapshot_available: undefined,
+      checks_conclusion: null,
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.getByRole("link", { name: /Fix a TGit issue/ })).toHaveAttribute("href", url);
+    expect(screen.queryByTestId("pull-request-verdict")).not.toBeInTheDocument();
+  });
+
+  it("shows review, conflict and CI approval as separate facts", async () => {
+    mockPRs = [makePR({
+      provider: "tgit", mergeable: "conflicting", checks_rollup: "pending",
+      checks_total: 2, checks_passed: 1, checks_running: 1,
+      review: { state: "approving", reviewers: [{ username: "alice", type: "necessary", review_state: "approved" }] },
+      check_details: [
+        { id: 1, context: "pipeline approval", state: "need_approve", target_url: "https://ci.test/approval" },
+        { id: 2, context: "unsafe link", state: "success", target_url: "javascript:bad()" },
+      ],
+    })];
+    renderList();
+    await waitForRender();
+    expect(verdict()).toHaveTextContent("Conflicts");
+    expect(screen.getByText("Review: Pending")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Review: Pending"));
+    expect(screen.getByText("@alice")).toBeVisible();
+    fireEvent.click(screen.getByText("Checks (2)"));
+    expect(screen.getByText("Awaiting CI approval")).toBeVisible();
+    expect(screen.getByRole("link", { name: "pipeline approval" })).toHaveAttribute("href", "https://ci.test/approval");
+    expect(screen.queryByRole("link", { name: "unsafe link" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+  });
+
+  it("keeps a blocked gate visible even without named checks", async () => {
+    mockPRs = [makePR({ provider: "tgit", checks_rollup: "pending", commit_gate: { state: "pending", blocked: true } })];
+    renderList();
+    await waitForRender();
+    expect(verdict()).toHaveTextContent("Pending");
+    expect(screen.getByText("CI gate blocks merging")).toBeInTheDocument();
+    expect(screen.queryByText("No checks yet")).not.toBeInTheDocument();
+  });
+
+  it("does not expose old approvals on a changed MR head", async () => {
+    mockPRs = [makePR({ provider: "tgit", snapshot_available: false,
+      review: { state: "approved", reviewers: [] },
+      check_details: [{ id: 1, context: "old build", state: "success", target_url: "https://ci.test/old" }],
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.queryByTestId("pull-request-review")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pull-request-check-details")).not.toBeInTheDocument();
+  });
+
+  it("does not infer merge readiness from passing CI and approval", async () => {
+    mockPRs = [makePR({ provider: "tgit", mergeable: "mergeable", checks_rollup: "success", checks_total: 1, checks_passed: 1,
+      review: { state: "approved", reviewers: [] },
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Review: Approved")).toBeInTheDocument();
+    expect(screen.getByText("No merge conflicts")).toBeInTheDocument();
+    expect(verdict()).toHaveTextContent("Checks passed");
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+  });
+
   // --- Terminal PRs --------------------------------------------------------
 
   it("ends a merged PR at Merged, whatever its last snapshot said", async () => {

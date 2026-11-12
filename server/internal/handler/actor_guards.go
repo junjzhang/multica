@@ -5,7 +5,8 @@ import (
 )
 
 // RequireHumanActor rejects machine credentials on human-only route groups.
-// Auth strips client-supplied X-Actor-Source and stamps task_token or cloud_pat;
+// Auth strips client-supplied X-Actor-Source and stamps task_token, cloud_pat
+// or external_agent;
 // that authoritative header distinguishes a machine acting for its human owner.
 // resolveActor classifies workspace authorship and is not this authorization gate.
 //
@@ -31,7 +32,7 @@ func isMachineCredentialActor(r *http.Request) bool {
 	// client-supplied value before stamping its own, so a recognized value here
 	// is authoritative.
 	switch r.Header.Get("X-Actor-Source") {
-	case "task_token", "cloud_pat":
+	case "task_token", "cloud_pat", "external_agent":
 		return true
 	default:
 		return false

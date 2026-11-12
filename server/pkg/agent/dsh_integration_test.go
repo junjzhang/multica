@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,21 +23,47 @@ func TestDshRealRuntimeSmoke(t *testing.T) {
 	if path == "" {
 		t.Fatal("MULTICA_DSH_PATH is required")
 	}
-	b, err := New("dsh", Config{ExecutablePath: path, TaskID: "dsh-real-smoke", Logger: slog.Default()})
+	sessionRoot := t.TempDir()
+	b, err := New("dsh", Config{ExecutablePath: path, TaskID: "dsh-real-smoke", Logger: slog.Default(),
+		Env: map[string]string{"MULTICA_DSH_SESSION_ROOT": sessionRoot}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cwd := t.TempDir()
-	session, err := b.Execute(ctx, "Remember the code word PINEAPPLE. Reply with exactly DSH_MULTICA_OK and nothing else.", ExecOptions{
-		Cwd: cwd, Model: "deepseek-official/deepseek-v4-flash", ThinkingLevel: "off",
+	model := os.Getenv("MULTICA_DSH_SMOKE_MODEL")
+	if model == "" {
+		model = "deepseek-official/deepseek-v4-flash"
+	}
+	firstBackend := b
+	if previousPath := os.Getenv("MULTICA_DSH_SMOKE_PREVIOUS_PATH"); previousPath != "" {
+		previousHome := os.Getenv("MULTICA_DSH_SMOKE_PREVIOUS_HOME")
+		if previousHome == "" {
+			t.Fatal("MULTICA_DSH_SMOKE_PREVIOUS_HOME is required when testing an upgrade")
+		}
+		firstBackend, err = New("dsh", Config{ExecutablePath: previousPath, TaskID: "dsh-upgrade-smoke", Logger: slog.Default(),
+			Env: map[string]string{"DSH_HOME": previousHome, "MULTICA_DSH_SESSION_ROOT": sessionRoot}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, err := firstBackend.Execute(ctx, "Remember the code word PINEAPPLE. Use the shell tool to write exactly DSH_TOOL_OK to a file named smoke.txt in the working directory. Then reply with exactly DSH_MULTICA_OK and nothing else.", ExecOptions{
+		Cwd: cwd, Model: model, ThinkingLevel: "off",
 		Timeout: 90 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range session.Messages {
+	toolCalls := map[string]string{}
+	toolResults := map[string]string{}
+	for message := range session.Messages {
+		if message.Type == MessageToolUse {
+			toolCalls[message.CallID] = message.Tool
+		}
+		if message.Type == MessageToolResult {
+			toolResults[message.CallID] = message.Tool
+		}
 	}
 	result := <-session.Result
 	if result.Status != "completed" {
@@ -48,9 +75,21 @@ func TestDshRealRuntimeSmoke(t *testing.T) {
 	if result.SessionID == "" {
 		t.Fatal("DSH smoke returned no session ID")
 	}
+	content, err := os.ReadFile(filepath.Join(cwd, "smoke.txt"))
+	if err != nil || strings.TrimSpace(string(content)) != "DSH_TOOL_OK" {
+		t.Fatalf("DSH shell tool did not write the expected file: content=%q error=%v", content, err)
+	}
+	if len(toolCalls) == 0 || len(toolCalls) != len(toolResults) {
+		t.Fatalf("DSH tool events are incomplete: calls=%v results=%v", toolCalls, toolResults)
+	}
+	for callID, name := range toolCalls {
+		if callID == "" || name == "" || toolResults[callID] != name {
+			t.Fatalf("DSH tool result lost its call ID or name: calls=%v results=%v", toolCalls, toolResults)
+		}
+	}
 
 	resumed, err := b.Execute(ctx, "Reply with exactly the code word from the previous turn and nothing else.", ExecOptions{
-		Cwd: cwd, Model: "deepseek-official/deepseek-v4-flash", ThinkingLevel: "off",
+		Cwd: cwd, Model: model, ThinkingLevel: "off",
 		ResumeSessionID: result.SessionID, Timeout: 90 * time.Second,
 	})
 	if err != nil {

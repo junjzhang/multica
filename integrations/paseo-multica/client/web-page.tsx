@@ -1,0 +1,175 @@
+import { createElement, useLayoutEffect, useRef } from "react";
+import { Platform } from "react-native";
+
+/*
+ * Minimal DOM shapes. The plugin keeps the DOM lib out of its tsconfig so
+ * native code cannot depend on it; only this file touches the document, and
+ * only when Platform.OS is "web".
+ */
+interface Style {
+  [property: string]: string;
+}
+interface Element {
+  style: Style;
+  inert: boolean;
+  setAttribute(name: string, value: string): void;
+  appendChild(child: Element): void;
+  remove(): void;
+  addEventListener(name: string, listener: (event: { errorCode?: number }) => void): void;
+  getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+}
+interface Document {
+  body: Element;
+  createElement(tag: string): Element;
+}
+interface ResizeObserverInstance {
+  observe(target: Element): void;
+  disconnect(): void;
+}
+interface Host {
+  document: Document;
+  ResizeObserver: new (callback: () => void) => ResizeObserverInstance;
+  requestAnimationFrame(callback: () => void): number;
+  cancelAnimationFrame(handle: number): void;
+  addEventListener(name: string, listener: () => void, capture?: boolean): void;
+  removeEventListener(name: string, listener: () => void, capture?: boolean): void;
+  paseoDesktop?: { browser?: { profilePartition?: string } };
+  __paseoMulticaPages?: Map<string, ResidentPage>;
+}
+
+interface ResidentPage {
+  surface: Element;
+  view: Element;
+  owner: symbol | null;
+  failed: boolean;
+  onError: (() => void) | null;
+}
+
+const host = globalThis as unknown as Host;
+const anchorStyle = { flex: 1, width: "100%", height: "100%", minHeight: 0 };
+
+/** The page outlives panels and routes; it belongs to the renderer. */
+function pages(): Map<string, ResidentPage> {
+  return (host.__paseoMulticaPages ??= new Map());
+}
+
+export function resetResidentPage(hostId: string): void {
+  if (Platform.OS !== "web") return;
+  pages().get(hostId)?.surface.remove();
+  pages().delete(hostId);
+}
+
+/** Keeps the guest alive and paintable off screen without shrinking its viewport. */
+function park(page: ResidentPage): void {
+  page.surface.setAttribute("aria-hidden", "true");
+  page.surface.inert = true;
+  Object.assign(page.surface.style, { left: "0px", top: "0px", width: "1px", height: "1px", pointerEvents: "none" });
+}
+
+function createPage(hostId: string, url: string): ResidentPage {
+  const { document } = host;
+  const partition = host.paseoDesktop?.browser?.profilePartition;
+  const surface = document.createElement("div");
+  surface.setAttribute("data-multica-host", hostId);
+  // Same paint plane as Paseo's resident browsers; its overlay root sits above at z-index 1.
+  Object.assign(surface.style, { position: "fixed", zIndex: "0", overflow: "hidden", display: "block" });
+
+  // Electron only attaches webviews that use Paseo's own browser profile, which
+  // also keeps the session cookie across restarts. Browsers fall back to a frame.
+  const view = document.createElement(partition ? "webview" : "iframe");
+  view.setAttribute("title", "Multica");
+  Object.assign(view.style, {
+    display: "inline-flex",
+    position: "absolute",
+    left: "0px",
+    top: "0px",
+    width: "1280px",
+    height: "800px",
+    border: "0",
+  });
+  if (partition) {
+    view.setAttribute("partition", partition);
+    view.setAttribute("allowpopups", "true");
+  } else {
+    view.setAttribute("allow", "clipboard-read; clipboard-write");
+    view.setAttribute("referrerpolicy", "no-referrer");
+  }
+  view.setAttribute("src", url);
+
+  const page: ResidentPage = { surface, view, owner: null, failed: false, onError: null };
+  view.addEventListener(partition ? "did-fail-load" : "error", (event) => {
+    // The sign-in redirect aborts the first navigation in Chromium (ERR_ABORTED).
+    if (event.errorCode === -3) return;
+    page.failed = true;
+    page.onError?.();
+  });
+  park(page);
+  surface.appendChild(view);
+  document.body.appendChild(surface);
+  return page;
+}
+
+function present(page: ResidentPage, anchor: Element): void {
+  const rect = anchor.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    park(page);
+    return;
+  }
+  page.surface.setAttribute("aria-hidden", "false");
+  page.surface.inert = false;
+  Object.assign(page.surface.style, {
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    pointerEvents: "auto",
+  });
+  page.view.style.width = `${rect.width}px`;
+  page.view.style.height = `${rect.height}px`;
+}
+
+export function ResidentWebPage({ hostId, url, onError }: { hostId: string; url: string; onError(): void }) {
+  const ref = useRef<Element>(null);
+  useLayoutEffect(() => {
+    if (Platform.OS !== "web" || !ref.current) return;
+    const anchor = ref.current;
+    let page = pages().get(hostId);
+    if (!page) {
+      page = createPage(hostId, url);
+      pages().set(hostId, page);
+    }
+    const current = page;
+    const owner = Symbol(hostId);
+    current.owner = owner;
+    current.onError = onError;
+    if (current.failed) onError();
+
+    let frame = 0;
+    const update = () => {
+      if (current.owner === owner) present(current, anchor);
+    };
+    const schedule = () => {
+      host.cancelAnimationFrame(frame);
+      frame = host.requestAnimationFrame(update);
+    };
+    const observer = new host.ResizeObserver(update);
+    observer.observe(anchor);
+    host.addEventListener("resize", schedule);
+    host.addEventListener("scroll", schedule, true);
+    update();
+    return () => {
+      observer.disconnect();
+      host.removeEventListener("resize", schedule);
+      host.removeEventListener("scroll", schedule, true);
+      host.cancelAnimationFrame(frame);
+      if (current.owner === owner) {
+        current.owner = null;
+        current.onError = null;
+        park(current);
+      }
+    };
+  }, [hostId, url, onError]);
+
+  if (Platform.OS !== "web") return null;
+  return createElement("div", { ref, style: anchorStyle, "data-multica-anchor": hostId });
+}

@@ -23,6 +23,12 @@ export interface Squad {
   archived_by: string | null;
   member_count?: number;
   member_preview?: SquadMemberPreview[];
+  /**
+   * Set when the stored default leader violates the managed-only rule (a
+   * legacy external value). Readers must show the migration hint and must not
+   * rely on the default for new dispatch; an explicit handoff is required.
+   */
+  default_leader_unavailable_reason?: string;
 }
 
 export interface SquadMember {

@@ -19,7 +19,7 @@ func TestCodexSessionWriterLockSerializesOneStore(t *testing.T) {
 	defer first.Release()
 
 	waiting := make(chan struct{})
-	acquired := make(chan *CodexSessionWriterLock, 1)
+	acquired := make(chan *ProviderStoreWriterLock, 1)
 	errs := make(chan error, 1)
 	go func() {
 		lock, err := AcquireCodexSessionWriterLock(context.Background(), store, func() { close(waiting) })
