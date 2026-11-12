@@ -1,19 +1,50 @@
-import type { PluginClientContext } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import React, { useState } from "react";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { expect, it, vi } from "vitest";
-vi.mock("../client/surface", () => ({ MulticaSurface: () => null }));
-import { createTaskPanels } from "../client/task-panel";
-
-it("opens and reuses a panel for each task", () => {
+vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable" }));
+vi.mock("../client/surface", () => ({ MulticaSurface: ({ path }: { path: string }) => React.createElement("Text", null, path) }));
+import { createTaskPanels, parseTaskState, TASK_PANEL_ID, visitTask } from "../client/task-panel";
+const a = "/acme/issues/WORK-1";
+const b = "/acme/issues/WORK-2";
+const link = (path: string) => `https://example.test${path}`;
+it("validates persisted paths and bounds history", () => {
+  for (const state of [null, {}, { paths: ["//evil.test/x"] }, { paths: ["/acme/issues/../x"] }, { paths: ["/acme/issues/%2e%2e"] }, { paths: Array(11).fill(a) }]) expect(parseTaskState(state)).toEqual({ paths: [] });
+  expect(parseTaskState({ paths: [a, b] })).toEqual({ paths: [a, b] });
+  expect(visitTask({ paths: [a] }, a)).toEqual({ paths: [a] });
+  expect(visitTask({ paths: Array(10).fill(a) }, b).paths).toHaveLength(10);
+});
+it("registers a static panel, restores state after reload, switches and goes back", async () => {
   const remove = vi.fn();
   const client = { addWorkspacePanel: vi.fn(() => remove), openPanel: vi.fn() } as unknown as PluginClientContext;
-  const panels = createTaskPanels(client);
-  panels.open("workspace", "https://example.test/acme/issues/WORK-1", "WORK-1");
-  panels.open("workspace", "https://example.test/acme/issues/WORK-1", "WORK-1");
-  panels.open("workspace", "https://example.test/acme/issues/WORK-2", "WORK-2");
-  expect(client.addWorkspacePanel).toHaveBeenCalledTimes(2);
-  expect(client.openPanel).toHaveBeenCalledTimes(3);
-  expect(vi.mocked(client.openPanel).mock.calls[0]).toEqual(vi.mocked(client.openPanel).mock.calls[1]);
-  expect(vi.mocked(client.openPanel).mock.calls[2]).not.toEqual(vi.mocked(client.openPanel).mock.calls[1]);
+  let panels = createTaskPanels(client);
+  expect(client.addWorkspacePanel).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(client.addWorkspacePanel).mock.calls[0]![0].id).toBe(TASK_PANEL_ID);
+  let stored: unknown = undefined;
+  const mount = async () => {
+    const Component = vi.mocked(client.addWorkspacePanel).mock.calls.at(-1)![0].Component as React.ComponentType<PluginWorkspacePanelProps>;
+    function Host() {
+      const [state, setState] = useState(stored);
+      return <Component {...({ workspaceId: "ws", host: { id: "host", label: "host" }, layout: { compact: false, platform: "web" }, theme: { colors: { surface0: "white", foreground: "black", foregroundMuted: "gray", accent: "blue" } }, tab: { state, setState: (next: unknown) => { stored = next; setState(next); }, setModified: () => {} } } as unknown as PluginWorkspacePanelProps)} />;
+    }
+    let renderer: ReactTestRenderer;
+    await act(async () => { renderer = create(<Host />); });
+    return renderer!;
+  };
+  panels.open("ws", link(a));
+  let renderer = await mount();
+  expect(JSON.stringify(renderer.toJSON())).toContain(a);
+  await act(async () => { panels.open("ws", link(b)); });
+  expect(JSON.stringify(renderer.toJSON())).toContain(b);
+  expect(stored).toEqual({ paths: [a, b] });
+  await act(async () => { renderer.root.findByProps({ accessibilityRole: "button" }).props.onPress(); });
+  expect(stored).toEqual({ paths: [a] });
+  await act(async () => { renderer.unmount(); });
   panels.dispose();
-  expect(remove).toHaveBeenCalledTimes(2);
+  panels = createTaskPanels(client);
+  renderer = await mount();
+  expect(JSON.stringify(renderer.toJSON())).toContain(a);
+  expect(vi.mocked(client.openPanel).mock.calls).toEqual([[TASK_PANEL_ID, { workspaceId: "ws", location: "explorer" }], [TASK_PANEL_ID, { workspaceId: "ws", location: "explorer" }]]);
+  await act(async () => { renderer.unmount(); });
+  panels.dispose();
 });

@@ -67,7 +67,7 @@ export default function contribute(client: PluginClientContext) {
     icon: "Plug",
     context: "agent",
     locations: ["workspace", "explorer"],
-    Component: (props) => <StatusPanel {...props} openTask={(url, identifier) => taskPanels.open(props.workspaceId, url, identifier)} />,
+    Component: (props) => <StatusPanel {...props} openTask={(url, identifier) => taskPanels.open(props.workspaceId, url)} />,
   });
 
   client.addSettingsScreen({
@@ -168,7 +168,7 @@ export default function contribute(client: PluginClientContext) {
       kind: DELIVERY_ITEM_KIND,
       version: DELIVERY_ITEM_VERSION,
       schema: deliveryDataSchema,
-      Component: (props) => <DeliveryCard {...props} openTask={(url, identifier) => { const workspaceId = agentWorkspaces.get(props.agentId); if (workspaceId) taskPanels.open(workspaceId, url, identifier); }} />,
+      Component: (props) => <DeliveryCard {...props} openTask={(url, identifier) => { const workspaceId = agentWorkspaces.get(props.agentId); if (workspaceId) taskPanels.open(workspaceId, url); }} />,
     }),
   ];
 
