@@ -74,14 +74,16 @@ streaming, a prompt missing one of its stable IDs, and ordinary conversation.
 ## Session tasks
 
 Every Paseo agent on the host gets one Multica composer pill. For a connected
-session the pill summarizes three Multica obligations, and the Multica panel
-lists them with status and task links:
+session the pill prioritizes deliveries awaiting acceptance and blocked owned
+work, then shows the number of tasks in progress. The panel lists:
 
-- owned: issues the session's agent executes or leads as task leader;
-- waiting for acceptance: contracts whose current version names the agent as
-  acceptor while a delivery is still undecided;
-- returns pending: delegations this session dispatched through an accepted
-  return address whose result has not come back yet.
+- needs attention: undecided deliveries for the agent and blocked owned tasks;
+- delegated: open issues dispatched through this session's accepted return
+  address, including those whose result has already returned;
+- owned: issues the session's agent executes or leads as task leader.
+
+Connection details are collapsed below the task lists. Older servers that do
+not supply delegated items fall back to pending returns.
 
 The data comes from the read-only `GET /api/agents/{id}/session-tasks`
 projection, scoped to the credential's own agent and requiring a session-bound
