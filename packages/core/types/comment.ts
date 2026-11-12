@@ -92,6 +92,7 @@ export interface CommentTriggerOutcome {
 export type CommentTriggerSource =
   | "issue_assignee"
   | "mention_agent"
+  | "mention_notify"
   | "mention_squad_leader";
 
 export interface CommentTriggerPreviewAgent {
@@ -99,6 +100,7 @@ export interface CommentTriggerPreviewAgent {
   name: string;
   avatar_url?: string;
   source: CommentTriggerSource | string;
+  mode?: string;
   reason: string;
   /** "mailbox" targets receive the comment in their session mailbox, not as a run. */
   dispatch_kind?: string;

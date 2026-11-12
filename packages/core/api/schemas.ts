@@ -1527,6 +1527,7 @@ const CommentTriggerPreviewAgentSchema = z.object({
 // target_id is required to correlate with the client's rendered mention; a
 // malformed entry (missing id) is dropped rather than failing the whole payload.
 export const CommentTriggerOutcomeSchema = z.object({
+  mode: z.string().optional(),
   target_type: z.string().default(""),
   target_id: z.string(),
   status: z.string().default(""),

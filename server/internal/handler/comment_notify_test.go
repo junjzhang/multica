@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ func TestCommentNotifyMixedReturnsAndRecovery(t *testing.T) {
 	drop()
 	if code != http.StatusCreated {
 		t.Fatalf("comment: %d %s", code, body)
+	}
+	if !strings.Contains(body, `"mode":"notify"`) || !strings.Contains(body, `"mode":"delegate"`) {
+		t.Fatalf("mixed outcome modes: %s", body)
 	}
 	aTask := latestTaskIDFor(t, issue, a)
 	if n := countValue(t, `SELECT count(*) FROM agent_task_delegation_return WHERE task_id=$1`, aTask); n != 1 {

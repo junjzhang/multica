@@ -2254,3 +2254,16 @@ func TestPromptCarriesJoinedWakeups(t *testing.T) {
 		t.Errorf("prompt without joined wakeups mentions them:\n%s", out)
 	}
 }
+
+func TestCommentPromptIdentifiesNotification(t *testing.T) {
+	const id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	task := Task{AgentID: id, IssueID: "issue", TriggerCommentContent: "[@A](mention://agent-notify/" + id + ")"}
+	prompt := buildCommentPrompt(task, "codex")
+	if !strings.Contains(prompt, "did not add a result return") {
+		t.Fatalf("notification mode missing: %s", prompt)
+	}
+	task.TriggerCommentContent += " [@A](mention://agent/" + id + ")"
+	if strings.Contains(buildCommentPrompt(task, "codex"), "did not add a result return") {
+		t.Fatal("delegation was labelled as notification")
+	}
+}

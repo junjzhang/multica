@@ -688,6 +688,7 @@
     "leave_comment_placeholder": "コメントを残す...",
     "send_tooltip": "送信",
     "trigger_source_issue_assignee": "担当",
+    "trigger_source_mention_notify": "通知のみ",
     "trigger_source_mention_agent": "@メンション",
     "trigger_source_mention_squad_leader": "Squad",
     "trigger_source_unknown": "トリガー",

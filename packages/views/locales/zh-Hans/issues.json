@@ -688,6 +688,7 @@
     "leave_comment_placeholder": "留下评论...",
     "send_tooltip": "发送",
     "trigger_source_issue_assignee": "负责人",
+    "trigger_source_mention_notify": "只通知",
     "trigger_source_mention_agent": "@提及",
     "trigger_source_mention_squad_leader": "小队",
     "trigger_source_unknown": "将触发",

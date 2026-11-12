@@ -688,6 +688,7 @@
     "leave_comment_placeholder": "댓글 남기기...",
     "send_tooltip": "보내기",
     "trigger_source_issue_assignee": "담당자",
+    "trigger_source_mention_notify": "알림만",
     "trigger_source_mention_agent": "@멘션",
     "trigger_source_mention_squad_leader": "Squad",
     "trigger_source_unknown": "트리거",

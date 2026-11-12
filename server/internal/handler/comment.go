@@ -1456,6 +1456,7 @@ type CommentTriggerPreviewResponse struct {
 }
 
 type CommentTriggerAgentResponse struct {
+	Mode      string  `json:"mode,omitempty"`
 	ID        string  `json:"id"`
 	Name      string  `json:"name"`
 	AvatarURL *string `json:"avatar_url,omitempty"`
@@ -1526,7 +1527,12 @@ func commentAgentTriggerReason(trigger commentAgentTrigger) string {
 }
 
 func (h *Handler) commentAgentTriggerToResponse(trigger commentAgentTrigger) CommentTriggerAgentResponse {
+	mode := "delegate"
+	if trigger.Source == commentTriggerSourceMentionNotify {
+		mode = "notify"
+	}
 	return CommentTriggerAgentResponse{
+		Mode:      mode,
 		ID:        uuidToString(trigger.Agent.ID),
 		Name:      trigger.Agent.Name,
 		AvatarURL: h.resolveAvatarURLPtr(textToPtr(trigger.Agent.AvatarUrl)),
@@ -1634,11 +1640,15 @@ func (h *Handler) PreviewCommentTriggers(w http.ResponseWriter, r *http.Request)
 		}
 		agent := target.MailboxAgent
 		source := string(commentTriggerSourceMentionAgent)
+		if target.Mode == "notify" {
+			source = string(commentTriggerSourceMentionNotify)
+		}
 		if target.TargetType == "squad" {
 			source = string(commentTriggerSourceMentionSquadLeader)
 		}
 		resp.Agents = append(resp.Agents, CommentTriggerAgentResponse{
 			ID:           uuidToString(agent.ID),
+			Mode:         target.Mode,
 			Name:         agent.Name,
 			AvatarURL:    h.resolveAvatarURLPtr(textToPtr(agent.AvatarUrl)),
 			Source:       source,
