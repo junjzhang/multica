@@ -79,6 +79,8 @@ describe("session task views", () => {
         owned: [{ issue_id: "x", title: "t", status: "todo", status_category: "unstarted", role: "nope" }],
       }).success,
     ).toBe(false);
+    expect(sessionTasksWireSchema.safeParse({ ...makeTasksWire(), requests: "invalid" }).success).toBe(false);
+    expect(sessionTasksWireSchema.safeParse({ ...makeTasksWire(), delegated: [{ ...makeTasksWire().returning[0], blocked_reason: 42 }] }).success).toBe(false);
   });
 
   it("keeps every view state parseable by the RPC contract", () => {
