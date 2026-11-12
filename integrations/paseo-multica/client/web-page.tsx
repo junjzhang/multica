@@ -66,7 +66,7 @@ function park(page: ResidentPage): void {
   Object.assign(page.surface.style, { left: "0px", top: "0px", width: "1px", height: "1px", pointerEvents: "none" });
 }
 
-function createPage(hostId: string, url: string): ResidentPage {
+function createPage(hostId: string, url: string, signInUrl?: string): ResidentPage {
   const { document } = host;
   const partition = host.paseoDesktop?.browser?.profilePartition;
   const surface = document.createElement("div");
@@ -94,7 +94,13 @@ function createPage(hostId: string, url: string): ResidentPage {
     view.setAttribute("allow", "clipboard-read; clipboard-write");
     view.setAttribute("referrerpolicy", "no-referrer");
   }
-  view.setAttribute("src", url);
+  if (signInUrl) {
+    let signedIn = false;
+    view.addEventListener(partition ? "did-finish-load" : "load", () => {
+      if (!signedIn) { signedIn = true; view.setAttribute("src", url); }
+    });
+  }
+  view.setAttribute("src", signInUrl ?? url);
 
   const page: ResidentPage = { surface, view, owner: null, failed: false, onError: null };
   view.addEventListener(partition ? "did-fail-load" : "error", (event) => {
@@ -128,14 +134,14 @@ function present(page: ResidentPage, anchor: Element): void {
   page.view.style.height = `${rect.height}px`;
 }
 
-export function ResidentWebPage({ hostId, url, onError }: { hostId: string; url: string; onError(): void }) {
+export function ResidentWebPage({ hostId, url, signInUrl, onError, retain = true }: { hostId: string; url: string; signInUrl?: string; onError(): void; retain?: boolean }) {
   const ref = useRef<Element>(null);
   useLayoutEffect(() => {
     if (Platform.OS !== "web" || !ref.current) return;
     const anchor = ref.current;
     let page = pages().get(hostId);
     if (!page) {
-      page = createPage(hostId, url);
+      page = createPage(hostId, url, signInUrl);
       pages().set(hostId, page);
     }
     const current = page;
@@ -165,10 +171,11 @@ export function ResidentWebPage({ hostId, url, onError }: { hostId: string; url:
       if (current.owner === owner) {
         current.owner = null;
         current.onError = null;
-        park(current);
+        if (retain) park(current);
+        else if (pages().get(hostId) === current) resetResidentPage(hostId);
       }
     };
-  }, [hostId, url, onError]);
+  }, [hostId, url, signInUrl, onError, retain]);
 
   if (Platform.OS !== "web") return null;
   return createElement("div", { ref, style: anchorStyle, "data-multica-anchor": hostId });

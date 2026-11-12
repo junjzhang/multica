@@ -9,7 +9,7 @@ const STATE_LABEL: Record<StatusView["state"], string> = {
   connected: "Connected", invalid: "Needs attention", unverified: "Not verified", disconnected: "Not connected",
 };
 
-export function StatusPanel({ agentId, theme }: PluginAgentPanelProps) {
+export function StatusPanel({ agentId, theme, openTask }: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
   const getStatus = useRpc(statusSession);
   const [view, setView] = useState<StatusView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +25,7 @@ export function StatusPanel({ agentId, theme }: PluginAgentPanelProps) {
   useEffect(() => { void load(); }, [load]);
   const colors = theme.colors;
   return <ScrollView style={{ backgroundColor: colors.surface0 }} contentContainerStyle={{ gap: 16, padding: 12 }}>
-    <SessionTasksSection agentId={agentId} theme={theme} />
+    <SessionTasksSection agentId={agentId} theme={theme} openTask={openTask} />
     <View style={{ gap: 6 }}>
       <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((value) => !value)}>
         <Text style={{ color: colors.foregroundMuted }}>{loading ? "Checking connection…" : view ? STATE_LABEL[view.state] : "Connection unavailable"}{view?.expiresAt ? ` · Credential expires ${view.expiresAt.slice(0, 7)}` : ""} {expanded ? "▴" : "▾"}</Text>

@@ -6,6 +6,7 @@ import { makeTasksWire } from "./fixtures";
 import { toTasksView } from "../shared/tasks";
 import type { DetailResult } from "../shared/task-details";
 
+const openTask = vi.fn();
 const { openURL, copyText } = vi.hoisted(() => ({ openURL: vi.fn(), copyText: vi.fn(async () => {}) }));
 vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable", Linking: { openURL } }));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: (contract: { name: string }) => contract.name === "session.tasks" ? getTasks : contract.name === "session.task-expansion" ? getExpansion : getDetail }));
@@ -21,7 +22,7 @@ for (const mode of ["light", "dark"]) {
     const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, `${mode}-${key}`]));
     const theme = { colors } as PluginAgentPanelProps["theme"];
     let renderer: ReactTestRenderer;
-    await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={theme} />); });
+    await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="agent" theme={theme} />); });
     const output = JSON.stringify(renderer!.toJSON());
     expect(output.indexOf("Needs your attention")).toBeLessThan(output.indexOf("Delegated by you"));
     expect(output.indexOf("Delegated by you")).toBeLessThan(output.indexOf("Your tasks"));
@@ -33,7 +34,7 @@ for (const mode of ["light", "dark"]) {
     const links = renderer!.root.findAllByProps({ accessibilityRole: "link" });
     expect(links.length).toBeGreaterThan(0);
     await act(async () => { links[0]!.props.onPress(); });
-    expect(openURL).toHaveBeenCalled();
+    expect(openTask).toHaveBeenCalled();
     const copy = renderer!.root.findAll((node) => node.props.accessibilityRole === "button" && node.findAll((child) => child.props.children === "Copy ID").length > 0)[0]!;
     await act(async () => { copy.props.onPress(); });
     expect(copyText).toHaveBeenCalledWith("WORK-1");
@@ -49,7 +50,7 @@ it("shows request evidence and the source of a blocked reason", async () => {
   getTasks.mockResolvedValueOnce(toTasksView({ ...base, requests: [request], delegated: [delegated] }, "2026-11-11T12:00:00Z"));
   const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
   const output = JSON.stringify(renderer!.toJSON());
   expect(output).toContain("Executor mentioned you · awaiting your reply");
   expect(output).toContain("From executor's latest comment: Waiting for input");
@@ -61,7 +62,7 @@ it("renders empty groups as a single muted line", async () => {
   getTasks.mockResolvedValueOnce(toTasksView({ ...base, owned: [], accepting: [], returning: [], delegated: [], requests: [] }, "2026-11-11T12:00:00Z"));
   const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
   const output = JSON.stringify(renderer!.toJSON());
   expect(output).toContain("Needs your attention");
   expect(output).not.toContain("None");
@@ -90,7 +91,7 @@ it("loads one level at a time, isolates errors, and restores expanded cards", as
   });
   const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  const mount = async () => { await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); }); };
+  const mount = async () => { await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); }); };
   await mount();
   expect(getDetail).not.toHaveBeenCalled();
   await act(async () => { renderer!.root.findAll((node) => node.props.accessibilityState?.expanded === false)[0]!.props.onPress(); });
@@ -118,7 +119,7 @@ it("labels stale contracts without misidentifying the pending actor", async () =
   getDetail.mockImplementation(async ({ section }) => ({ ok: true, data: section === "contract" ? { stale: true, contract: { versions: [{ number: 1, criteria: ["a"] }], deliveries: [] }, accepted: [], pending_actor: { type: "agent", id: "a" }, acceptor: { type: "agent", id: "a" } } : ({ runs: [], comments: [], prs: { pull_requests: [] }, children: { issues: [] } } as Record<string, unknown>)[section] }));
   const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
   await act(async () => { renderer!.root.findAll((node) => node.props.accessibilityState?.expanded === false)[0]!.props.onPress(); });
   const output = JSON.stringify(renderer!.toJSON());
   expect(output).toContain("Contract stale");

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Linking, Pressable, Text, View } from "react-native";
 import type { DeliveryData } from "../shared/delivery";
 
-export function DeliveryCard({ item, theme }: PluginTimelineItemProps<DeliveryData>) {
+export function DeliveryCard({ item, theme, openTask }: PluginTimelineItemProps<DeliveryData> & { openTask(url: string, identifier?: string): void }) {
   const [expanded, setExpanded] = useState(false);
   const delivery = item.data;
   const colors = theme.colors;
@@ -17,10 +17,11 @@ export function DeliveryCard({ item, theme }: PluginTimelineItemProps<DeliveryDa
       {delivery.mentionMode ? <Text style={{ color: colors.foregroundMuted }}>{delivery.mentionMode}</Text> : null}
       {delivery.issueTitle ? <Text style={{ color: colors.foreground }}>{delivery.issueTitle}</Text> : null}
       {delivery.issueUrl ? (
-        <Text accessibilityRole="link" onPress={() => void Linking.openURL(delivery.issueUrl!)} style={{ color: colors.accent }}>
+        <Text accessibilityRole="link" onPress={() => openTask(delivery.issueUrl!, delivery.issueIdentifier)} style={{ color: colors.accent }}>
           Open task
         </Text>
       ) : null}
+      {delivery.issueUrl ? <Text accessibilityRole="link" onPress={() => void Linking.openURL(delivery.issueUrl!)} style={{ color: colors.accent }}>Open in browser</Text> : null}
       <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((open) => !open)}>
         <Text style={{ color: colors.foregroundMuted }}>{expanded ? "Hide original" : "Show original"}</Text>
       </Pressable>

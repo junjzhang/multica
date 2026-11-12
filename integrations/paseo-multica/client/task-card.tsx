@@ -8,7 +8,7 @@ import { detailWireSchemas, type DetailSection } from "../shared/task-details";
 import { taskStatusLabel, type SessionTaskItem } from "../shared/tasks";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
-type Props = { agentId: string; item: SessionTaskItem; detail: string; colors: Colors; expandedIds: string[]; toggle(id: string, expanded: boolean): void };
+type Props = { agentId: string; item: SessionTaskItem; detail: string; colors: Colors; expandedIds: string[]; toggle(id: string, expanded: boolean): void; openTask(url: string, identifier?: string): void };
 
 export function TaskCard(props: Props) {
   const { item, detail, colors, expandedIds, toggle } = props;
@@ -21,7 +21,8 @@ export function TaskCard(props: Props) {
     </Pressable>
     {expanded ? <>
       <View style={{ flexDirection: "row", gap: 16 }}>
-        {item.url ? <Pressable accessibilityRole="link" onPress={() => { void Linking.openURL(item.url!); }}><Text style={{ color: colors.accent }}>Open task</Text></Pressable> : null}
+        {item.url ? <Pressable accessibilityRole="link" onPress={() => props.openTask(item.url!, item.identifier)}><Text style={{ color: colors.accent }}>Open task</Text></Pressable> : null}
+        {item.url ? <Pressable accessibilityRole="link" onPress={() => { void Linking.openURL(item.url!); }}><Text style={{ color: colors.accent }}>Open in browser</Text></Pressable> : null}
         <Pressable accessibilityRole="button" onPress={() => { void copyText(item.identifier ?? item.issueId).then(() => setCopyError(""), () => setCopyError("Could not copy identifier.")); }}><Text style={{ color: colors.accent }}>Copy ID</Text></Pressable>
       </View>
       {copyError ? <Text style={{ color: colors.statusDanger }}>{copyError}</Text> : null}

@@ -14,7 +14,7 @@ for (const mode of ["light", "dark"]) {
     const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, `${mode}-${key}`]));
     const props = { agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
     let renderer: ReactTestRenderer;
-    await act(async () => { renderer = create(<StatusPanel {...props} />); });
+    await act(async () => { renderer = create(<StatusPanel {...props} openTask={vi.fn()} />); });
     const before = JSON.stringify(renderer!.toJSON());
     expect(before).toContain("Credential expires 2027-02");
     expect(before).toContain(`${mode}-foregroundMuted`);
@@ -30,7 +30,7 @@ it("keeps connection errors visible while details are collapsed", async () => {
   const colors = Object.fromEntries(["surface0", "foregroundMuted", "statusDanger"].map((key) => [key, key]));
   const props = { agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<StatusPanel {...props} />); });
+  await act(async () => { renderer = create(<StatusPanel {...props} openTask={vi.fn()} />); });
   expect(JSON.stringify(renderer!.toJSON())).toContain("Reconnect this session");
   await act(async () => { renderer!.unmount(); });
 });

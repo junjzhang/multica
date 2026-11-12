@@ -2,7 +2,8 @@ import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
-import { ConfigurationError } from "./server/owner-profile";
+import { ConfigurationError, loadOwnerProfile } from "./server/owner-profile";
+import { z } from "zod";
 import { paseoHostAdapter } from "./server/host";
 import { createSessionService, type ConnectionConfig } from "./server/service";
 import { sessionOpenEnv } from "./server/session-open";
@@ -31,7 +32,23 @@ export default function contribute(server: PluginServerContext) {
     });
   }
 
-  server.handle(openWeb, async () => webSignInLink());
+  server.handle(openWeb, async ({ path }) => {
+    if (path === undefined) return webSignInLink();
+    const owner = await loadOwnerProfile(homedir(), (await readSettings()).ownerProfile);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(`${owner.serverUrl}/api/workspaces/${encodeURIComponent(owner.workspaceId)}`, {
+        headers: { Authorization: `Bearer ${owner.token}`, "X-Workspace-ID": owner.workspaceId },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new ConfigurationError("Could not resolve the Multica workspace.");
+      const workspace = z.object({ slug: z.string() }).parse(await response.json());
+      return await webSignInLink(undefined, path, workspace.slug);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
   server.handle(connectSession, async ({ agentId }, context) => service(context).connect(agentId));
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));

@@ -14,6 +14,7 @@ import { deliveryTransformer } from "./client/timeline";
 import { StatusPanel } from "./client/status-panel";
 import { MulticaSurface } from "./client/surface";
 import { WEB_PANEL_ID, WEB_SCREEN_ID } from "./shared/web";
+import { createTaskPanels } from "./client/task-panel";
 
 const TASKS_PILL_ID = "multica-tasks";
 
@@ -28,6 +29,8 @@ function MulticaSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProp
 }
 
 export default function contribute(client: PluginClientContext) {
+  const taskPanels = createTaskPanels(client);
+  const agentWorkspaces = new Map<string, string>();
   client.addScreen({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSurface });
   client.addSidebarHeaderItem({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSidebarItem });
   client.addWorkspacePanel({
@@ -64,7 +67,7 @@ export default function contribute(client: PluginClientContext) {
     icon: "Plug",
     context: "agent",
     locations: ["workspace", "explorer"],
-    Component: StatusPanel,
+    Component: (props) => <StatusPanel {...props} openTask={(url, identifier) => taskPanels.open(props.workspaceId, url)} />,
   });
 
   client.addSettingsScreen({
@@ -98,6 +101,7 @@ export default function contribute(client: PluginClientContext) {
   const register = (agent: { id: string; workspaceId?: string | null }): void => {
     if (stopped || !agent.workspaceId) return;
     const workspaceId = agent.workspaceId;
+    agentWorkspaces.set(agent.id, workspaceId);
     if (pills.has(agent.id)) {
       void refreshPill(agent.id);
       return;
@@ -130,6 +134,7 @@ export default function contribute(client: PluginClientContext) {
   };
 
   const remove = (agentId: string): void => {
+    agentWorkspaces.delete(agentId);
     pills.get(agentId)?.remove();
     pills.delete(agentId);
   };
@@ -141,6 +146,7 @@ export default function contribute(client: PluginClientContext) {
         snapshot: ({ entries }) => {
           for (const pill of pills.values()) pill.remove();
           pills.clear();
+          agentWorkspaces.clear();
           for (const { agent } of entries) register(agent);
         },
         update: (message) => {
@@ -162,12 +168,13 @@ export default function contribute(client: PluginClientContext) {
       kind: DELIVERY_ITEM_KIND,
       version: DELIVERY_ITEM_VERSION,
       schema: deliveryDataSchema,
-      Component: DeliveryCard,
+      Component: (props) => <DeliveryCard {...props} openTask={(url, identifier) => { const workspaceId = agentWorkspaces.get(props.agentId); if (workspaceId) taskPanels.open(workspaceId, url); }} />,
     }),
   ];
 
   return () => {
     stopped = true;
+    taskPanels.dispose();
     lifetime.abort();
     for (const pill of pills.values()) pill.remove();
     pills.clear();

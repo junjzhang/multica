@@ -24,7 +24,9 @@ export function webConfigPath(home: string = homedir()): string {
  */
 export async function webSignInLink(
   configPath: string = webConfigPath(),
-): Promise<{ url: string; externalUrl: string }> {
+  path?: string,
+  workspaceSlug?: string,
+): Promise<{ url: string; externalUrl: string; signInUrl?: string }> {
   let text: string;
   try {
     text = await readFile(configPath, "utf8");
@@ -53,7 +55,13 @@ export async function webSignInLink(
   const externalUrl = parsed.externalUrl === undefined ? url : origin(parsed.externalUrl, "externalUrl");
   const link = new URL(SIGN_IN_PATH, url);
   link.searchParams.set("k", parsed.key);
-  return { url: link.href, externalUrl: externalUrl.href };
+  if (path === undefined) return { url: link.href, externalUrl: externalUrl.href };
+  if (!workspaceSlug || !isIssuePath(path, workspaceSlug)) throw new ConfigurationError("Invalid Multica issue path.");
+  return { url: new URL(path, url).href, externalUrl: new URL(path, externalUrl).href, signInUrl: link.href };
+}
+
+export function isIssuePath(path: string, workspaceSlug: string): boolean {
+  return /^\/[A-Za-z0-9][A-Za-z0-9_-]*\/issues\/[A-Za-z0-9][A-Za-z0-9_-]*$/.test(path) && path.split("/")[1] === workspaceSlug;
 }
 
 function origin(value: string, field: string): URL {

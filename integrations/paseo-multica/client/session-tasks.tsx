@@ -8,7 +8,7 @@ import { taskStatusLabel, type SessionTaskItem, type SessionTasksView } from "..
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
 
-export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelProps, "agentId" | "theme">) {
+export function SessionTasksSection({ agentId, theme, openTask }: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
   const getTasks = useRpc(tasksSummary);
   const expansion = useRpc(taskExpansion);
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
@@ -42,9 +42,9 @@ export function SessionTasksSection({ agentId, theme }: Pick<PluginAgentPanelPro
           ...view.accepting.map((item) => ({ item, detail: `Awaiting your acceptance${item.deliveryAt ? ` · ${formatDate(item.deliveryAt)}` : ""}` })),
           ...(view.requests ?? []).map((item) => ({ item, detail: `Executor mentioned you · awaiting your reply${item.requestAt ? ` · ${formatDate(item.requestAt)}` : ""}` })),
           ...view.owned.filter((item) => item.status === "blocked").map((item) => ({ item, detail: "Your task is blocked" })),
-        ]} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
-        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
-        <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />
+        ]} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} openTask={openTask} />
+        <TaskGroup title="Delegated by you" items={(view.delegated ?? view.returning).map((item) => ({ item, detail: [item.executorName, delegationStatus(item), elapsed(item.activityAt ?? item.acceptedAt), item.blockedReason ? `From executor's latest comment: ${item.blockedReason}` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} openTask={openTask} />
+        <TaskGroup title="Your tasks" items={view.owned.map((item) => ({ item, detail: [taskStatusLabel(item), item.childCount ? `${item.closedChildCount ?? 0}/${item.childCount} children closed` : ""].filter(Boolean).join(" · ") }))} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} openTask={openTask} />
         {view.truncated ? <Text style={{ color: colors.foregroundMuted }}>Some tasks are not shown.</Text> : null}
       </> : null}
     <Pressable accessibilityRole="button" disabled={loading} onPress={() => void load()}><Text style={{ color: colors.accent }}>Refresh</Text></Pressable>
@@ -59,12 +59,12 @@ function delegationStatus(item: SessionTaskItem): string {
   return taskStatusLabel(item);
 }
 
-function TaskGroup({ title, items, colors, agentId, expandedIds, toggle }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors; agentId: string; expandedIds: string[]; toggle(id: string, expanded: boolean): void }) {
+function TaskGroup({ title, items, colors, agentId, expandedIds, toggle, openTask }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors; agentId: string; expandedIds: string[]; toggle(id: string, expanded: boolean): void; openTask(url: string, identifier?: string): void }) {
   if (items.length === 0) return <Text style={{ color: colors.foregroundMuted }}>{title} · 0</Text>;
   return <View style={{ gap: 6 }}>
     <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title} · {items.length}</Text>
     {items.map(({ item, detail }) =>
-      <TaskCard key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} item={item} detail={detail} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} />)}
+      <TaskCard key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} item={item} detail={detail} colors={colors} agentId={agentId} expandedIds={expandedIds} toggle={toggle} openTask={openTask} />)}
   </View>;
 }
 
