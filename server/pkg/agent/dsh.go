@@ -205,6 +205,28 @@ func buildDshMCPServers(raw json.RawMessage, logger interface {
 }
 
 func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	// DSH protocol v1 carries the prompt and resume_session_id in the same
+	// execute frame, so there is no separate preflight RPC. Strict mode is
+	// still supported because the Multica DSH runtime treats a non-empty
+	// resume_session_id as resume-only: createOrResumeAgent never calls
+	// agents.create on that path, the JSONL persistence backend refuses a
+	// missing session instead of creating it, and followup(prompt) runs only
+	// after the resumed agent is idle. The runtime then reports
+	// session{session_id, resumed:true} before that first followup. The
+	// adapter requires that evidence and never falls back to a fresh session;
+	// see enforceStrictResumeResult for the failure contract.
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
+	// That atomic resume guarantee belongs to the Multica DSH runtime this
+	// package ships with, not to an arbitrary command that merely declares the
+	// dsh protocol family. BuiltinRuntime is the existing boundary between
+	// the two (a custom runtime profile arrives with a LaunchPrefix and the
+	// daemon clears it), so strict resume fails closed for the latter rather
+	// than borrowing a contract nobody verified.
+	if opts.RequireResume && (!b.cfg.BuiltinRuntime || len(b.cfg.LaunchPrefix) != 0) {
+		return nil, fmt.Errorf("%w: dsh strict resume requires the built-in Multica DSH protocol-v1 runtime", ErrResumeRequired)
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "dsh"
@@ -305,7 +327,11 @@ func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 		defer close(resCh)
 		defer func() { _ = stdin.Close() }()
 		started := time.Now()
-		state := dshRunState{usage: make(map[string]TokenUsage)}
+		state := dshRunState{
+			usage:             make(map[string]TokenUsage),
+			strictResume:      opts.RequireResume,
+			requestedResumeID: opts.ResumeSessionID,
+		}
 		scanner := newAgentStreamScanner(stdout)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -350,6 +376,7 @@ func (b *dshBackend) Execute(ctx context.Context, prompt string, opts ExecOption
 				result.Error = "dsh exited without a terminal result"
 			}
 		}
+		state.enforceStrictResumeResult(result)
 		if result.Error != "" {
 			result.Error = withAgentStderr(result.Error, "dsh", stderrBuf.Tail())
 		}
@@ -371,6 +398,53 @@ type dshRunState struct {
 	invalidFrames int
 	usage         map[string]TokenUsage
 	result        *Result
+
+	// Strict resume evidence. DSH reports the session only after it has
+	// resumed the requested one, so this frame is the pre-prompt proof the
+	// adapter accepts; a terminal result's session_id is not a substitute.
+	strictResume      bool
+	requestedResumeID string
+	resumeConfirmed   bool
+	strictResumeErr   string
+}
+
+// enforceStrictResumeResult fails a strict run that did not prove it resumed
+// exactly the requested session. Every unconfirmed strict run — including one
+// that ends cancelled or timed out — must hand back no SessionID: a fresh
+// session must never be adopted as the continuation of the requested one, and
+// the daemon pins a resume pointer from it. Cancellation and timeout keep their
+// real status because neither is a resume verdict, and they are not turned
+// into a definite rejection; StrictResumeUnmet is what stops the daemon from
+// treating them as a licence to start over. A confirmed run may echo the
+// requested id or omit it, but a different terminal id is itself a failure.
+func (s *dshRunState) enforceStrictResumeResult(result *Result) {
+	if !s.strictResume {
+		return
+	}
+	if s.resumeConfirmed && s.strictResumeErr == "" {
+		switch result.SessionID {
+		case "", s.requestedResumeID:
+			result.SessionID = s.requestedResumeID
+			return
+		default:
+			s.strictResumeErr = fmt.Sprintf("%v: dsh reported session %q in its result after resuming %q", ErrResumeRequired, result.SessionID, s.requestedResumeID)
+		}
+	}
+	result.SessionID = ""
+	result.StrictResumeUnmet = true
+	if result.Status == "cancelled" || result.Status == "timeout" {
+		return
+	}
+	reason := s.strictResumeErr
+	if reason == "" {
+		reason = fmt.Sprintf("%v: dsh finished without confirming session %q before the first prompt", ErrResumeRequired, s.requestedResumeID)
+	}
+	if result.Error != "" {
+		reason += ": " + result.Error
+	}
+	result.Status = "failed"
+	result.Error = reason
+	result.ResumeRejected = true
 }
 
 func handleDshFrame(frame dshFrame, requestID string, ch chan<- Message, state *dshRunState) {
@@ -385,6 +459,20 @@ func handleDshFrame(frame dshFrame, requestID string, ch chan<- Message, state *
 	case "ready":
 		state.ready = frame.Runtime == "dsh"
 	case "session":
+		if state.strictResume {
+			switch {
+			case !frame.Resumed:
+				state.strictResumeErr = fmt.Sprintf("%v: dsh reported a new session %q instead of resuming %q", ErrResumeRequired, frame.SessionID, state.requestedResumeID)
+			case frame.SessionID != state.requestedResumeID:
+				state.strictResumeErr = fmt.Sprintf("%v: dsh resumed session %q, requested %q", ErrResumeRequired, frame.SessionID, state.requestedResumeID)
+			default:
+				state.resumeConfirmed = true
+			}
+			if state.strictResumeErr != "" {
+				// Do not publish a session the strict run must not continue.
+				return
+			}
+		}
 		state.sessionID = frame.SessionID
 		trySend(ch, Message{Type: MessageStatus, Status: "running", SessionID: frame.SessionID})
 	case "text":

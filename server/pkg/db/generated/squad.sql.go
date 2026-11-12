@@ -565,6 +565,31 @@ func (q *Queries) ListSquadsByMember(ctx context.Context, arg ListSquadsByMember
 	return items, nil
 }
 
+const listSquadsWithExternalDefaultLeaders = `-- name: ListSquadsWithExternalDefaultLeaders :many
+SELECT s.id FROM squad s JOIN agent a ON a.id=s.leader_id AND a.workspace_id=s.workspace_id
+WHERE s.workspace_id=$1 AND s.archived_at IS NULL AND a.execution_kind='external'
+`
+
+func (q *Queries) ListSquadsWithExternalDefaultLeaders(ctx context.Context, workspaceID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listSquadsWithExternalDefaultLeaders, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockSquadForAutopilotAssignment = `-- name: LockSquadForAutopilotAssignment :one
 SELECT id, workspace_id, name, description, leader_id, creator_id, created_at, updated_at, archived_at, archived_by, avatar_url, instructions FROM squad
 WHERE id = $1 AND workspace_id = $2
@@ -655,7 +680,7 @@ func (q *Queries) RemoveSquadMember(ctx context.Context, arg RemoveSquadMemberPa
 
 const transferSquadAssignees = `-- name: TransferSquadAssignees :exec
 UPDATE issue SET assignee_type = 'agent', assignee_id = $2, revision = revision + 1, updated_at = now()
-WHERE assignee_type = 'squad' AND assignee_id = $1
+WHERE assignee_type = 'squad' AND assignee_id = $1 AND leadership_root_issue_id IS NULL
 `
 
 type TransferSquadAssigneesParams struct {

@@ -1,0 +1,8 @@
+{
+  "id": "paseo-multica",
+  "name": "Paseo Multica",
+  "description": "Connect the current Paseo session to Multica as its own external agent.",
+  "requirements": {
+    "paseo": ">=0.13.0-beta.1"
+  }
+}

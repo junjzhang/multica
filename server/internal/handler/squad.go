@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -22,20 +23,21 @@ import (
 // ── Response types ──────────────────────────────────────────────────────────
 
 type SquadResponse struct {
-	ID            string                       `json:"id"`
-	WorkspaceID   string                       `json:"workspace_id"`
-	Name          string                       `json:"name"`
-	Description   string                       `json:"description"`
-	Instructions  string                       `json:"instructions"`
-	AvatarURL     *string                      `json:"avatar_url"`
-	LeaderID      string                       `json:"leader_id"`
-	CreatorID     string                       `json:"creator_id"`
-	CreatedAt     string                       `json:"created_at"`
-	UpdatedAt     string                       `json:"updated_at"`
-	ArchivedAt    *string                      `json:"archived_at"`
-	ArchivedBy    *string                      `json:"archived_by"`
-	MemberCount   int                          `json:"member_count"`
-	MemberPreview []SquadMemberPreviewResponse `json:"member_preview"`
+	DefaultLeaderUnavailableReason string                       `json:"default_leader_unavailable_reason,omitempty"`
+	ID                             string                       `json:"id"`
+	WorkspaceID                    string                       `json:"workspace_id"`
+	Name                           string                       `json:"name"`
+	Description                    string                       `json:"description"`
+	Instructions                   string                       `json:"instructions"`
+	AvatarURL                      *string                      `json:"avatar_url"`
+	LeaderID                       string                       `json:"leader_id"`
+	CreatorID                      string                       `json:"creator_id"`
+	CreatedAt                      string                       `json:"created_at"`
+	UpdatedAt                      string                       `json:"updated_at"`
+	ArchivedAt                     *string                      `json:"archived_at"`
+	ArchivedBy                     *string                      `json:"archived_by"`
+	MemberCount                    int                          `json:"member_count"`
+	MemberPreview                  []SquadMemberPreviewResponse `json:"member_preview"`
 }
 
 type SquadMemberPreviewResponse struct {
@@ -182,6 +184,9 @@ func (h *Handler) squadToResponseWithPreview(ctx context.Context, squad db.Squad
 	if err != nil {
 		return resp, err
 	}
+	if leader, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: squad.LeaderID, WorkspaceID: squad.WorkspaceID}); err == nil && leader.ExecutionKind == "external" {
+		resp.DefaultLeaderUnavailableReason = "default_leader_must_be_managed"
+	}
 	applySquadMemberSummary(&resp, summary)
 	return resp, nil
 }
@@ -216,9 +221,21 @@ func (h *Handler) ListSquads(w http.ResponseWriter, r *http.Request) {
 		addSquadMemberPreview(summary, row.MemberType, row.MemberID, row.Role)
 	}
 
+	invalid, err := h.Queries.ListSquadsWithExternalDefaultLeaders(r.Context(), wsUUID)
+	if err != nil {
+		writeError(w, 500, "load default leader availability failed")
+		return
+	}
+	unavailable := make(map[string]bool, len(invalid))
+	for _, id := range invalid {
+		unavailable[uuidToString(id)] = true
+	}
 	resp := make([]SquadResponse, len(squads))
 	for i, s := range squads {
 		resp[i] = h.squadToResponse(s)
+		if unavailable[uuidToString(s.ID)] {
+			resp[i].DefaultLeaderUnavailableReason = "default_leader_must_be_managed"
+		}
 		applySquadMemberSummary(&resp[i], summaries[uuidToString(s.ID)])
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -262,13 +279,24 @@ func (h *Handler) CreateSquad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, 500, "begin squad create failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	q := h.Queries.WithTx(tx)
 	// Validate leader is an agent in this workspace.
-	leaderAgent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+	leaderAgent, err := q.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 		ID:          leaderUUID,
 		WorkspaceID: wsUUID,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "leader must be a valid agent in this workspace")
+		return
+	}
+	if leaderAgent.ExecutionKind != "managed" || leaderAgent.ArchivedAt.Valid {
+		writeError(w, 400, "default_leader_must_be_managed: select an active managed agent")
 		return
 	}
 	// A non-admin creator may only lead their squad with an agent they can
@@ -287,7 +315,7 @@ func (h *Handler) CreateSquad(w http.ResponseWriter, r *http.Request) {
 		avatarURL = pgtype.Text{String: accepted, Valid: true}
 	}
 
-	squad, err := h.Queries.CreateSquad(r.Context(), db.CreateSquadParams{
+	squad, err := q.CreateSquad(r.Context(), db.CreateSquadParams{
 		WorkspaceID: wsUUID,
 		Name:        req.Name,
 		Description: req.Description,
@@ -301,12 +329,19 @@ func (h *Handler) CreateSquad(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auto-add leader as a member with role "leader".
-	h.Queries.AddSquadMember(r.Context(), db.AddSquadMemberParams{
+	if _, err = q.AddSquadMember(r.Context(), db.AddSquadMemberParams{
 		SquadID:    squad.ID,
 		MemberType: "agent",
 		MemberID:   leaderUUID,
 		Role:       "leader",
-	})
+	}); err != nil {
+		writeError(w, 500, "create leader membership failed")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, 409, "squad changed concurrently")
+		return
+	}
 
 	resp, err := h.squadToResponseWithPreview(r.Context(), squad)
 	if err != nil {
@@ -415,12 +450,16 @@ func (h *Handler) UpdateSquad(w http.ResponseWriter, r *http.Request) {
 		// Stabilize runtime_id through commit. Runtime teardown takes FOR UPDATE
 		// on this row and follows the same Agent→Autopilot lock order, so
 		// whichever operation starts first produces a complete result.
-		newLeader, err := qtx.LockAgentForAutopilotAssignment(r.Context(), db.LockAgentForAutopilotAssignmentParams{
+		newLeader, err := qtx.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
 			ID:          lid,
 			WorkspaceID: wsUUID,
 		})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "leader must be a valid agent in this workspace")
+			return
+		}
+		if newLeader.ExecutionKind != "managed" || newLeader.ArchivedAt.Valid {
+			writeError(w, 400, "default_leader_must_be_managed: select an active managed agent")
 			return
 		}
 		// A non-admin creator may only promote an agent they can @-trigger.
@@ -501,12 +540,34 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, 500, "begin squad archive failed")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	q := h.Queries.WithTx(tx)
+	squad, err = q.LockSquadForUpdate(r.Context(), db.LockSquadForUpdateParams{ID: squad.ID, WorkspaceID: squad.WorkspaceID})
+	if err != nil {
+		writeError(w, 409, "squad is changing")
+		return
+	}
+	leader, err := q.LockAgentForContract(r.Context(), db.LockAgentForContractParams{ID: squad.LeaderID, WorkspaceID: squad.WorkspaceID})
+	if err != nil || leader.ExecutionKind != "managed" {
+		writeError(w, 409, "select a managed default and explicitly handle existing tasks before archiving")
+		return
+	}
+	if bound, err := q.SquadHasLeadershipIssues(r.Context(), db.SquadHasLeadershipIssuesParams{WorkspaceID: squad.WorkspaceID, LeadershipSquadID: squad.ID}); err != nil || bound {
+		writeError(w, 409, "explicitly hand off task leadership before deleting this squad")
+		return
+	}
 	// Transfer issues assigned to this squad to the leader agent.
-	if err := h.Queries.TransferSquadAssignees(r.Context(), db.TransferSquadAssigneesParams{
+	if err := q.TransferSquadAssignees(r.Context(), db.TransferSquadAssigneesParams{
 		AssigneeID:   squad.ID,
 		AssigneeID_2: squad.LeaderID,
 	}); err != nil {
-		slog.Warn("transfer squad assignees failed", "squad_id", uuidToString(squad.ID), "error", err)
+		writeError(w, 500, "transfer legacy squad assignments failed")
+		return
 	}
 
 	// Mirror the issue-assignee transfer for autopilots that target this
@@ -515,17 +576,18 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 	// "assignee squad is archived" — visible to ops but useless to the
 	// owner. Rewriting to the leader keeps the autopilot semantics
 	// unchanged (Path A from MUL-2429 is leader-only execution anyway).
-	if err := h.Queries.TransferSquadAutopilotsToLeader(r.Context(), db.TransferSquadAutopilotsToLeaderParams{
+	if err := q.TransferSquadAutopilotsToLeader(r.Context(), db.TransferSquadAutopilotsToLeaderParams{
 		AssigneeID:   squad.ID,
 		AssigneeID_2: squad.LeaderID,
 	}); err != nil {
-		slog.Warn("transfer squad autopilots failed", "squad_id", uuidToString(squad.ID), "error", err)
+		writeError(w, 500, "transfer squad autopilot configuration failed")
+		return
 	}
 
 	userID := requestUserID(r)
 	userUUID, _ := parseUUIDOrBadRequest(w, userID, "user_id")
 
-	if _, err := h.Queries.ArchiveSquad(r.Context(), db.ArchiveSquadParams{
+	if _, err := q.ArchiveSquad(r.Context(), db.ArchiveSquadParams{
 		ID:         squad.ID,
 		ArchivedBy: userUUID,
 	}); err != nil {
@@ -533,6 +595,10 @@ func (h *Handler) DeleteSquad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, 409, "squad changed concurrently")
+		return
+	}
 	h.publish(protocol.EventSquadDeleted, workspaceID, "member", userID, map[string]any{
 		"squad_id":  uuidToString(squad.ID),
 		"leader_id": uuidToString(squad.LeaderID),
@@ -832,7 +898,26 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sm, err := h.Queries.AddSquadMember(r.Context(), db.AddSquadMemberParams{
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to add squad member")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	queries := h.Queries.WithTx(tx)
+	if req.MemberType == "agent" {
+		// Re-read the agent under the shared reference lock: archive holds
+		// FOR UPDATE on this row, so an Agent archived after the validation
+		// above is refused here instead of becoming a stranded membership.
+		agent, err := queries.LockAgentForSharedWrite(r.Context(), db.LockAgentForSharedWriteParams{
+			ID: memberUUID, WorkspaceID: wsUUID,
+		})
+		if err != nil || agent.ArchivedAt.Valid {
+			writeError(w, http.StatusConflict, "agent was archived; reload the squad member list")
+			return
+		}
+	}
+	sm, err := queries.AddSquadMember(r.Context(), db.AddSquadMemberParams{
 		SquadID:    squad.ID,
 		MemberType: req.MemberType,
 		MemberID:   memberUUID,
@@ -843,6 +928,10 @@ func (h *Handler) AddSquadMember(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "member already in squad")
 			return
 		}
+		writeError(w, http.StatusInternalServerError, "failed to add squad member")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to add squad member")
 		return
 	}
@@ -980,8 +1069,9 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 	}
 
 	var req struct {
-		Outcome string `json:"outcome"` // action | no_action | failed
-		Reason  string `json:"reason"`  // short explanation from leader
+		MailboxID string `json:"mailbox_id,omitempty"`
+		Outcome   string `json:"outcome"` // action | no_action | failed
+		Reason    string `json:"reason"`  // short explanation from leader
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -990,6 +1080,11 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 
 	if req.Outcome != "action" && req.Outcome != "no_action" && req.Outcome != "failed" {
 		writeError(w, http.StatusBadRequest, "outcome must be 'action', 'no_action', or 'failed'")
+		return
+	}
+
+	if req.MailboxID != "" || r.Header.Get("X-Actor-Source") == "external_agent" {
+		h.recordExternalSquadEvaluation(w, r, issue, req.MailboxID, req.Outcome, req.Reason)
 		return
 	}
 
@@ -1087,28 +1182,32 @@ func (h *Handler) RecordSquadLeaderEvaluation(w http.ResponseWriter, r *http.Req
 	// Cost of the conservative choice: a leader rotated away MID-run is refused
 	// here. That no longer means silence — the injected rules now tell a leader
 	// whose recording call failed to leave a short comment instead.
-	if actorID != uuidToString(squad.LeaderID) {
+	leader, leaderErr := issueleader.ResolveIssueLeader(r.Context(), h.Queries, issue, squad)
+	if leaderErr != nil || actorID != uuidToString(leader.Agent.ID) {
 		writeError(w, http.StatusForbidden, "only the squad leader agent can record evaluations")
 		return
 	}
 
-	details, _ := json.Marshal(map[string]string{
-		"squad_id": uuidToString(squad.ID),
-		"task_id":  util.UUIDToString(taskUUID),
-		"outcome":  req.Outcome,
-		"reason":   req.Reason,
+	h.recordSquadEvaluation(w, r, issue, task.AgentID, map[string]string{
+		"squad_id": uuidToString(squad.ID), "task_id": uuidToString(taskUUID), "outcome": req.Outcome, "reason": req.Reason,
 	})
+}
+
+func (h *Handler) recordSquadEvaluation(w http.ResponseWriter, r *http.Request, issue db.Issue, agentID pgtype.UUID, proof map[string]string) {
+	actorID := uuidToString(agentID)
+	details, _ := json.Marshal(proof)
 
 	activity, err := h.Queries.CreateActivity(r.Context(), db.CreateActivityParams{
-		ID:          dbid.NewV7(),
-		WorkspaceID: issue.WorkspaceID,
-		IssueID:     issue.ID,
-		ActorType:   pgtype.Text{String: "agent", Valid: true},
+		ID:             dbid.NewV7(),
+		ActorSessionID: func() pgtype.UUID { id, _ := externalActorSessionID(r); return id }(),
+		WorkspaceID:    issue.WorkspaceID,
+		IssueID:        issue.ID,
+		ActorType:      pgtype.Text{String: "agent", Valid: true},
 		// task.AgentID, not squad.LeaderID: the no_action comment suppression
 		// lookup matches actor_id against task.agent_id
 		// (service.HasSquadLeaderNoActionEvaluationForTask), so this column has
 		// to carry the task's agent for suppression to find the row at all.
-		ActorID: task.AgentID,
+		ActorID: agentID,
 		Action:  "squad_leader_evaluated",
 		Details: details,
 	})
@@ -1177,67 +1276,7 @@ func commentMentionsAnyone(content string) bool {
 // service.IssueService.WillEnqueueRun predicate (MUL-3375), shared by the issue
 // write paths and the preview endpoint. The former handler-local mirrors
 // (shouldEnqueueSquadLeaderOnAssign / isSquadLeaderReady) were removed to stop
-// the four-entry-point drift. The squad enqueue side effect still flows through
-// enqueueSquadLeaderTask below, which keeps the leader access gate and pending
-// dedup in one place.
-
-// enqueueSquadLeaderTask triggers the squad leader agent for an issue assigned
-// to a squad. Assign and backlog-promotion paths use this directly; comment
-// paths go through computeCommentAgentTriggers so preview and create share the
-// same trigger set.
-// It returns true only when a leader task was actually enqueued.
-func (h *Handler) enqueueSquadLeaderTask(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, authorType, authorID, handoffNote string) bool {
-	squad, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{
-		ID:          issue.AssigneeID,
-		WorkspaceID: issue.WorkspaceID,
-	})
-	if err != nil {
-		return false
-	}
-
-	// The gate must judge the SAME top-of-chain human the enqueue path will
-	// persist on the leader task row, or it drifts: an agent-created issue that
-	// correctly inherits its originator (MUL-4305) would still be denied here
-	// if the gate used an empty originator. Member authors are their own
-	// originator; for agent/system-triggered assigns we resolve the originator
-	// exactly like EnqueueTaskForSquadLeader* does (via the issue's origin
-	// link). triggerCommentID is always empty on the assign/promote path, so we
-	// pass an invalid UUID to match. A still-unresolved originator leaves
-	// leaderOriginator empty, which correctly fails closed for member/team
-	// targets while a workspace target still admits the agent principal.
-	leaderOriginator := ""
-	if authorType == "member" {
-		leaderOriginator = authorID
-	} else {
-		leaderOriginator = uuidToString(h.TaskService.OriginatorForIssueTask(ctx, issue, pgtype.UUID{}))
-	}
-	if !h.canEnqueueSquadLeader(ctx, squad.LeaderID, authorType, authorID, leaderOriginator, uuidToString(issue.WorkspaceID)) {
-		return false
-	}
-
-	hasPending, err := h.Queries.HasPendingTaskForIssueAndAgent(ctx, db.HasPendingTaskForIssueAndAgentParams{
-		IssueID: issue.ID,
-		AgentID: squad.LeaderID,
-		// Key dedup on the reviewed head (TEN-356).
-		HeadSha: h.TaskService.ResolveIssueReviewSHAParam(ctx, issue.ID),
-	})
-	if err != nil || hasPending {
-		return false
-	}
-
-	// triggerCommentID is always empty on the assign/promote path; legacy
-	// handoff text rides its dedicated task column instead.
-	_ = triggerCommentID
-	// The member who performed the assign/promote is the accountable human for the
-	// leader run (MUL-4302 §4) — the same principal the gate above judged. An agent
-	// author is not a human, so only a member actor is threaded.
-	if _, err := h.TaskService.EnqueueTaskForSquadLeaderWithHandoff(ctx, issue, squad.LeaderID, squad.ID, handoffNote, memberActorUserID(authorType, authorID)); err != nil {
-		slog.Warn("enqueue squad leader task failed",
-			"issue_id", uuidToString(issue.ID),
-			"squad_id", uuidToString(squad.ID),
-			"leader_id", uuidToString(squad.LeaderID),
-			"error", err)
-		return false
-	}
-	return true
-}
+// the four-entry-point drift. Squad enqueue side effects flow through the
+// shared in-transaction helpers (IssueService.enqueueSquadLeaderTaskInTx and
+// Handler.enqueueAssignmentRunInTx), which keep the leader access gate, pending
+// dedup, and accepted-return link in one place.

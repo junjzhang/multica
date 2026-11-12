@@ -27,11 +27,10 @@ import (
 // assignee is only a proposal.
 //
 // The check cannot live at the call sites: several paths enqueue without
-// looking at status at all, and dispatchIssueRun discards the enqueue error
-// entirely, so a missed call site would fail silently. It sits at the last
-// point every issue-linked task passes through — immediately before the INSERT
-// — and the upstream short-circuits exist only to make previews and dispatch
-// reasons correct.
+// looking at status at all, so a missed call site would fail silently. It sits
+// at the last point every issue-linked task passes through — immediately before
+// the INSERT — and the upstream short-circuits exist only to make previews and
+// dispatch reasons correct.
 //
 // Exactly two enqueue paths are exempt, and both are Triage's own:
 //
