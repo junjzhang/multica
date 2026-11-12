@@ -27,10 +27,10 @@ on each card. Task links must point to an issue in the configured workspace.
   `url`) without the sign-in key; the browser signs in with the proxy
   password. Use it when the embedded origin is unreachable from a phone.
 
-After the first open, the page stays resident for the renderer's lifetime.
+After the first open, the main page stays resident for the renderer's lifetime.
 Closing the panel or leaving the screen only parks it off screen; reopening
 reuses the same page, navigation, and form state. An explicit retry replaces
-only a failed page.
+only a failed page. Task pages are released when their panels unmount.
 
 ### Sign-in
 

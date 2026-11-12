@@ -134,7 +134,7 @@ function present(page: ResidentPage, anchor: Element): void {
   page.view.style.height = `${rect.height}px`;
 }
 
-export function ResidentWebPage({ hostId, url, signInUrl, onError }: { hostId: string; url: string; signInUrl?: string; onError(): void }) {
+export function ResidentWebPage({ hostId, url, signInUrl, onError, retain = true }: { hostId: string; url: string; signInUrl?: string; onError(): void; retain?: boolean }) {
   const ref = useRef<Element>(null);
   useLayoutEffect(() => {
     if (Platform.OS !== "web" || !ref.current) return;
@@ -171,10 +171,11 @@ export function ResidentWebPage({ hostId, url, signInUrl, onError }: { hostId: s
       if (current.owner === owner) {
         current.owner = null;
         current.onError = null;
-        park(current);
+        if (retain) park(current);
+        else if (pages().get(hostId) === current) resetResidentPage(hostId);
       }
     };
-  }, [hostId, url, signInUrl, onError]);
+  }, [hostId, url, signInUrl, onError, retain]);
 
   if (Platform.OS !== "web") return null;
   return createElement("div", { ref, style: anchorStyle, "data-multica-anchor": hostId });

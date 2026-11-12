@@ -44,7 +44,7 @@ export function MulticaSurface({ host, theme, layout, path }: PluginSurfaceProps
   }, [link.data]);
 
   if (link.data && !error && Platform.OS === "web") {
-    return <ResidentWebPage key={revision} hostId={pageId} url={link.data.url} signInUrl={link.data.signInUrl} onError={failed} />;
+    return <ResidentWebPage key={revision} hostId={pageId} url={link.data.url} signInUrl={link.data.signInUrl} onError={failed} retain={!path} />;
   }
   return (
     <View style={styles.container}>
