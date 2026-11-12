@@ -35,10 +35,19 @@ export default function contribute(server: PluginServerContext) {
   server.handle(openWeb, async ({ path }) => {
     if (path === undefined) return webSignInLink();
     const owner = await loadOwnerProfile(homedir(), (await readSettings()).ownerProfile);
-    const response = await fetch(`${owner.serverUrl}/api/workspaces/${encodeURIComponent(owner.workspaceId)}`, { headers: { Authorization: `Bearer ${owner.token}`, "X-Workspace-ID": owner.workspaceId } });
-    if (!response.ok) throw new ConfigurationError("Could not resolve the Multica workspace.");
-    const workspace = z.object({ slug: z.string() }).parse(await response.json());
-    return webSignInLink(undefined, path, workspace.slug);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(`${owner.serverUrl}/api/workspaces/${encodeURIComponent(owner.workspaceId)}`, {
+        headers: { Authorization: `Bearer ${owner.token}`, "X-Workspace-ID": owner.workspaceId },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new ConfigurationError("Could not resolve the Multica workspace.");
+      const workspace = z.object({ slug: z.string() }).parse(await response.json());
+      return await webSignInLink(undefined, path, workspace.slug);
+    } finally {
+      clearTimeout(timer);
+    }
   });
   server.handle(connectSession, async ({ agentId }, context) => service(context).connect(agentId));
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));

@@ -16,6 +16,9 @@ screen.
 Open it from the **Multica** sidebar entry, the Command Center ("Open
 Multica"), or as a **Multica** panel in a workspace or the Explorer. Every
 entry shows the same page; the plugin does not reimplement Multica's UI.
+Task and delivery cards also open individual task details in Explorer panels.
+Opening the same task again reuses its panel; the browser action remains available
+on each card. Task links must point to an issue in the configured workspace.
 
 - **Desktop** uses Paseo's sandboxed browser profile (`persist:paseo-browser`)
   in a `<webview>`, the only webview Paseo's main process allows to attach.
