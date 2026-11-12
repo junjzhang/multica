@@ -12,6 +12,7 @@ export const deliveryDataSchema = z.object({
   deliveryId: z.string().optional(),
   kind: z.string(),
   kindLabel: z.string(),
+  outcome: z.string().optional(),
   issueId: z.string().optional(),
   issueIdentifier: z.string().optional(),
   issueTitle: z.string().optional(),
@@ -128,10 +129,22 @@ function parseGenericEnvelope(lines: string[], deliveryId: string): DeliveryData
   const recipientAgentId = optional(fields.get("Recipient agent ID"));
   if (!kind || !recipientAgentId) return null;
   const task = parseTaskLine(fields.get("Task"));
+  let outcome: string | undefined;
+  const payloadLine = lines.find((line) => line.startsWith("{"));
+  if (payloadLine) {
+    try {
+      const payload: unknown = JSON.parse(payloadLine);
+      const parsed = z.object({ outcome: z.string().min(1).max(100) }).safeParse(payload);
+      if (parsed.success) outcome = parsed.data.outcome;
+    } catch {
+      // The original prompt remains available when the payload is not JSON.
+    }
+  }
   return finalize({
     deliveryId,
     kind: kind.kind,
     kindLabel: kind.label,
+    outcome,
     issueId: optional(fields.get("Issue ID")),
     issueIdentifier: task.identifier,
     issueTitle: task.title,

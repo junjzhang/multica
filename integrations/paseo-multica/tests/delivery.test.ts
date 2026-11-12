@@ -80,6 +80,7 @@ describe("parseDelivery", () => {
       deliveryId: "3d1e2f4a-7777-4a8b-9c0d-888888888888",
       kind: "delegation_result",
       kindLabel: "delegation result",
+      outcome: "submitted",
       issueId: "issue-9",
       issueIdentifier: "WORK-281",
       recipientAgentId: "agent-3",
