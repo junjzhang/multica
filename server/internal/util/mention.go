@@ -1,6 +1,9 @@
 package util
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Mention represents a parsed @mention from markdown content.
 type Mention struct {
@@ -26,16 +29,16 @@ func ParseMentions(content string) []Mention {
 	delegated := make(map[string]bool)
 	for _, m := range matches {
 		if m[2] == "agent" {
-			delegated[m[3]] = true
+			delegated[strings.ToLower(m[3])] = true
 		}
 	}
 	seen := make(map[string]bool)
 	var result []Mention
 	for _, m := range matches {
-		if m[2] == "agent-notify" && delegated[m[3]] {
+		if m[2] == "agent-notify" && delegated[strings.ToLower(m[3])] {
 			continue
 		}
-		key := m[2] + ":" + m[3]
+		key := m[2] + ":" + strings.ToLower(m[3])
 		if seen[key] {
 			continue
 		}
