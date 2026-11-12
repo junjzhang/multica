@@ -178,3 +178,49 @@ func TestCommentNotifySquadLeaderCoalescesAsDelegation(t *testing.T) {
 		t.Fatalf("squad obligation = %d", n)
 	}
 }
+
+func TestCommentNotifyMixedFreshAndFold(t *testing.T) {
+	for _, fold := range []bool{false, true} {
+		name := "fresh"
+		if fold {
+			name = "fold"
+		}
+		t.Run(name, func(t *testing.T) {
+			_, _, token := managedDispatcherFixture(t, "notify-mixed-"+name)
+			a, _ := executableTarget(t, "notify-mixed-a-"+name)
+			b, _ := executableTarget(t, "notify-mixed-b-"+name)
+			issue := dbfx.Issue(t, "Mixed notification "+name)
+			t.Cleanup(func() { cleanupDelegatedIssue(t, issue) })
+			parent := ""
+			var bTask string
+			if fold {
+				_, _, firstToken := managedDispatcherFixture(t, "notify-fold-prior")
+				code, id, body := intentComment(t, firstToken, issue, fmt.Sprintf("[@B](mention://agent/%s)", b), "")
+				if code != http.StatusCreated {
+					t.Fatalf("first: %d %s", code, body)
+				}
+				parent = id
+				bTask = latestTaskIDFor(t, issue, b)
+			}
+			code, mixedComment, body := intentComment(t, token, issue, fmt.Sprintf("[@A](mention://agent/%s) [@B](mention://agent-notify/%s)", a, b), parent)
+			if code != http.StatusCreated {
+				t.Fatalf("mixed: %d %s", code, body)
+			}
+			if !fold {
+				bTask = latestTaskIDFor(t, issue, b)
+			} else if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE id=$1 AND trigger_comment_id=$2`, bTask, mixedComment); n != 1 {
+				t.Fatal("notification did not fold into the pending run")
+			}
+			expected := 0
+			if fold {
+				expected = 1
+			}
+			if n := countValue(t, `SELECT count(*) FROM agent_task_delegation_return WHERE task_id=$1`, bTask); n != expected {
+				t.Fatalf("notification target returns = %d, want %d", n, expected)
+			}
+			if n := countValue(t, `SELECT count(*) FROM agent_task_delegation_return WHERE task_id=$1`, latestTaskIDFor(t, issue, a)); n != 1 {
+				t.Fatalf("delegated target returns = %d", n)
+			}
+		})
+	}
+}
