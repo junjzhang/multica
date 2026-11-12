@@ -504,7 +504,7 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
 			return out, loadErr
 		}
-		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID)}
+		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID), Mode: target.Mode}
 		if display := service.ResolveDeliveryDisplay(ctx, q, issue, h.cfg.AppURL); display.Identifier != "" || display.Title != "" {
 			payload.IssueIdentifier, payload.IssueTitle, payload.IssueURL = display.Identifier, display.Title, display.URL
 		}

@@ -200,6 +200,8 @@
     "composer_pill": "添加评论，输入 @ 提及..."
   },
   "suggestions": {
+    "delegate": "委派",
+    "notify": "只通知",
     "everyone": "所有人",
     "all": "全部",
     "member": "成员",

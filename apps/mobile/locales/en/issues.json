@@ -202,6 +202,8 @@
     "composer_pill": "Add a comment, type @ to mention..."
   },
   "suggestions": {
+    "delegate": "Delegate",
+    "notify": "Notify",
     "everyone": "Everyone",
     "all": "All",
     "member": "Member",

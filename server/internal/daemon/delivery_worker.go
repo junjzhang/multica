@@ -72,6 +72,9 @@ func deliveryTaskLines(d delivery.Delivery) string {
 		return ""
 	}
 	var b strings.Builder
+	if request.Mode == "notify" {
+		b.WriteString("Mention mode: notification (no new result return)\n")
+	}
 	switch {
 	case request.IssueIdentifier != "" && request.IssueTitle != "":
 		fmt.Fprintf(&b, "Task: %s — %s\n", request.IssueIdentifier, request.IssueTitle)

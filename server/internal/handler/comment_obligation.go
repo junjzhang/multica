@@ -55,6 +55,10 @@ func (h *Handler) recordAcceptedCommentObligations(ctx context.Context, q *db.Qu
 		if trigger.Squad != nil {
 			squadID = trigger.Squad.ID
 		}
+		targetReturnID := returnID
+		if trigger.Source == commentTriggerSourceMentionNotify {
+			targetReturnID = pgtype.UUID{}
+		}
 		params := db.InsertCommentDispatchObligationParams{
 			ID:                 dbid.NewV7(),
 			WorkspaceID:        issue.WorkspaceID,
@@ -63,7 +67,7 @@ func (h *Handler) recordAcceptedCommentObligations(ctx context.Context, q *db.Qu
 			AgentID:            trigger.Agent.ID,
 			SquadID:            squadID,
 			TriggerSource:      string(trigger.Source),
-			DelegationReturnID: returnID,
+			DelegationReturnID: targetReturnID,
 		}
 		row, err := q.InsertCommentDispatchObligation(ctx, params)
 		if err != nil {
@@ -85,7 +89,11 @@ func (h *Handler) coverAcceptedCommentObligationsInTx(ctx context.Context, tx pg
 	var tasks []commentTriggerTask
 	var merged []commentTriggerTask
 	for _, obligation := range obligations {
-		coverage := h.coverCommentObligationInTx(ctx, tx, q, issue, commentID, obligation, returnIDs)
+		targetReturns := returnIDs
+		if obligation.Trigger.Source == commentTriggerSourceMentionNotify {
+			targetReturns = nil
+		}
+		coverage := h.coverCommentObligationInTx(ctx, tx, q, issue, commentID, obligation, targetReturns)
 		execSquadID := ""
 		if obligation.Trigger.Squad != nil {
 			execSquadID = uuidToString(obligation.Trigger.Squad.ID)
@@ -236,7 +244,7 @@ func (h *Handler) planCommentObligationInTx(ctx context.Context, tx pgx.Tx, q *d
 		}
 		return commentObligationCoverage{}, false
 	}
-	if err := linkCommentRunReturns(ctx, qsp, row.ID, commentID); err != nil {
+	if err := linkCommentRunReturns(ctx, qsp, row.ID, commentID, obligation.Trigger.Agent.ID); err != nil {
 		_ = sp.Rollback(ctx)
 		return commentObligationCoverage{}, false
 	}

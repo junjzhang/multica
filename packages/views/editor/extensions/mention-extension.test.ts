@@ -24,6 +24,11 @@ function tokenize(src: string) {
 }
 
 describe("mention tokenizer", () => {
+  it("round-trips notification mentions", () => {
+    const md = renderMarkdown({ attrs: { id: "aaa-bbb", label: "Alice", type: "agent-notify" } });
+    expect(tokenize(md)?.attributes.type).toBe("agent-notify");
+  });
+
   it("parses a plain mention", () => {
     const token = tokenize("[@Alice](mention://member/aaa-bbb)");
     expect(token).toBeDefined();

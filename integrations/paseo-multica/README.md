@@ -86,6 +86,8 @@ work, then shows the number of tasks in progress. The panel lists:
 Connection details are collapsed below the task lists. Older servers that do
 not supply delegated items fall back to pending returns.
 
+A notification-only `mention://agent-notify/<uuid>` wakes the agent without adding a result return and is not listed as an unanswered request.
+
 An unanswered executor mention is an explicit agent mention link in a comment
 by the issue's current executor on an open issue, with no later comment by this
 agent in the same unresolved thread. Mailbox receipts are not used as replies. For a

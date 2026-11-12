@@ -13,7 +13,7 @@ type Mention struct {
 // Uses .+? (non-greedy) instead of [^\]]* so labels containing square brackets
 // (e.g. "David[TF]") are matched correctly — the ](mention:// anchor is specific
 // enough to prevent over-matching.
-var MentionRe = regexp.MustCompile(`\[@?(.+?)\]\(mention://(member|agent|squad|issue|all)/([0-9a-fA-F-]+|all)\)`)
+var MentionRe = regexp.MustCompile(`\[@?(.+?)\]\(mention://(member|agent-notify|agent|squad|issue|all)/([0-9a-fA-F-]+|all)\)`)
 
 // IsMentionAll returns true if the mention is an @all mention.
 func (m Mention) IsMentionAll() bool {
@@ -23,9 +23,18 @@ func (m Mention) IsMentionAll() bool {
 // ParseMentions extracts deduplicated mentions from markdown content.
 func ParseMentions(content string) []Mention {
 	matches := MentionRe.FindAllStringSubmatch(content, -1)
+	delegated := make(map[string]bool)
+	for _, m := range matches {
+		if m[2] == "agent" {
+			delegated[m[3]] = true
+		}
+	}
 	seen := make(map[string]bool)
 	var result []Mention
 	for _, m := range matches {
+		if m[2] == "agent-notify" && delegated[m[3]] {
+			continue
+		}
 		key := m[2] + ":" + m[3]
 		if seen[key] {
 			continue

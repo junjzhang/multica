@@ -14,6 +14,7 @@ export function DeliveryCard({ item, theme }: PluginTimelineItemProps<DeliveryDa
       <Text style={{ color: colors.foreground, fontWeight: "600" }}>
         {heading} <Text style={{ color: colors.foregroundMuted }}>· {delivery.kindLabel}{delivery.outcome ? ` · ${delivery.outcome}` : ""}</Text>
       </Text>
+      {delivery.mentionMode ? <Text style={{ color: colors.foregroundMuted }}>{delivery.mentionMode}</Text> : null}
       {delivery.issueTitle ? <Text style={{ color: colors.foreground }}>{delivery.issueTitle}</Text> : null}
       {delivery.issueUrl ? (
         <Text accessibilityRole="link" onPress={() => void Linking.openURL(delivery.issueUrl!)} style={{ color: colors.accent }}>

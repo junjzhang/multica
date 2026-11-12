@@ -86,6 +86,7 @@ export interface CommentTriggerOutcome {
   status: CommentTriggerStatus | string;
   reason_code: string;
   dispatch_kind?: string;
+  mode?: string;
 }
 
 export type CommentTriggerSource =

@@ -111,6 +111,7 @@ type CommentTriggerOutcome struct {
 	// Absent means "run" for old servers/clients; an external target always
 	// carries "mailbox" so it can never be mistaken for a managed run.
 	DispatchKind string `json:"dispatch_kind,omitempty"`
+	Mode         string `json:"mode,omitempty"`
 }
 
 func commentToResponse(c db.Comment, reactions []ReactionResponse, attachments []AttachmentResponse) CommentResponse {
@@ -1470,6 +1471,7 @@ type commentAgentTriggerSource string
 const (
 	commentTriggerSourceIssueAssignee      commentAgentTriggerSource = "issue_assignee"
 	commentTriggerSourceMentionAgent       commentAgentTriggerSource = "mention_agent"
+	commentTriggerSourceMentionNotify      commentAgentTriggerSource = "mention_notify"
 	commentTriggerSourceMentionSquadLeader commentAgentTriggerSource = "mention_squad_leader"
 	commentTriggerSourceThreadParent       commentAgentTriggerSource = "thread_parent"
 	commentTriggerSourceConversation       commentAgentTriggerSource = "conversation_continuation"
@@ -1510,7 +1512,7 @@ func commentAgentTriggerReason(trigger commentAgentTrigger) string {
 	switch trigger.Source {
 	case commentTriggerSourceIssueAssignee:
 		return "Current issue assignment will trigger this agent."
-	case commentTriggerSourceMentionAgent:
+	case commentTriggerSourceMentionAgent, commentTriggerSourceMentionNotify:
 		return "This agent was mentioned in the comment."
 	case commentTriggerSourceMentionSquadLeader:
 		return "A mentioned squad will trigger its leader."
@@ -1897,7 +1899,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// its accepted return are already durable, so a crash after this commit
 	// cannot lose the dispatcher. Non-agent comments keep their existing
 	// post-commit path (they have no accepted return to preserve).
-	commentObligationsEnabled := authorType == "agent" && commentAddress != nil && len(triggerPlan.triggers) > 0
+	commentObligationsEnabled := authorType == "agent" && len(triggerPlan.triggers) > 0
 	var commentInTxResults map[string]commentEnqueueResult
 	var commentInTxTasks []commentTriggerTask
 	var commentMergedTasks []commentTriggerTask
@@ -2250,6 +2252,7 @@ func mailboxTriggerOutcomes(targets []commentMentionTarget, delivered mailboxDel
 			Status:       status,
 			ReasonCode:   reason,
 			DispatchKind: "mailbox",
+			Mode:         t.Mode,
 		})
 	}
 	return out
@@ -2347,7 +2350,11 @@ func (h *Handler) enqueueCommentAgentTriggers(ctx context.Context, issue db.Issu
 			record(trigger, coverage.status, coverage.reason)
 			continue
 		}
-		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, returnIDs)
+		targetReturns := returnIDs
+		if trigger.Source == commentTriggerSourceMentionNotify {
+			targetReturns = nil
+		}
+		status, reason := h.resolveCommentTriggerEnqueue(ctx, issue, trigger, triggerCommentID, targetReturns)
 		record(trigger, status, reason)
 	}
 	return results
@@ -2526,10 +2533,10 @@ func commentTriggerOutcomes(targets []commentMentionTarget, enqueued map[string]
 			if t.TargetType == "squad" && res.execSquadID != "" && res.execSquadID != t.TargetID && status == DispatchQueued {
 				status, reason = DispatchCoalesced, ReasonCoalesced
 			}
-			outcomes = append(outcomes, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: status, ReasonCode: reason})
+			outcomes = append(outcomes, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: status, ReasonCode: reason, Mode: t.Mode})
 			continue
 		}
-		outcomes = append(outcomes, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: t.Status, ReasonCode: t.ReasonCode})
+		outcomes = append(outcomes, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: t.Status, ReasonCode: t.ReasonCode, Mode: t.Mode})
 	}
 	return outcomes
 }
@@ -2545,7 +2552,7 @@ func commentBlockedTargetOutcomes(targets []commentMentionTarget) []CommentTrigg
 			continue
 		}
 		if t.Status == DispatchBlocked {
-			blocked = append(blocked, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: t.Status, ReasonCode: t.ReasonCode})
+			blocked = append(blocked, CommentTriggerOutcome{TargetType: t.TargetType, TargetID: t.TargetID, Status: t.Status, ReasonCode: t.ReasonCode, Mode: t.Mode})
 		}
 	}
 	return blocked
@@ -2724,13 +2731,20 @@ func (h *Handler) mergeCommentIntoPendingTaskWithQueries(ctx context.Context, q 
 	if err != nil {
 		return db.MergeCommentIntoPendingTaskRow{}, err
 	}
-	if err := linkCommentRunReturns(ctx, q, row.ID, commentID); err != nil {
+	if err := linkCommentRunReturns(ctx, q, row.ID, commentID, params.AgentID); err != nil {
 		return db.MergeCommentIntoPendingTaskRow{}, err
 	}
 	return row, nil
 }
 
-func linkCommentRunReturns(ctx context.Context, q *db.Queries, taskID, commentID pgtype.UUID) error {
+func linkCommentRunReturns(ctx context.Context, q *db.Queries, taskID, commentID, agentID pgtype.UUID) error {
+	obligation, err := q.GetCommentDispatchObligationForTarget(ctx, db.GetCommentDispatchObligationForTargetParams{CommentID: commentID, AgentID: agentID})
+	if err == nil && !obligation.DelegationReturnID.Valid {
+		return nil
+	}
+	if err != nil && !isNotFound(err) {
+		return err
+	}
 	returnIDs, err := delegation.CommentReturns(ctx, q, commentID)
 	if err != nil {
 		return err
@@ -2871,6 +2885,9 @@ func (h *Handler) propagateUncoveredCommentObligation(ctx context.Context, issue
 		if idsErr != nil {
 			return false
 		}
+		if trigger.Source == commentTriggerSourceMentionNotify {
+			returnIDs = nil
+		}
 		err = h.enqueueSingleCommentTrigger(ctx, issue, commentID, trigger, returnIDs)
 		if err == nil {
 			return true
@@ -2934,7 +2951,7 @@ func (h *Handler) enqueueSingleCommentTrigger(ctx context.Context, issue db.Issu
 				"agent_id", uuidToString(trigger.Agent.ID))
 			return err
 		}
-	case commentTriggerSourceMentionAgent:
+	case commentTriggerSourceMentionAgent, commentTriggerSourceMentionNotify:
 		if _, err := h.TaskService.EnqueueTaskForMention(ctx, issue, trigger.Agent.ID, triggerCommentID, service.OriginNamed, delegationReturns...); err != nil {
 			logCommentEnqueueFailure("enqueue mention agent task failed", err,
 				"issue_id", uuidToString(issue.ID),
@@ -2980,7 +2997,7 @@ func (h *Handler) enqueueSingleCommentTriggerInTx(ctx context.Context, q *db.Que
 		return h.TaskService.EnqueueIssueCommentTriggerInTx(ctx, q, issue, triggerCommentID, delegationReturns)
 	case commentTriggerSourceMentionSquadLeader:
 		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, true, trigger.Squad.ID, service.OriginNamed, delegationReturns)
-	case commentTriggerSourceMentionAgent:
+	case commentTriggerSourceMentionAgent, commentTriggerSourceMentionNotify:
 		return h.TaskService.EnqueueMentionCommentTriggerInTx(ctx, q, issue, trigger.Agent.ID, triggerCommentID, false, pgtype.UUID{}, service.OriginNamed, delegationReturns)
 	case commentTriggerSourceThreadParent, commentTriggerSourceConversation:
 		if trigger.Squad != nil {
@@ -3067,7 +3084,7 @@ func (h *Handler) computeCommentAgentTriggers(ctx context.Context, issue db.Issu
 
 func hasAgentOrSquadMention(mentions []util.Mention) bool {
 	for _, m := range mentions {
-		if m.Type == "agent" || m.Type == "squad" {
+		if m.Type == "agent" || m.Type == "agent-notify" || m.Type == "squad" {
 			return true
 		}
 	}
@@ -3123,6 +3140,7 @@ func (h *Handler) hasPendingTaskForIssueAndAgent(ctx context.Context, issueID, a
 //   - Status set (with ReasonCode) → a terminal, non-executing outcome
 //     (blocked, or an A2A self-suppressed squad leader that is deferred).
 type commentMentionTarget struct {
+	Mode        string
 	TargetType  string // "agent" | "squad"
 	TargetID    string
 	ExecAgentID string
@@ -3160,8 +3178,7 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 	add := func(trigger commentAgentTrigger) {
 		id := uuidToString(trigger.Agent.ID)
 		if idx, ok := seen[id]; ok {
-			if triggers[idx].Source != commentTriggerSourceMentionSquadLeader &&
-				trigger.Source == commentTriggerSourceMentionSquadLeader {
+			if (triggers[idx].Source == commentTriggerSourceMentionNotify && trigger.Source != commentTriggerSourceMentionNotify) || (triggers[idx].Source != commentTriggerSourceMentionSquadLeader && trigger.Source == commentTriggerSourceMentionSquadLeader) {
 				triggers[idx] = trigger
 			}
 			return
@@ -3295,7 +3312,7 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 			addTarget(commentMentionTarget{TargetType: "squad", TargetID: m.ID, ExecAgentID: uuidToString(leaderID)})
 			continue
 		}
-		if m.Type != "agent" {
+		if m.Type != "agent" && m.Type != "agent-notify" {
 			continue
 		}
 		agentUUID, err := util.ParseUUID(m.ID)
@@ -3356,8 +3373,20 @@ func (h *Handler) resolveMentionedAgentCommentTriggers(ctx context.Context, issu
 			blockTarget("agent", m.ID, ReasonInternalError)
 			continue
 		}
-		add(commentAgentTrigger{Agent: agent, Source: commentTriggerSourceMentionAgent, AlreadyPending: hasPending})
+		source := commentTriggerSourceMentionAgent
+		if m.Type == "agent-notify" {
+			source = commentTriggerSourceMentionNotify
+		}
+		add(commentAgentTrigger{Agent: agent, Source: source, AlreadyPending: hasPending})
 		addTarget(commentMentionTarget{TargetType: "agent", TargetID: m.ID, ExecAgentID: uuidToString(agentUUID)})
+	}
+	for i := range targets {
+		targets[i].Mode = "delegate"
+		for _, m := range mentions {
+			if targets[i].TargetType == "agent" && m.Type == "agent-notify" && m.ID == targets[i].TargetID {
+				targets[i].Mode = "notify"
+			}
+		}
 	}
 	return triggers, targets
 }
@@ -3538,7 +3567,7 @@ func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
 	// obligations for the edited content and covers them in the edit
 	// transaction. Replacing the content also clears the old intent, so the
 	// sweeper never replays a target the comment no longer names.
-	commentObligationsEnabled := actorType == "agent" && commentAddress != nil && len(triggerPlan.triggers) > 0
+	commentObligationsEnabled := actorType == "agent" && len(triggerPlan.triggers) > 0
 	runCommentTriggerTx := func(tx pgx.Tx, q *db.Queries) error {
 		if triggerIssue == nil {
 			return nil

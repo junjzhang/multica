@@ -1520,6 +1520,7 @@ const CommentTriggerPreviewAgentSchema = z.object({
   source: z.string().default(""),
   reason: z.string().default(""),
   dispatch_kind: DispatchKindSchema,
+  mode: z.string().optional(),
 }).loose();
 
 // Per-target outcome of an explicit @agent / @squad mention (MUL-4525 §2).
