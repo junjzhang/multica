@@ -48,9 +48,10 @@ function delegationStatus(item: SessionTaskItem): string {
 }
 
 function TaskGroup({ title, items, colors }: { title: string; items: { item: SessionTaskItem; detail: string }[]; colors: Colors }) {
+  if (items.length === 0) return <Text style={{ color: colors.foregroundMuted }}>{title} · 0</Text>;
   return <View style={{ gap: 6 }}>
     <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title} · {items.length}</Text>
-    {items.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>None</Text> : items.map(({ item, detail }) =>
+    {items.map(({ item, detail }) =>
       <Pressable key={`${item.issueId}:${item.role}:${item.requestId ?? ""}`} accessibilityRole={item.url ? "link" : undefined} disabled={!item.url} onPress={() => { if (item.url) void Linking.openURL(item.url); }} style={{ backgroundColor: colors.surface1, borderColor: colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 4 }}>
         <Text style={{ color: colors.foreground, fontWeight: "600" }}>{item.identifier ?? item.issueId} · {item.title}</Text>
         <Text style={{ color: colors.foregroundMuted }}>{detail}</Text>

@@ -43,3 +43,16 @@ it("shows request evidence and the source of a blocked reason", async () => {
   expect(output).toContain("From executor's latest comment: Waiting for input");
   await act(async () => { renderer!.unmount(); });
 });
+
+it("renders empty groups as a single muted line", async () => {
+  const base = makeTasksWire();
+  getTasks.mockResolvedValueOnce(toTasksView({ ...base, owned: [], accepting: [], returning: [], delegated: [], requests: [] }, "2026-11-11T12:00:00Z"));
+  const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, key]));
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<SessionTasksSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} />); });
+  const output = JSON.stringify(renderer!.toJSON());
+  expect(output).toContain("Needs your attention");
+  expect(output).not.toContain("None");
+  expect(renderer!.root.findAll((node) => node.props.style?.color === "foregroundMuted" && Array.isArray(node.props.children))).toHaveLength(3);
+  await act(async () => { renderer!.unmount(); });
+});
