@@ -132,6 +132,12 @@ func TestNotification_CurrentMembership(t *testing.T) {
 					addTestSubscriber(t, subscriberIssue, "member", recipient, "manual")
 					e.Type = protocol.EventIssueUpdated
 					issue.Status = "done"
+					if source == "parent subscriber" {
+						// Routine child success is quiet for a parent watcher, so
+						// keep this case on a handoff status to keep testing the
+						// membership gate rather than the quieting rule.
+						issue.Status = "blocked"
+					}
 					payload["issue"], payload["status_changed"], payload["prev_status"] = issue, true, "todo"
 					expectedType = "status_changed"
 				case "subscriber task failure":

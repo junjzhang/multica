@@ -76,6 +76,7 @@ UPDATE issue AS i SET
     updated_at = now()
 WHERE i.id = $1
   AND i.workspace_id = $2
+  AND NOT EXISTS (SELECT 1 FROM issue_contract c WHERE c.issue_id = i.id AND c.workspace_id = i.workspace_id)
   AND i.status = sqlc.arg('expected_status')::text
   AND i.status <> sqlc.arg('target_status')::text
   AND EXISTS (

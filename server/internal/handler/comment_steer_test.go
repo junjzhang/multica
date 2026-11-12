@@ -67,7 +67,7 @@ func TestCreateCommentSteersTheThreadAgentsRunningTurn(t *testing.T) {
 			dbfx.Cleanup(t, `DELETE FROM agent_task_queue WHERE issue_id = $1`, f.issueID)
 
 			var created CommentResponse
-			postSteeredComment(t, f.issueID, f.triggerID, "Only fix web.", f.taskID).Want(http.StatusCreated).JSON(&created)
+			postSteeredComment(t, f.issueID, f.triggerID, agentMention("Supplement", f.agentID)+" Only fix web.", f.taskID).Want(http.StatusCreated).JSON(&created)
 			if len(created.Supplements) != 1 {
 				t.Fatalf("receipts = %+v, want one for the running turn", created.Supplements)
 			}
@@ -107,7 +107,7 @@ func TestCreateCommentSteerKeepsTheNormalTriggerWhenTheTurnCannotTakeInput(t *te
 			dbfx.Cleanup(t, `DELETE FROM agent_task_queue WHERE issue_id = $1`, f.issueID)
 
 			var created CommentResponse
-			postSteeredComment(t, f.issueID, f.triggerID, "Only fix web.", f.taskID).Want(http.StatusCreated).JSON(&created)
+			postSteeredComment(t, f.issueID, f.triggerID, agentMention("Supplement", f.agentID)+" Only fix web.", f.taskID).Want(http.StatusCreated).JSON(&created)
 			if len(created.Supplements) != 0 {
 				t.Fatalf("bound a turn that cannot take input: %+v", created.Supplements)
 			}

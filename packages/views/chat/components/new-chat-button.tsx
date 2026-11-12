@@ -15,6 +15,7 @@ import {
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 import type { Agent } from "@multica/core/types";
 import { isAgentRuntimeBound } from "@multica/core/agents";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { toast } from "sonner";
 import { useT } from "../../i18n";
 
@@ -163,7 +164,7 @@ function AgentPickerItem({
  * surface shows its no-agent empty state.
  */
 export function NewChatButton({
-  agents,
+  agents: candidates,
   userId,
   onStart,
   side = "bottom",
@@ -173,6 +174,7 @@ export function NewChatButton({
   onStart: (agent: Agent | null) => void;
   side?: "top" | "bottom";
 }) {
+  const agents = candidates.filter((agent) => agentExecutionKind(agent) === "managed");
   const { t } = useT("chat");
   const label = t(($) => $.window.new_chat_tooltip);
 

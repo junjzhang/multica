@@ -1,0 +1,1 @@
+ALTER TABLE delegation_result_takeover ADD COLUMN target_selection_version TEXT;

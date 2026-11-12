@@ -104,6 +104,12 @@ const (
 	// delegatedFailureRecoveryBatchSize bounds the durable recovery-outbox
 	// replay so a historical backlog cannot monopolise the runtime sweep tick.
 	delegatedFailureRecoveryBatchSize = 100
+	// commentDispatchObligationSweepInterval is the durable recovery cadence
+	// for accepted comments whose covering run could not be created or linked
+	// in the comment transaction. It is independent of run completion.
+	commentDispatchObligationSweepInterval = time.Minute
+	// commentDispatchObligationBatchSize bounds one recovery tick.
+	commentDispatchObligationBatchSize = 100
 )
 
 type runtimeGCTxStarter interface {
@@ -176,6 +182,41 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 func runDelegatedFailureRecoverySweeper(ctx context.Context, taskSvc *service.TaskService) {
 	runPeriodicSweep(ctx, delegatedFailureRecoverySweepInterval, func() {
 		sweepPendingDelegatedFailureRecoveries(ctx, taskSvc)
+	})
+}
+
+// runCommentDispatchObligationSweeper consumes accepted comments whose run
+// creation/fold did not complete with the comment. The obligation row is
+// written in the comment transaction, so this consumer is what makes progress
+// after a crash or a failed post-insert enqueue — without waiting for another
+// run to complete or a person to edit the comment again.
+func runCommentDispatchObligationSweeper(ctx context.Context, h *handler.Handler) {
+	runPeriodicSweep(ctx, commentDispatchObligationSweepInterval, func() {
+		stats, err := h.ConsumeCommentDispatchObligations(ctx, commentDispatchObligationBatchSize)
+		if err != nil {
+			slog.Warn("comment dispatch obligation sweeper failed", "error", err)
+			return
+		}
+		if stats.Covered > 0 || stats.Failed > 0 {
+			slog.Info("comment dispatch obligation sweeper advanced",
+				"scanned", stats.Scanned,
+				"covered", stats.Covered,
+				"failed", stats.Failed,
+			)
+		}
+	})
+}
+
+func runDelegationResultSweeper(ctx context.Context, h *handler.Handler) {
+	runPeriodicSweep(ctx, time.Minute, func() {
+		stats, err := h.TaskService.ReconcileDelegationResults(ctx, 100)
+		if err != nil {
+			slog.Warn("delegated result reconciliation failed", "error", err)
+			return
+		}
+		if stats.Materialized > 0 || stats.Refused > 0 {
+			slog.Info("delegated results reconciled", "materialized", stats.Materialized, "refused", stats.Refused)
+		}
 	})
 }
 

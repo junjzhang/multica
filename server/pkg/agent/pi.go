@@ -348,6 +348,9 @@ func isPiToolNameByte(b byte) bool {
 }
 
 func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	label := b.providerLabel
 	if label == "" {
 		label = "pi"
@@ -398,6 +401,19 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 				return nil, fmt.Errorf("%s session path: %w", label, err)
 			}
 		}
+		if opts.RequireResume {
+			// Pi's --session points at the persisted transcript and its resume
+			// path refuses a missing one before running a turn. Check the same
+			// file up front so strict mode never launches a process that would
+			// have to start over.
+			info, statErr := os.Stat(sessionPath)
+			if statErr != nil {
+				return nil, fmt.Errorf("%w: %s has no session transcript %q: %v", ErrResumeRequired, label, sessionPath, statErr)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("%w: %s session transcript %q is not a regular file", ErrResumeRequired, label, sessionPath)
+			}
+		}
 		if label != "omp" {
 			if err := ensurePiSessionFile(sessionPath); err != nil {
 				return nil, fmt.Errorf("%s session file: %w", label, err)
@@ -410,7 +426,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 		}
 		if !locked {
 			if opts.ResumeSessionID != "" {
-				return piSessionBusyResult(label, sessionPath), nil
+				return piSessionBusyResult(label, sessionPath, opts.RequireResume), nil
 			}
 			return nil, fmt.Errorf("%s session file %q is already in use", label, sessionPath)
 		}
@@ -837,7 +853,7 @@ func (b *piBackend) Execute(ctx context.Context, prompt string, opts ExecOptions
 	}, nil
 }
 
-func piSessionBusyResult(label, sessionPath string) *Session {
+func piSessionBusyResult(label, sessionPath string, strict bool) *Session {
 	msgCh := make(chan Message)
 	close(msgCh)
 	resCh := make(chan Result, 1)
@@ -845,6 +861,7 @@ func piSessionBusyResult(label, sessionPath string) *Session {
 		Status:                  "failed",
 		Error:                   fmt.Sprintf("%s session file %q is already in use by another execution", label, sessionPath),
 		ResumeRejectedTransient: true,
+		StrictResumeUnmet:       strict,
 	}
 	close(resCh)
 	return &Session{Messages: msgCh, Result: resCh}

@@ -33,6 +33,7 @@ import { useScrollToTopOnChange } from "@/lib/use-scroll-to-top-on-change";
 import { THEME } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { isAgentRuntimeBound } from "@/lib/is-agent-runtime-bound";
+import { isExternalExecutionAgent } from "@/lib/external-assignee";
 import { useT } from "@/lib/i18n";
 
 const AVATAR_SIZE = 36;
@@ -153,17 +154,19 @@ export function AssigneePickerBody({ value, query, onChange }: Props) {
         return `s:${row.squad.id}`;
       }}
       renderItem={({ item }) => {
+        const externalAgent =
+          item.kind === "agent" && isExternalExecutionAgent(item.agent);
         const needsRuntime =
           (item.kind === "agent" && !isAgentRuntimeBound(item.agent)) ||
           (item.kind === "squad" &&
             !runnableAgentIds.has(item.squad.leader_id));
         return (
           <Pressable
-          disabled={needsRuntime}
+          disabled={needsRuntime || externalAgent}
           onPress={() => select(item)}
           className={cn(
             "flex-row items-center gap-3 px-4 py-3 active:bg-secondary",
-            needsRuntime && "opacity-50",
+            (needsRuntime || externalAgent) && "opacity-50",
           )}
         >
           {item.kind === "unassigned" ? (
@@ -199,9 +202,11 @@ export function AssigneePickerBody({ value, query, onChange }: Props) {
               the same row. Members carry no tag (they're the default actor). */}
           {item.kind === "agent" ? (
             <Text className="text-sm text-muted-foreground">
-              {isAgentRuntimeBound(item.agent)
-                ? t("picker.agent")
-                : t("picker.needs_runtime")}
+              {externalAgent
+                ? t("picker.external_read_only")
+                : isAgentRuntimeBound(item.agent)
+                  ? t("picker.agent")
+                  : t("picker.needs_runtime")}
             </Text>
           ) : item.kind === "squad" ? (
             <Text className="text-sm text-muted-foreground">
