@@ -1778,6 +1778,21 @@ func TestAutomaticTreesExcludeUntrackedRuntimeFiles(t *testing.T) {
 	}
 }
 
+func TestAutomaticCommitExcludesStagedRuntimeSymlink(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := os.Symlink("tracked.txt", filepath.Join(repo, ".multica")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	gitRun(t, repo, "add", "-f", ".multica")
+	writeFile(t, filepath.Join(repo, "business.txt"), "business")
+	if _, err := commitEverything(repo, "automatic", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitTry(t, repo, "cat-file", "-e", "HEAD:.multica"); err == nil {
+		t.Fatal("runtime symlink was committed")
+	}
+}
+
 // Git must rehash a same-size edit when its timestamp equals the index's.
 // A private index with a newer timestamp would incorrectly make it look clean.
 func TestCaptureUserSnapshotPreservesRacyIndexTimestamp(t *testing.T) {

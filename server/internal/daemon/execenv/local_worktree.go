@@ -984,13 +984,13 @@ func stageWithoutRuntimeFiles(dir string, env []string, baseline string, exclude
 	if out, err := runGitEnv(dir, env, updateArgs...); err != nil {
 		return out, err
 	}
-	args := append([]string{"add", "-A", "--", ".", ":(exclude,glob)**/.multica/**"}, excludes...)
+	args := append([]string{"add", "-A", "--", ".", ":(exclude,glob)**/.multica", ":(exclude,glob)**/.multica/**"}, excludes...)
 	if out, err := runGitEnv(dir, env, args...); err != nil {
 		return out, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=A", "-z", baseline, "--", ":(glob)**/.multica/**")
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=A", "-z", baseline, "--", ":(glob)**/.multica", ":(glob)**/.multica/**")
 	cmd.Env = append(os.Environ(), env...)
 	cmd.WaitDelay = 5 * time.Second
 	bytes, err := cmd.Output()
