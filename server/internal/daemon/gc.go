@@ -356,7 +356,7 @@ func (d *Daemon) applyGCActionForMeta(ctx context.Context, taskDir string, actio
 			return 0
 		}
 		defer claim.Release()
-		present, err := execenv.HasLocalWorktree(taskDir)
+		present, err := execenv.HasRetainedRuntimePaths(taskDir)
 		if err != nil || present {
 			d.logger.Warn("gc: retaining task directory with a worktree or an unreadable worktree state", "dir", taskDir, "error", err)
 			stats.skipped++

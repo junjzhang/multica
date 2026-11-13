@@ -1818,6 +1818,17 @@ func TestFinalizePreservesNewRuntimePaths(t *testing.T) {
 	if err := resetEnvRootContents(filepath.Dir(wt.Path)); err == nil {
 		t.Fatal("reset removed a retained worktree")
 	}
+	root, err := os.OpenRoot(filepath.Dir(wt.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if claim, _, err := LockEnvRootForReuse(root, ".", filepath.Dir(wt.Path)); err == nil {
+		if claim != nil {
+			claim.Release()
+		}
+		t.Fatal("retained worktree was available for reuse")
+	}
 	if got := readFile(t, filepath.Join(wt.Path, ".multica", "renamed")); got != "original" {
 		t.Fatalf("reset lost file: %q", got)
 	}

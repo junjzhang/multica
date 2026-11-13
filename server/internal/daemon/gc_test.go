@@ -634,6 +634,9 @@ func TestApplyGCActionPreservesTaskWorktree(t *testing.T) {
 	if err := os.WriteFile(path, []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(taskDir, ".retained-runtime-paths"), []byte(".multica/data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stats := &gcStats{byPattern: map[string]int{}}
 	if removed := d.applyGCAction(context.Background(), taskDir, gcActionClean, stats); removed != 0 {
 		t.Fatalf("removed %d tasks", removed)

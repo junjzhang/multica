@@ -291,10 +291,20 @@ type LocalWorktreeOutcome struct {
 	PreservedPath string
 }
 
-// HasLocalWorktree fails closed for a surviving task worktree, including one
-// with damaged Git metadata after an interrupted run.
-func HasLocalWorktree(envRoot string) (bool, error) {
-	_, err := os.Lstat(filepath.Join(envRoot, localWorktreeDirName))
+const retainedRuntimeMarker = ".retained-runtime-paths"
+
+func markRetainedRuntimePaths(worktreePath string) error {
+	err := os.Mkdir(filepath.Join(filepath.Dir(worktreePath), retainedRuntimeMarker), 0o700)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	return err
+}
+
+// HasRetainedRuntimePaths protects an explicitly retained worktree from reset
+// and garbage collection until its owner recovers the listed files.
+func HasRetainedRuntimePaths(envRoot string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(envRoot, retainedRuntimeMarker))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -614,6 +624,12 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		outcome.PreservedPath = w.Path
 		return outcome, fmt.Errorf("could not inspect runtime files: %w; the task worktree is preserved at %s", err, w.Path)
 	}
+	if len(skipped) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not protect runtime files from cleanup: %w; inspect the task worktree at %s immediately", err, w.Path)
+		}
+	}
 
 	// Treat "can't tell" like "dirty": committing costs an empty commit at
 	// worst, while assuming clean risks deleting the agent's edits.
@@ -713,7 +729,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 
 	if len(skipped) > 0 {
 		outcome.PreservedPath = w.Path
-		return outcome, fmt.Errorf("new .multica paths were not committed: %s; the task worktree is preserved at %s — inspect and recover these files before removing it", quotedPaths(skipped), w.Path)
+		return outcome, fmt.Errorf("new .multica paths were not committed: %s; the task worktree is preserved at %s — recover these files, then remove the worktree and %s", quotedPaths(skipped), w.Path, filepath.Join(filepath.Dir(w.Path), retainedRuntimeMarker))
 	}
 	info, infoErr := os.Lstat(w.Path)
 	if infoErr != nil {
@@ -807,6 +823,9 @@ func (w *LocalWorktree) Remove(logger *slog.Logger) error {
 	if paths, err := untrackedRuntimePaths(w.Path); err != nil {
 		return fmt.Errorf("could not inspect runtime files in %s: %w", w.Path, err)
 	} else if len(paths) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			return fmt.Errorf("could not protect runtime files from cleanup: %w; inspect %s immediately", err, w.Path)
+		}
 		return fmt.Errorf("new .multica paths remain in %s: %s", w.Path, quotedPaths(paths))
 	}
 	if err := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); err != nil {
