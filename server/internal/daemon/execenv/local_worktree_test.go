@@ -2393,6 +2393,9 @@ func TestIsolatedPrepareCarriesTheStateFinalizeNeeds(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(wt.WorkDir, "agent.txt"), "work from turn one\n")
+	if err := CleanupSidecars(first.RootDir); err != nil {
+		t.Fatalf("cleanup sidecars: %v", err)
+	}
 	finalizeOK(t, wt)
 
 	// Finalize's record is the observable proof it had the state: the checkpoint
