@@ -335,16 +335,27 @@ func TestTGitSnapshotResponsePreservesGatesWithoutNamedChecks(t *testing.T) {
 
 func TestDescendantTGitSnapshotProjection(t *testing.T) {
 	ctx := context.Background()
-	conn := seedVCSConnection(t, ctx, withVCSBox(t), "tgit", "https://git.test")
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"username":"tester"}`))
+	}))
+	defer provider.Close()
+	withVCSBox(t)
+	var connection VCSConnectResponse
+	testutil.Call(t, testHandler.ConnectVCS, vcsHandlerRequest(http.MethodPost, "/api/workspaces/"+testWorkspaceID+"/vcs/connections", map[string]any{"provider": "tgit", "instance_url": provider.URL, "access_token": "tok"}, "")).Want(http.StatusOK).JSON(&connection)
+	conn := connection.ID
 	parent := newVCSIssue(t, "TGit parent")
 	var child IssueResponse
 	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "TGit child", "parent_issue_id": parent.ID})).Want(http.StatusCreated).JSON(&child)
 	t.Cleanup(func() { cleanupVCS(ctx, child.ID); cleanupVCS(ctx, parent.ID) })
 	raw, _ := json.Marshal(map[string]any{"object_kind": "merge_request", "object_attributes": map[string]any{
-		"iid": 42, "title": child.Identifier + " fix", "state": "opened", "action": "open", "source_branch": "feature/test", "url": "https://git.test/org/repo/merge_requests/42", "target": map[string]any{"web_url": "https://git.test/org/repo"}, "last_commit": map[string]any{"id": "head"}, "created_at": "2026-10-26T06:00:00Z", "updated_at": "2026-10-26T07:00:00Z",
+		"iid": 42, "title": child.Identifier + " fix", "state": "opened", "action": "open", "source_branch": "feature/test", "url": provider.URL + "/org/repo/merge_requests/42", "target": map[string]any{"web_url": provider.URL + "/org/repo"}, "last_commit": map[string]any{"id": "head"}, "created_at": "2026-10-26T06:00:00Z", "updated_at": "2026-10-26T07:00:00Z",
 	}})
 	w := httptest.NewRecorder()
-	testHandler.HandleVCSWebhook(w, vcsWebhookReq(conn, map[string]string{"X-Event": "Merge Request Hook", "X-Token": vcsTestSecret}, raw))
+	testHandler.HandleVCSWebhook(w, vcsWebhookReq(conn, map[string]string{"X-Event": "Merge Request Hook", "X-Token": connection.WebhookSecret}, raw))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("webhook %d: %s", w.Code, w.Body.String())
 	}
