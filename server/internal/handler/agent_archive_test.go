@@ -217,7 +217,11 @@ func TestExternalAgentArchiveRechecksReferencesAfterPreview(t *testing.T) {
 func TestExternalAgentArchiveSquadReferences(t *testing.T) {
 	agent, _, _ := externalAgentFixture(t, "Archive squad references", "archive-squad-daemon")
 	squad := dbfx.Squad(t, "Archive squad references", agent)
+	otherLeader := dbfx.Agent(t, "Archive squad other leader", testRuntimeID)
+	memberSquad := dbfx.Squad(t, "Archive squad member only", otherLeader)
+	dbfx.SquadMember(t, memberSquad, "agent", agent)
 	dbfx.Exec(t, "UPDATE squad SET archived_at=now() WHERE id=$1", squad)
+	dbfx.Exec(t, "UPDATE squad SET archived_at=now() WHERE id=$1", memberSquad)
 
 	code, resp, body := archivePreflightCall(t, agent)
 	if code != http.StatusOK || !resp.Archivable || len(resp.Blockers) != 0 {
