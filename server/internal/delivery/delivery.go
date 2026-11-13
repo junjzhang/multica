@@ -116,6 +116,7 @@ type Delivery struct {
 	HostReceipt      string
 	LastError        string
 	CreatedAt        time.Time
+	NextAttemptAt    *time.Time
 	DeliveredAt      *time.Time
 }
 

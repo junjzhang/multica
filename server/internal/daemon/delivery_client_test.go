@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
 // One malformed lease timestamp must not discard the rest of an already-leased
@@ -173,6 +175,32 @@ func TestClaimDeliveriesRejectsMissingOrForeignWorkspaceEcho(t *testing.T) {
 			}
 			if claim.Scope.WorkspaceID != "workspace-1" {
 				t.Fatalf("claim scope = %q, want the claimed workspace for the outcome ack", claim.Scope.WorkspaceID)
+			}
+		})
+	}
+}
+
+func TestRecordDeliveryOutcomeNextAttemptCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{`"2026-01-02T03:04:05.123Z"`, true}, {`null`, false}, {`"invalid"`, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"id":"delivery-1","delivery_status":"pending","next_attempt_at":` + tc.value + `}`))
+			}))
+			defer srv.Close()
+			client := NewClient(srv.URL)
+			client.SetToken("daemon-token")
+			client.mailboxDaemonID = "daemon-1"
+			stored, err := client.RecordDeliveryOutcome(context.Background(), "workspace-1", delivery.OutcomeRequest{DeliveryID: "delivery-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (stored.NextAttemptAt != nil) != tc.want {
+				t.Fatalf("next attempt = %v, want present %v", stored.NextAttemptAt, tc.want)
 			}
 		})
 	}

@@ -45,6 +45,7 @@ type deliveryOutcomeDTO struct {
 	HostReceipt      *string `json:"host_receipt"`
 	LastError        *string `json:"last_error"`
 	DeliveredAt      *string `json:"delivered_at"`
+	NextAttemptAt    *string `json:"next_attempt_at"`
 	ProcessingStatus string  `json:"processing_status"`
 }
 
@@ -172,6 +173,11 @@ func (c *Client) RecordDeliveryOutcome(ctx context.Context, workspaceID string, 
 	}
 	if resp.LastError != nil {
 		stored.LastError = *resp.LastError
+	}
+	if resp.NextAttemptAt != nil {
+		if parsed, err := time.Parse(time.RFC3339Nano, *resp.NextAttemptAt); err == nil {
+			stored.NextAttemptAt = &parsed
+		}
 	}
 	if resp.DeliveredAt != nil {
 		if parsed, err := time.Parse(time.RFC3339, *resp.DeliveredAt); err == nil {

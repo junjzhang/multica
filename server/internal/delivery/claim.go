@@ -392,7 +392,13 @@ func (q *Queue) RecordOutcome(ctx context.Context, req OutcomeRequest) (Delivery
 			retryClass = string(RetryUnavailable)
 		}
 	}
-	row, err := q.q.RecordDeliveryOutcome(ctx, db.RecordDeliveryOutcomeParams{
+	tx, err := q.tx.Begin(ctx)
+	if err != nil {
+		return Delivery{}, fmt.Errorf("delivery: begin outcome: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := q.q.WithTx(tx)
+	row, err := qtx.RecordDeliveryOutcome(ctx, db.RecordDeliveryOutcomeParams{
 		ID:             deliveryID,
 		WorkspaceID:    workspaceID,
 		Status:         req.storedStatus(),
@@ -407,6 +413,16 @@ func (q *Queue) RecordOutcome(ctx context.Context, req OutcomeRequest) (Delivery
 	}
 	if err != nil {
 		return Delivery{}, fmt.Errorf("delivery: record outcome: %w", err)
+	}
+	if req.State == OutcomeDelivered || (req.State == OutcomeRetry && req.RetryClass == RetryBusy) {
+		if err := qtx.WakeOfflineDeliveriesForHost(ctx, db.WakeOfflineDeliveriesForHostParams{
+			TargetSessionID: row.TargetSessionID, WorkspaceID: workspaceID, DaemonID: req.DaemonID, DeliveryID: deliveryID,
+		}); err != nil {
+			return Delivery{}, fmt.Errorf("delivery: wake offline host deliveries: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Delivery{}, fmt.Errorf("delivery: commit outcome: %w", err)
 	}
 	return deliveryFromRow(row), nil
 }

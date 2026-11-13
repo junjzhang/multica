@@ -25,7 +25,7 @@ WHERE agent_mailbox_message.recipient_agent_id = EXCLUDED.recipient_agent_id
   AND agent_mailbox_message.source_type = 'background_wait'
   AND agent_mailbox_message.payload = EXCLUDED.payload
   AND agent_mailbox_message.target_session_id IS NULL
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type CreateManagedWaitMailboxParams struct {
@@ -79,6 +79,8 @@ func (q *Queries) CreateManagedWaitMailbox(ctx context.Context, arg CreateManage
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
