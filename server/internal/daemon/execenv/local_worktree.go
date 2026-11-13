@@ -793,7 +793,7 @@ func (w *LocalWorktree) commitAll(logger *slog.Logger) (bool, error) {
 // commit" case and (false, err) for a real failure — the distinction callers
 // need to decide whether the tree is safe to discard.
 func commitEverything(worktreePath, message string, allowEmpty bool) (bool, error) {
-	if out, err := runGit(worktreePath, "add", "-A"); err != nil {
+	if out, err := stageWithoutRuntimeFiles(worktreePath, nil, "HEAD", nil); err != nil {
 		return false, fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), err)
 	}
 	// --no-verify: the user's commit hooks are written for the user's own
@@ -941,8 +941,7 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 	// not a failure — read-tree rebuilds a correct index, merely a colder one —
 	// so the fallback runs on any error from the add, not just from the copy.
 	seeded := seedSnapshotIndex(gitRoot, indexPath)
-	addArgs := append([]string{"add", "-A", "--"}, snapshotExcludes()...)
-	if out, err := runGitEnv(gitRoot, env, addArgs...); err != nil {
+	if out, err := stageWithoutRuntimeFiles(gitRoot, env, headSHA, snapshotExcludes()); err != nil {
 		if !seeded {
 			return "", fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), err)
 		}
@@ -953,7 +952,7 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 		if out, resetErr := runGitEnv(gitRoot, env, "read-tree", headSHA); resetErr != nil {
 			return "", fmt.Errorf("git read-tree: %s: %w", strings.TrimSpace(out), resetErr)
 		}
-		if out, retryErr := runGitEnv(gitRoot, env, addArgs...); retryErr != nil {
+		if out, retryErr := stageWithoutRuntimeFiles(gitRoot, env, headSHA, snapshotExcludes()); retryErr != nil {
 			return "", fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), retryErr)
 		}
 	}
@@ -971,6 +970,42 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 		return "", fmt.Errorf("git commit-tree: %w", err)
 	}
 	return snapshot, nil
+}
+
+// stageWithoutRuntimeFiles preserves changes to paths present in the baseline,
+// while removing newly staged runtime files even when they were force-added.
+func stageWithoutRuntimeFiles(dir string, env []string, baseline string, excludes []string) (string, error) {
+	updateArgs := []string{"add", "-u", "--", "."}
+	for _, spec := range excludes {
+		if spec != ":(exclude,glob)**/.multica/**" {
+			updateArgs = append(updateArgs, spec)
+		}
+	}
+	if out, err := runGitEnv(dir, env, updateArgs...); err != nil {
+		return out, err
+	}
+	args := append([]string{"add", "-A", "--", ".", ":(exclude,glob)**/.multica/**"}, excludes...)
+	if out, err := runGitEnv(dir, env, args...); err != nil {
+		return out, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=A", "-z", baseline, "--", ":(glob)**/.multica/**")
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = 5 * time.Second
+	bytes, err := cmd.Output()
+	if err != nil {
+		return "", withGitStderr(err)
+	}
+	for _, path := range strings.Split(string(bytes), "\x00") {
+		if path == "" {
+			continue
+		}
+		if out, err := runGitEnv(dir, env, "--literal-pathspecs", "rm", "--cached", "-f", "--", path); err != nil {
+			return out, err
+		}
+	}
+	return "", nil
 }
 
 // seedSnapshotIndex copies the repository's index to path, reporting whether it
@@ -1895,7 +1930,7 @@ func stagedWorktreeTree(dir string) (string, error) {
 		return "", errors.New("execenv: cannot copy the worktree index")
 	}
 	env := []string{"GIT_INDEX_FILE=" + index}
-	if out, err := runGitEnv(dir, env, "add", "-A"); err != nil {
+	if out, err := stageWithoutRuntimeFiles(dir, env, "HEAD", nil); err != nil {
 		return "", fmt.Errorf("execenv: stage worktree in private index: %s: %w", strings.TrimSpace(out), err)
 	}
 	return runGitTrimmedEnv(dir, env, "write-tree")
@@ -2073,7 +2108,7 @@ func checkUntrackedReplayable(gitRoot string, logger *slog.Logger) error {
 		skipped int
 	)
 	for _, rel := range strings.Split(out, "\x00") {
-		if rel == "" || isMulticaSidecarPath(rel) {
+		if rel == "" || isMulticaSidecarPath(rel) || strings.HasPrefix(rel, ".multica/") || strings.Contains(rel, "/.multica/") {
 			continue
 		}
 		info, statErr := os.Lstat(filepath.Join(gitRoot, rel))

@@ -1741,6 +1741,43 @@ func TestCaptureUserSnapshotExcludesMulticaSidecars(t *testing.T) {
 	}
 }
 
+func TestAutomaticTreesExcludeUntrackedRuntimeFiles(t *testing.T) {
+	for _, snapshot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot=%t", snapshot), func(t *testing.T) {
+			repo := newTestRepo(t)
+			writeFile(t, filepath.Join(repo, ".multica", "tracked.txt"), "original")
+			gitRun(t, repo, "add", "-f", ".multica/tracked.txt")
+			gitRun(t, repo, "commit", "-m", "track project file")
+			writeFile(t, filepath.Join(repo, ".multica", "tracked.txt"), "updated")
+			writeFile(t, filepath.Join(repo, ".multica", "private.txt"), "secret")
+			writeFile(t, filepath.Join(repo, "sub", ".multica", "private.txt"), "secret")
+			writeFile(t, filepath.Join(repo, "business.txt"), "business")
+			gitRun(t, repo, "add", "-f", ".multica/private.txt")
+			commit := "HEAD"
+			if snapshot {
+				var err error
+				commit, err = captureUserSnapshot(repo, t.TempDir(), gitRun(t, repo, "rev-parse", "HEAD"), worktreeTestLogger())
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := commitEverything(repo, "automatic", false); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitRun(t, repo, "show", commit+":.multica/tracked.txt"); got != "updated" {
+				t.Errorf("tracked file: %q", got)
+			}
+			if got := gitRun(t, repo, "show", commit+":business.txt"); got != "business" {
+				t.Errorf("business file: %q", got)
+			}
+			for _, name := range []string{".multica/private.txt", "sub/.multica/private.txt"} {
+				if _, err := gitTry(t, repo, "cat-file", "-e", commit+":"+name); err == nil {
+					t.Errorf("private file %s included", name)
+				}
+			}
+		})
+	}
+}
+
 // Git must rehash a same-size edit when its timestamp equals the index's.
 // A private index with a newer timestamp would incorrectly make it look clean.
 func TestCaptureUserSnapshotPreservesRacyIndexTimestamp(t *testing.T) {
