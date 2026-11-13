@@ -1890,6 +1890,7 @@ func TestPendingRuntimePathsIncludesStagedDeletionAndIgnoredFiles(t *testing.T) 
 	wt := prepareForTest(t, repo)
 	gitRun(t, wt.Path, "rm", "--cached", ".multica/tracked")
 	writeFile(t, filepath.Join(wt.Path, ".multica", "new"), "private")
+	writeFile(t, filepath.Join(wt.Path, ".gitignore"), ".multica/new\n")
 	paths, err := wt.PendingRuntimePaths()
 	if err != nil {
 		t.Fatal(err)
