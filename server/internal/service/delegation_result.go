@@ -118,9 +118,9 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if obligation.NotificationTaskID.Valid || obligation.NotificationDeliveryID.Valid || obligation.NotificationError.Valid {
 		return false, false, nil
 	}
-	// Admission and takeover hold this owner fence before rotating current.
-	// Resolve a certified chain once, in the materialization transaction; a
-	// later continuation cannot retarget an already materialized notification.
+	// The issue write fences serialize dispatch, takeover and materialization;
+	// the runtime share lock freezes provider identity. Resolve a certified chain
+	// once so later continuations cannot retarget a materialized notification.
 	if address.ReturnKind == string(delegation.KindManagedTask) && sourceErr == nil {
 		if _, err := q.LockRuntimeForDelegation(ctx, db.LockRuntimeForDelegationParams{ID: address.RuntimeID, WorkspaceID: address.WorkspaceID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return false, false, err

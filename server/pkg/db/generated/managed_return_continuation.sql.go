@@ -41,8 +41,8 @@ type GetManagedReturnContinuationParams struct {
 }
 
 // Follow only certified continuation edges, never an explicit takeover or a
-// coincidentally newer session. The runtime owner fence serializes this read
-// with admission. UNION also bounds malformed cyclic data.
+// coincidentally newer session. The caller holds the delegated issue write
+// fence used by dispatch and takeover. UNION also bounds malformed cyclic data.
 func (q *Queries) GetManagedReturnContinuation(ctx context.Context, arg GetManagedReturnContinuationParams) (IssueDelegationReturn, error) {
 	row := q.db.QueryRow(ctx, getManagedReturnContinuation,
 		arg.WorkspaceID,
@@ -85,8 +85,8 @@ type HasOtherLiveManagedScopeTaskParams struct {
 	TaskID  pgtype.UUID `json:"task_id"`
 }
 
-// Admission holds the runtime and agent owner fences, which also serialize
-// task insertion. Result consumers occupy this scope just like ordinary runs.
+// Check scope occupancy inside the dispatch transaction. Result consumers
+// occupy this scope just like ordinary runs; owner locks also protect identity.
 func (q *Queries) HasOtherLiveManagedScopeTask(ctx context.Context, arg HasOtherLiveManagedScopeTaskParams) (bool, error) {
 	row := q.db.QueryRow(ctx, hasOtherLiveManagedScopeTask, arg.AgentID, arg.IssueID, arg.TaskID)
 	var present bool
