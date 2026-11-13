@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -3742,6 +3745,11 @@ func newIssueUpdateTestCmd() *cobra.Command {
 	cmd.Flags().String("priority", "", "")
 	cmd.Flags().String("assignee", "", "")
 	cmd.Flags().String("assignee-id", "", "")
+	cmd.Flags().String("coordinator", "", "")
+	cmd.Flags().String("coordinator-id", "", "")
+	cmd.Flags().Bool("merge-allowed", false, "")
+	cmd.Flags().String("merge-repository-url", "", "")
+	cmd.Flags().String("merge-target-branch", "", "")
 	cmd.Flags().String("project", "", "")
 	cmd.Flags().String("start-date", "", "")
 	cmd.Flags().String("due-date", "", "")
@@ -3884,6 +3892,7 @@ func newIssueListTestCmd() *cobra.Command {
 	cmd.Flags().Int("offset", 0, "")
 	cmd.Flags().String("sort", "", "")
 	cmd.Flags().String("direction", "", "")
+	cmd.Flags().String("updated-since", "", "")
 	cmd.Flags().String("fields", "", "")
 	cmd.Flags().Bool("resolve-properties", false, "")
 	return cmd
@@ -4281,18 +4290,110 @@ func TestRunIssueListSendsSortAndDirection(t *testing.T) {
 	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
 	t.Setenv("MULTICA_TOKEN", "test-token")
 
-	cmd := newIssueListTestCmd()
-	_ = cmd.Flags().Set("output", "json")
-	_ = cmd.Flags().Set("sort", "created_at")
-	_ = cmd.Flags().Set("direction", "DESC")
-	if err := runIssueList(cmd, nil); err != nil {
-		t.Fatalf("runIssueList: %v", err)
+	for _, sort := range []string{"created_at", "updated_at", "last_activity", "status"} {
+		cmd := newIssueListTestCmd()
+		_ = cmd.Flags().Set("output", "json")
+		_ = cmd.Flags().Set("sort", sort)
+		_ = cmd.Flags().Set("direction", "DESC")
+		if err := runIssueList(cmd, nil); err != nil {
+			t.Fatalf("runIssueList: %v", err)
+		}
+		if got := gotQuery.Get("sort"); got != sort {
+			t.Fatalf("sort query = %q, want %s", got, sort)
+		}
+		if got := gotQuery.Get("direction"); got != "desc" {
+			t.Fatalf("direction query = %q, want desc (lower-cased)", got)
+		}
 	}
-	if got := gotQuery.Get("sort"); got != "created_at" {
-		t.Fatalf("sort query = %q, want created_at", got)
+}
+
+func TestIssueSortColumnsMatchListHandler(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "../../internal/handler/issue.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := gotQuery.Get("direction"); got != "desc" {
-		t.Fatalf("direction query = %q, want desc (lower-cased)", got)
+	var columns []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "ListIssues" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			sw, ok := n.(*ast.SwitchStmt)
+			if !ok {
+				return true
+			}
+			id, ok := sw.Tag.(*ast.Ident)
+			if !ok || id.Name != "s" {
+				return true
+			}
+			for _, stmt := range sw.Body.List {
+				for _, expr := range stmt.(*ast.CaseClause).List {
+					lit, ok := expr.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatal("unexpected ListIssues sort case")
+					}
+					v, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					columns = append(columns, v)
+				}
+			}
+			return false
+		})
+		return false
+	})
+	slices.Sort(columns)
+	want := slices.Clone(validIssueSortColumns)
+	slices.Sort(want)
+	if !slices.Equal(columns, want) {
+		t.Fatalf("handler sort columns %v differ from CLI %v", columns, want)
+	}
+}
+
+func TestRunIssueListUpdatedSince(t *testing.T) {
+	var query url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]any{"issues": []any{}, "total": 0})
+	}))
+	defer srv.Close()
+	t.Setenv("MULTICA_SERVER_URL", srv.URL)
+	t.Setenv("MULTICA_WORKSPACE_ID", "ws-1")
+	t.Setenv("MULTICA_TOKEN", "test-token")
+	for _, value := range []string{"2020-01-02T03:04:05Z", "24h", "7d"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := newIssueListTestCmd()
+			_ = cmd.Flags().Set("updated-since", value)
+			if err := runIssueList(cmd, nil); err != nil {
+				t.Fatal(err)
+			}
+			start, err := time.Parse(time.RFC3339Nano, query.Get("date_start"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			end, err := time.Parse(time.RFC3339Nano, query.Get("date_end"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if query.Get("date_field") != "updated_at" || !start.Before(end) {
+				t.Fatalf("invalid range: %v", query)
+			}
+			if value == "2020-01-02T03:04:05Z" && !start.Equal(time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)) {
+				t.Fatalf("start = %s", start)
+			}
+			if value == "24h" && end.Sub(start) != 24*time.Hour || value == "7d" && end.Sub(start) != 7*24*time.Hour {
+				t.Fatalf("range = %s", end.Sub(start))
+			}
+		})
+	}
+	for _, value := range []string{"", "bad", "0h", "-1h", "999999999999999999d", "2999-01-01T00:00:00Z"} {
+		cmd := newIssueListTestCmd()
+		_ = cmd.Flags().Set("updated-since", value)
+		if err := runIssueList(cmd, nil); err == nil || !strings.Contains(err.Error(), "invalid --updated-since") {
+			t.Errorf("%q: got %v", value, err)
+		}
 	}
 }
 

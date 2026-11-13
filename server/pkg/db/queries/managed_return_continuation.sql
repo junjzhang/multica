@@ -1,0 +1,21 @@
+-- name: HasOtherLiveManagedScopeTask :one
+-- Check scope occupancy inside the dispatch transaction. Result consumers
+-- occupy this scope just like ordinary runs; owner locks also protect identity.
+SELECT EXISTS (
+ SELECT 1 FROM agent_task_queue
+ WHERE agent_id = @agent_id AND issue_id = @issue_id AND id <> @task_id
+   AND status NOT IN ('completed', 'failed', 'cancelled')
+) AS present;
+
+-- name: SetManagedReturnPredecessor :exec
+UPDATE issue_delegation_return SET continued_from_return_id = @previous_id WHERE id = @id;
+
+-- name: GetManagedReturnContinuation :one
+-- Follow only certified continuation edges, never an explicit takeover or a
+-- coincidentally newer session. The caller holds the delegated issue write
+-- fence used by dispatch and takeover.
+SELECT r.* FROM issue_delegation_return r
+WHERE r.workspace_id = @workspace_id AND r.issue_id = @issue_id
+ AND r.dispatcher_agent_id = @agent_id AND r.is_current AND r.id <> @from_return_id
+ AND r.return_kind = 'managed_task'
+ AND @from_return_id IN (SELECT return_id FROM managed_return_continuation_chain(r.id));

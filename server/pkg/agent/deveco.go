@@ -72,6 +72,9 @@ type devecoBackend struct {
 }
 
 func (b *devecoBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("deveco", opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "deveco"

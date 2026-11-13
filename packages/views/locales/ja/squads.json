@@ -98,7 +98,8 @@
     "members": "メンバー",
     "created_by": "作成者",
     "created": "作成日時",
-    "updated": "更新日時"
+    "updated": "更新日時",
+    "default_leader_migration": "既定リーダーはマネージドエージェントである必要があります。新しい委譲の前に選択してください。"
   },
   "toasts": {
     "member_added": "メンバーを追加しました",

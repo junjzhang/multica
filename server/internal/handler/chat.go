@@ -723,6 +723,19 @@ func (h *Handler) DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := qtx.LockTasksForScopeRemoval(r.Context(), db.LockTasksForScopeRemovalParams{ChatSessionID: session.ID}); err != nil {
+		writeError(w, 500, "lock source tasks failed")
+		return
+	}
+	if err := h.TaskService.RequireDelegationScopeReleased(r.Context(), qtx, session.WorkspaceID, pgtype.UUID{}, session.ID); err != nil {
+		if errors.Is(err, service.ErrDelegationResourcesRetained) {
+			writeError(w, http.StatusConflict, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "check retained delegation resources failed")
+		}
+		return
+	}
+
 	cancelled, err := qtx.CancelAgentTasksByChatSession(r.Context(), session.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to cancel chat session tasks")

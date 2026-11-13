@@ -298,6 +298,8 @@ var issueStatusCmd = &cobra.Command{
 		"Built-in keys: backlog, todo, in_progress, in_review, done, blocked, cancelled.\n" +
 		"A workspace may define custom statuses on top of these; their keys are shown in\n" +
 		"Workspace Settings > Issue Statuses, and an unknown value errors with the full list.\n\n" +
+		"A status change only updates the board: it never starts an agent run. To start\n" +
+		"assigned work, explicitly @-mention the assignee in a comment or rerun the issue.\n\n" +
 		"To cancel an issue because it duplicates another, mark it instead of only cancelling:\n" +
 		"  multica issue status <id> cancelled --duplicate-of <original>\n" +
 		"The original then lists it as a duplicate. Moving the issue to any status other\n" +
@@ -341,6 +343,7 @@ var issueCommentListCmd = &cobra.Command{
 var issueCommentAddCmd = &cobra.Command{
 	Use:   "add <issue-id>",
 	Short: "Add a comment to an issue",
+	Long:  "Add a comment. Use [@Name](mention://agent/<uuid>) to delegate or [@Name](mention://agent-notify/<uuid>) to wake an agent without adding a result return. If both target the same agent, delegation wins.",
 	Args:  exactArgs(1),
 	RunE:  runIssueCommentAdd,
 }
@@ -504,7 +507,7 @@ const issueListMaxPageSize = 100
 // always sorted ascending (the board's manual drag order), so --direction is
 // only meaningful for the other columns.
 var validIssueSortColumns = []string{
-	"position", "title", "created_at", "start_date", "due_date", "priority",
+	"position", "title", "created_at", "updated_at", "last_activity", "status", "start_date", "due_date", "priority",
 }
 
 // validIssueFields are the top-level keys /api/issues actually emits for
@@ -536,6 +539,29 @@ var directionalIssueSortColumns = func() []string {
 	}
 	return cols
 }()
+
+func parseIssueUpdatedSince(value string, now time.Time) (time.Time, error) {
+	start, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		durationValue := value
+		if strings.HasSuffix(value, "d") {
+			days, dayErr := strconv.ParseUint(strings.TrimSuffix(value, "d"), 10, 64)
+			if dayErr != nil || days > uint64((1<<63-1)/int64(24*time.Hour)) {
+				return time.Time{}, fmt.Errorf("invalid --updated-since %q: use a past RFC3339 timestamp or positive duration (e.g. 24h, 7d)", value)
+			}
+			durationValue = strconv.FormatUint(days*24, 10) + "h"
+		}
+		duration, durationErr := time.ParseDuration(durationValue)
+		if durationErr != nil || duration <= 0 {
+			return time.Time{}, fmt.Errorf("invalid --updated-since %q: use a past RFC3339 timestamp or positive duration (e.g. 24h, 7d)", value)
+		}
+		start = now.Add(-duration)
+	}
+	if !start.Before(now) {
+		return time.Time{}, fmt.Errorf("invalid --updated-since %q: timestamp must be before now", value)
+	}
+	return start, nil
+}
 
 // validateIssueStatus checks the shape of a status key, not its membership.
 //
@@ -617,8 +643,9 @@ func init() {
 	issueListCmd.Flags().StringArray("property", nil, `Filter by custom property, written as "Name=Value" or as a comparison such as "Score>=3", "Ship Date<2026-01-01" or "Notes~=review" (repeatable, one member per flag; quote it so the shell does not read < and > as redirection). Name is a property name (case-insensitive) or its UUID; a name containing =, <, >, ! or ~ has to be given by UUID. Use __none__ to match issues where the property is unset; it works for every type, so an option or member actually named __none__ has to be given by id. Repeating a property matches ANY of its members; different properties must ALL match. The per-type value forms and comparisons are in the command description above.`)
 	issueListCmd.Flags().Int("limit", 50, fmt.Sprintf("Page size, 1 to %d (the server returns at most %d issues per request; use --offset to page through more)", issueListMaxPageSize, issueListMaxPageSize))
 	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination; while --output json reports has_more, advance it by the number of issues in that same response)")
-	issueListCmd.Flags().String("sort", "", "Sort column: position (default, manual board order), title, created_at, start_date, due_date, priority, or property:<name-or-id> to sort by a custom property (select properties sort by option order)")
+	issueListCmd.Flags().String("sort", "", "Sort column: "+strings.Join(validIssueSortColumns, ", ")+", or property:<name-or-id> to sort by a custom property (position is the default manual order; select properties sort by option order)")
 	issueListCmd.Flags().String("direction", "", "Sort direction (asc or desc); requires --sort to be a non-position column or a property sort (position is always ascending)")
+	issueListCmd.Flags().String("updated-since", "", "Only issues updated since an RFC3339 timestamp or positive duration (e.g. 24h, 7d), up to the time of this request")
 	issueListCmd.Flags().String("fields", "", "JSON output only: comma-separated list of issue fields to include (e.g. id,title,status,priority). Filtering happens client-side after the full response is fetched, so this shrinks CLI output size and agent context cost, not network/server-side cost. Omit for the full issue object (default, unchanged). Valid fields: "+strings.Join(validIssueFields, ", "))
 	issueListCmd.Flags().Bool("resolve-properties", false, resolvePropertiesHelp)
 
@@ -642,12 +669,15 @@ func init() {
 	issueCreateCmd.Flags().String("priority", "", "Issue priority")
 	issueCreateCmd.Flags().String("assignee", "", "Assignee name (member, agent, or squad; fuzzy match)")
 	issueCreateCmd.Flags().String("assignee-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
+	issueCreateCmd.Flags().String("coordinator", "", "Coordinator actor name (member or agent; mutually exclusive with --coordinator-id)")
+	issueCreateCmd.Flags().String("coordinator-id", "", "Coordinator actor UUID (member or agent; mutually exclusive with --coordinator)")
 	issueCreateCmd.Flags().String("parent", "", "Parent issue ID")
 	issueCreateCmd.Flags().Int("stage", 0, "Stage ordinal (>=1) grouping this sub-issue into an ordered barrier group under its parent; omit for unstaged. The parent assignee is woken only when every sub-issue in a stage finishes.")
 	issueCreateCmd.Flags().String("project", "", "Project ID")
 	issueCreateCmd.Flags().String("start-date", "", "Start date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().String("due-date", "", "Due date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().Bool("allow-duplicate", false, "Allow creating an issue even when an active duplicate exists")
+	issueCreateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueCreateCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCreateCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times). Each file is uploaded and its markdown reference is appended to the description, which is what makes it render on the issue page")
 	issueCreateCmd.Flags().StringSlice("attachment-id", nil, "Existing attachment UUID(s) to bind to the created issue (can be specified multiple times)")
@@ -664,18 +694,24 @@ func init() {
 	issueUpdateCmd.Flags().String("priority", "", "New priority")
 	issueUpdateCmd.Flags().String("assignee", "", "New assignee name (member, agent, or squad; fuzzy match)")
 	issueUpdateCmd.Flags().String("assignee-id", "", "New assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
+	issueUpdateCmd.Flags().String("coordinator", "", "New coordinator actor name (member or agent)")
+	issueUpdateCmd.Flags().String("coordinator-id", "", "New coordinator actor UUID (member or agent)")
+	issueUpdateCmd.Flags().Bool("merge-allowed", false, "Grant or revoke merge authorization for this issue (human owner/admin only)")
+	issueUpdateCmd.Flags().String("merge-repository-url", "", "Repository URL covered by --merge-allowed")
+	issueUpdateCmd.Flags().String("merge-target-branch", "", "Target branch covered by --merge-allowed")
 	issueUpdateCmd.Flags().String("project", "", "Project ID")
 	issueUpdateCmd.Flags().String("start-date", "", "New start date (calendar day, YYYY-MM-DD; pass empty string to clear)")
 	issueUpdateCmd.Flags().String("due-date", "", "New due date (calendar day, YYYY-MM-DD)")
 	issueUpdateCmd.Flags().String("parent", "", "Parent issue ID (use --parent \"\" to clear)")
 	issueUpdateCmd.Flags().Int("stage", 0, "Stage ordinal (>=1) for this sub-issue; see `issue create --stage`")
 	issueUpdateCmd.Flags().Float64("position", 0, "Ordering position within the board column (lower sorts first); prefer `issue reorder` for relative moves")
-	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run")
+	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run (only an assignee change in the update would start one)")
 	issueUpdateCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID) and cancel it; --status, if given, must be cancelled, and description/attachment changes must go in a separate update")
+	issueUpdateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue status
-	issueStatusCmd.Flags().Bool("no-start", false, "Change status without starting an agent run")
+	issueStatusCmd.Flags().Bool("no-start", false, "Accepted for compatibility; a status change alone never starts an agent run")
 	issueStatusCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID); the status must be cancelled")
 	issueStatusCmd.Flags().String("output", "table", "Output format: table or json")
 
@@ -687,6 +723,7 @@ func init() {
 	issueAssignCmd.Flags().String("to-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --to)")
 	issueAssignCmd.Flags().Bool("unassign", false, "Remove current assignee")
 	issueAssignCmd.Flags().Bool("no-start", false, "Assign ownership without starting an agent run")
+	issueAssignCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueAssignCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue comment list
@@ -793,6 +830,17 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 
 	params := url.Values{}
 	params.Set("workspace_id", client.WorkspaceID)
+	if cmd.Flags().Changed("updated-since") {
+		v, _ := cmd.Flags().GetString("updated-since")
+		now := time.Now().UTC()
+		start, err := parseIssueUpdatedSince(v, now)
+		if err != nil {
+			return err
+		}
+		params.Set("date_field", "updated_at")
+		params.Set("date_start", start.Format(time.RFC3339Nano))
+		params.Set("date_end", now.Format(time.RFC3339Nano))
+	}
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
 		params.Set("status", v)
 	}
@@ -1538,6 +1586,13 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		body["assignee_type"] = aType
 		body["assignee_id"] = aID
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
+	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
+		return err
+	}
 
 	// Quick-create stamp: when the daemon sets MULTICA_QUICK_CREATE_TASK_ID
 	// before invoking the agent, the agent's `multica issue create` call
@@ -1762,6 +1817,16 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 			body["assignee_id"] = aID
 		}
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
+	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
+		return err
+	}
+	if err := addMergeAuthorizationFromFlags(cmd, body); err != nil {
+		return err
+	}
 	if cmd.Flags().Changed("parent") {
 		v, _ := cmd.Flags().GetString("parent")
 		if v == "" {
@@ -1794,7 +1859,7 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(body) == 0 && len(attachmentPaths) == 0 {
-		return fmt.Errorf("no fields to update; use flags like --title, --status, --priority, --assignee, etc.")
+		return fmt.Errorf("no fields to update; use flags like --title, --status, --priority, --assignee, --coordinator, or --merge-allowed")
 	}
 	// Validate every path before any upload so an invalid later path cannot
 	// leave earlier files uploaded and unbound.
@@ -1915,6 +1980,10 @@ func runIssueAssign(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	var result map[string]any
 	if err := client.PutJSON(ctx, "/api/issues/"+issueRef.ID, body, &result); err != nil {
 		return fmt.Errorf("assign issue: %w", err)
@@ -3402,7 +3471,7 @@ func normalizeAssigneeLookupInput(raw string) string {
 	input := strings.TrimSpace(raw)
 	if m := util.MentionRe.FindStringSubmatch(input); len(m) == 4 && m[0] == input {
 		switch m[2] {
-		case "member", "agent", "squad":
+		case "member", "agent", "agent-notify", "squad":
 			return m[3]
 		}
 	}
@@ -3528,6 +3597,70 @@ func pickAssigneeFromFlags(ctx context.Context, client *cli.APIClient, cmd *cobr
 		return t, i, true, nil
 	}
 	return "", "", false, nil
+}
+
+// addCoordinatorFromFlags resolves a member/agent coordinator and writes the
+// request's coordinator object. The two name/id flags are mutually exclusive.
+// The server accepts an explicit coordinator object, not a null clear.
+func addCoordinatorFromFlags(ctx context.Context, client *cli.APIClient, cmd *cobra.Command, body map[string]any) error {
+	nameSet := cmd.Flags().Changed("coordinator")
+	idSet := cmd.Flags().Changed("coordinator-id")
+	if !nameSet && !idSet {
+		return nil
+	}
+	if nameSet && idSet {
+		return fmt.Errorf("--coordinator and --coordinator-id are mutually exclusive")
+	}
+	actorType, actorID, hasCoordinator, err := pickAssigneeFromFlags(ctx, client, cmd, "coordinator", "coordinator-id", memberOrAgentKinds)
+	if err != nil {
+		return fmt.Errorf("resolve coordinator: %w", err)
+	}
+	if !hasCoordinator {
+		return nil
+	}
+	body["coordinator"] = map[string]any{"type": actorType, "id": actorID}
+	return nil
+}
+
+// addMergeAuthorizationFromFlags writes the human grant/revoke payload. A grant
+// must name both the repository and target branch; a revoke clears the scope,
+// so supplying scope flags together with --merge-allowed=false is rejected.
+func addMergeAuthorizationFromFlags(cmd *cobra.Command, body map[string]any) error {
+	allowedSet := cmd.Flags().Changed("merge-allowed")
+	repoSet := cmd.Flags().Changed("merge-repository-url")
+	branchSet := cmd.Flags().Changed("merge-target-branch")
+	if !allowedSet && !repoSet && !branchSet {
+		return nil
+	}
+	if !allowedSet {
+		return fmt.Errorf("--merge-repository-url and --merge-target-branch require --merge-allowed")
+	}
+	allowed := flagBool(cmd, "merge-allowed")
+	if !allowed {
+		if repoSet || branchSet {
+			return fmt.Errorf("--merge-repository-url and --merge-target-branch cannot be combined with --merge-allowed=false")
+		}
+		body["merge_authorization"] = map[string]any{"allowed": false}
+		return nil
+	}
+	repositoryURL := strings.TrimSpace(flagString(cmd, "merge-repository-url"))
+	targetBranch := strings.TrimSpace(flagString(cmd, "merge-target-branch"))
+	if repositoryURL == "" || targetBranch == "" {
+		return fmt.Errorf("--merge-allowed=true requires --merge-repository-url and --merge-target-branch")
+	}
+	parsedRepo, err := url.Parse(repositoryURL)
+	if err != nil || (parsedRepo.Scheme != "https" && parsedRepo.Scheme != "http") || parsedRepo.Host == "" || parsedRepo.User != nil {
+		return fmt.Errorf("--merge-repository-url must be an http(s) repository URL without credentials")
+	}
+	if strings.Contains(targetBranch, "..") {
+		return fmt.Errorf("--merge-target-branch is invalid")
+	}
+	body["merge_authorization"] = map[string]any{
+		"allowed":        true,
+		"repository_url": repositoryURL,
+		"target_branch":  targetBranch,
+	}
+	return nil
 }
 
 func formatAssignee(issue map[string]any, actors actorDisplayLookup) string {

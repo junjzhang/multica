@@ -15,6 +15,7 @@ export type RunConfirmIntent =
       mode: "assign";
       assigneeType: "agent" | "squad";
       assigneeId: string;
+      recipientSessionId?: string;
     }
   | {
       issueIds: [string];
@@ -74,6 +75,7 @@ export function runConfirmIntent(
   updates: Partial<UpdateIssueRequest>,
   catalog: Pick<IssueStatusCatalog, "entryOf">,
 ): RunConfirmIntent | null {
+  if (updates.suppress_run) return null;
   const issueCategory = resolveStatusCategory(issue.status, issue.status_category, catalog);
   const parked = issue.status === "backlog";
 
@@ -87,6 +89,7 @@ export function runConfirmIntent(
       mode: "assign",
       assigneeType: updates.assignee_type,
       assigneeId: updates.assignee_id,
+      ...(updates.recipient_session_id ? { recipientSessionId: updates.recipient_session_id } : {}),
     };
   }
 

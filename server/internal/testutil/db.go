@@ -256,23 +256,33 @@ func (f *Fixture) Task(t TB, agentID string, over ...Cols) string {
 // Squad inserts a squad led by leaderID.
 func (f *Fixture) Squad(t TB, name, leaderID string, over ...Cols) string {
 	t.Helper()
-	return f.Insert(t, "squad", merge(Cols{
+	id := f.Insert(t, "squad", merge(Cols{
 		"workspace_id": f.WorkspaceID,
 		"name":         name,
 		"description":  "",
 		"leader_id":    leaderID,
 		"creator_id":   f.UserID,
 	}, over))
+	f.SquadMember(t, id, "agent", leaderID, Cols{"role": "leader"})
+	return id
 }
 
 // SquadMember adds an agent or member to a squad.
 func (f *Fixture) SquadMember(t TB, squadID, memberType, memberID string, over ...Cols) string {
 	t.Helper()
-	return f.Insert(t, "squad_member", merge(Cols{
-		"squad_id":    squadID,
-		"member_type": memberType,
-		"member_id":   memberID,
-	}, over))
+	cols := merge(Cols{"squad_id": squadID, "member_type": memberType, "member_id": memberID}, over)
+	names, placeholders, args := compile(cols)
+	roleUpdate := "squad_member.role"
+	if _, ok := cols["role"]; ok {
+		roleUpdate = "EXCLUDED.role"
+	}
+	sql := fmt.Sprintf("INSERT INTO squad_member (%s) VALUES (%s) ON CONFLICT (squad_id,member_type,member_id) DO UPDATE SET role=%s RETURNING id", strings.Join(names, ", "), strings.Join(placeholders, ", "), roleUpdate)
+	var id string
+	if err := f.Pool.QueryRow(context.Background(), sql, args...).Scan(&id); err != nil {
+		t.Fatalf("setup: squad member: %v", err)
+	}
+	f.deleteOnCleanup(t, "squad_member", id)
+	return id
 }
 
 // Project inserts a project.
