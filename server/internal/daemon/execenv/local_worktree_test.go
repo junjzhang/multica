@@ -1818,6 +1818,10 @@ func TestFinalizePreservesNewRuntimePaths(t *testing.T) {
 	if err := resetEnvRootContents(filepath.Dir(wt.Path)); err == nil {
 		t.Fatal("reset removed a retained worktree")
 	}
+	env := &Environment{RootDir: filepath.Dir(wt.Path), logger: worktreeTestLogger()}
+	if err := env.Cleanup(true); err == nil {
+		t.Fatal("cleanup removed a retained worktree")
+	}
 	root, err := os.OpenRoot(filepath.Dir(wt.Path))
 	if err != nil {
 		t.Fatal(err)

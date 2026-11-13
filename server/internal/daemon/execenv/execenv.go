@@ -1276,13 +1276,13 @@ func (env *Environment) Cleanup(removeAll bool) error {
 	// rerun fail closed. The daemon also defers ReleaseLock for the task run;
 	// both paths are idempotent.
 	env.ReleaseLock()
-	if env.LocalWorktree != nil {
+	if env.RootDir != "" {
 		present, err := HasRetainedRuntimePaths(env.RootDir)
 		if err != nil {
 			return err
 		}
 		if present {
-			return fmt.Errorf("execenv: refusing to clean a retained worktree at %s", env.LocalWorktree.Path)
+			return fmt.Errorf("execenv: refusing to clean a retained worktree in %s", env.RootDir)
 		}
 	}
 
