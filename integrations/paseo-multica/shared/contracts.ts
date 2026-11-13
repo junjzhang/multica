@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { pullRequestsSchema } from "./pull-requests";
 import { sessionTasksViewSchema } from "./tasks";
 import { detailResultSchema, detailSection } from "./task-details";
 
@@ -62,3 +63,5 @@ export const taskExpansion = defineRpc({
   input: agentInput.extend({ issueId: z.string().uuid().optional(), expanded: z.boolean().optional() }),
   output: z.array(z.string().uuid()),
 });
+
+export const sessionPullRequests = defineRpc({ name: "session.pull-requests", input: agentInput, output: pullRequestsSchema });

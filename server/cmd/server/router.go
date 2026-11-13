@@ -2337,6 +2337,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// of the credential's agent, read-only and scoped to that
 					// agent by loadAgentForSessionRead.
 					r.Get("/session-tasks", h.GetAgentSessionTasks)
+					r.Get("/session-pull-requests", h.GetAgentSessionPullRequests)
 					// Mailbox: the recipient's own external credential or an
 					// authorized human owner/admin.
 					r.Get("/mailbox", h.ListAgentMailbox)

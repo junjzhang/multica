@@ -85,13 +85,14 @@ export function PullRequestList({
   const prs = data?.pull_requests ?? [];
   // Older backends send no auto-complete block and have no link/unlink
   // endpoints, so the row actions stay hidden with it.
+  const descendants = data?.descendant_pull_requests ?? [];
   const autoComplete = data?.auto_complete ?? null;
   const rowActions = autoComplete ? { issueId, identifier, autoComplete } : null;
 
   if (isLoading) {
     return <p className="text-caption text-muted-foreground px-2">{t(($) => $.detail.pull_requests_loading)}</p>;
   }
-  if (prs.length === 0) {
+  if (prs.length === 0 && descendants.length === 0) {
     return (
       <p className="px-2 text-caption text-muted-foreground">
         {t(($) => $.detail.pull_requests_empty_title)}
@@ -112,6 +113,7 @@ export function PullRequestList({
 
   return (
     <div className="space-y-1">
+      {prs.length > 0 && descendants.length > 0 ? <p className="px-2 text-micro text-muted-foreground">{t(($) => $.detail.pull_requests_direct)}</p> : null}
       {expandedHead.map((pr) => (
         <PullRequestRow key={pr.id} pr={pr} identifier={identifier} showRepo={showRepo} actions={rowActions} />
       ))}
@@ -131,6 +133,17 @@ export function PullRequestList({
               ? t(($) => $.detail.pull_request_card_show_less)
               : t(($) => $.detail.pull_request_card_show_more, { count: collapsedTail.length })}
           </button>
+        </div>
+      ) : null}
+      {descendants.length > 0 ? (
+        <div className="space-y-1">
+          <p className="px-2 text-micro text-muted-foreground">{t(($) => $.detail.pull_requests_descendants)}</p>
+          {descendants.map((pr) => (
+            <div key={pr.id}>
+              <PullRequestRow pr={pr} identifier={pr.source_identifier} showRepo actions={null} />
+              <p className="px-2 text-micro text-muted-foreground">{pr.source_identifier}</p>
+            </div>
+          ))}
         </div>
       ) : null}
       {autoComplete ? (

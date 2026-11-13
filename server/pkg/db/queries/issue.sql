@@ -816,3 +816,16 @@ FROM (
     WHERE workspace_id = $1
     LIMIT sqlc.arg('limit')::bigint
 ) bounded_issues;
+
+-- name: ListDescendantIssues :many
+-- UNION terminates even if legacy data contains a cycle.
+WITH RECURSIVE tree(id) AS (
+    SELECT unnest(sqlc.arg('root_ids')::uuid[])
+    UNION
+    SELECT i.id FROM issue i JOIN tree t ON i.parent_issue_id = t.id
+    WHERE i.workspace_id = sqlc.arg('workspace_id')
+)
+SELECT i.* FROM issue i JOIN tree t ON t.id = i.id
+WHERE i.workspace_id = sqlc.arg('workspace_id')
+  AND NOT (i.id = ANY(sqlc.arg('root_ids')::uuid[]))
+ORDER BY i.number, i.id;

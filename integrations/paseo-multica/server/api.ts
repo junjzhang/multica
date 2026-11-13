@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { pullRequestsSchema, type PullRequest } from "../shared/pull-requests";
 import { redactSecrets } from "../shared/redaction";
 import { isUuid } from "../shared/session";
 import { sessionTasksWireSchema, type SessionTasksWire } from "../shared/tasks";
@@ -60,6 +61,7 @@ export interface MulticaApi {
   verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid">;
   /** Read-only "this session's tasks" projection; scoped by the credential. */
   listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire>;
+  listSessionPullRequests(credential: ApiCredential, agentId: string): Promise<PullRequest[]>;
   taskDetail(credential: ApiCredential, issueId: string, section: DetailSection): Promise<unknown>;
 }
 
@@ -267,6 +269,13 @@ export function createMulticaApi(options: {
         throw new MulticaApiError(0, "Multica did not return a valid session task summary.");
       }
       return parsed.data;
+    },
+
+    async listSessionPullRequests(credential, agentId) {
+      const text = await request(credential, "GET", `/api/agents/${encodeURIComponent(agentId)}/session-pull-requests`, credential.token);
+      const parsed = pullRequestsSchema.safeParse(parseJson(text));
+      if (!parsed.success) throw new MulticaApiError(0, "Multica did not return valid pull requests.");
+      return parsed.data.pull_requests;
     },
 
     async verifyExternalAgentToken(credential, agentId) {

@@ -501,3 +501,81 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 		t.Fatalf("owned = %+v, want only open parent with 8/8 closed children", response.Owned)
 	}
 }
+
+func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemon := "pr-session-" + suffix
+	dbfx.Runtime(t, "PR session runtime "+suffix, testutil.Cols{"daemon_id": daemon})
+	host := "pr-host-" + suffix
+	code, first, bodyText := registerExternal(t, h, templateBody("PR template "+suffix, host, "first-"+suffix, "first", daemon))
+	if code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, bodyText)
+	}
+	defer cleanupExternalAgent(t, first.ID)
+	code, second, bodyText := registerExternal(t, h, templateBody("PR template "+suffix, host, "second-"+suffix, "second", daemon))
+	if code != http.StatusCreated || second.ID != first.ID {
+		t.Fatalf("register second: %d %s", code, bodyText)
+	}
+	agent, session, owner, otherSession := first.ID, first.ExternalSession.ID, testUserID, second.ExternalSession.ID
+	const installationID int64 = 30264988
+	secret := "session-pr-secret"
+	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
+	root := prAutoCompleteTestIssue(t, "session root", installationID)
+	assign := map[string]any{"assignee_type": "agent", "assignee_id": agent, "recipient_session_id": session, "suppress_run": true}
+	testutil.Call(t, testHandler.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+root.ID, assign), "id", root.ID)).Want(http.StatusOK)
+	var child IssueResponse
+	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "session child", "parent_issue_id": root.ID})).Want(http.StatusCreated).JSON(&child)
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue_pull_request WHERE issue_id = $1`, child.ID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, child.ID)
+	})
+	firePRWebhook(t, secret, installationID, 8, child.Identifier+" fix", "", "fix", "opened")
+	var dispatched IssueResponse
+	req := externalAgentRequest(t, agent, http.MethodPost, "/api/issues", map[string]any{"title": "dispatched root", "status": "backlog"})
+	req.Header.Set(ActorSessionHeader, session)
+	testutil.Call(t, h.CreateIssue, req).Want(http.StatusCreated).JSON(&dispatched)
+	cleanupDelegatedIssue(t, dispatched.ID)
+	var dispatchedChild IssueResponse
+	testutil.Call(t, h.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "dispatched child", "parent_issue_id": dispatched.ID})).Want(http.StatusCreated).JSON(&dispatchedChild)
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue_pull_request WHERE issue_id = $1`, dispatchedChild.ID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, dispatchedChild.ID)
+	})
+	firePRWebhook(t, secret, installationID, 9, dispatchedChild.Identifier+" fix", "", "dispatch-fix", "opened")
+	read := func(user, actor, sid string, external bool) *httptest.ResponseRecorder {
+		req := sessionTasksRequest(user, actor, external, sid)
+		w := httptest.NewRecorder()
+		testHandler.GetAgentSessionPullRequests(w, req)
+		return w
+	}
+	w := read(owner, agent, session, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("session read: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		PullRequests []descendantPullRequest `json:"pull_requests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PullRequests) != 2 || body.PullRequests[0].SourceIssueID != child.ID || body.PullRequests[1].SourceIssueID != dispatchedChild.ID {
+		t.Fatalf("projection: %+v", body)
+	}
+	w = read(owner, agent, otherSession, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("other session: %d %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PullRequests) != 0 {
+		t.Fatalf("other session saw PRs: %+v", body)
+	}
+	if w = read(owner, agent, "", true); w.Code != http.StatusForbidden {
+		t.Fatalf("unbound session read: %d", w.Code)
+	}
+	if w = read(owner, agent, "", false); w.Code != http.StatusForbidden {
+		t.Fatalf("human read: %d", w.Code)
+	}
+}

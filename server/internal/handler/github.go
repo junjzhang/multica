@@ -28,6 +28,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/integrations/vcs"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -978,11 +979,35 @@ func (h *Handler) ListPullRequestsForIssue(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "failed to list pull requests")
 		return
 	}
-	identifier := fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number)
-	rows, err := h.Queries.ListPullRequestsByIssue(r.Context(), issue.ID)
+	out, err := h.issuePullRequests(r.Context(), ws, issue, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list pull requests")
 		return
+	}
+	descendants, err := h.descendantPullRequests(r.Context(), ws, []db.Issue{issue}, out, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list descendant pull requests")
+		return
+	}
+	// The one auto-complete decision the issue page renders, so the UI never
+	// re-derives the rule on its own.
+	decision, err := h.decidePRAutoComplete(r.Context(), ws, issue, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pull requests")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pull_requests":            out,
+		"descendant_pull_requests": descendants,
+		"auto_complete":            prAutoCompleteToResponse(decision),
+	})
+}
+
+func (h *Handler) issuePullRequests(ctx context.Context, ws db.Workspace, issue db.Issue, refresh bool) ([]GitHubPullRequestResponse, error) {
+	identifier := fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number)
+	rows, err := h.Queries.ListPullRequestsByIssue(ctx, issue.ID)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]GitHubPullRequestResponse, 0, len(rows))
 	for _, row := range rows {
@@ -993,45 +1018,115 @@ func (h *Handler) ListPullRequestsForIssue(w http.ResponseWriter, r *http.Reques
 		// older than the view TTL, kick an async refresh. Non-blocking — the
 		// current (possibly stale) response is returned immediately and the
 		// fresh snapshot arrives via the pull_request:updated realtime event.
-		h.PRRefresh.MaybeEnqueueOnView(
-			row.InstallationID, row.RepoOwner, row.RepoName, row.PrNumber,
-			row.SnapshotFetchedAt.Time,
-			row.SnapshotFetchedAt.Valid &&
-				row.SnapshotHeadSha != "" &&
-				row.SnapshotHeadSha == row.HeadSha,
-		)
+		if refresh {
+			h.PRRefresh.MaybeEnqueueOnView(
+				row.InstallationID, row.RepoOwner, row.RepoName, row.PrNumber,
+				row.SnapshotFetchedAt.Time,
+				row.SnapshotFetchedAt.Valid &&
+					row.SnapshotHeadSha != "" &&
+					row.SnapshotHeadSha == row.HeadSha,
+			)
+		}
 	}
 	// PRs from token-based providers (Forgejo / Gitea / GitLab) share the same
 	// card list. They live in their own provider-tagged tables, so they merge
 	// in here mapped to the same response shape; the combined list is re-sorted
 	// newest-first.
-	vcsRows, err := h.Queries.ListVCSPullRequestsByIssue(r.Context(), issue.ID)
+	vcsRows, err := h.Queries.ListVCSPullRequestsByIssue(ctx, issue.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list pull requests")
-		return
+		return nil, err
 	}
 	for _, row := range vcsRows {
 		resp := vcsPullRequestRowToResponse(row)
 		resp.LinkSource = prLinkSource(row.LinkedByType, identifier, row.Title, row.Branch.String)
 		out = append(out, resp)
-		if row.Provider == "tgit" {
+		if refresh && row.Provider == "tgit" {
 			h.TGitSnapshots.Enqueue(row.ID)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].PRCreatedAt > out[j].PRCreatedAt
 	})
-	// The one auto-complete decision the issue page renders, so the UI never
-	// re-derives the rule on its own.
-	decision, err := h.decidePRAutoComplete(r.Context(), ws, issue, nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list pull requests")
-		return
+	return out, nil
+}
+
+type descendantPullRequest struct {
+	GitHubPullRequestResponse
+	SourceIssueID    string `json:"source_issue_id"`
+	SourceIdentifier string `json:"source_identifier"`
+	SourceURL        string `json:"source_url"`
+}
+
+func (h *Handler) batchIssuePullRequests(ctx context.Context, ws db.Workspace, issues []db.Issue, refresh bool) (map[pgtype.UUID][]GitHubPullRequestResponse, error) {
+	ids := make([]pgtype.UUID, 0, len(issues))
+	identifiers := make(map[pgtype.UUID]string, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+		identifiers[issue.ID] = fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"pull_requests": out,
-		"auto_complete": prAutoCompleteToResponse(decision),
-	})
+	out := make(map[pgtype.UUID][]GitHubPullRequestResponse)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := h.Queries.ListPullRequestsByIssues(ctx, db.ListPullRequestsByIssuesParams{WorkspaceID: ws.ID, IssueIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		resp := issuePullRequestRowToResponse(db.ListPullRequestsByIssueRow{ID: row.ID, WorkspaceID: row.WorkspaceID, InstallationID: row.InstallationID, RepoOwner: row.RepoOwner, RepoName: row.RepoName, PrNumber: row.PrNumber, Title: row.Title, State: row.State, HtmlUrl: row.HtmlUrl, Branch: row.Branch, AuthorLogin: row.AuthorLogin, AuthorAvatarUrl: row.AuthorAvatarUrl, MergedAt: row.MergedAt, ClosedAt: row.ClosedAt, PrCreatedAt: row.PrCreatedAt, PrUpdatedAt: row.PrUpdatedAt, HeadSha: row.HeadSha, MergeableState: row.MergeableState, Additions: row.Additions, Deletions: row.Deletions, ChangedFiles: row.ChangedFiles, ApiMergeable: row.ApiMergeable, ApiMergeStateStatus: row.ApiMergeStateStatus, ChecksRollupState: row.ChecksRollupState, SnapshotHeadSha: row.SnapshotHeadSha, SnapshotFetchedAt: row.SnapshotFetchedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, LinkedByType: row.LinkedByType, ChecksTotal: row.ChecksTotal, ChecksPassed: row.ChecksPassed, ChecksFailed: row.ChecksFailed, ChecksRunning: row.ChecksRunning, FailedCheckNames: row.FailedCheckNames}, h.PRRefresh.Enabled())
+		resp.LinkSource = prLinkSource(row.LinkedByType, identifiers[row.IssueID], row.Title, row.Branch.String)
+		out[row.IssueID] = append(out[row.IssueID], resp)
+		if refresh {
+			h.PRRefresh.MaybeEnqueueOnView(row.InstallationID, row.RepoOwner, row.RepoName, row.PrNumber, row.SnapshotFetchedAt.Time, row.SnapshotFetchedAt.Valid && row.SnapshotHeadSha != "" && row.SnapshotHeadSha == row.HeadSha)
+		}
+	}
+	vcsRows, err := h.Queries.ListVCSPullRequestsByIssues(ctx, db.ListVCSPullRequestsByIssuesParams{WorkspaceID: ws.ID, IssueIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range vcsRows {
+		resp := vcsPullRequestRowToResponse(db.ListVCSPullRequestsByIssueRow{ID: row.ID, WorkspaceID: row.WorkspaceID, ConnectionID: row.ConnectionID, Provider: row.Provider, RepoOwner: row.RepoOwner, RepoName: row.RepoName, PrNumber: row.PrNumber, Title: row.Title, State: row.State, HtmlUrl: row.HtmlUrl, Branch: row.Branch, HeadSha: row.HeadSha, AuthorLogin: row.AuthorLogin, AuthorAvatarUrl: row.AuthorAvatarUrl, MergedAt: row.MergedAt, ClosedAt: row.ClosedAt, PrCreatedAt: row.PrCreatedAt, PrUpdatedAt: row.PrUpdatedAt, Additions: row.Additions, Deletions: row.Deletions, ChangedFiles: row.ChangedFiles, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, ApiSnapshot: row.ApiSnapshot, SnapshotFetchedAt: row.SnapshotFetchedAt, SnapshotRefreshAfter: row.SnapshotRefreshAfter, SnapshotError: row.SnapshotError, LinkedByType: row.LinkedByType, ChecksTotal: row.ChecksTotal, ChecksPassed: row.ChecksPassed, ChecksFailed: row.ChecksFailed, ChecksPending: row.ChecksPending})
+		resp.LinkSource = prLinkSource(row.LinkedByType, identifiers[row.IssueID], row.Title, row.Branch.String)
+		out[row.IssueID] = append(out[row.IssueID], resp)
+		if refresh && row.Provider == "tgit" {
+			h.TGitSnapshots.Enqueue(row.ID)
+		}
+	}
+	return out, nil
+}
+
+func (h *Handler) descendantPullRequests(ctx context.Context, ws db.Workspace, roots []db.Issue, direct []GitHubPullRequestResponse, refresh bool) ([]descendantPullRequest, error) {
+	seenPRs := make(map[string]bool)
+	for _, pr := range direct {
+		seenPRs[pr.ID] = true
+	}
+	rootIDs := make([]pgtype.UUID, 0, len(roots))
+	for _, root := range roots {
+		rootIDs = append(rootIDs, root.ID)
+	}
+	if len(rootIDs) == 0 {
+		return []descendantPullRequest{}, nil
+	}
+	descendants, err := h.Queries.ListDescendantIssues(ctx, db.ListDescendantIssuesParams{WorkspaceID: ws.ID, RootIds: rootIDs})
+	if err != nil {
+		return nil, err
+	}
+	byIssue, err := h.batchIssuePullRequests(ctx, ws, descendants, refresh)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]descendantPullRequest, 0)
+	for _, child := range descendants {
+		for _, pr := range byIssue[child.ID] {
+			if seenPRs[pr.ID] {
+				continue
+			}
+			seenPRs[pr.ID] = true
+			identifier := fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), child.Number)
+			out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(child.ID), SourceIdentifier: identifier, SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, identifier)})
+		}
+	}
+	return out, nil
 }
 
 // broadcastPRSnapshotApplied is the ghsnapshot pipeline's onApplied callback:
