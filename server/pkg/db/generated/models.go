@@ -109,6 +109,8 @@ type AgentMailboxMessage struct {
 	HandledByTaskID       pgtype.UUID        `json:"handled_by_task_id"`
 	LeadershipRootIssueID pgtype.UUID        `json:"leadership_root_issue_id"`
 	LeadershipRevision    pgtype.Int8        `json:"leadership_revision"`
+	DeliveryFailureStreak int32              `json:"delivery_failure_streak"`
+	DeliveryRetryClass    string             `json:"delivery_retry_class"`
 }
 
 type AgentMcpServer struct {

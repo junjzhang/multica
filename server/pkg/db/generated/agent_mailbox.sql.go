@@ -32,7 +32,7 @@ WHERE id = $3
     $6::uuid IS NULL
     OR target_session_id = $6::uuid
   )
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type AckAgentMailboxProcessingParams struct {
@@ -89,6 +89,8 @@ func (q *Queries) AckAgentMailboxProcessing(ctx context.Context, arg AckAgentMai
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -186,7 +188,7 @@ INSERT INTO agent_mailbox_message (
     $7, $8
 )
 ON CONFLICT (recipient_agent_id, comment_id) DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type CreateAgentMailboxMessageParams struct {
@@ -247,6 +249,8 @@ func (q *Queries) CreateAgentMailboxMessage(ctx context.Context, arg CreateAgent
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -264,7 +268,7 @@ INSERT INTO agent_mailbox_message (
     $14, $15
 )
 ON CONFLICT DO NOTHING
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type CreateDeliveryParams struct {
@@ -354,6 +358,8 @@ func (q *Queries) CreateDelivery(ctx context.Context, arg CreateDeliveryParams) 
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -364,7 +370,7 @@ INSERT INTO agent_mailbox_message (
  kind, notification_key, payload
 ) VALUES ($1, $2, $3, $4, 'delegation_result',
  $5, 'delegation_result', $5, $6)
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type CreateManagedResultMailboxParams struct {
@@ -418,6 +424,8 @@ func (q *Queries) CreateManagedResultMailbox(ctx context.Context, arg CreateMana
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -441,7 +449,7 @@ func (q *Queries) DeleteAgentMailboxMessagesForIssue(ctx context.Context, issueI
 }
 
 const getAgentMailboxMessage = `-- name: GetAgentMailboxMessage :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetAgentMailboxMessageParams struct {
@@ -484,12 +492,14 @@ func (q *Queries) GetAgentMailboxMessage(ctx context.Context, arg GetAgentMailbo
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
 
 const getAgentMailboxMessageByComment = `-- name: GetAgentMailboxMessageByComment :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -533,12 +543,14 @@ func (q *Queries) GetAgentMailboxMessageByComment(ctx context.Context, arg GetAg
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
 
 const getDelivery = `-- name: GetDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message WHERE id = $1 AND workspace_id = $2
 `
 
 type GetDeliveryParams struct {
@@ -581,12 +593,14 @@ func (q *Queries) GetDelivery(ctx context.Context, arg GetDeliveryParams) (Agent
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
 
 const getDeliveryByNotificationKey = `-- name: GetDeliveryByNotificationKey :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
 WHERE workspace_id = $1
   AND notification_key = $2
 `
@@ -632,12 +646,14 @@ func (q *Queries) GetDeliveryByNotificationKey(ctx context.Context, arg GetDeliv
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
 
 const getLegacyCommentDelivery = `-- name: GetLegacyCommentDelivery :one
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
 WHERE recipient_agent_id = $1 AND comment_id = $2
 `
 
@@ -685,6 +701,8 @@ func (q *Queries) GetLegacyCommentDelivery(ctx context.Context, arg GetLegacyCom
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -785,7 +803,7 @@ WHERE agent_mailbox_message.id = $4
         AND inflight.delivery_status = 'leased'
         AND inflight.lease_expires_at > now()
   )
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type LeaseClaimableDeliveryParams struct {
@@ -861,12 +879,14 @@ func (q *Queries) LeaseClaimableDelivery(ctx context.Context, arg LeaseClaimable
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
 
 const listAgentMailboxMessages = `-- name: ListAgentMailboxMessages :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
 WHERE recipient_agent_id = $1
   AND workspace_id = $2
   AND source_type = $3
@@ -951,6 +971,8 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 			&i.HandledByTaskID,
 			&i.LeadershipRootIssueID,
 			&i.LeadershipRevision,
+			&i.DeliveryFailureStreak,
+			&i.DeliveryRetryClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1198,7 +1220,7 @@ func (q *Queries) ListIssueExternalParticipants(ctx context.Context, arg ListIss
 }
 
 const listIssueMailboxDeliveries = `-- name: ListIssueMailboxDeliveries :many
-SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision FROM agent_mailbox_message
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
 WHERE issue_id = $1 AND workspace_id = $2
 ORDER BY created_at DESC, id DESC
 LIMIT 50
@@ -1255,6 +1277,8 @@ func (q *Queries) ListIssueMailboxDeliveries(ctx context.Context, arg ListIssueM
 			&i.HandledByTaskID,
 			&i.LeadershipRootIssueID,
 			&i.LeadershipRevision,
+			&i.DeliveryFailureStreak,
+			&i.DeliveryRetryClass,
 		); err != nil {
 			return nil, err
 		}
@@ -1510,11 +1534,17 @@ SET delivery_status = CASE
             THEN COALESCE(last_error, 'Notification withdrawn before it was accepted')
         ELSE $3
     END,
+    delivery_failure_streak = CASE
+        WHEN $1 = 'unknown' OR ($1 = 'pending' AND $4::text = 'unavailable') THEN LEAST(delivery_failure_streak + 1, 3)
+        ELSE 0
+    END,
+    delivery_retry_class = CASE WHEN $1 = 'pending' AND withdrawn_at IS NULL THEN $4::text ELSE '' END,
     next_attempt_at = CASE
         WHEN $1 = 'pending' AND withdrawn_at IS NOT NULL THEN next_attempt_at
         WHEN $1 = 'pending' AND $4::text = 'busy' THEN now() + interval '5 seconds'
-        WHEN $1 = 'pending' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
-        WHEN $1 = 'unknown' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        WHEN $1 = 'pending' AND $4::text = 'dependency' THEN now() + interval '120 seconds'
+        WHEN $1 = 'pending' THEN now() + LEAST((LEAST(delivery_failure_streak + 1, 3))::bigint * (LEAST(delivery_failure_streak + 1, 3))::bigint * 15, 120) * interval '1 second'
+        WHEN $1 = 'unknown' THEN now() + LEAST((LEAST(delivery_failure_streak + 1, 3))::bigint * (LEAST(delivery_failure_streak + 1, 3))::bigint * 15, 120) * interval '1 second'
         ELSE next_attempt_at
     END,
     lease_token_hash = NULL,
@@ -1527,7 +1557,7 @@ WHERE id = $5
   AND lease_token_hash = $7
   AND lease_expires_at > now()
   AND lease_owner = $8
-RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision
+RETURNING id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class
 `
 
 type RecordDeliveryOutcomeParams struct {
@@ -1597,6 +1627,8 @@ func (q *Queries) RecordDeliveryOutcome(ctx context.Context, arg RecordDeliveryO
 		&i.HandledByTaskID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipRevision,
+		&i.DeliveryFailureStreak,
+		&i.DeliveryRetryClass,
 	)
 	return i, err
 }
@@ -1614,6 +1646,45 @@ func (q *Queries) TryLockDeliveryTarget(ctx context.Context, targetSessionID str
 	var locked bool
 	err := row.Scan(&locked)
 	return locked, err
+}
+
+const wakeOfflineDeliveriesForHost = `-- name: WakeOfflineDeliveriesForHost :exec
+UPDATE agent_mailbox_message m
+SET next_attempt_at = now(), updated_at = now()
+FROM external_agent_session target, external_agent_session recovered
+WHERE recovered.id = $1
+  AND recovered.workspace_id = $2
+  AND recovered.daemon_id = $3
+  AND target.workspace_id = recovered.workspace_id
+  AND target.daemon_id = recovered.daemon_id
+  AND target.provider = recovered.provider
+  AND target.host_id = recovered.host_id
+  AND m.workspace_id = recovered.workspace_id
+  AND m.target_session_id = target.id
+  AND m.id <> $4
+  AND m.delivery_status = 'pending'
+  AND m.delivery_retry_class = 'unavailable'
+  AND m.next_attempt_at > now()
+`
+
+type WakeOfflineDeliveriesForHostParams struct {
+	TargetSessionID pgtype.UUID `json:"target_session_id"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	DaemonID        string      `json:"daemon_id"`
+	DeliveryID      pgtype.UUID `json:"delivery_id"`
+}
+
+// A successful or busy response proves this daemon can reach the host again.
+// Only known-no-effect offline retries are accelerated; unknown outcomes stay
+// on the receipt-verification schedule and dependency failures are untouched.
+func (q *Queries) WakeOfflineDeliveriesForHost(ctx context.Context, arg WakeOfflineDeliveriesForHostParams) error {
+	_, err := q.db.Exec(ctx, wakeOfflineDeliveriesForHost,
+		arg.TargetSessionID,
+		arg.WorkspaceID,
+		arg.DaemonID,
+		arg.DeliveryID,
+	)
+	return err
 }
 
 const withdrawAgentDeliveries = `-- name: WithdrawAgentDeliveries :execrows

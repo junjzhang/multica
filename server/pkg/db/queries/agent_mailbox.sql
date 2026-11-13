@@ -268,11 +268,17 @@ SET delivery_status = CASE
             THEN COALESCE(last_error, 'Notification withdrawn before it was accepted')
         ELSE sqlc.narg('last_error')
     END,
+    delivery_failure_streak = CASE
+        WHEN @status = 'unknown' OR (@status = 'pending' AND @retry_class::text = 'unavailable') THEN LEAST(delivery_failure_streak + 1, 3)
+        ELSE 0
+    END,
+    delivery_retry_class = CASE WHEN @status = 'pending' AND withdrawn_at IS NULL THEN @retry_class::text ELSE '' END,
     next_attempt_at = CASE
         WHEN @status = 'pending' AND withdrawn_at IS NOT NULL THEN next_attempt_at
         WHEN @status = 'pending' AND @retry_class::text = 'busy' THEN now() + interval '5 seconds'
-        WHEN @status = 'pending' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
-        WHEN @status = 'unknown' THEN now() + LEAST(GREATEST(attempts::bigint * attempts::bigint * 15, 15), 900) * interval '1 second'
+        WHEN @status = 'pending' AND @retry_class::text = 'dependency' THEN now() + interval '120 seconds'
+        WHEN @status = 'pending' THEN now() + LEAST((LEAST(delivery_failure_streak + 1, 3))::bigint * (LEAST(delivery_failure_streak + 1, 3))::bigint * 15, 120) * interval '1 second'
+        WHEN @status = 'unknown' THEN now() + LEAST((LEAST(delivery_failure_streak + 1, 3))::bigint * (LEAST(delivery_failure_streak + 1, 3))::bigint * 15, 120) * interval '1 second'
         ELSE next_attempt_at
     END,
     lease_token_hash = NULL,
@@ -286,6 +292,27 @@ WHERE id = @id
   AND lease_expires_at > now()
   AND lease_owner = @daemon_id
 RETURNING *;
+
+-- name: WakeOfflineDeliveriesForHost :exec
+-- A successful or busy response proves this daemon can reach the host again.
+-- Only known-no-effect offline retries are accelerated; unknown outcomes stay
+-- on the receipt-verification schedule and dependency failures are untouched.
+UPDATE agent_mailbox_message m
+SET next_attempt_at = now(), updated_at = now()
+FROM external_agent_session target, external_agent_session recovered
+WHERE recovered.id = @target_session_id
+  AND recovered.workspace_id = @workspace_id
+  AND recovered.daemon_id = @daemon_id
+  AND target.workspace_id = recovered.workspace_id
+  AND target.daemon_id = recovered.daemon_id
+  AND target.provider = recovered.provider
+  AND target.host_id = recovered.host_id
+  AND m.workspace_id = recovered.workspace_id
+  AND m.target_session_id = target.id
+  AND m.id <> @delivery_id
+  AND m.delivery_status = 'pending'
+  AND m.delivery_retry_class = 'unavailable'
+  AND m.next_attempt_at > now();
 
 -- name: WithdrawAgentDeliveries :execrows
 -- Withdraws the unaccepted notifications of archived agents. It runs in the
