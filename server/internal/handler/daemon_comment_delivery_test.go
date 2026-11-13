@@ -157,7 +157,10 @@ func createCommentDeliveryFixture(t *testing.T, label string) commentDeliveryFix
 	runtimeID := createClaimReclaimRuntime(t, ctx, label+" runtime")
 	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, label+" agent")
 
-	contents := []string{"first cross-thread instruction", "second instruction", "latest instruction"}
+	// Explicit mentions keep these comments trigger-bearing under
+	// explicit-mention-only routing; this fixture is about delivery, not routing.
+	mention := "[@Agent](mention://agent/" + agentID + ") "
+	contents := []string{mention + "first cross-thread instruction", mention + "second instruction", mention + "latest instruction"}
 	ids := make([]string, 3)
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at)
@@ -395,7 +398,7 @@ func TestUpdateComment_RequeuesSurvivingCoalescedBatch(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodPut, "/api/comments/"+fixture.commentID[2], map[string]any{
-		"content": "edited latest instruction",
+		"content": "[@Agent](mention://agent/" + fixture.agentID + ") edited latest instruction",
 	})
 	req = withURLParam(req, "commentId", fixture.commentID[2])
 	testHandler.UpdateComment(w, req)
@@ -446,7 +449,7 @@ func TestUpdateComment_CancelsAndRequeuesWhenEditedInputIsCoalesced(t *testing.T
 
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodPut, "/api/comments/"+fixture.commentID[0], map[string]any{
-		"content": "edited earlier instruction",
+		"content": "[@Agent](mention://agent/" + fixture.agentID + ") edited earlier instruction",
 	})
 	req = withURLParam(req, "commentId", fixture.commentID[0])
 	testHandler.UpdateComment(w, req)
@@ -485,7 +488,7 @@ func TestDeleteComment_CancelsAndRequeuesWhenDeletedInputIsCoalesced(t *testing.
 	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[1:2])
 }
 
-func TestDeleteComment_FailureRestoresCancelledCompleteBatch(t *testing.T) {
+func TestDeleteComment_FailurePreservesOriginalBatch(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -512,10 +515,10 @@ func TestDeleteComment_FailureRestoresCancelledCompleteBatch(t *testing.T) {
 	if existing != 1 {
 		t.Fatalf("failed delete unexpectedly removed trigger")
 	}
-	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[:2])
+	assertOriginalCommentBatch(t, fixture)
 }
 
-func TestDeleteComment_ConcurrentNoOpIsReportedAndRestoresCancelledBatch(t *testing.T) {
+func TestDeleteComment_ConcurrentNoOpPreservesOriginalBatch(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -535,7 +538,17 @@ func TestDeleteComment_ConcurrentNoOpIsReportedAndRestoresCancelledBatch(t *test
 		t.Fatalf("DeleteComment no-op: got %d: %s", w.Code, w.Body.String())
 	}
 
-	assertRepairedCommentBatch(t, fixture, fixture.commentID[2], fixture.commentID[:2])
+	assertOriginalCommentBatch(t, fixture)
+}
+
+func assertOriginalCommentBatch(t *testing.T, fixture commentDeliveryFixture) {
+	t.Helper()
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2`, fixture.issueID, fixture.agentID); n != 1 {
+		t.Fatalf("failed deletion created %d runs", n)
+	}
+	if n := countValue(t, `SELECT count(*) FROM agent_task_queue WHERE id=$1 AND status='queued' AND trigger_comment_id=$2 AND $3::uuid=ANY(coalesced_comment_ids) AND $4::uuid=ANY(coalesced_comment_ids)`, fixture.taskID, fixture.commentID[2], fixture.commentID[0], fixture.commentID[1]); n != 1 {
+		t.Fatal("failed deletion changed the original comment batch")
+	}
 }
 
 func assertRepairedCommentBatch(t *testing.T, fixture commentDeliveryFixture, wantTrigger string, wantCoalesced []string) {
@@ -603,7 +616,7 @@ func TestClaimTaskByRuntime_PayloadOverflowReceiptsOnlyEmbeddedPrefix(t *testing
 	}
 	fixture := createCommentDeliveryFixture(t, "Comment payload overflow")
 	makeCommentDeliverySingleThread(t, fixture)
-	oversized := strings.Repeat("x", maxClaimCommentPayloadBytes+1024)
+	oversized := "[@Agent](mention://agent/" + fixture.agentID + ") " + strings.Repeat("x", maxClaimCommentPayloadBytes+1024)
 	if _, err := testPool.Exec(context.Background(), `UPDATE comment SET content = $2 WHERE id = $1`, fixture.commentID[0], oversized); err != nil {
 		t.Fatalf("make first coalesced comment oversized: %v", err)
 	}

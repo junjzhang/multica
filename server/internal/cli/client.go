@@ -56,9 +56,15 @@ type APIClient struct {
 	// mat_ task token, so attribution follows the token, not these fields
 	// (MUL-3428). The CLI only sets them inside a daemon-managed task, where
 	// MULTICA_TOKEN is that mat_ token.
-	AgentID    string
-	TaskID     string
-	HTTPClient *http.Client
+	AgentID string
+	TaskID  string
+	// ReturnSession names the host session an external agent's delegation
+	// results must return to. It travels as X-Return-Session; the server
+	// resolves it to a session registered to the authenticated agent and
+	// refuses anything else. Empty inside a managed task (the task token is the
+	// address there) and for ordinary member commands.
+	ReturnSession string
+	HTTPClient    *http.Client
 
 	// Identity overrides. Empty values fall back to the package-level
 	// ClientPlatform / ClientVersion / ClientOS.
@@ -227,6 +233,9 @@ func (c *APIClient) setHeaders(req *http.Request) {
 	}
 	if c.TaskID != "" {
 		req.Header.Set("X-Task-ID", c.TaskID)
+	}
+	if c.ReturnSession != "" {
+		req.Header.Set("X-Return-Session", c.ReturnSession)
 	}
 
 	platform := c.Platform

@@ -268,9 +268,9 @@ func TestAutopilotAssignmentLockBlocksRuntimeTeardown(t *testing.T) {
 		t.Fatalf("begin assignment transaction: %v", err)
 	}
 	defer assignmentTx.Rollback(ctx)
-	if _, err := testHandler.Queries.WithTx(assignmentTx).LockAgentForAutopilotAssignment(
+	if _, err := testHandler.Queries.WithTx(assignmentTx).LockAgentForSharedWrite(
 		ctx,
-		db.LockAgentForAutopilotAssignmentParams{
+		db.LockAgentForSharedWriteParams{
 			ID:          parseUUID(agentID),
 			WorkspaceID: parseUUID(testWorkspaceID),
 		},

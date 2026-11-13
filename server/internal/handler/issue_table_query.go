@@ -411,7 +411,7 @@ func appendIssueTableInvolvedPredicate(where []string, addArg func(any) string, 
        UNION
        SELECT s.id
          FROM squad s
-         JOIN agent a ON a.id = s.leader_id
+         JOIN agent a ON a.id = issue_leader_id(i,s.id)
         WHERE s.workspace_id = $1
           AND a.workspace_id = $1
           AND a.owner_id     = %[1]s::uuid

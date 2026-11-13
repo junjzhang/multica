@@ -33,6 +33,8 @@ export interface TimelineEntry {
   resolved_by_type?: CommentAuthorType | null;
   resolved_by_id?: string | null;
   source_task_id?: string | null;
+  /** Explicit-mention dispatch this comment produced; absent means a native run. */
+  dispatch_kind?: string;
   /** Every running turn this comment steered, one receipt per run. */
   supplements?: CommentSupplementReceipt[];
   /** Mirrors the first receipt; servers that predate `supplements` send only these. */

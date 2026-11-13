@@ -342,6 +342,9 @@ func withCopilotExitCode(msg string, exitCode int) string {
 }
 
 func (b *copilotBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("copilot", opts); err != nil {
+		return nil, err
+	}
 	execName := b.cfg.ExecutablePath
 	if execName == "" {
 		execName = "copilot"

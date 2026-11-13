@@ -1,0 +1,3 @@
+ALTER TABLE agent_task_delegation_return DROP COLUMN caller_task_ids;
+ALTER TABLE issue_assignment_delegation_return DROP COLUMN caller_task_ids;
+ALTER TABLE comment_delegation_return DROP COLUMN caller_task_ids;

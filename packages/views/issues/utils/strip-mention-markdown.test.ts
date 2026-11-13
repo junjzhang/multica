@@ -3,6 +3,10 @@ import { describe, it, expect } from "vitest";
 import { stripMentionMarkdown } from "./strip-mention-markdown";
 
 describe("stripMentionMarkdown", () => {
+  it("strips notification mention markup", () => {
+    expect(stripMentionMarkdown("[@A](mention://agent-notify/abc-123)")).toBe("@A");
+  });
+
   it("strips simple agent mention", () => {
     expect(
       stripMentionMarkdown("[@魏和尚](mention://agent/de8efbcc-eaa1-4605-a6ac-d50cfa88e447)"),

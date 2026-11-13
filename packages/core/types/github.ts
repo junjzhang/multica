@@ -90,14 +90,20 @@ export interface PRAutoComplete {
 
 export interface IssuePullRequestsResponse {
   pull_requests: GitHubPullRequest[];
+  descendant_pull_requests?: DescendantPullRequest[];
   /** Absent on older backends. */
   auto_complete: PRAutoComplete | null;
+}
+
+export interface DescendantPullRequest extends GitHubPullRequest {
+  source_issue_id: string;
+  source_identifier: string;
 }
 
 export interface GitHubPullRequest {
   id: string;
   /** Source provider. Older GitHub-only backends omit it. */
-  provider?: "github" | "forgejo" | "gitea" | "gitlab";
+  provider?: "github" | "forgejo" | "gitea" | "gitlab" | "tgit";
   workspace_id: string;
   repo_owner: string;
   repo_name: string;
@@ -128,6 +134,14 @@ export interface GitHubPullRequest {
    * snapshot belongs to this PR's current head. False means the CI/merge
    * snapshot region must be hidden; omitted preserves legacy provider output. */
   snapshot_available?: boolean;
+  review?: {
+    state: string;
+    reviewers: { username: string; type: string; review_state: string }[];
+    approver_rule?: number;
+    necessary_approver_rule?: number;
+  } | null;
+  check_details?: { id: number; context: string; state: string; target_url: string }[];
+  commit_gate?: { state: string; blocked: boolean | null } | null;
   /** Check counts from the snapshot. Older backends omit these; treat absence
    * as 0. `checks_total` is 0 when no checks have been reported. */
   checks_total?: number;

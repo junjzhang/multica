@@ -5,6 +5,7 @@ import type { Project, ProjectStatus } from "./project";
 
 // Issue API
 export interface CreateIssueRequest {
+  recipient_session_id?: string;
   title: string;
   description?: string;
   status?: IssueStatus;
@@ -51,6 +52,8 @@ export type CreateCommentSubIssueRequest =
   | CreateCommentSubIssueAgentRequest;
 
 export interface UpdateIssueRequest {
+  /** Explicit registered recipient session, not an agent display session. */
+  recipient_session_id?: string;
   /** Legacy aggregate compare-and-swap token. New text editors use field
    * baselines so unrelated issue activity does not reject their edits. */
   expected_revision?: number;

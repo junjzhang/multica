@@ -137,6 +137,36 @@ LEFT JOIN checks c ON c.pr_id = pr.id
 WHERE ipr.issue_id = sqlc.arg('issue_id')
 ORDER BY pr.pr_created_at DESC;
 
+-- name: ListVCSPullRequestsByIssues :many
+WITH checks AS (
+    SELECT
+        pr.id AS pr_id,
+        COUNT(*)::bigint AS total,
+        SUM(CASE WHEN cs.state = 'failed'  THEN 1 ELSE 0 END)::bigint AS failed,
+        SUM(CASE WHEN cs.state = 'passed'  THEN 1 ELSE 0 END)::bigint AS passed,
+        SUM(CASE WHEN cs.state = 'pending' THEN 1 ELSE 0 END)::bigint AS pending
+    FROM vcs_pull_request pr
+    JOIN vcs_commit_status cs
+        ON cs.connection_id = pr.connection_id
+       AND cs.sha = pr.head_sha
+       AND pr.head_sha <> ''
+    WHERE EXISTS (SELECT 1 FROM issue_vcs_pull_request ipr WHERE ipr.pull_request_id = pr.id AND ipr.issue_id = ANY(sqlc.arg('issue_ids')::uuid[]))
+    GROUP BY pr.id
+)
+SELECT
+    ipr.issue_id, pr.*,
+    COALESCE(ipr.linked_by_type, 'system')::text AS linked_by_type,
+    COALESCE(c.total, 0)::bigint   AS checks_total,
+    COALESCE(c.passed, 0)::bigint  AS checks_passed,
+    COALESCE(c.failed, 0)::bigint  AS checks_failed,
+    COALESCE(c.pending, 0)::bigint AS checks_pending
+FROM vcs_pull_request pr
+JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+LEFT JOIN checks c ON c.pr_id = pr.id
+WHERE pr.workspace_id = sqlc.arg('workspace_id') AND ipr.issue_id = ANY(sqlc.arg('issue_ids')::uuid[])
+ORDER BY pr.pr_created_at DESC;
+
+
 -- =====================
 -- VCS commit status (CI)
 -- =====================
@@ -215,6 +245,46 @@ WHERE id = $1 AND workspace_id = $2;
 -- name: FindVCSPullRequestByURL :one
 SELECT * FROM vcs_pull_request
 WHERE workspace_id = $1
-  AND lower(rtrim(html_url, '/')) = lower(sqlc.arg('html_url')::text)
+  AND (
+    lower(rtrim(html_url, '/')) = lower(sqlc.arg('html_url')::text)
+    OR (
+      provider = 'tgit'
+      AND replace(regexp_replace(lower(rtrim(html_url, '/')), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+        = replace(regexp_replace(lower(sqlc.arg('html_url')::text), '^https?://', ''), '/-/merge_requests/', '/merge_requests/')
+    )
+  )
 ORDER BY pr_updated_at DESC
 LIMIT 1;
+
+-- name: ListTGitSnapshotCandidates :many
+SELECT id FROM vcs_pull_request
+WHERE provider = 'tgit' AND state IN ('open', 'draft')
+  AND (snapshot_refresh_after IS NULL OR snapshot_refresh_after <= now())
+ORDER BY snapshot_refresh_after ASC NULLS FIRST, id
+LIMIT 100;
+
+-- name: ClaimTGitSnapshot :one
+UPDATE vcs_pull_request SET snapshot_refresh_after = now() + interval '1 minute'
+WHERE id = $1 AND provider = 'tgit' AND state IN ('open', 'draft')
+  AND (snapshot_refresh_after IS NULL OR snapshot_refresh_after <= now())
+RETURNING *;
+
+-- name: ApplyTGitSnapshot :one
+UPDATE vcs_pull_request
+SET api_snapshot = sqlc.arg('snapshot'), snapshot_fetched_at = now(), snapshot_error = false,
+    head_sha = sqlc.arg('head_sha'), pr_updated_at = sqlc.arg('remote_updated_at'),
+    title = sqlc.arg('title'), state = sqlc.arg('state'), branch = sqlc.narg('branch'), updated_at = now()
+WHERE id = sqlc.arg('id') AND provider = 'tgit' AND head_sha = sqlc.arg('expected_head')
+  AND pr_updated_at = sqlc.arg('expected_updated_at')
+  AND pr_updated_at <= sqlc.arg('remote_updated_at')
+  AND snapshot_refresh_after = sqlc.arg('claim_until')
+RETURNING *;
+
+-- name: FailTGitSnapshot :execrows
+UPDATE vcs_pull_request
+SET snapshot_error = true, snapshot_refresh_after = sqlc.arg('retry_at')
+WHERE id = sqlc.arg('id') AND snapshot_refresh_after = sqlc.arg('claim_until');
+
+-- name: ResetVCSRefresh :exec
+UPDATE vcs_pull_request SET snapshot_refresh_after = NULL
+WHERE connection_id = $1 AND provider = 'tgit';

@@ -17,12 +17,19 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 // newGCTestDaemon creates a minimal Daemon for GC testing with a mock HTTP server.
 func newGCTestDaemon(t *testing.T, handler http.Handler) *Daemon {
 	t.Helper()
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/daemon/resources/release" {
+			json.NewEncoder(w).Encode(map[string]any{"release_allowed": true, "admission_closed": true, "resource_control_required": false, "protected_resources": []protocol.ManagedResourceAddress{}})
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
 	t.Cleanup(srv.Close)
 
 	root := t.TempDir()
@@ -56,7 +63,11 @@ func createTaskDir(t *testing.T, root, wsID, dirName string, meta *execenv.GCMet
 	if i := strings.LastIndex(dirName, "-"); i >= 0 && i+1 < len(dirName) {
 		taskID = dirName[i+1:]
 	}
-	owner, err := json.Marshal(execenv.EnvRootOwner{WorkspaceID: wsID, TaskID: taskID})
+	ownerWorkspace := wsID
+	if meta != nil && meta.WorkspaceID != "" {
+		ownerWorkspace = meta.WorkspaceID
+	}
+	owner, err := json.Marshal(execenv.EnvRootOwner{WorkspaceID: ownerWorkspace, TaskID: taskID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +537,7 @@ func TestCleanTaskDir_RemovesDirectory(t *testing.T) {
 		t.Fatal("task dir should exist before cleanup")
 	}
 
-	if bytes, removed := d.cleanTaskDir(taskDir); !removed || bytes < 64 {
+	if bytes, removed := d.cleanTaskDir(context.Background(), taskDir); !removed || bytes < 64 {
 		t.Fatalf("reclaimed bytes = %d, want at least payload size", bytes)
 	}
 
@@ -652,7 +663,7 @@ func TestCleanTaskDir_RefusesOwnerPathMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if bytes, removed := d.cleanTaskDir(taskDir); removed || bytes != 0 {
+	if bytes, removed := d.cleanTaskDir(context.Background(), taskDir); removed || bytes != 0 {
 		t.Fatalf("cleanTaskDir removed owner/path mismatch: removed=%v bytes=%d", removed, bytes)
 	}
 	if _, err := os.Stat(survivor); err != nil {
@@ -682,7 +693,7 @@ func TestCleanTaskDir_AcceptsLegacyOwnerWithGCWorkspaceIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, removed := d.cleanTaskDir(taskDir); !removed {
+	if _, removed := d.cleanTaskDir(context.Background(), taskDir); !removed {
 		t.Fatal("legacy task owner with matching GC workspace identity was not removed")
 	}
 	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
@@ -708,7 +719,7 @@ func TestCleanTaskDir_RemovesStableRootRecord(t *testing.T) {
 	}
 	original := env.RootDir
 	d := &Daemon{cfg: Config{WorkspacesRoot: root}, logger: slog.Default()}
-	if bytes, removed := d.cleanTaskDir(original); !removed || bytes <= 0 {
+	if bytes, removed := d.cleanTaskDir(context.Background(), original); !removed || bytes <= 0 {
 		t.Fatalf("reclaimed bytes = %d, want owner metadata bytes", bytes)
 	}
 

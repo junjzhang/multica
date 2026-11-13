@@ -10,7 +10,7 @@ const listing = vi.hoisted(() => ({
   current: {
     connections: [] as {
       id: string;
-      provider: "forgejo" | "gitea" | "gitlab";
+      provider: "forgejo" | "gitea" | "gitlab" | "tgit";
       instance_url: string;
       account_login: string;
     }[],
@@ -49,9 +49,13 @@ beforeEach(() => {
 });
 
 describe("VCSConnectionRows", () => {
-  it("connects an instance from a dialog and then shows the one-time webhook secret", async () => {
+  it.each([
+    ["forgejo", "Forgejo"],
+    ["tgit", "TGit (工蜂)"],
+  ])("connects a %s instance and shows the one-time webhook secret", async (provider, label) => {
     mockConnect.mockResolvedValue({
       ...CONNECTION,
+      provider,
       webhook_url: "https://api.example/webhooks/vcs/vcs-1",
       webhook_path: "/webhooks/vcs/vcs-1",
       webhook_secret: "s3cret",
@@ -61,19 +65,24 @@ describe("VCSConnectionRows", () => {
 
     await user.click(screen.getByRole("button", { name: "Connect" }));
     const form = await screen.findByRole("dialog");
+    await user.click(within(form).getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: label }));
     await user.type(within(form).getByLabelText("Instance URL"), " https://git.acme.dev ");
     await user.type(within(form).getByLabelText("Access token"), "tok");
     await user.click(within(form).getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
       expect(mockConnect).toHaveBeenCalledWith("ws-1", {
-        provider: "forgejo",
+        provider,
         instance_url: "https://git.acme.dev",
         access_token: "tok",
       }),
     );
     const webhook = await screen.findByRole("dialog", { name: /Finish setup/ });
     expect(within(webhook).getByDisplayValue("s3cret")).toBeInTheDocument();
+    if (provider === "tgit") {
+      expect(within(webhook).getByText(/CI, review and conflict status/)).toBeInTheDocument();
+    }
     await user.click(within(webhook).getByRole("button", { name: "I've saved it" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });

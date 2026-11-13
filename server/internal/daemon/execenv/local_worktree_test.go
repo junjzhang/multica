@@ -526,6 +526,9 @@ func finalizeOK(t *testing.T, wt *LocalWorktree) LocalWorktreeOutcome {
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
+	if err := wt.Remove(worktreeTestLogger()); err != nil {
+		t.Fatalf("Remove finalized worktree: %v", err)
+	}
 	return outcome
 }
 
@@ -1840,6 +1843,24 @@ func TestFinalizePreservesRuntimeSymlink(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(wt.Path, ".multica")); err != nil {
 		t.Fatalf("symlink lost: %v", err)
+	}
+}
+
+func TestRemovePreservesRuntimeFilesCreatedAfterFinalize(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if _, err := wt.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, ".multica", "late"), "keep")
+	gitRun(t, repo, "config", "core.excludesFile", filepath.Join(t.TempDir(), "ignores"))
+	ignoreFile := gitRun(t, repo, "config", "core.excludesFile")
+	writeFile(t, ignoreFile, ".multica/\n")
+	if err := wt.Remove(worktreeTestLogger()); err == nil || !strings.Contains(err.Error(), ".multica/late") {
+		t.Fatalf("Remove = %v", err)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "late")); got != "keep" {
+		t.Fatalf("lost file: %q", got)
 	}
 }
 

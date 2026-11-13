@@ -186,6 +186,7 @@ func insertSquad(t *testing.T, ctx context.Context, workspaceID, leaderAgentID, 
 	`, workspaceID, name, leaderAgentID, testUserID).Scan(&id); err != nil {
 		t.Fatalf("create squad %q: %v", name, err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", id)
 	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, id) })
 	return id
 }
