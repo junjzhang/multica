@@ -232,7 +232,7 @@ func (w *Worker) dispatch(ctx context.Context, claims []Claim) {
 			// so it does not stay leased until verification parks a never-sent
 			// delivery as unknown.
 			if w.adoptPending(claim) {
-				w.retryPendingOne(ctx, claim.ID)
+				w.retryPendingOne(ctx, claim.ID, true)
 			} else {
 				w.recordUnusable(ctx, claim, "the claim batch held a second row for this session, so the host was not called")
 			}
@@ -273,7 +273,7 @@ func (w *Worker) handleClaim(ctx context.Context, claim Claim) error {
 	// needs only the new token, not a usable session, and overwriting it with an
 	// unusable-claim result would lose a confirmed delivery.
 	if w.adoptPending(claim) {
-		w.retryPendingOne(ctx, claim.ID)
+		w.retryPendingOne(ctx, claim.ID, true)
 		return nil
 	}
 	if claim.ClaimError != "" {
@@ -408,8 +408,36 @@ func (w *Worker) record(ctx context.Context, claim Claim, state OutcomeState, cl
 		decidedAt:   time.Now(),
 	}
 	w.mu.Unlock()
-	w.retryPendingOne(ctx, claim.ID)
+	stored, ackErr := w.retryPendingOne(ctx, claim.ID, false)
+	result, reason := attemptResult(state, class)
+	var next any
+	if ackErr == nil && stored.NextAttemptAt != nil {
+		next = *stored.NextAttemptAt
+	}
+	if ackErr != nil {
+		reason += "; outcome acknowledgement pending or refused"
+	}
+	w.logger.Info("delivery attempt", "delivery_id", claim.ID, "kind", claim.Kind,
+		"session_id", claim.Session.SessionID, "attempt", claim.Attempts,
+		"result", result, "next_attempt_at", next, "reason", reason)
 	return nil
+}
+
+func attemptResult(state OutcomeState, class RetryClass) (string, string) {
+	switch state {
+	case OutcomeDelivered:
+		return "delivered", "host accepted"
+	case OutcomeUnknown:
+		return "unknown", "host outcome unconfirmed"
+	case OutcomeRetry:
+		switch class {
+		case RetryBusy:
+			return "busy", "session busy"
+		case RetryUnavailable:
+			return "offline", "host unavailable"
+		}
+	}
+	return "error", "delivery rejected or dependency unavailable"
 }
 
 // adoptPending reports whether a locally decided outcome already exists for
@@ -450,30 +478,33 @@ func (w *Worker) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		w.retryPendingOne(ctx, id)
+		w.retryPendingOne(ctx, id, true)
 	}
 }
 
-func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string) {
+func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string, delayed bool) (Delivery, error) {
 	w.mu.Lock()
 	pending, ok := w.pending[deliveryID]
 	if !ok || pending.awaitingLease {
 		w.mu.Unlock()
-		return
+		return Delivery{}, ErrLeaseLost
 	}
 	request := pending.request
 	workspaceID := pending.workspaceID
 	w.mu.Unlock()
 
 	if ctx.Err() != nil {
-		return
+		return Delivery{}, ctx.Err()
 	}
-	_, err := w.client.RecordDeliveryOutcome(ctx, workspaceID, request)
+	stored, err := w.client.RecordDeliveryOutcome(ctx, workspaceID, request)
 	if err == nil {
 		w.mu.Lock()
 		delete(w.pending, deliveryID)
 		w.mu.Unlock()
-		return
+		if delayed {
+			w.logger.Info("delivery outcome recorded after retry", "delivery_id", deliveryID, "next_attempt_at", stored.NextAttemptAt)
+		}
+		return stored, nil
 	}
 	switch {
 	case errors.Is(err, ErrLeaseLost):
@@ -493,6 +524,7 @@ func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string) {
 	default:
 		w.logger.Debug("delivery outcome delayed; will retry", "delivery_id", deliveryID, "error", err)
 	}
+	return Delivery{}, err
 }
 
 // flushPending makes one bounded attempt to persist decided outcomes during
