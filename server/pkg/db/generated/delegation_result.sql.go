@@ -1014,6 +1014,19 @@ func (q *Queries) ListReadyDelegationResults(ctx context.Context, batchSize int3
 }
 
 const listReturnResultDependencies = `-- name: ListReturnResultDependencies :many
+WITH RECURSIVE pending_sources AS (
+ SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current, r.continued_from_return_id FROM issue_delegation_return r
+ WHERE r.id = $1 AND r.is_current AND r.return_kind = 'managed_task'
+ UNION
+ SELECT prior.id, prior.workspace_id, prior.issue_id, prior.dispatcher_agent_id, prior.return_kind, prior.external_session_id, prior.source_task_id, prior.runtime_id, prior.provider, prior.session_id, prior.work_dir, prior.created_at, prior.scope_task_id, prior.is_current, prior.continued_from_return_id FROM issue_delegation_return prior
+ JOIN pending_sources next ON next.continued_from_return_id = prior.id
+ JOIN agent_task_queue source ON source.id = prior.source_task_id
+ WHERE prior.workspace_id = next.workspace_id AND prior.issue_id = next.issue_id
+   AND prior.dispatcher_agent_id = next.dispatcher_agent_id
+   AND prior.return_kind = 'managed_task' AND prior.runtime_id = next.runtime_id
+   AND prior.provider = next.provider
+   AND source.status IN ('completed', 'failed', 'cancelled')
+)
 SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, l.caller_task_ids, l.delivery_return_id, t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
@@ -1025,6 +1038,8 @@ LEFT JOIN agent_task_queue t ON t.id = l.task_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
 WHERE COALESCE(l.delivery_return_id, l.delegation_return_id) = $1
+ OR (l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL AND l.notification_error IS NULL
+     AND l.delegation_return_id IN (SELECT pending_sources.id FROM pending_sources))
 `
 
 type ListReturnResultDependenciesRow struct {
@@ -1041,6 +1056,9 @@ type ListReturnResultDependenciesRow struct {
 	MailboxProcessingStatus         pgtype.Text               `json:"mailbox_processing_status"`
 }
 
+// Retain the prospective destination even before forwarding materializes.
+// Traverse the same certified, terminal-source chain as result delivery;
+// materialized obligations keep only their frozen physical destination.
 func (q *Queries) ListReturnResultDependencies(ctx context.Context, returnID pgtype.UUID) ([]ListReturnResultDependenciesRow, error) {
 	rows, err := q.db.Query(ctx, listReturnResultDependencies, returnID)
 	if err != nil {

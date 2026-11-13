@@ -10,6 +10,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 func continuationRun(t *testing.T, source db.AgentTaskQueue, suffix string) (db.AgentTaskQueue, string) {
@@ -160,6 +161,46 @@ func TestManagedReturnContinuationReceivesNewResult(t *testing.T) {
 	completeResultHandlingTurn(t, result)
 	if n := countValue(t, `SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='delegation_result_forwarded'`, result.IssueID); n != 0 {
 		t.Fatalf("new-version outcome incorrectly counted as forwarded: %d", n)
+	}
+}
+
+func TestManagedReturnContinuationRetainsPendingForwardResources(t *testing.T) {
+	ctx := context.Background()
+	source, oldResult, original := resultFixture(t, "continuation-retention")
+	run, token := continuationRun(t, source, "retention")
+	worker, _ := executableTarget(t, "retention-reviewer")
+	dispatchContinuation(t, token, oldResult, worker, http.StatusCreated)
+	current := currentContinuationReturn(t, original)
+	newResultID := latestTaskIDFor(t, uuidToString(oldResult.IssueID), worker)
+	// The new request is withdrawn and accepted while the original review is
+	// still running. The continuation must retain resources for that old input.
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='cancelled',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, newResultID)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, run.ID)
+	dbfx.Exec(t, `UPDATE issue SET status='done' WHERE id=$1`, oldResult.IssueID)
+	req := protocol.ResourceReleaseRequest{Kind: "workdir", SourceTaskID: uuidToString(run.ID), ResourcePath: run.WorkDir.String, WorkDir: run.WorkDir.String}
+	decision, err := testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
+	if err != nil || decision.ReleaseAllowed || decision.Reason != "delegated_execution_active" {
+		t.Fatalf("pending forwarded review lost its future resources: %+v %v", decision, err)
+	}
+	deps, err := testHandler.Queries.ListReturnResultDependencies(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, dep := range deps {
+		found = found || dep.AgentTaskDelegationReturn.TaskID == oldResult.ID
+	}
+	if !found {
+		t.Fatal("continuation retention omitted pending ancestor outcome")
+	}
+	finishResultFixture(t, oldResult)
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	completeResultHandlingTurn(t, oldResult)
+	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
+	if err != nil || !decision.ReleaseAllowed {
+		t.Fatalf("consumed forwarded review retained resources forever: %+v %v", decision, err)
 	}
 }
 
