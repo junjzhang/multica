@@ -22,7 +22,7 @@ export function SessionPullRequests({ agentId, theme, openTask }: Pick<PluginAge
     {open && items?.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>No related pull requests.</Text> : null}
     {open && items?.map((pr) => <View key={pr.id} style={{ gap: 3 }}>
       <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(pr.html_url)}><Text style={{ color: colors.accent }}>{pr.repo_owner}/{pr.repo_name}#{pr.number} · {pr.title}</Text></Pressable>
-      <Text style={{ color: colors.foregroundMuted }}>{pr.state} · CI: {pr.checks_conclusion ?? pr.checks_rollup ?? "unknown"} · review: {pr.review?.state ?? "unknown"} · conflicts: {pr.mergeable ?? "unknown"}</Text>
+      <Text style={{ color: colors.foregroundMuted }}>{pr.state}{pr.snapshot_stale ? " · Snapshot stale" : pr.snapshot_available === false ? " · Snapshot unavailable" : ""} · CI: {pr.checks_conclusion ?? pr.checks_rollup ?? "unknown"} · review: {pr.review?.state ?? "unknown"} · conflicts: {pr.mergeable ?? "unknown"}</Text>
       {pr.source_url && /^https?:\/\//i.test(pr.source_url) ? <Pressable accessibilityRole="link" onPress={() => openTask(pr.source_url!, pr.source_identifier)}><Text style={{ color: colors.accent }}>{pr.source_identifier}</Text></Pressable> : <Text style={{ color: colors.foregroundMuted }}>{pr.source_identifier}</Text>}
     </View>)}
     {open ? <Pressable accessibilityRole="button" onPress={() => void load()}><Text style={{ color: colors.accent }}>Refresh</Text></Pressable> : null}

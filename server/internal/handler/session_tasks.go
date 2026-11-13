@@ -337,7 +337,7 @@ func (h *Handler) GetAgentSessionPullRequests(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "failed to load workspace")
 		return
 	}
-	rows, err := h.DB.Query(r.Context(), `SELECT DISTINCT i.id FROM issue i
+	rows, err := h.DB.Query(r.Context(), `SELECT DISTINCT i.id, i.number FROM issue i
 		LEFT JOIN issue root ON root.id = COALESCE(i.leadership_root_issue_id, i.id) AND root.workspace_id = i.workspace_id
 		WHERE i.workspace_id = $1 AND (
 		  (i.assignee_type = 'agent' AND i.assignee_id = $2 AND EXISTS
@@ -350,13 +350,13 @@ func (h *Handler) GetAgentSessionPullRequests(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "failed to load session tasks")
 		return
 	}
-	var ids []pgtype.UUID
+	var roots []db.Issue
 	for rows.Next() {
-		var id pgtype.UUID
-		if err = rows.Scan(&id); err != nil {
+		var issue db.Issue
+		if err = rows.Scan(&issue.ID, &issue.Number); err != nil {
 			break
 		}
-		ids = append(ids, id)
+		roots = append(roots, issue)
 	}
 	if err == nil {
 		err = rows.Err()
@@ -366,31 +366,22 @@ func (h *Handler) GetAgentSessionPullRequests(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "failed to load session tasks")
 		return
 	}
-	roots := make([]db.Issue, 0, len(ids))
 	out := make([]descendantPullRequest, 0)
 	seen := make(map[string]bool)
 	var direct []GitHubPullRequestResponse
-	for _, id := range ids {
-		issue, e := h.Queries.GetIssue(r.Context(), id)
-		if e != nil {
-			err = e
-			break
-		}
-		roots = append(roots, issue)
-		prs, e := h.issuePullRequests(r.Context(), ws, issue, false)
-		if e != nil {
-			err = e
-			break
-		}
-		for _, pr := range prs {
+	byIssue, err := h.batchIssuePullRequests(r.Context(), ws, roots, false)
+	for _, issue := range roots {
+		for _, pr := range byIssue[issue.ID] {
 			if seen[pr.ID] {
 				continue
 			}
 			seen[pr.ID] = true
 			direct = append(direct, pr)
-			out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(issue.ID), SourceIdentifier: fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number), SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number))})
+			identifier := fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number)
+			out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(issue.ID), SourceIdentifier: identifier, SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, identifier)})
 		}
 	}
+
 	if err == nil {
 		var descendants []descendantPullRequest
 		descendants, err = h.descendantPullRequests(r.Context(), ws, roots, direct, false)

@@ -503,8 +503,21 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 }
 
 func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
-	agent, session, owner := externalAgentFixture(t, "PR session", "pr-session-daemon")
-	other, otherSession, otherOwner := externalAgentFixture(t, "Other PR session", "other-pr-session-daemon")
+	h := templatesEnabledHandler(t)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	daemon := "pr-session-" + suffix
+	dbfx.Runtime(t, "PR session runtime "+suffix, testutil.Cols{"daemon_id": daemon})
+	host := "pr-host-" + suffix
+	code, first, bodyText := registerExternal(t, h, templateBody("PR template "+suffix, host, "first-"+suffix, "first", daemon))
+	if code != http.StatusCreated {
+		t.Fatalf("register: %d %s", code, bodyText)
+	}
+	defer cleanupExternalAgent(t, first.ID)
+	code, second, bodyText := registerExternal(t, h, templateBody("PR template "+suffix, host, "second-"+suffix, "second", daemon))
+	if code != http.StatusCreated || second.ID != first.ID {
+		t.Fatalf("register second: %d %s", code, bodyText)
+	}
+	agent, session, owner, otherSession := first.ID, first.ExternalSession.ID, testUserID, second.ExternalSession.ID
 	const installationID int64 = 30264988
 	secret := "session-pr-secret"
 	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
@@ -518,6 +531,18 @@ func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
 		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, child.ID)
 	})
 	firePRWebhook(t, secret, installationID, 8, child.Identifier+" fix", "", "fix", "opened")
+	var dispatched IssueResponse
+	req := externalAgentRequest(t, agent, http.MethodPost, "/api/issues", map[string]any{"title": "dispatched root", "status": "backlog"})
+	req.Header.Set(ActorSessionHeader, session)
+	testutil.Call(t, h.CreateIssue, req).Want(http.StatusCreated).JSON(&dispatched)
+	cleanupDelegatedIssue(t, dispatched.ID)
+	var dispatchedChild IssueResponse
+	testutil.Call(t, h.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "dispatched child", "parent_issue_id": dispatched.ID})).Want(http.StatusCreated).JSON(&dispatchedChild)
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue_pull_request WHERE issue_id = $1`, dispatchedChild.ID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, dispatchedChild.ID)
+	})
+	firePRWebhook(t, secret, installationID, 9, dispatchedChild.Identifier+" fix", "", "dispatch-fix", "opened")
 	read := func(user, actor, sid string, external bool) *httptest.ResponseRecorder {
 		req := sessionTasksRequest(user, actor, external, sid)
 		w := httptest.NewRecorder()
@@ -534,10 +559,10 @@ func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.PullRequests) != 1 || body.PullRequests[0].SourceIssueID != child.ID {
+	if len(body.PullRequests) != 2 || body.PullRequests[0].SourceIssueID != child.ID || body.PullRequests[1].SourceIssueID != dispatchedChild.ID {
 		t.Fatalf("projection: %+v", body)
 	}
-	w = read(otherOwner, other, otherSession, true)
+	w = read(owner, agent, otherSession, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("other session: %d %s", w.Code, w.Body.String())
 	}
@@ -546,6 +571,9 @@ func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
 	}
 	if len(body.PullRequests) != 0 {
 		t.Fatalf("other session saw PRs: %+v", body)
+	}
+	if w = read(owner, agent, "", true); w.Code != http.StatusForbidden {
+		t.Fatalf("unbound session read: %d", w.Code)
 	}
 	if w = read(owner, agent, "", false); w.Code != http.StatusForbidden {
 		t.Fatalf("human read: %d", w.Code)

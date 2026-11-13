@@ -1057,41 +1057,73 @@ type descendantPullRequest struct {
 	SourceURL        string `json:"source_url"`
 }
 
+func (h *Handler) batchIssuePullRequests(ctx context.Context, ws db.Workspace, issues []db.Issue, refresh bool) (map[pgtype.UUID][]GitHubPullRequestResponse, error) {
+	ids := make([]pgtype.UUID, 0, len(issues))
+	identifiers := make(map[pgtype.UUID]string, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+		identifiers[issue.ID] = fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number)
+	}
+	out := make(map[pgtype.UUID][]GitHubPullRequestResponse)
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := h.Queries.ListPullRequestsByIssues(ctx, db.ListPullRequestsByIssuesParams{WorkspaceID: ws.ID, IssueIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		resp := issuePullRequestRowToResponse(db.ListPullRequestsByIssueRow{ID: row.ID, WorkspaceID: row.WorkspaceID, InstallationID: row.InstallationID, RepoOwner: row.RepoOwner, RepoName: row.RepoName, PrNumber: row.PrNumber, Title: row.Title, State: row.State, HtmlUrl: row.HtmlUrl, Branch: row.Branch, AuthorLogin: row.AuthorLogin, AuthorAvatarUrl: row.AuthorAvatarUrl, MergedAt: row.MergedAt, ClosedAt: row.ClosedAt, PrCreatedAt: row.PrCreatedAt, PrUpdatedAt: row.PrUpdatedAt, HeadSha: row.HeadSha, MergeableState: row.MergeableState, Additions: row.Additions, Deletions: row.Deletions, ChangedFiles: row.ChangedFiles, ApiMergeable: row.ApiMergeable, ApiMergeStateStatus: row.ApiMergeStateStatus, ChecksRollupState: row.ChecksRollupState, SnapshotHeadSha: row.SnapshotHeadSha, SnapshotFetchedAt: row.SnapshotFetchedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, LinkedByType: row.LinkedByType, ChecksTotal: row.ChecksTotal, ChecksPassed: row.ChecksPassed, ChecksFailed: row.ChecksFailed, ChecksRunning: row.ChecksRunning, FailedCheckNames: row.FailedCheckNames}, h.PRRefresh.Enabled())
+		resp.LinkSource = prLinkSource(row.LinkedByType, identifiers[row.IssueID], row.Title, row.Branch.String)
+		out[row.IssueID] = append(out[row.IssueID], resp)
+		if refresh {
+			h.PRRefresh.MaybeEnqueueOnView(row.InstallationID, row.RepoOwner, row.RepoName, row.PrNumber, row.SnapshotFetchedAt.Time, row.SnapshotFetchedAt.Valid && row.SnapshotHeadSha != "" && row.SnapshotHeadSha == row.HeadSha)
+		}
+	}
+	vcsRows, err := h.Queries.ListVCSPullRequestsByIssues(ctx, db.ListVCSPullRequestsByIssuesParams{WorkspaceID: ws.ID, IssueIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range vcsRows {
+		resp := vcsPullRequestRowToResponse(db.ListVCSPullRequestsByIssueRow{ID: row.ID, WorkspaceID: row.WorkspaceID, ConnectionID: row.ConnectionID, Provider: row.Provider, RepoOwner: row.RepoOwner, RepoName: row.RepoName, PrNumber: row.PrNumber, Title: row.Title, State: row.State, HtmlUrl: row.HtmlUrl, Branch: row.Branch, HeadSha: row.HeadSha, AuthorLogin: row.AuthorLogin, AuthorAvatarUrl: row.AuthorAvatarUrl, MergedAt: row.MergedAt, ClosedAt: row.ClosedAt, PrCreatedAt: row.PrCreatedAt, PrUpdatedAt: row.PrUpdatedAt, Additions: row.Additions, Deletions: row.Deletions, ChangedFiles: row.ChangedFiles, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, ApiSnapshot: row.ApiSnapshot, SnapshotFetchedAt: row.SnapshotFetchedAt, SnapshotRefreshAfter: row.SnapshotRefreshAfter, SnapshotError: row.SnapshotError, LinkedByType: row.LinkedByType, ChecksTotal: row.ChecksTotal, ChecksPassed: row.ChecksPassed, ChecksFailed: row.ChecksFailed, ChecksPending: row.ChecksPending})
+		resp.LinkSource = prLinkSource(row.LinkedByType, identifiers[row.IssueID], row.Title, row.Branch.String)
+		out[row.IssueID] = append(out[row.IssueID], resp)
+		if refresh && row.Provider == "tgit" {
+			h.TGitSnapshots.Enqueue(row.ID)
+		}
+	}
+	return out, nil
+}
+
 func (h *Handler) descendantPullRequests(ctx context.Context, ws db.Workspace, roots []db.Issue, direct []GitHubPullRequestResponse, refresh bool) ([]descendantPullRequest, error) {
-	seenIssues := make(map[pgtype.UUID]bool)
 	seenPRs := make(map[string]bool)
 	for _, pr := range direct {
 		seenPRs[pr.ID] = true
 	}
-	parents := make([]pgtype.UUID, 0, len(roots))
+	rootIDs := make([]pgtype.UUID, 0, len(roots))
 	for _, root := range roots {
-		seenIssues[root.ID] = true
-		parents = append(parents, root.ID)
+		rootIDs = append(rootIDs, root.ID)
+	}
+	if len(rootIDs) == 0 {
+		return []descendantPullRequest{}, nil
+	}
+	descendants, err := h.Queries.ListDescendantIssues(ctx, db.ListDescendantIssuesParams{WorkspaceID: ws.ID, RootIds: rootIDs})
+	if err != nil {
+		return nil, err
+	}
+	byIssue, err := h.batchIssuePullRequests(ctx, ws, descendants, refresh)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]descendantPullRequest, 0)
-	for len(parents) > 0 {
-		children, err := h.Queries.ListChildrenByParents(ctx, db.ListChildrenByParentsParams{WorkspaceID: ws.ID, ParentIds: parents})
-		if err != nil {
-			return nil, err
-		}
-		parents = nil
-		for _, child := range children {
-			if seenIssues[child.ID] {
+	for _, child := range descendants {
+		for _, pr := range byIssue[child.ID] {
+			if seenPRs[pr.ID] {
 				continue
 			}
-			seenIssues[child.ID] = true
-			parents = append(parents, child.ID)
-			prs, err := h.issuePullRequests(ctx, ws, child, refresh)
-			if err != nil {
-				return nil, err
-			}
-			for _, pr := range prs {
-				if seenPRs[pr.ID] {
-					continue
-				}
-				seenPRs[pr.ID] = true
-				out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(child.ID), SourceIdentifier: fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), child.Number), SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), child.Number))})
-			}
+			seenPRs[pr.ID] = true
+			identifier := fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), child.Number)
+			out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(child.ID), SourceIdentifier: identifier, SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, identifier)})
 		}
 	}
 	return out, nil
