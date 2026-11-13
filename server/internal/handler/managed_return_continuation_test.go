@@ -137,6 +137,32 @@ func TestManagedReturnContinuationPreservesMaterializedHistory(t *testing.T) {
 	}
 }
 
+func TestManagedReturnContinuationReceivesNewResult(t *testing.T) {
+	ctx := context.Background()
+	source, oldResult, original := resultFixture(t, "continuation-new-result")
+	run, token := continuationRun(t, source, "new-result")
+	worker, _ := executableTarget(t, "new-session-reviewer")
+	dispatchContinuation(t, token, oldResult, worker, http.StatusCreated)
+	current := currentContinuationReturn(t, original)
+	result, err := testHandler.Queries.GetAgentTask(ctx, parseUUID(latestTaskIDFor(t, uuidToString(oldResult.IssueID), worker)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, run.ID)
+	finishResultFixture(t, result)
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	link, err := testHandler.Queries.GetResultReturnObligation(ctx, db.GetResultReturnObligationParams{TaskID: result.ID, DelegationReturnID: current.ID})
+	if err != nil || link.DeliveryReturnID != current.ID || !link.NotificationTaskID.Valid {
+		t.Fatalf("new delegation did not return to continuation: %+v %v", link, err)
+	}
+	completeResultHandlingTurn(t, result)
+	if n := countValue(t, `SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='delegation_result_forwarded'`, result.IssueID); n != 0 {
+		t.Fatalf("new-version outcome incorrectly counted as forwarded: %d", n)
+	}
+}
+
 func TestManagedReturnContinuationRejectsUnsafeSources(t *testing.T) {
 	for _, kind := range []string{"old-active", "concurrent", "other-issue", "unconfirmed-pin", "same-task", "runtime", "provider"} {
 		t.Run(kind, func(t *testing.T) {
