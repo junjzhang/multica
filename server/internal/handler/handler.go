@@ -83,6 +83,13 @@ type Config struct {
 	// decides who may create a workspace; it grants no cross-workspace
 	// visibility or admin rights (#9400).
 	WorkspaceCreationAllowedEmails []string
+	// ExternalAgentTemplatesEnabled opens template-mode external registration:
+	// new host sessions attach to one template keyed by (workspace, owner,
+	// provider, host instance). Off by default so merging a host identity is a
+	// deliberate rollout step, not a side effect of deploying. Legacy
+	// per-session registration keeps its existing behavior either way.
+	// Populated from MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED.
+	ExternalAgentTemplatesEnabled bool
 	// VCSIntegrationEnabled gates the self-hosted Git provider integration
 	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
 	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
@@ -428,8 +435,9 @@ type Handler struct {
 	// trigger is a no-op) when GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY are unset,
 	// so the feature degrades cleanly on deployments without a private key.
 	// Wired in cmd/server/router.go after New.
-	PRRefresh *ghsnapshot.Manager
-	cfg       Config
+	PRRefresh     *ghsnapshot.Manager
+	TGitSnapshots *TGitSnapshotRefresher
+	cfg           Config
 }
 
 func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
@@ -490,6 +498,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
+	taskSvc.AppURL = cfg.AppURL
 	taskSvc.SourceContextStorage = store
 	// Chat follow-up suggestions run through the same internal LLM layer that
 	// backs auto-titling. A deployment with no MULTICA_LLM_* configuration gets
@@ -550,6 +559,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		slog.Warn("github: PR snapshot pipeline disabled (invalid App private key)", "err", err)
 	}
 	h.PRRefresh = ghsnapshot.NewManager(ghClient, queries, txStarter, h.broadcastPRSnapshotApplied)
+	h.TGitSnapshots = newTGitSnapshotRefresher(h)
 	taskSvc.PRSnapshotsEnabled = h.PRRefresh.Enabled()
 
 	return h
@@ -885,6 +895,14 @@ func (h *Handler) resolveActor(r *http.Request, userID, workspaceID string) (act
 		// it directly without re-querying.
 		return "agent", r.Header.Get("X-Agent-ID")
 	}
+	if r.Header.Get("X-Actor-Source") == "external_agent" {
+		// A mea_ credential authenticates one concrete external agent and
+		// carries no task. The middleware re-stamped X-Agent-ID after
+		// checking expiry/revocation, membership and archive state, so the
+		// identity is authoritative; deriving a task here would fabricate
+		// execution that never happened.
+		return "agent", r.Header.Get("X-Agent-ID")
+	}
 	agentID := r.Header.Get("X-Agent-ID")
 	if agentID == "" {
 		return "member", userID
@@ -988,6 +1006,10 @@ func countOwners(members []db.Member) int {
 }
 
 func (h *Handler) getWorkspaceMember(ctx context.Context, userID, workspaceID string) (db.Member, error) {
+	return h.getWorkspaceMemberWithQueries(ctx, h.Queries, userID, workspaceID)
+}
+
+func (h *Handler) getWorkspaceMemberWithQueries(ctx context.Context, q *db.Queries, userID, workspaceID string) (db.Member, error) {
 	userUUID, err := util.ParseUUID(userID)
 	if err != nil {
 		return db.Member{}, err
@@ -996,7 +1018,7 @@ func (h *Handler) getWorkspaceMember(ctx context.Context, userID, workspaceID st
 	if err != nil {
 		return db.Member{}, err
 	}
-	return h.Queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+	return q.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
 		UserID:      userUUID,
 		WorkspaceID: wsUUID,
 	})
@@ -1075,7 +1097,7 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	// silently returns false for non-identifier strings, falling through to
 	// the UUID path below.
 	if issue, ok := h.resolveIssueByIdentifier(r.Context(), issueID, workspaceID); ok {
-		return issue, true
+		return issue, h.checkIssueSessionWrite(w, r, issue)
 	}
 
 	issueUUID, err := util.ParseUUID(issueID)
@@ -1098,7 +1120,7 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 		writeError(w, http.StatusNotFound, "issue not found")
 		return db.Issue{}, false
 	}
-	return issue, true
+	return issue, h.checkIssueSessionWrite(w, r, issue)
 }
 
 // resolveIssueByIdentifier tries to look up an issue by "PREFIX-NUMBER" format.

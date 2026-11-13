@@ -35,6 +35,7 @@ import {
   useIssuePeekPosition,
   type IssuePeekActions,
   type IssuePeekColumns,
+  type IssuePeekSectionRequest,
 } from "../surface/peek-context";
 
 const NEXT_KEY = createShortcutChord("J");
@@ -66,13 +67,23 @@ const ARROW_STEPS: Record<string, Step> = {
  */
 export function IssuePeekHost({ children }: { children: ReactNode }) {
   const [peekId, setPeekId] = useState<string | null>(null);
+  const [sectionRequest, setSectionRequest] = useState<IssuePeekSectionRequest | null>(null);
   const [columns, setColumns] = useState<IssuePeekColumns | null>(null);
 
   const actions = useMemo<IssuePeekActions>(
     () => ({
-      open: (issueId) => setPeekId(issueId),
-      toggle: (issueId) => setPeekId((current) => (current === issueId ? null : issueId)),
-      close: () => setPeekId(null),
+      open: (issueId, section) => {
+        setPeekId(issueId);
+        setSectionRequest(section ? { section } : null);
+      },
+      toggle: (issueId) => {
+        setPeekId((current) => (current === issueId ? null : issueId));
+        setSectionRequest(null);
+      },
+      close: () => {
+        setPeekId(null);
+        setSectionRequest(null);
+      },
       publishColumns: setColumns,
     }),
     [],
@@ -121,7 +132,7 @@ export function IssuePeekHost({ children }: { children: ReactNode }) {
                 (J / K is keyboard navigation — it must not animate); only
                 opening and closing the panel does. */}
             <AnimatePresence initial={false}>
-              {openId && <IssuePeekPanel key="issue-peek" issueId={openId} />}
+              {openId && <IssuePeekPanel key="issue-peek" issueId={openId} sectionRequest={sectionRequest} />}
             </AnimatePresence>
           </div>
         </IssuePeekPositionContext.Provider>
@@ -133,7 +144,10 @@ export function IssuePeekHost({ children }: { children: ReactNode }) {
 // Memoized, and blind to the column order: the host re-renders on every board
 // reorder (a drag publishes columns on each hover), and none of that may reach
 // IssueDetail. What does follow the order lives in IssuePeekFollow.
-const IssuePeekPanel = memo(function IssuePeekPanel({ issueId }: { issueId: string }) {
+const IssuePeekPanel = memo(function IssuePeekPanel({ issueId, sectionRequest }: {
+  issueId: string;
+  sectionRequest: IssuePeekSectionRequest | null;
+}) {
   const { t } = useT("issues");
   const actions = useIssuePeekActions()!;
   const panelRef = useRef<HTMLElement>(null);
@@ -189,6 +203,7 @@ const IssuePeekPanel = memo(function IssuePeekPanel({ issueId }: { issueId: stri
           key={issueId}
           issueId={issueId}
           variant="peek"
+          sectionRequest={sectionRequest}
           defaultSidebarOpen={false}
           leadingAction={<IssuePeekNav />}
           trailingActions={<IssuePeekTrailingActions issueId={issueId} />}

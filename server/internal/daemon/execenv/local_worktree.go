@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -135,7 +137,7 @@ func localWorktreeConversation(params PrepareParams) (key, id string) {
 	if params.Task.ChatSessionID != "" {
 		return "chat-" + taskKey(params.Task.ChatSessionID), params.Task.ChatSessionID
 	}
-	return "", ""
+	return "", params.Task.ScopeTaskID
 }
 
 // LocalWorktree is a prepared worktree plus everything the daemon needs to
@@ -205,7 +207,10 @@ type LocalWorktree struct {
 	// aborted, when set, makes Finalize refuse to commit or remove anything.
 	// Set by the daemon when a pre-commit step failed in a way that would make
 	// the committed branch wrong (see AbortWithReason).
-	aborted error
+	aborted       error
+	finalizedTip  string
+	finalizedInfo os.FileInfo
+	dropOnRemove  bool
 }
 
 // MarshalJSON / UnmarshalJSON carry this struct's unexported state across the
@@ -232,6 +237,8 @@ func (w *LocalWorktree) MarshalJSON() ([]byte, error) {
 		Owner           branchOwner `json:"owner"`
 		TracksState     bool        `json:"tracks_state"`
 		SnapshotPending bool        `json:"snapshot_pending"`
+		FinalizedTip    string      `json:"finalized_tip,omitempty"`
+		DropOnRemove    bool        `json:"drop_on_remove,omitempty"`
 	}{
 		wire:            (*wire)(w),
 		CreatedBranch:   w.createdBranch,
@@ -240,6 +247,8 @@ func (w *LocalWorktree) MarshalJSON() ([]byte, error) {
 		Owner:           w.owner,
 		TracksState:     w.tracksState,
 		SnapshotPending: w.snapshotPending,
+		FinalizedTip:    w.finalizedTip,
+		DropOnRemove:    w.dropOnRemove,
 	})
 }
 
@@ -253,6 +262,8 @@ func (w *LocalWorktree) UnmarshalJSON(data []byte) error {
 		Owner           branchOwner `json:"owner"`
 		TracksState     bool        `json:"tracks_state"`
 		SnapshotPending bool        `json:"snapshot_pending"`
+		FinalizedTip    string      `json:"finalized_tip,omitempty"`
+		DropOnRemove    bool        `json:"drop_on_remove,omitempty"`
 	}{wire: (*wire)(w)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -263,6 +274,8 @@ func (w *LocalWorktree) UnmarshalJSON(data []byte) error {
 	w.owner = aux.Owner
 	w.tracksState = aux.TracksState
 	w.snapshotPending = aux.SnapshotPending
+	w.finalizedTip = aux.FinalizedTip
+	w.dropOnRemove = aux.DropOnRemove
 	return nil
 }
 
@@ -275,10 +288,41 @@ type LocalWorktreeOutcome struct {
 	// AutoCommitted is true when the agent left uncommitted changes that
 	// Finalize committed so they would survive the worktree's removal.
 	AutoCommitted bool
-	// PreservedPath is set only when Finalize could NOT commit the agent's
-	// changes. The worktree at this path was intentionally left on disk because
-	// it is the only remaining copy of that work.
+	// PreservedPath identifies a worktree kept for recovery or inspection.
 	PreservedPath string
+}
+
+const retainedRuntimeMarker = ".retained-runtime-paths"
+
+// RetainedRuntimePathsError identifies paths left in a preserved worktree.
+type RetainedRuntimePathsError struct {
+	Worktree string
+	Paths    []string
+}
+
+func (e *RetainedRuntimePathsError) Error() string {
+	return fmt.Sprintf("new .multica paths were not committed: %s; the task worktree is preserved at %s — recover these files, then remove the worktree and %s", quotedPaths(e.Paths), e.Worktree, filepath.Join(filepath.Dir(e.Worktree), retainedRuntimeMarker))
+}
+
+func markRetainedRuntimePaths(worktreePath string) error {
+	err := os.Mkdir(filepath.Join(filepath.Dir(worktreePath), retainedRuntimeMarker), 0o700)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	return err
+}
+
+// HasRetainedRuntimePaths protects an explicitly retained worktree from reset
+// and garbage collection until its owner recovers the listed files.
+func HasRetainedRuntimePaths(envRoot string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(envRoot, retainedRuntimeMarker))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // PrepareLocalWorktree creates the task's worktree and replays the user's
@@ -506,9 +550,9 @@ func PrepareLocalWorktree(params LocalWorktreeParams, logger *slog.Logger) (*Loc
 	return wt, nil
 }
 
-// Finalize commits whatever the agent left behind, removes the worktree, and
-// reports the branch. Called after the agent exits, before the env root is
-// handed to the GC.
+// Finalize persists the agent's work and branch state without removing its
+// directory. The caller reports the terminal outcome before obtaining resource
+// release authority and calling Remove.
 //
 // The auto-commit is the reason a worktree task can't lose work: `git worktree
 // remove --force` would happily delete uncommitted edits, and the user would
@@ -527,6 +571,7 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		return LocalWorktreeOutcome{}, nil
 	}
 	outcome := LocalWorktreeOutcome{Branch: w.Branch}
+	w.finalizedTip, w.finalizedInfo = "", nil
 
 	unlock, err := lockGitRoot(w.GitRoot, logger)
 	if err != nil {
@@ -585,6 +630,18 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 			w.Branch, quotedPaths(unmerged), w.Path, w.GitRoot)
 	}
 
+	skipped, err := untrackedRuntimePaths(w.Path)
+	if err != nil {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("could not inspect runtime files: %w; the task worktree is preserved at %s", err, w.Path)
+	}
+	if len(skipped) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not protect runtime files from cleanup: %w; inspect the task worktree at %s immediately", err, w.Path)
+		}
+	}
+
 	// Treat "can't tell" like "dirty": committing costs an empty commit at
 	// worst, while assuming clean risks deleting the agent's edits.
 	dirty, statusErr := worktreeIsDirty(w.Path)
@@ -608,6 +665,23 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 				w.Branch, err, w.Path, w.GitRoot)
 		}
 		outcome.AutoCommitted = committed
+	}
+	remaining, err := untrackedRuntimePaths(w.Path)
+	if err != nil {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("could not inspect runtime files after commit: %w; the task worktree is preserved at %s", err, w.Path)
+	}
+	for _, path := range remaining {
+		if !slices.Contains(skipped, path) {
+			skipped = append(skipped, path)
+		}
+	}
+	sort.Strings(skipped)
+	if len(skipped) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not protect runtime files from cleanup: %w; inspect the task worktree at %s immediately", err, w.Path)
+		}
 	}
 
 	// A branch still sitting exactly on its base commit means the task changed
@@ -681,15 +755,25 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
-	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
+	if len(skipped) > 0 {
 		outcome.PreservedPath = w.Path
-		return outcome, fmt.Errorf(
-			"could not remove finalized worktree for branch %s: %w; the task worktree remains at %s",
-			w.Branch, removeErr, w.Path)
+		retained := &RetainedRuntimePathsError{Worktree: w.Path, Paths: skipped}
+		if out, err := runGit(w.Path, "checkout", "--detach", "HEAD"); err != nil {
+			return outcome, fmt.Errorf("could not release branch %s: %s: %w; %w", w.Branch, strings.TrimSpace(out), err, retained)
+		}
+		return outcome, retained
 	}
-
+	info, infoErr := os.Lstat(w.Path)
+	if infoErr != nil {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("cannot confirm finalized worktree identity: %w", infoErr)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || tip == "" {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("invalid finalized worktree: %s", w.Path)
+	}
+	w.finalizedTip, w.finalizedInfo, w.dropOnRemove = tip, info, dropped
 	if dropped {
-		dropBranch(w.GitRoot, w.Branch, logger)
 		outcome.Branch = ""
 	}
 
@@ -703,6 +787,87 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+// untrackedRuntimePaths compares both staged and unstaged paths with HEAD.
+// Ignored files are included because removal would destroy them too.
+func untrackedRuntimePaths(dir string) ([]string, error) {
+	tracked, err := runGitStdout(dir, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool)
+	for _, path := range strings.Split(tracked, "\x00") {
+		known[path] = true
+	}
+	listed, err := runGitStdout(dir, "ls-files", "--cached", "--others", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	seen := make(map[string]bool)
+	for _, path := range strings.Split(listed, "\x00") {
+		if path == "" || known[path] || seen[path] {
+			continue
+		}
+		if path != ".multica" && !strings.HasPrefix(path, ".multica/") && !strings.Contains(path, "/.multica/") && !strings.HasSuffix(path, "/.multica") {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, path)); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// Remove deletes only the exact clean worktree Finalize persisted. The caller
+// must hold its env-root lock and have authoritative permission to release the
+// resource. New ownership or edits after finalization always preserve the tree.
+func (w *LocalWorktree) Remove(logger *slog.Logger) error {
+	if w == nil {
+		return nil
+	}
+	if w.finalizedTip == "" || w.finalizedInfo == nil {
+		return errors.New("worktree has not been finalized")
+	}
+	unlock, err := lockGitRoot(w.GitRoot, logger)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	info, err := os.Lstat(w.Path)
+	if err != nil || !info.IsDir() || !os.SameFile(w.finalizedInfo, info) {
+		return fmt.Errorf("finalized worktree identity changed: %s", w.Path)
+	}
+	tip, err := runGitTrimmed(w.Path, "rev-parse", "--verify", "HEAD")
+	if err != nil || tip != w.finalizedTip {
+		return fmt.Errorf("finalized worktree commit changed: %s", w.Path)
+	}
+	if paths, err := untrackedRuntimePaths(w.Path); err != nil {
+		return fmt.Errorf("could not inspect runtime files in %s: %w", w.Path, err)
+	} else if len(paths) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			return fmt.Errorf("could not protect runtime files from cleanup: %w; inspect %s immediately", err, w.Path)
+		}
+		return &RetainedRuntimePathsError{Worktree: w.Path, Paths: paths}
+	}
+	dirty, err := worktreeIsDirty(w.Path)
+	if err != nil || dirty {
+		return fmt.Errorf("finalized worktree is no longer clean: %s", w.Path)
+	}
+	if err := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); err != nil {
+		return err
+	}
+	if w.dropOnRemove {
+		dropBranch(w.GitRoot, w.Branch, logger)
+	}
+	return nil
+
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,
@@ -793,7 +958,7 @@ func (w *LocalWorktree) commitAll(logger *slog.Logger) (bool, error) {
 // commit" case and (false, err) for a real failure — the distinction callers
 // need to decide whether the tree is safe to discard.
 func commitEverything(worktreePath, message string, allowEmpty bool) (bool, error) {
-	if out, err := runGit(worktreePath, "add", "-A"); err != nil {
+	if out, err := stageWithoutRuntimeFiles(worktreePath, nil, "HEAD", nil); err != nil {
 		return false, fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), err)
 	}
 	// --no-verify: the user's commit hooks are written for the user's own
@@ -941,8 +1106,7 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 	// not a failure — read-tree rebuilds a correct index, merely a colder one —
 	// so the fallback runs on any error from the add, not just from the copy.
 	seeded := seedSnapshotIndex(gitRoot, indexPath)
-	addArgs := append([]string{"add", "-A", "--"}, snapshotExcludes()...)
-	if out, err := runGitEnv(gitRoot, env, addArgs...); err != nil {
+	if out, err := stageWithoutRuntimeFiles(gitRoot, env, headSHA, snapshotExcludes()); err != nil {
 		if !seeded {
 			return "", fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), err)
 		}
@@ -953,7 +1117,7 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 		if out, resetErr := runGitEnv(gitRoot, env, "read-tree", headSHA); resetErr != nil {
 			return "", fmt.Errorf("git read-tree: %s: %w", strings.TrimSpace(out), resetErr)
 		}
-		if out, retryErr := runGitEnv(gitRoot, env, addArgs...); retryErr != nil {
+		if out, retryErr := stageWithoutRuntimeFiles(gitRoot, env, headSHA, snapshotExcludes()); retryErr != nil {
 			return "", fmt.Errorf("git add: %s: %w", strings.TrimSpace(out), retryErr)
 		}
 	}
@@ -971,6 +1135,42 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 		return "", fmt.Errorf("git commit-tree: %w", err)
 	}
 	return snapshot, nil
+}
+
+// stageWithoutRuntimeFiles preserves changes to paths present in the baseline,
+// while removing newly staged runtime files even when they were force-added.
+func stageWithoutRuntimeFiles(dir string, env []string, baseline string, excludes []string) (string, error) {
+	updateArgs := []string{"add", "-u", "--", "."}
+	for _, spec := range excludes {
+		if spec != ":(exclude,glob)**/.multica/**" {
+			updateArgs = append(updateArgs, spec)
+		}
+	}
+	if out, err := runGitEnv(dir, env, updateArgs...); err != nil {
+		return out, err
+	}
+	args := append([]string{"add", "-A", "--", ".", ":(exclude,glob)**/.multica", ":(exclude,glob)**/.multica/**"}, excludes...)
+	if out, err := runGitEnv(dir, env, args...); err != nil {
+		return out, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=A", "-z", baseline, "--", ":(glob)**/.multica", ":(glob)**/.multica/**")
+	cmd.Env = append(os.Environ(), env...)
+	cmd.WaitDelay = 5 * time.Second
+	bytes, err := cmd.Output()
+	if err != nil {
+		return "", withGitStderr(err)
+	}
+	for _, path := range strings.Split(string(bytes), "\x00") {
+		if path == "" {
+			continue
+		}
+		if out, err := runGitEnv(dir, env, "--literal-pathspecs", "rm", "--cached", "-f", "--", path); err != nil {
+			return out, err
+		}
+	}
+	return "", nil
 }
 
 // seedSnapshotIndex copies the repository's index to path, reporting whether it
@@ -1210,6 +1410,9 @@ func resolveTaskBranch(gitRoot string, params LocalWorktreeParams, headSHA strin
 	taskScoped := taskBranchPlan{name: fmt.Sprintf("agent/%s/%s", agentSegment, taskKey(params.TaskID)), base: headSHA}
 
 	owner := params.owner()
+	if owner.valid() {
+		taskScoped.owner = owner
+	}
 	if params.ConversationKey == "" || !owner.valid() {
 		return taskScoped
 	}
@@ -1665,11 +1868,11 @@ type DeliveryProblem struct {
 const RepairCommitMessage = "chore(agent): put this turn's work back on its task branch"
 
 // RepairSteps is one git sequence that resolves any DeliveryProblem while
-// keeping the worktree's files exactly as they are: stage everything, point
+// keeping the worktree's files exactly as they are: stage eligible paths, point
 // HEAD back at the task branch without touching files or index, move the
 // branch to BaseCommit, and commit the staged tree on top of it. The result is
-// a single commit whose parent is BaseCommit and whose tree is what the agent
-// left — so it passes verifyDeliveryPoint by construction, and the guard
+// a single commit whose parent is BaseCommit and excludes new runtime paths,
+// so it passes verifyDeliveryPoint by construction, and the guard
 // itself is unchanged.
 //
 // Each step is a git argv (without the leading "git"). Rendered into the
@@ -1677,7 +1880,9 @@ const RepairCommitMessage = "chore(agent): put this turn's work back on its task
 // agent gets is the one that is proven to work.
 func (p *DeliveryProblem) RepairSteps() [][]string {
 	return [][]string{
-		{"add", "-A"},
+		{"reset", "-q", "HEAD", "--", ":(glob)**/.multica", ":(glob)**/.multica/**"},
+		{"add", "-u", "--", "."},
+		{"add", "-A", "--", ".", ":(exclude,glob)**/.multica", ":(exclude,glob)**/.multica/**"},
 		{"symbolic-ref", "HEAD", "refs/heads/" + p.Branch},
 		{"reset", "--soft", p.BaseCommit},
 		{"commit", "-m", RepairCommitMessage},
@@ -1880,7 +2085,7 @@ func treeEntryMode(gitRoot, treeish, path string) string {
 	return mode
 }
 
-// stagedWorktreeTree returns the tree `git add -A` would stage in dir, built in
+// stagedWorktreeTree returns the tree the repair steps would stage in dir, built in
 // a private copy of dir's index so neither the agent's index nor its files
 // change. Errors — including a missing index to seed from, without which the
 // recorded modes cannot be predicted — fail the caller closed.
@@ -1895,8 +2100,11 @@ func stagedWorktreeTree(dir string) (string, error) {
 		return "", errors.New("execenv: cannot copy the worktree index")
 	}
 	env := []string{"GIT_INDEX_FILE=" + index}
-	if out, err := runGitEnv(dir, env, "add", "-A"); err != nil {
-		return "", fmt.Errorf("execenv: stage worktree in private index: %s: %w", strings.TrimSpace(out), err)
+	steps := (&DeliveryProblem{}).RepairSteps()
+	for _, step := range steps[:3] {
+		if out, err := runGitEnv(dir, env, step...); err != nil {
+			return "", fmt.Errorf("execenv: stage worktree in private index: %s: %w", strings.TrimSpace(out), err)
+		}
 	}
 	return runGitTrimmedEnv(dir, env, "write-tree")
 }
@@ -2073,7 +2281,7 @@ func checkUntrackedReplayable(gitRoot string, logger *slog.Logger) error {
 		skipped int
 	)
 	for _, rel := range strings.Split(out, "\x00") {
-		if rel == "" || isMulticaSidecarPath(rel) {
+		if rel == "" || isMulticaSidecarPath(rel) || strings.HasPrefix(rel, ".multica/") || strings.Contains(rel, "/.multica/") {
 			continue
 		}
 		info, statErr := os.Lstat(filepath.Join(gitRoot, rel))

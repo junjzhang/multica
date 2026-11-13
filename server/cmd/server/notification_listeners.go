@@ -139,20 +139,88 @@ func issueStatusIsHandoff(
 	}
 }
 
+// routineChildNotifTypes are child-issue events that are ordinary progress:
+// visible in the GUI and timeline, but not worth a human Inbox row.
+var routineChildNotifTypes = map[string]bool{
+	"status_changed":     true,
+	"new_comment":        true,
+	"priority_changed":   true,
+	"start_date_changed": true,
+	"due_date_changed":   true,
+}
+
+// routineChildIssue returns the child issue when this is routine activity on
+// it, and nil otherwise. It fails OPEN: unresolved facts keep the old loud
+// behavior rather than strand a handoff.
+func routineChildIssue(
+	ctx context.Context,
+	queries *db.Queries,
+	workspaceID pgtype.UUID,
+	issueID string,
+	issueStatus string,
+	notifType string,
+) *db.Issue {
+	if !routineChildNotifTypes[notifType] {
+		return nil
+	}
+	issue, err := queries.GetIssue(ctx, parseUUID(issueID))
+	if err != nil {
+		slog.Error("resolve child issue for inbox quieting; delivering",
+			"issue_id", issueID, "type", notifType, "error", err)
+		return nil
+	}
+	if !issue.ParentIssueID.Valid {
+		return nil
+	}
+	if notifType != "status_changed" {
+		return &issue
+	}
+	routine, err := childStatusIsRoutine(ctx, queries, workspaceID, issueStatus)
+	if err != nil {
+		slog.Warn("resolve child status routine for inbox quieting; delivering",
+			"issue_id", issueID, "status", issueStatus, "error", err)
+		return nil
+	}
+	if !routine {
+		return nil
+	}
+	return &issue
+}
+
+// childStatusIsRoutine reports whether arriving on a child status is ordinary
+// progress rather than a human handoff. The whitelist is deliberately positive:
+// in_progress, in_review and done — plus custom statuses in the done category,
+// which are the workspace's own names for success — are routine. Every other
+// status keeps the previous notification behavior: todo/backlog return it to
+// the queue, cancelled and custom closed statuses end it, blocked and custom
+// started statuses wait on a person, and a custom unstarted status parks it.
+// Unlike issueStatusIsHandoff, in_review and done on a child are routine; a
+// status that is not provably routine stays loud.
+func childStatusIsRoutine(
+	ctx context.Context,
+	queries *db.Queries,
+	workspaceID pgtype.UUID,
+	status string,
+) (bool, error) {
+	switch status {
+	case issuestatus.InProgress, issuestatus.InReview, issuestatus.Done:
+		return true, nil
+	}
+	category, err := issuestatus.CategoryWithError(ctx, queries, workspaceID, status)
+	if err != nil {
+		return false, err
+	}
+	return category == issuestatus.CategoryDone, nil
+}
+
 // deliverToSubscriber reports whether a subscriber row should receive this
-// notification type. Direct subscriptions (creator / assignee / commenter /
-// mentioned / manual / autopilot) are unchanged — they opted in to this issue,
-// explicitly or by acting on it. Only the delegated tier is narrowed, and only
-// to drop churn.
+// notification type. Direct subscriptions are unchanged; only the delegated
+// tier is narrowed to drop churn: mentions, failures and blocked agents always
+// deliver, routine progress never does, and a status change delivers only when
+// it is a handoff.
 //
-// A child finishing is NOT churn: "sub-issue X is ready for review" is exactly
-// the signal a delegated watcher needs, and there is one per piece of real work.
-// An earlier cut suppressed those and synthesized a single "the whole batch
-// finished" roll-up from sibling state instead. That was both the wrong shape
-// (see the MUL-5483 thread) and redundant: the human is subscribed to the PARENT
-// as well, so when the agent moves the parent to in_review/done that transition
-// delivers here — which is the natural "the tree is done" signal. Deriving it
-// from children was reinventing a notification the platform already sends.
+// Routine child activity is narrowed further for every automatic reason; see
+// routineChildIssue.
 //
 // statusIsHandoff is the resolved issueStatusIsHandoff answer for the issue's
 // current status, so the catalog is read once per notification rather than once
@@ -294,9 +362,10 @@ func archiveStaleTaskFailedInbox(
 // notifySubscribers queries the subscriber table for an issue, excludes the
 // actor and any extra IDs, and creates inbox items for each remaining member
 // subscriber. Publishes an inbox:new event for each notification.
-// If the issue has a parent and the notification type is in the bubble
-// allowlist, parent issue subscribers are also notified (deduplicated
-// against direct subscribers).
+//
+// Routine child activity stays in the GUI/timeline; only the child's current
+// human assignee and manual subscribers get an Inbox row, and it does not
+// bubble to the parent. Other event types keep the existing parent bubble.
 func notifySubscribers(
 	ctx context.Context,
 	queries *db.Queries,
@@ -312,12 +381,20 @@ func notifySubscribers(
 	body string,
 	details []byte,
 ) {
+	routineChild := routineChildIssue(ctx, queries, parseUUID(workspaceID),
+		issueID, issueStatus, notifType)
+
 	notified, tierSuppressed := notifyIssueSubscribers(ctx, queries, bus,
 		issueID, issueID, issueStatus, workspaceID, e, exclude,
-		notifType, severity, title, body, details)
+		notifType, severity, title, body, details, routineChild)
 
 	// Only a small allowlist of event types bubbles to parent subscribers.
 	if !parentBubbleNotifTypes[notifType] {
+		return
+	}
+
+	// A parent watcher, even a manual one, did not opt in to every child.
+	if routineChild != nil {
 		return
 	}
 
@@ -356,7 +433,7 @@ func notifySubscribers(
 	parentID := util.UUIDToString(issue.ParentIssueID)
 	notifyIssueSubscribers(ctx, queries, bus,
 		parentID, issueID, issueStatus, workspaceID, e, parentExclude,
-		notifType, severity, title, body, details)
+		notifType, severity, title, body, details, nil)
 }
 
 // notifyIssueSubscribers sends inbox notifications to subscribers of
@@ -365,9 +442,12 @@ func notifySubscribers(
 // links to the sub-issue where the change actually occurred.
 //
 // Returns two sets of member IDs: those that were notified, and those the
-// delegated delivery tier deliberately filtered out. The caller propagates the
-// second set into the parent bubble so a suppressed event cannot be
-// re-delivered through an ancestor subscription (see notifySubscribers).
+// delivery rules deliberately filtered out. The caller propagates the second
+// set into the parent bubble so a suppressed event cannot be re-delivered
+// through an ancestor subscription (see notifySubscribers).
+//
+// routineChild is the child issue for routine child activity; nil otherwise.
+// Its current human assignee and manual subscribers remain eligible.
 func notifyIssueSubscribers(
 	ctx context.Context,
 	queries *db.Queries,
@@ -383,6 +463,7 @@ func notifyIssueSubscribers(
 	title string,
 	body string,
 	details []byte,
+	routineChild *db.Issue,
 ) (map[string]bool, map[string]bool) {
 	notified := map[string]bool{}
 	tierSuppressed := map[string]bool{}
@@ -444,6 +525,16 @@ func notifyIssueSubscribers(
 		// Delegated subscriptions deliver a narrower event set than direct
 		// ones — see deliverToSubscriber.
 		if !deliverToSubscriber(sub.Reason, notifType, statusIsHandoff) {
+			tierSuppressed[subID] = true
+			continue
+		}
+
+		// Routine child activity reaches only its current human assignee and
+		// manual subscribers; other watchers still see it in the GUI.
+		assignedToSubscriber := routineChild != nil &&
+			routineChild.AssigneeType.Valid && routineChild.AssigneeType.String == "member" &&
+			routineChild.AssigneeID.Valid && routineChild.AssigneeID == sub.UserID
+		if routineChild != nil && sub.Reason != "manual" && !assignedToSubscriber {
 			tierSuppressed[subID] = true
 			continue
 		}
@@ -1053,6 +1144,12 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 		agentID, _ := payload["agent_id"].(string)
 		issueID, _ := payload["issue_id"].(string)
 		if issueID == "" {
+			return
+		}
+
+		// A retry is queued: keep the event for GUI consumers, but no human
+		// Inbox row until recovery is exhausted.
+		if retryPending, _ := payload["retry_pending"].(bool); retryPending {
 			return
 		}
 

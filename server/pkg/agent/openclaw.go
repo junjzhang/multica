@@ -53,6 +53,9 @@ type openclawBackend struct {
 }
 
 func (b *openclawBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("openclaw", opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "openclaw"

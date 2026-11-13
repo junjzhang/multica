@@ -31,7 +31,7 @@ import {
 } from "@multica/core/issues/surface/scope";
 import type { IssueDateFilter, SortField } from "@multica/core/issues/stores/view-store";
 import { propertyListOptions } from "@multica/core/properties";
-import { propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
+import { effectiveShowSubIssues, propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
 import type { IssueFilters } from "../utils/filter";
 import type { ChildProgress } from "../components/list-row";
@@ -233,7 +233,6 @@ export function useIssueSurfaceController({
   const labelFilters = useViewStore((s) => s.labelFilters);
   const propertyFilters = useViewStore((s) => s.propertyFilters);
   const agentRunningFilter = useViewStore((s) => s.agentRunningFilter);
-  const showSubIssues = useViewStore((s) => s.showSubIssues);
   const ganttShowCompleted = useViewStore((s) => s.ganttShowCompleted);
   const cardProperties = useViewStore((s) => s.cardProperties);
   const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
@@ -330,6 +329,7 @@ export function useIssueSurfaceController({
   const usesTable = effectiveViewMode === "table";
   const activeSearch = usesTable ? tableSearch : search;
   const debouncedActiveSearch = useDebouncedTableSearch(activeSearch);
+  const showSubIssues = useViewStore((s) => effectiveShowSubIssues(s, debouncedActiveSearch));
   const usesServerStatusSurface =
     effectiveViewMode === "list" ||
     (effectiveViewMode === "board" && effectiveGrouping === "status");

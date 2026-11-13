@@ -593,3 +593,27 @@ func TestRunBatchPollerReleasesSlotAfterTerminalRetryExhaustion(t *testing.T) {
 		t.Fatalf("pending reports = %+v, want only exhausted task t1", items)
 	}
 }
+
+func TestTerminalReportSeparatesResumedTaskGenerations(t *testing.T) {
+	store := newTerminalReportStore(Config{WorkspacesRoot: t.TempDir(), ServerBaseURL: "https://example.test", DaemonID: "daemon"})
+	first := terminalTaskReport{kind: terminalTaskReportComplete, taskID: "original-task", generation: "original-generation", knownWaitIDs: `["original-wait"]`, output: "waiting"}
+	next := first
+	next.generation = "resumed-generation"
+	next.output = "delivery"
+	for _, report := range []terminalTaskReport{first, next} {
+		if err := store.enqueue(report); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.list()
+	if err != nil || len(items) != 2 {
+		t.Fatalf("distinct turn reports lost: %+v %v", items, err)
+	}
+	if err := store.acknowledge(items[0]); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := store.list()
+	if err != nil || len(remaining) != 1 || remaining[0].report != items[1].report {
+		t.Fatalf("old receipt removed new turn: %+v %v", remaining, err)
+	}
+}

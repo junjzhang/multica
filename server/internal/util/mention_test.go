@@ -54,6 +54,11 @@ func TestParseMentions(t *testing.T) {
 			want:    []Mention{{Type: "agent", ID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}},
 		},
 		{
+			name:    "mixed case same target delegates",
+			content: "[@A](mention://agent-notify/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa) [@A](mention://agent/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA)",
+			want:    []Mention{{Type: "agent", ID: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"}},
+		},
+		{
 			name:    "no mentions",
 			content: "just a plain comment",
 			want:    nil,

@@ -181,6 +181,15 @@ describe("RunConfirmModal", () => {
     expect(mockToast.success).not.toHaveBeenCalled();
   });
 
+  it("preserves an explicitly chosen external recipient through confirmation", async () => {
+    render(<RunConfirmModal onClose={vi.fn()} data={{ ...single, recipientSessionId: "session-picked" }} />);
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    expect(mockUpdate).toHaveBeenCalledWith({
+      id: "issue-1", assignee_type: "agent", assignee_id: "agent-1", recipient_session_id: "session-picked",
+    });
+  });
+
   it("promote sends the status change with no assignee fields", async () => {
     // The owner is already on the issue: re-sending it would turn a status
     // write into an assignee write on the server's side of the predicate.

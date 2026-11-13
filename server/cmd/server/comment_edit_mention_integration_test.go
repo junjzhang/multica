@@ -96,7 +96,7 @@ func TestEditCommentTriggers(t *testing.T) {
 		})
 		clearTasks(t, assignedIssue)
 
-		commentID := postComment(t, assignedIssue, "fix the login page", nil)
+		commentID := postComment(t, assignedIssue, fmt.Sprintf("[@Agent](mention://agent/%s) fix the login page", agentID), nil)
 		if n := countPendingTasks(t, assignedIssue); n != 1 {
 			t.Fatalf("expected 1 pending task from on_comment trigger, got %d", n)
 		}
@@ -104,7 +104,7 @@ func TestEditCommentTriggers(t *testing.T) {
 		clearTasks(t, assignedIssue)
 
 		resp := authRequest(t, "PUT", "/api/comments/"+commentID, map[string]any{
-			"content": "actually fix the signup page instead",
+			"content": fmt.Sprintf("[@Agent](mention://agent/%s) actually fix the signup page instead", agentID),
 		})
 		if resp.StatusCode != 200 {
 			body, _ := io.ReadAll(resp.Body)

@@ -69,8 +69,8 @@ func TestUpdateComment_RequeuesDelegatedFailureRecoverySurvivor(t *testing.T) {
 	var humanCommentID, recoveryCommentID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at)
-		VALUES ($1, $2, 'member', $3, 'original instruction', 'comment', now() - interval '1 second')
-		RETURNING id`, sourceIssueID, testWorkspaceID, testUserID).Scan(&humanCommentID); err != nil {
+		VALUES ($1, $2, 'member', $3, '[@Coord](mention://agent/' || $4 || ') original instruction', 'comment', now() - interval '1 second')
+		RETURNING id`, sourceIssueID, testWorkspaceID, testUserID, coordinatorID).Scan(&humanCommentID); err != nil {
 		t.Fatalf("create human comment: %v", err)
 	}
 	if err := testPool.QueryRow(ctx, `
@@ -93,7 +93,7 @@ func TestUpdateComment_RequeuesDelegatedFailureRecoverySurvivor(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	req := newRequest(http.MethodPut, "/api/comments/"+humanCommentID, map[string]any{
-		"content": "edited instruction",
+		"content": "[@Coord](mention://agent/" + coordinatorID + ") edited instruction",
 	})
 	req = withURLParam(req, "commentId", humanCommentID)
 	testHandler.UpdateComment(w, req)
