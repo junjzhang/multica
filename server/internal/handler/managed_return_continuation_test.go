@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -201,6 +203,43 @@ func TestManagedReturnContinuationRetainsPendingForwardResources(t *testing.T) {
 	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
 	if err != nil || !decision.ReleaseAllowed {
 		t.Fatalf("consumed forwarded review retained resources forever: %+v %v", decision, err)
+	}
+}
+
+func TestManagedReturnContinuationPreservesTakeoverAuthority(t *testing.T) {
+	ctx := context.Background()
+	source, result, original := resultFixture(t, "continuation-takeover-authority")
+	finishResultFixture(t, result)
+	selected, _ := continuationRun(t, source, "takeover-selected")
+	dbfx.Exec(t, `UPDATE agent_task_queue SET originator_user_id=$2,accountable_user_id=$2 WHERE id=$1`, selected.ID, testUserID)
+	pat, _ := insertTestPAT(t, time.Now().Add(time.Hour))
+	f := takeoverFixture{result, original, testUserID, pat}
+	dbfx.Cleanup(t, `DELETE FROM delegation_result_takeover WHERE result_task_id=$1`, result.ID)
+	action := decodeTakeover(t, callTakeover(t, f, takeoverBody(t, f, delegation.KindManagedTask, uuidToString(selected.ID))), http.StatusCreated)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, selected.ID)
+	other := dbfx.User(t, "Other takeover caller", fmt.Sprintf("continuation-takeover-%d@example.test", time.Now().UnixNano()))
+	dbfx.Member(t, testWorkspaceID, other, "member")
+	resumed, token := continuationRun(t, selected, "takeover-resumed")
+	dbfx.Exec(t, `UPDATE agent_task_queue SET originator_user_id=$2,accountable_user_id=$2 WHERE id=$1`, resumed.ID, other)
+	worker, _ := executableTarget(t, "takeover-continuation-reviewer")
+	dispatchContinuation(t, token, result, worker, http.StatusCreated)
+	current := currentContinuationReturn(t, original)
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+	link, err := testHandler.Queries.GetResultReturnObligation(ctx, db.GetResultReturnObligationParams{TaskID: result.ID, DelegationReturnID: parseUUID(action.TargetReturnID)})
+	if err != nil || !link.NotificationTaskID.Valid || link.DeliveryReturnID != current.ID {
+		t.Fatalf("takeover result did not follow certified continuation: %+v %v", link, err)
+	}
+	handling, err := testHandler.Queries.GetAgentTask(ctx, link.NotificationTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handling.OriginatorUserID != parseUUID(testUserID) || handling.AccountableUserID != parseUUID(testUserID) {
+		t.Fatalf("forwarding replaced explicit takeover authority with the new caller: originator=%s accountable=%s", uuidToString(handling.OriginatorUserID), uuidToString(handling.AccountableUserID))
+	}
+	if _, err := service.VerifiedDelegationResult(ctx, testHandler.Queries, handling); err != nil {
+		t.Fatalf("preserved takeover authority cannot verify: %v", err)
 	}
 }
 

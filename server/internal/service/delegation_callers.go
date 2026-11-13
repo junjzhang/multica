@@ -16,7 +16,23 @@ func resultCallerProvenance(ctx context.Context, q *db.Queries, incoming db.Agen
 	unknown := attribution.OwnerFallback(attribution.Unattributed(kind, incoming.TaskID), agent.OwnerID)
 	callers := incoming.CallerTaskIds
 	if incoming.TakeoverID.Valid {
-		callers = []pgtype.UUID{anchor.ID}
+		selectedSource := anchor.ID
+		if incoming.DelegationReturnID != address.ID {
+			// A takeover authorizes its selected source's caller independently
+			// of subsequent changes to the physical delivery destination.
+			accepted, err := q.GetDelegationReturnByID(ctx, incoming.DelegationReturnID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return unknown, false, resultRefusal("accepted_takeover_return_missing")
+			}
+			if err != nil {
+				return unknown, false, err
+			}
+			if accepted.WorkspaceID != address.WorkspaceID || accepted.DispatcherAgentID != agent.ID || accepted.ReturnKind != string(delegation.KindManagedTask) {
+				return unknown, false, resultRefusal("accepted_takeover_identity_changed")
+			}
+			selectedSource = accepted.SourceTaskID
+		}
+		callers = []pgtype.UUID{selectedSource}
 	}
 	if callers == nil {
 		return unknown, false, nil
