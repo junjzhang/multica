@@ -215,3 +215,23 @@ func TestWaitReceiptUnavailableHistoricalTargetDoesNotPoisonBatch(t *testing.T) 
 		t.Fatalf("partial receipt observations %+v", out)
 	}
 }
+
+func TestManagedWaitReceiptDaemonOwnership(t *testing.T) {
+	f := newManagedWaitFixture(t)
+	req := protocol.WaitDeliveryRequest{Waits: []protocol.WaitLookup{{ID: f.id, Address: f.address}}}
+	for _, tc := range []struct {
+		name, daemon, owner string
+		known               bool
+	}{{"own runtime", "managed-wait-daemon", testUserID, true}, {"other machine", "other-daemon", testUserID, false}, {"other owner", "managed-wait-daemon", uuid.NewString(), false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDaemonTokenRequest("POST", "/api/daemon/background-waits/status", req, testWorkspaceID, tc.daemon)
+			r = r.WithContext(middleware.WithDaemonTokenOwnerID(r.Context(), tc.owner))
+			var out protocol.WaitDeliveryResponse
+			testutil.Call(t, testHandler.BackgroundWaitStatuses, r).Want(200).JSON(&out)
+			status := out.Statuses[f.id]
+			if status.Known != tc.known || status.Enqueued || status.DeliveryID != "" {
+				t.Fatalf("managed receipt scope %+v", status)
+			}
+		})
+	}
+}
