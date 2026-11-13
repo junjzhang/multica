@@ -30,7 +30,7 @@ func TestManagedReturnContinuationRollbackPreservesProofs(t *testing.T) {
 			if _, err := tx.Exec(ctx, `
 CREATE TEMP TABLE issue_delegation_return (id uuid) ON COMMIT DROP;
 CREATE TEMP TABLE agent_task_delegation_return (delegation_return_id uuid) ON COMMIT DROP;
-`+readMigrationFile(t, "662_managed_return_continuation.up.sql")); err != nil {
+`+readMigrationFile(t, "663_managed_return_continuation.up.sql")); err != nil {
 				t.Fatal(err)
 			}
 			switch kind {
@@ -45,7 +45,7 @@ CREATE TEMP TABLE agent_task_delegation_return (delegation_return_id uuid) ON CO
 			if _, err := tx.Exec(ctx, `SAVEPOINT before_down`); err != nil {
 				t.Fatal(err)
 			}
-			_, err = tx.Exec(ctx, readMigrationFile(t, "662_managed_return_continuation.down.sql"))
+			_, err = tx.Exec(ctx, readMigrationFile(t, "663_managed_return_continuation.down.sql"))
 			if kind == "unused" {
 				if err != nil {
 					t.Fatalf("unused schema rollback: %v", err)
