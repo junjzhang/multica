@@ -199,19 +199,6 @@ WHERE r.workspace_id = @workspace_id AND r.return_kind = 'managed_task'
 -- Retain the prospective destination even before forwarding materializes.
 -- Traverse the same certified, terminal-source chain as result delivery;
 -- materialized obligations keep only their frozen physical destination.
-WITH RECURSIVE pending_sources AS (
- SELECT r.* FROM issue_delegation_return r
- WHERE r.id = @return_id AND r.is_current AND r.return_kind = 'managed_task'
- UNION
- SELECT prior.* FROM issue_delegation_return prior
- JOIN pending_sources next ON next.continued_from_return_id = prior.id
- JOIN agent_task_queue source ON source.id = prior.source_task_id
- WHERE prior.workspace_id = next.workspace_id AND prior.issue_id = next.issue_id
-   AND prior.dispatcher_agent_id = next.dispatcher_agent_id
-   AND prior.return_kind = 'managed_task' AND prior.runtime_id = next.runtime_id
-   AND prior.provider = next.provider
-   AND source.status IN ('completed', 'failed', 'cancelled')
-)
 SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
@@ -224,7 +211,7 @@ LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
 WHERE COALESCE(l.delivery_return_id, l.delegation_return_id) = @return_id
  OR (l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL AND l.notification_error IS NULL
-     AND l.delegation_return_id IN (SELECT pending_sources.id FROM pending_sources));
+     AND l.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)));
 
 -- name: ConfirmTaskSessionPin :execrows
 UPDATE agent_task_queue SET session_pin_confirmed = true
@@ -235,7 +222,9 @@ WHERE id = @task_id AND session_id = @session_id AND work_dir = @work_dir
 SELECT EXISTS (
  SELECT 1 FROM comment_dispatch_obligation o
  LEFT JOIN comment_delegation_return c ON c.comment_id = o.comment_id
- WHERE o.status = 'pending' AND (o.delegation_return_id = @return_id OR c.delegation_return_id = @return_id)
+ WHERE o.status = 'pending'
+   AND (o.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id))
+     OR c.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)))
 ) AS pending;
 
 -- name: ListIssueResultNotifications :many

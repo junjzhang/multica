@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
@@ -181,8 +182,14 @@ func TestManagedReturnContinuationRetainsPendingForwardResources(t *testing.T) {
 	// still running. The continuation must retain resources for that old input.
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='cancelled',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, newResultID)
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, run.ID)
+	second, secondToken := continuationRun(t, run, "retention-second")
+	secondWorker, _ := executableTarget(t, "retention-second-reviewer")
+	dispatchContinuation(t, secondToken, oldResult, secondWorker, http.StatusCreated)
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='cancelled',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, latestTaskIDFor(t, uuidToString(oldResult.IssueID), secondWorker))
+	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, second.ID)
+	current = currentContinuationReturn(t, original)
 	dbfx.Exec(t, `UPDATE issue SET status='done' WHERE id=$1`, oldResult.IssueID)
-	req := protocol.ResourceReleaseRequest{Kind: "workdir", SourceTaskID: uuidToString(run.ID), ResourcePath: run.WorkDir.String, WorkDir: run.WorkDir.String}
+	req := protocol.ResourceReleaseRequest{Kind: "workdir", SourceTaskID: uuidToString(second.ID), ResourcePath: second.WorkDir.String, WorkDir: second.WorkDir.String}
 	decision, err := testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
 	if err != nil || decision.ReleaseAllowed || decision.Reason != "delegated_execution_active" {
 		t.Fatalf("pending forwarded review lost its future resources: %+v %v", decision, err)
@@ -206,6 +213,31 @@ func TestManagedReturnContinuationRetainsPendingForwardResources(t *testing.T) {
 	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
 	if err != nil || !decision.ReleaseAllowed {
 		t.Fatalf("consumed forwarded review retained resources forever: %+v %v", decision, err)
+	}
+	// This accepted old input has not produced a worker run, so no result
+	// dependency can protect the future destination on its behalf yet.
+	comment := dbfx.Comment(t, uuidToString(oldResult.IssueID), fmt.Sprintf("[@Reviewer](mention://agent/%s) deferred review input", secondWorker), testutil.Cols{"author_type": "agent", "author_id": source.AgentID, "source_task_id": source.ID})
+	dbfx.InsertNoID(t, "comment_delegation_return", testutil.Cols{
+		"comment_id": comment, "delegation_return_id": original.ID, "caller_task_ids": []pgtype.UUID{source.ID},
+	}, "comment_id=$1 AND delegation_return_id=$2", comment, original.ID)
+	obligation := dbfx.Insert(t, "comment_dispatch_obligation", testutil.Cols{
+		"workspace_id": original.WorkspaceID, "issue_id": oldResult.IssueID,
+		"comment_id": comment, "agent_id": secondWorker, "trigger_source": string(commentTriggerSourceMentionAgent),
+		"delegation_return_id": original.ID,
+	})
+	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
+	if err != nil || decision.ReleaseAllowed || decision.Reason != "delegated_input_pending" {
+		t.Fatalf("pending ancestor input lost its future resources after two hops: %+v %v", decision, err)
+	}
+	dbfx.Exec(t, `UPDATE comment_dispatch_obligation SET delegation_return_id=NULL WHERE id=$1`, obligation)
+	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
+	if err != nil || decision.ReleaseAllowed || decision.Reason != "delegated_input_pending" {
+		t.Fatalf("pending comment return link lost its future resources: %+v %v", decision, err)
+	}
+	dbfx.Exec(t, `UPDATE comment_dispatch_obligation SET status='settled' WHERE id=$1`, obligation)
+	decision, err = testHandler.TaskService.ResourceRelease(ctx, original.WorkspaceID, "result-continuation-retention", req)
+	if err != nil || !decision.ReleaseAllowed {
+		t.Fatalf("settled ancestor input retained resources forever: %+v %v", decision, err)
 	}
 }
 

@@ -12,25 +12,11 @@ import (
 )
 
 const getManagedReturnContinuation = `-- name: GetManagedReturnContinuation :one
-WITH RECURSIVE chain AS (
- SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current, r.continued_from_return_id FROM issue_delegation_return r
- WHERE r.workspace_id = $1 AND r.issue_id = $2
-   AND r.dispatcher_agent_id = $3 AND r.is_current
-   AND r.return_kind = 'managed_task'
- UNION
- SELECT prior.id, prior.workspace_id, prior.issue_id, prior.dispatcher_agent_id, prior.return_kind, prior.external_session_id, prior.source_task_id, prior.runtime_id, prior.provider, prior.session_id, prior.work_dir, prior.created_at, prior.scope_task_id, prior.is_current, prior.continued_from_return_id FROM issue_delegation_return prior
- JOIN chain next ON next.continued_from_return_id = prior.id
- JOIN agent_task_queue source ON source.id = prior.source_task_id
- WHERE prior.workspace_id = next.workspace_id AND prior.issue_id = next.issue_id
-   AND prior.dispatcher_agent_id = next.dispatcher_agent_id
-   AND prior.return_kind = 'managed_task' AND prior.runtime_id = next.runtime_id
-   AND prior.provider = next.provider
-   AND source.status IN ('completed', 'failed', 'cancelled')
-)
 SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current, r.continued_from_return_id FROM issue_delegation_return r
 WHERE r.workspace_id = $1 AND r.issue_id = $2
  AND r.dispatcher_agent_id = $3 AND r.is_current AND r.id <> $4
- AND EXISTS (SELECT 1 FROM chain WHERE chain.id = $4)
+ AND r.return_kind = 'managed_task'
+ AND $4 IN (SELECT return_id FROM managed_return_continuation_chain(r.id))
 `
 
 type GetManagedReturnContinuationParams struct {
@@ -42,7 +28,7 @@ type GetManagedReturnContinuationParams struct {
 
 // Follow only certified continuation edges, never an explicit takeover or a
 // coincidentally newer session. The caller holds the delegated issue write
-// fence used by dispatch and takeover. UNION also bounds malformed cyclic data.
+// fence used by dispatch and takeover.
 func (q *Queries) GetManagedReturnContinuation(ctx context.Context, arg GetManagedReturnContinuationParams) (IssueDelegationReturn, error) {
 	row := q.db.QueryRow(ctx, getManagedReturnContinuation,
 		arg.WorkspaceID,
