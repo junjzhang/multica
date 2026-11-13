@@ -90,6 +90,32 @@ func TestWorkerLogsAttemptWithoutPayloadOrCredentials(t *testing.T) {
 	}
 }
 
+func TestWorkerLogsScheduleAfterDelayedAcknowledgement(t *testing.T) {
+	next := time.Date(2026, 1, 2, 3, 4, 5, 123000000, time.UTC)
+	client := newFakeOutcomeClient()
+	client.nextAttempt = &next
+	client.ackErrs = []error{errors.New("temporary failure")}
+	host := newFakeHost()
+	host.deliverErrs["delivery-1"] = &HostError{Kind: HostBusy}
+	var logs bytes.Buffer
+	worker := NewWorker(client, host, nil, "daemon-1", slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err := worker.handleClaim(context.Background(), testClaim("delivery-1", "session-1", "lease-1")); err != nil {
+		t.Fatal(err)
+	}
+	worker.retryPending(context.Background())
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("logs = %s", logs.String())
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(lines[1]), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["delivery_id"] != "delivery-1" || entry["next_attempt_at"] != "2026-01-02T03:04:05.123Z" {
+		t.Fatalf("retry log = %v", entry)
+	}
+}
+
 func (f *fakeOutcomeClient) ackSnapshot() []recordedOutcome {
 	f.mu.Lock()
 	defer f.mu.Unlock()

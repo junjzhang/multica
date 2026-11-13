@@ -232,7 +232,7 @@ func (w *Worker) dispatch(ctx context.Context, claims []Claim) {
 			// so it does not stay leased until verification parks a never-sent
 			// delivery as unknown.
 			if w.adoptPending(claim) {
-				w.retryPendingOne(ctx, claim.ID)
+				w.retryPendingOne(ctx, claim.ID, true)
 			} else {
 				w.recordUnusable(ctx, claim, "the claim batch held a second row for this session, so the host was not called")
 			}
@@ -273,7 +273,7 @@ func (w *Worker) handleClaim(ctx context.Context, claim Claim) error {
 	// needs only the new token, not a usable session, and overwriting it with an
 	// unusable-claim result would lose a confirmed delivery.
 	if w.adoptPending(claim) {
-		w.retryPendingOne(ctx, claim.ID)
+		w.retryPendingOne(ctx, claim.ID, true)
 		return nil
 	}
 	if claim.ClaimError != "" {
@@ -408,7 +408,7 @@ func (w *Worker) record(ctx context.Context, claim Claim, state OutcomeState, cl
 		decidedAt:   time.Now(),
 	}
 	w.mu.Unlock()
-	stored, ackErr := w.retryPendingOne(ctx, claim.ID)
+	stored, ackErr := w.retryPendingOne(ctx, claim.ID, false)
 	result, reason := attemptResult(state, class)
 	var next any
 	if ackErr == nil && stored.NextAttemptAt != nil {
@@ -478,11 +478,11 @@ func (w *Worker) retryPending(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		w.retryPendingOne(ctx, id)
+		w.retryPendingOne(ctx, id, true)
 	}
 }
 
-func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string) (Delivery, error) {
+func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string, delayed bool) (Delivery, error) {
 	w.mu.Lock()
 	pending, ok := w.pending[deliveryID]
 	if !ok || pending.awaitingLease {
@@ -501,6 +501,9 @@ func (w *Worker) retryPendingOne(ctx context.Context, deliveryID string) (Delive
 		w.mu.Lock()
 		delete(w.pending, deliveryID)
 		w.mu.Unlock()
+		if delayed {
+			w.logger.Info("delivery outcome recorded after retry", "delivery_id", deliveryID, "next_attempt_at", stored.NextAttemptAt)
+		}
 		return stored, nil
 	}
 	switch {
