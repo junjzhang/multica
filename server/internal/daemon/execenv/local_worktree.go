@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -655,6 +656,23 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 		outcome.AutoCommitted = committed
 	}
+	remaining, err := untrackedRuntimePaths(w.Path)
+	if err != nil {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("could not inspect runtime files after commit: %w; the task worktree is preserved at %s", err, w.Path)
+	}
+	for _, path := range remaining {
+		if !slices.Contains(skipped, path) {
+			skipped = append(skipped, path)
+		}
+	}
+	sort.Strings(skipped)
+	if len(skipped) > 0 {
+		if err := markRetainedRuntimePaths(w.Path); err != nil {
+			outcome.PreservedPath = w.Path
+			return outcome, fmt.Errorf("could not protect runtime files from cleanup: %w; inspect the task worktree at %s immediately", err, w.Path)
+		}
+	}
 
 	// A branch still sitting exactly on its base commit means the task changed
 	// nothing — the read-only case. Delete it so the user's branch list only
@@ -729,6 +747,9 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 
 	if len(skipped) > 0 {
 		outcome.PreservedPath = w.Path
+		if out, err := runGit(w.Path, "checkout", "--detach", "HEAD"); err != nil {
+			return outcome, fmt.Errorf("could not release branch %s: %s: %w; the task worktree is preserved at %s with uncommitted paths %s", w.Branch, strings.TrimSpace(out), err, w.Path, quotedPaths(skipped))
+		}
 		return outcome, fmt.Errorf("new .multica paths were not committed: %s; the task worktree is preserved at %s — recover these files, then remove the worktree and %s", quotedPaths(skipped), w.Path, filepath.Join(filepath.Dir(w.Path), retainedRuntimeMarker))
 	}
 	info, infoErr := os.Lstat(w.Path)
@@ -2068,8 +2089,11 @@ func stagedWorktreeTree(dir string) (string, error) {
 		return "", errors.New("execenv: cannot copy the worktree index")
 	}
 	env := []string{"GIT_INDEX_FILE=" + index}
-	if out, err := stageWithoutRuntimeFiles(dir, env, "HEAD", nil); err != nil {
-		return "", fmt.Errorf("execenv: stage worktree in private index: %s: %w", strings.TrimSpace(out), err)
+	steps := (&DeliveryProblem{}).RepairSteps()
+	for _, step := range steps[:3] {
+		if out, err := runGitEnv(dir, env, step...); err != nil {
+			return "", fmt.Errorf("execenv: stage worktree in private index: %s: %w", strings.TrimSpace(out), err)
+		}
 	}
 	return runGitTrimmedEnv(dir, env, "write-tree")
 }

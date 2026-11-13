@@ -1857,6 +1857,27 @@ func TestFinalizePreservesRuntimeSymlink(t *testing.T) {
 	}
 }
 
+func TestFinalizePreservesUnstagedTrackedRuntimeAndReleasesBranch(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
+	gitRun(t, repo, "add", "-f", ".multica/tracked")
+	gitRun(t, repo, "commit", "-m", "tracked runtime path")
+	wt := prepareTurn(t, repo, "MUL-6881", turnOneTask)
+	gitRun(t, wt.Path, "rm", "--cached", ".multica/tracked")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "tracked"), "changed")
+	_, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica/tracked") {
+		t.Fatalf("Finalize = %v", err)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "tracked")); got != "changed" {
+		t.Fatalf("lost file: %q", got)
+	}
+	second := prepareTurn(t, repo, "MUL-6881", turnTwoTask)
+	if !second.Continued || second.Branch != wt.Branch {
+		t.Fatalf("branch not continued: %+v", second)
+	}
+}
+
 func TestRemovePreservesRuntimeFilesCreatedAfterFinalize(t *testing.T) {
 	repo := newTestRepo(t)
 	wt := prepareForTest(t, repo)

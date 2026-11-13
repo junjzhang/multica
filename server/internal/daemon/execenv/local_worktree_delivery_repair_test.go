@@ -41,6 +41,28 @@ func TestRepairStepsExcludeRuntimePaths(t *testing.T) {
 	}
 }
 
+func TestRepairPredictionMatchesUnstagedTrackedRuntime(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
+	gitRun(t, repo, "add", "-f", ".multica/tracked")
+	gitRun(t, repo, "commit", "-m", "tracked runtime path")
+	wt := prepareForTest(t, repo)
+	gitRun(t, wt.Path, "checkout", "--quiet", "--detach")
+	gitRun(t, wt.Path, "rm", "--cached", ".multica/tracked")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "tracked"), "updated")
+	predicted, err := stagedWorktreeTree(wt.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyRepairSteps(t, wt, &DeliveryProblem{Branch: wt.Branch, BaseCommit: wt.BaseCommit})
+	if got := gitRun(t, wt.Path, "rev-parse", "HEAD^{tree}"); got != predicted {
+		t.Fatalf("repair tree %s differs from prediction %s", got, predicted)
+	}
+	if got := gitRun(t, wt.Path, "show", "HEAD:.multica/tracked"); got != "updated" {
+		t.Fatalf("tracked content = %q", got)
+	}
+}
+
 // requireRepairable asserts CheckDelivery predicts the refusal Finalize would
 // make, then repairs it and checks Finalize records the delivery with the
 // agent's files intact.
