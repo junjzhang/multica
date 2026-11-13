@@ -1231,6 +1231,15 @@ func (env *Environment) Cleanup(removeAll bool) error {
 	// rerun fail closed. The daemon also defers ReleaseLock for the task run;
 	// both paths are idempotent.
 	env.ReleaseLock()
+	if env.LocalWorktree != nil {
+		present, err := HasLocalWorktree(env.RootDir)
+		if err != nil {
+			return err
+		}
+		if present {
+			return fmt.Errorf("execenv: refusing to clean a retained worktree at %s", env.LocalWorktree.Path)
+		}
+	}
 
 	if env.LocalDirectory {
 		// Never touch the user's directory. RootDir is the daemon's own
@@ -1625,6 +1634,11 @@ func ReadEnvRootOwner(envRoot string) (*EnvRootOwner, error) {
 // directory instead would drop both the claim and the lock for as long as the
 // recreate takes, which is exactly the window claimEnvRoot exists to close.
 func resetEnvRootContents(envRoot string) error {
+	if present, err := HasLocalWorktree(envRoot); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("execenv: refusing to reset %s: a task worktree remains for recovery", envRoot)
+	}
 	entries, err := os.ReadDir(envRoot)
 	if err != nil {
 		return err

@@ -334,6 +334,12 @@ func (d *Daemon) applyGCAction(ctx context.Context, taskDir string, action gcAct
 			return 0
 		}
 		defer release()
+		present, err := execenv.HasLocalWorktree(taskDir)
+		if err != nil || present {
+			d.logger.Warn("gc: retaining task directory with a worktree or an unreadable worktree state", "dir", taskDir, "error", err)
+			stats.skipped++
+			return 0
+		}
 		// Re-read provenance after taking the exclusion lock so a concurrent
 		// reset cannot change ownership between validation and mutation.
 		if _, err := d.gcTaskDirOwner(taskDir); err != nil {

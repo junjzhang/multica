@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -275,10 +276,21 @@ type LocalWorktreeOutcome struct {
 	// AutoCommitted is true when the agent left uncommitted changes that
 	// Finalize committed so they would survive the worktree's removal.
 	AutoCommitted bool
-	// PreservedPath is set only when Finalize could NOT commit the agent's
-	// changes. The worktree at this path was intentionally left on disk because
-	// it is the only remaining copy of that work.
+	// PreservedPath identifies a worktree kept for recovery or inspection.
 	PreservedPath string
+}
+
+// HasLocalWorktree fails closed for a surviving task worktree, including one
+// with damaged Git metadata after an interrupted run.
+func HasLocalWorktree(envRoot string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(envRoot, localWorktreeDirName))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // PrepareLocalWorktree creates the task's worktree and replays the user's
@@ -585,6 +597,12 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 			w.Branch, quotedPaths(unmerged), w.Path, w.GitRoot)
 	}
 
+	skipped, err := untrackedRuntimePaths(w.Path)
+	if err != nil {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("could not inspect runtime files: %w; the task worktree is preserved at %s", err, w.Path)
+	}
+
 	// Treat "can't tell" like "dirty": committing costs an empty commit at
 	// worst, while assuming clean risks deleting the agent's edits.
 	dirty, statusErr := worktreeIsDirty(w.Path)
@@ -681,6 +699,10 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		}
 	}
 
+	if len(skipped) > 0 {
+		outcome.PreservedPath = w.Path
+		return outcome, fmt.Errorf("new .multica paths were not committed: %s; the task worktree is preserved at %s — inspect and recover these files before removing it", quotedPaths(skipped), w.Path)
+	}
 	if removeErr := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); removeErr != nil {
 		outcome.PreservedPath = w.Path
 		return outcome, fmt.Errorf(
@@ -703,6 +725,42 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 		)
 	}
 	return outcome, nil
+}
+
+// untrackedRuntimePaths compares both staged and unstaged paths with HEAD.
+// Ignored files are included because removal would destroy them too.
+func untrackedRuntimePaths(dir string) ([]string, error) {
+	tracked, err := runGitStdout(dir, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool)
+	for _, path := range strings.Split(tracked, "\x00") {
+		known[path] = true
+	}
+	listed, err := runGitStdout(dir, "ls-files", "--cached", "--others", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	seen := make(map[string]bool)
+	for _, path := range strings.Split(listed, "\x00") {
+		if path == "" || known[path] || seen[path] {
+			continue
+		}
+		if path != ".multica" && !strings.HasPrefix(path, ".multica/") && !strings.Contains(path, "/.multica/") && !strings.HasSuffix(path, "/.multica") {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(dir, path)); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 // Discard tears a worktree down without delivering anything: unregister it,
@@ -1700,11 +1758,11 @@ type DeliveryProblem struct {
 const RepairCommitMessage = "chore(agent): put this turn's work back on its task branch"
 
 // RepairSteps is one git sequence that resolves any DeliveryProblem while
-// keeping the worktree's files exactly as they are: stage everything, point
+// keeping the worktree's files exactly as they are: stage eligible paths, point
 // HEAD back at the task branch without touching files or index, move the
 // branch to BaseCommit, and commit the staged tree on top of it. The result is
-// a single commit whose parent is BaseCommit and whose tree is what the agent
-// left — so it passes verifyDeliveryPoint by construction, and the guard
+// a single commit whose parent is BaseCommit and excludes new runtime paths,
+// so it passes verifyDeliveryPoint by construction, and the guard
 // itself is unchanged.
 //
 // Each step is a git argv (without the leading "git"). Rendered into the
@@ -1712,7 +1770,9 @@ const RepairCommitMessage = "chore(agent): put this turn's work back on its task
 // agent gets is the one that is proven to work.
 func (p *DeliveryProblem) RepairSteps() [][]string {
 	return [][]string{
-		{"add", "-A"},
+		{"reset", "-q", "HEAD", "--", ":(glob)**/.multica", ":(glob)**/.multica/**"},
+		{"add", "-u", "--", "."},
+		{"add", "-A", "--", ".", ":(exclude,glob)**/.multica", ":(exclude,glob)**/.multica/**"},
 		{"symbolic-ref", "HEAD", "refs/heads/" + p.Branch},
 		{"reset", "--soft", p.BaseCommit},
 		{"commit", "-m", RepairCommitMessage},
@@ -1915,7 +1975,7 @@ func treeEntryMode(gitRoot, treeish, path string) string {
 	return mode
 }
 
-// stagedWorktreeTree returns the tree `git add -A` would stage in dir, built in
+// stagedWorktreeTree returns the tree the repair steps would stage in dir, built in
 // a private copy of dir's index so neither the agent's index nor its files
 // change. Errors — including a missing index to seed from, without which the
 // recorded modes cannot be predicted — fail the caller closed.

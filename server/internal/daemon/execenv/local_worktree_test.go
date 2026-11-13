@@ -1793,6 +1793,56 @@ func TestAutomaticCommitExcludesStagedRuntimeSymlink(t *testing.T) {
 	}
 }
 
+func TestFinalizePreservesNewRuntimePaths(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
+	gitRun(t, repo, "add", "-f", ".multica/tracked")
+	gitRun(t, repo, "commit", "-m", "tracked runtime path")
+	wt := prepareForTest(t, repo)
+	gitRun(t, wt.Path, "mv", ".multica/tracked", ".multica/renamed")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "new"), "new work")
+	writeFile(t, filepath.Join(wt.Path, "business.txt"), "business")
+	outcome, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica/renamed") || !strings.Contains(err.Error(), ".multica/new") {
+		t.Fatalf("expected preserved paths in error, got %v", err)
+	}
+	if outcome.PreservedPath != wt.Path {
+		t.Fatalf("preserved path = %q", outcome.PreservedPath)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "renamed")); got != "original" {
+		t.Fatalf("renamed contents = %q", got)
+	}
+	if err := resetEnvRootContents(filepath.Dir(wt.Path)); err == nil {
+		t.Fatal("reset removed a retained worktree")
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "renamed")); got != "original" {
+		t.Fatalf("reset lost file: %q", got)
+	}
+	if got := gitRun(t, repo, "show", wt.Branch+":business.txt"); got != "business" {
+		t.Fatalf("business = %q", got)
+	}
+	for _, name := range []string{".multica/renamed", ".multica/new", ".multica/tracked"} {
+		if _, err := gitTry(t, repo, "cat-file", "-e", wt.Branch+":"+name); err == nil {
+			t.Errorf("%s unexpectedly committed", name)
+		}
+	}
+}
+
+func TestFinalizePreservesRuntimeSymlink(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if err := os.Symlink("tracked.txt", filepath.Join(wt.Path, ".multica")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	outcome, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica") || outcome.PreservedPath != wt.Path {
+		t.Fatalf("symlink was not reported and preserved: outcome=%+v error=%v", outcome, err)
+	}
+	if _, err := os.Lstat(filepath.Join(wt.Path, ".multica")); err != nil {
+		t.Fatalf("symlink lost: %v", err)
+	}
+}
+
 // Git must rehash a same-size edit when its timestamp equals the index's.
 // A private index with a newer timestamp would incorrectly make it look clean.
 func TestCaptureUserSnapshotPreservesRacyIndexTimestamp(t *testing.T) {

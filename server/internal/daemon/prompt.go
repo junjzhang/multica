@@ -169,11 +169,11 @@ func BuildWorktreeDeliveryRepairPrompt(problem *execenv.DeliveryProblem) string 
 	b.WriteString("Your previous turn in this git worktree finished, but its work cannot be delivered yet.\n\n")
 	fmt.Fprintf(&b, "Problem: %s.\n\n", problem.Reason)
 	fmt.Fprintf(&b, "The work has to end on branch `%s`, in commits on top of `%s` (the commit this turn started from), with HEAD on that branch. Your files are intact; only where they are committed is wrong.\n\n", problem.Branch, problem.BaseCommit)
-	b.WriteString("Fix it in this worktree. This sequence keeps every file exactly as it is now and puts it on the branch as one commit:\n\n```sh\n")
+	b.WriteString("Fix it in this worktree. This sequence preserves the files and commits the work outside new .multica paths; those paths remain in the worktree for manual recovery:\n\n```sh\n")
 	for _, step := range problem.RepairSteps() {
 		b.WriteString("git")
 		for _, arg := range step {
-			if strings.ContainsAny(arg, " '\"") {
+			if strings.ContainsAny(arg, " '\"()*?[]!$`\\;&|<>") {
 				arg = "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 			}
 			b.WriteString(" " + arg)

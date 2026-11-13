@@ -17,6 +17,30 @@ func applyRepairSteps(t *testing.T, wt *LocalWorktree, problem *DeliveryProblem)
 	}
 }
 
+func TestRepairStepsExcludeRuntimePaths(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	gitRun(t, wt.Path, "checkout", "--quiet", "--detach")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "private"), "secret")
+	gitRun(t, wt.Path, "add", "-f", ".multica/private")
+	writeFile(t, filepath.Join(wt.Path, "business.txt"), "business")
+	problem := &DeliveryProblem{Branch: wt.Branch, BaseCommit: wt.BaseCommit}
+	predicted, err := stagedWorktreeTree(wt.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyRepairSteps(t, wt, problem)
+	if got := gitRun(t, wt.Path, "rev-parse", "HEAD^{tree}"); got != predicted {
+		t.Fatalf("repair tree %s differs from prediction %s", got, predicted)
+	}
+	if _, err := gitTry(t, wt.Path, "cat-file", "-e", "HEAD:.multica/private"); err == nil {
+		t.Fatal("private file in repair commit")
+	}
+	if got := gitRun(t, wt.Path, "show", "HEAD:business.txt"); got != "business" {
+		t.Fatalf("business = %q", got)
+	}
+}
+
 // requireRepairable asserts CheckDelivery predicts the refusal Finalize would
 // make, then repairs it and checks Finalize records the delivery with the
 // agent's files intact.
