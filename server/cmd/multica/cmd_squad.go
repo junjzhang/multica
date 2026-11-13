@@ -488,6 +488,9 @@ func runSquadActivity(cmd *cobra.Command, args []string) error {
 		"outcome": outcome,
 		"reason":  reason,
 	}
+	if mailboxID, _ := cmd.Flags().GetString("mailbox-id"); mailboxID != "" {
+		body["mailbox_id"] = mailboxID
+	}
 	var result map[string]any
 	if err := client.PostJSON(ctx, "/api/issues/"+issueRef.ID+"/squad-evaluated", body, &result); err != nil {
 		return fmt.Errorf("record evaluation: %w", err)
@@ -549,6 +552,7 @@ func init() {
 	squadMemberSetRoleCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// activity
+	squadActivityCmd.Flags().String("mailbox-id", "", "Delivered Mailbox request proving this external leader turn")
 	squadActivityCmd.Flags().String("reason", "", "Short explanation of the decision")
 	squadActivityCmd.Flags().String("output", "table", "Output format: table or json")
 

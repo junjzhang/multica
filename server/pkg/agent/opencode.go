@@ -139,6 +139,18 @@ func openCodeEnvironment(cfg Config, opts ExecOptions) ([]string, error) {
 }
 
 func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
+	if opts.RequireResume {
+		// OpenCode's own export is the only pre-run proof that the requested
+		// session exists and belongs to the id we are about to pass to
+		// --session. Reuse the existing clock preflight rather than treating
+		// --session plus a later ProcessExit/SessionID observation as proof.
+		if err := CheckOpenCodeResumeClock(ctx, b.cfg, opts); err != nil {
+			return nil, fmt.Errorf("%w: opencode could not verify session %q: %v", ErrResumeRequired, opts.ResumeSessionID, err)
+		}
+	}
 	execPath, err := resolveOpenCodeExecutable(b.cfg)
 	if err != nil {
 		return nil, err

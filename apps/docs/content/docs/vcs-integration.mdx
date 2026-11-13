@@ -22,6 +22,30 @@ These providers run alongside GitHub: a workspace can use any combination.
 Unlike GitHub, these providers have no "App" model. Each workspace stores its own instance URL plus an access token, and registers a webhook on its repository or organisation. The token and webhook secret are encrypted at rest.
 </Callout>
 
+## TGit (工蜂)
+
+Choose **TGit (工蜂)** in Settings → Code and enter the instance URL (for example `https://git.woa.com`) and a personal access token with API access to read your account. Multica validates it with `GET /api/v3/user`.
+
+In the repository's Webhook settings, use Multica's webhook URL, paste its secret into **Token**, and enable **Merge request events**. TGit sends `X-Event: Merge Request Hook` and authenticates with `X-Token`. See the [TGit webhook API](https://git.tencent.com/help/menu/api/hooks.html).
+
+MR events sync draft, open, closed and merged states into the existing issue cards. Fork MRs belong to their target repository. The webhook actor is not presented as the MR author, and update times are not presented as merge or close times.
+
+Existing MRs appear after a webhook delivery; this integration does not backfill them. Once mirrored, both `/merge_requests/N` and `/-/merge_requests/N` links on the same host can be used for manual linking, with either HTTP or HTTPS. No repository hooks are created automatically.
+
+TGit also reads **CI checks, MR review state and merge conflicts** through its API. Checks are scoped to the source commit and target branch, and the MR CI gate is evaluated independently of named checks. A pipeline waiting for human approval stays pending. Review uses the provider's aggregate decision; conflict detection uses the dedicated conflict API rather than inferring a conflict from a blocked merge.
+
+| MR metadata | Status snapshot |
+| --- | --- |
+| ![MR metadata](/images/docs/tgit-mr-basic.png) | ![Status snapshot](/images/docs/tgit-mr-status.png) |
+
+Snapshots are stored per MR and checked against the source and target revisions before publication. Missing or wrong-revision results remain unavailable; failed refreshes retain a visibly stale last result. Named checks and reviewer votes can be expanded on the card. Passing these displayed gates does not claim overall permission to merge.
+
+Only already-mirrored open MRs are refreshed. The server scans every 30 seconds, limits each MR to one attempt per minute and runs at most four fetches concurrently. Page visits and MR webhooks also request a refresh. Revision races retry shortly; errors back off, and rate limits honor Retry-After. Reconnecting resets credential-error backoff. No historical discovery/import or new wakeup conditions are added.
+
+Refresh capacity is shared across the service: four workers, up to 100 candidates per scan, and a queue of 256 MRs. Large queues or slow provider responses can exceed the two-minute freshness window; skipped queue entries remain eligible for later scans. Visits and webhooks respect the same cooldown, so a new head can remain unavailable until the next eligible refresh. Unchanged snapshots do not broadcast updates; changes and recovery from stale data do.
+
+For `git.woa.com`, the callback port must be 80, 443, 8080 or 8081. If Multica runs on another port, publish its authenticated webhook path through a reverse proxy on an accepted port.
+
 ## Prerequisites (server)
 
 Turn the integration on for this deployment. It is off by default, so the section stays hidden until you set:

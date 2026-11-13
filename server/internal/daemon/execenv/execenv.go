@@ -128,6 +128,8 @@ type PrepareParams struct {
 
 // TaskContextForEnv is the subset of task context used for writing context files.
 type TaskContextForEnv struct {
+	ResultHandling   bool
+	ScopeTaskID      string
 	IssueID          string
 	TriggerCommentID string // comment that triggered this task (empty for on_assign)
 	TriggerThreadID  string // root comment ID for the triggering thread; falls back to TriggerCommentID when empty
@@ -417,6 +419,16 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		return nil, fmt.Errorf("execenv: task ID is required")
 	}
 
+	localPath := params.LocalWorkDir
+	if params.LocalWorktree != nil {
+		localPath = params.LocalWorktree.LocalPath
+	}
+	if localPath != "" {
+		if err := ValidateUserWorkDir(params.WorkspacesRoot, localPath); err != nil {
+			return nil, err
+		}
+	}
+
 	envRoot, err := ResolveRootDir(RootDirParams{
 		WorkspacesRoot:  params.WorkspacesRoot,
 		WorkspaceID:     params.WorkspaceID,
@@ -611,16 +623,17 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// follow-up can be claimed the instant the prior task completes — before
 	// the prior handler writes .gc_meta.json — so reuse eligibility must be
 	// provable from an artifact that exists the moment the env is created. Only
-	// managed (non-local_directory) issue and chat envs get this marker; that is
-	// exactly the set with a durable conversation scope. Non-fatal: a write failure
-	// only costs the next follow-up its session reuse (it falls back to a fresh
-	// session), which must never block dispatching this task.
-	if params.LocalWorkDir == "" && (params.Task.IssueID != "" || params.Task.ChatSessionID != "") {
+	// Managed business scopes and explicit original-task scopes get this marker.
+	// A write failure leaves ordinary preparation usable, but strict returns
+	// must subsequently refuse reuse without the required ownership proof.
+	if params.LocalWorkDir == "" && (params.Task.IssueID != "" || params.Task.ChatSessionID != "" || params.Task.AutopilotRunID != "" || params.Task.ScopeTaskID != "") {
 		if err := WriteManagedEnvProvenance(envRoot, ManagedEnvProvenance{
-			WorkspaceID:   params.WorkspaceID,
-			IssueID:       params.Task.IssueID,
-			ChatSessionID: params.Task.ChatSessionID,
-			AgentID:       params.Task.AgentID,
+			WorkspaceID:    params.WorkspaceID,
+			IssueID:        params.Task.IssueID,
+			ChatSessionID:  params.Task.ChatSessionID,
+			AutopilotRunID: params.Task.AutopilotRunID,
+			ScopeTaskID:    params.Task.ScopeTaskID,
+			AgentID:        params.Task.AgentID,
 		}); err != nil && logger != nil {
 			logger.Warn("execenv: write managed env provenance failed (non-fatal); a follow-up may start a fresh session", "error", err)
 		}
@@ -735,6 +748,11 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 		env.OpenclawIncludeRoot = result.IncludeRoot
 	}
 
+	if localWorktree != nil {
+		if err := localWorktree.SaveForReuse(envRoot); err != nil {
+			return nil, err
+		}
+	}
 	logger.Info("execenv: prepared env", "root", envRoot, "repos_available", len(params.Task.Repos))
 	prepareSucceeded = true
 	lockClaimed = false // ownership of any lock passes to the Environment
@@ -745,6 +763,9 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 // the per-provider knobs (CodexVersion, OpenclawBin) so callers can pass
 // the same resolved binary path on both first-run and reuse paths.
 type ReuseParams struct {
+	RequireResume bool
+	RootDir       string
+	LocalWorktree *LocalWorktree
 	// WorkspacesRoot is the daemon-owned root under which all task envs live.
 	// Passed on reuse so the root-level fail-closed marker is self-healed here
 	// too — a marker removed while the daemon runs is restored before a reused
@@ -804,10 +825,22 @@ type ReuseParams struct {
 // Returns nil if the workdir does not exist or required provider setup fails
 // (caller should fall back to Prepare).
 func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
+	if params.LocalDirectory {
+		if err := ValidateUserWorkDir(params.WorkspacesRoot, params.WorkDir); err != nil {
+			logger.Warn("execenv: user working directory is not user-owned", "error", err)
+			return nil
+		}
+	}
 	if _, err := os.Stat(params.WorkDir); err != nil {
 		return nil
 	}
 
+	if params.RequireResume && params.Provider == "hermes" {
+		if err := validateRetainedHermesStore(params); err != nil {
+			logger.Warn("strict Hermes environment cannot be restored", "error", err)
+			return nil
+		}
+	}
 	// Self-heal the root-level daemon marker on the reuse path too, so a marker
 	// removed while the daemon runs is restored before a reused task spawns —
 	// otherwise reuse could run without the fail-closed guard until the next
@@ -820,6 +853,9 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	}
 
 	rootDir := filepath.Dir(params.WorkDir)
+	if params.RootDir != "" {
+		rootDir = params.RootDir
+	}
 	if params.LocalDirectory {
 		// For local_directory tasks the user's WorkDir is unrelated to
 		// envRoot (envRoot still lives under workspacesRoot/{wsID}/...),
@@ -836,6 +872,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 		RootDir:        rootDir,
 		WorkDir:        params.WorkDir,
 		LocalDirectory: params.LocalDirectory,
+		LocalWorktree:  params.LocalWorktree,
 		logger:         logger,
 	}
 	if env.RootDir != "" {
@@ -911,7 +948,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// config (especially sandbox/network access) is up to date.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(env.RootDir, codexHomeDirName)
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, ResumeSessionID: params.ResumeSessionID, IsLocalDirectory: params.LocalDirectory, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
+		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, ResumeSessionID: params.ResumeSessionID, IsLocalDirectory: params.LocalDirectory || params.LocalWorktree != nil, SessionStoreKey: codexSessionStoreKey(params.Profile, params.Task), CodexCustomArgs: params.CodexCustomArgs}, logger); err != nil {
 			// Leaving env.CodexHome empty does not launch Codex against an
 			// ambient home: configureCodexTaskShellEnvironment rejects the empty
 			// value ("task CODEX_HOME is missing") and the run fails before
@@ -966,7 +1003,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// skill-less agent.
 	if params.Provider == "hermes" && env.RootDir != "" {
 		hermesHome := filepath.Join(env.RootDir, "hermes-home")
-		if len(params.Task.AgentSkills) > 0 {
+		if len(params.Task.AgentSkills) > 0 || params.RequireResume {
 			sessions, err := prepareHermesHome(hermesHome, params.HermesSourceHome, params.HermesSourceMustExist, params.Task.AgentSkills, params.HermesEnv, params.HermesMemoryStore, params.HermesSessionStore, logger)
 			if err != nil {
 				// Fail closed: a half-built overlay must not run. Returning nil
@@ -975,6 +1012,12 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 				// skill.
 				logger.Warn("execenv: refresh hermes-home failed; forcing fresh prepare", "error", err)
 				return nil
+			}
+			if params.RequireResume {
+				if err := validateRetainedHermesStore(params); err != nil {
+					logger.Warn("strict Hermes store changed during refresh", "error", err)
+					return nil
+				}
 			}
 			env.HermesHome = hermesHome
 			env.HermesSessionStore = ""
@@ -1173,15 +1216,17 @@ const ManagedEnvProvenanceManagedBy = "multica-daemon-managed-env"
 // eligibility off .gc_meta.json therefore raced: the successor read a
 // not-yet-written file and started a fresh session (MUL-4886). This marker is
 // on disk from the moment the env is created, so the successor can prove reuse
-// safety inside that window. It is written only for non-local managed issue or
-// chat envs, so its presence is itself the "safe to reuse, not a user
-// local_directory" assertion; see shouldReusePriorWorkdir.
+// safety inside that window. It covers managed business scopes and explicit
+// original-task scopes, including retained local worktrees; user-owned in-place
+// directories do not acquire this proof.
 type ManagedEnvProvenance struct {
-	ManagedBy     string `json:"managed_by"`
-	WorkspaceID   string `json:"workspace_id"`
-	IssueID       string `json:"issue_id,omitempty"`
-	ChatSessionID string `json:"chat_session_id,omitempty"`
-	AgentID       string `json:"agent_id"`
+	ManagedBy      string `json:"managed_by"`
+	WorkspaceID    string `json:"workspace_id"`
+	IssueID        string `json:"issue_id,omitempty"`
+	ChatSessionID  string `json:"chat_session_id,omitempty"`
+	AgentID        string `json:"agent_id"`
+	AutopilotRunID string `json:"autopilot_run_id,omitempty"`
+	ScopeTaskID    string `json:"scope_task_id,omitempty"`
 }
 
 // WriteManagedEnvProvenance persists the reuse-eligibility marker at the env
@@ -1231,6 +1276,15 @@ func (env *Environment) Cleanup(removeAll bool) error {
 	// rerun fail closed. The daemon also defers ReleaseLock for the task run;
 	// both paths are idempotent.
 	env.ReleaseLock()
+	if env.RootDir != "" {
+		present, err := HasRetainedRuntimePaths(env.RootDir)
+		if err != nil {
+			return err
+		}
+		if present {
+			return fmt.Errorf("execenv: refusing to clean a retained worktree in %s", env.RootDir)
+		}
+	}
 
 	if env.LocalDirectory {
 		// Never touch the user's directory. RootDir is the daemon's own
@@ -1389,6 +1443,13 @@ func LockEnvRootForReuse(wsRoot *os.Root, rel, envRoot string) (*EnvRootClaim, o
 	if !locked {
 		lock.Close()
 		return nil, nil, fmt.Errorf("execenv: reuse %s: %w", envRoot, ErrEnvRootBusy)
+	}
+	if _, err := envRootHandle.Lstat(retainedRuntimeMarker); err == nil {
+		releaseLockFile(lock)
+		return nil, nil, fmt.Errorf("execenv: worktree at %s is retained for manual recovery", envRoot)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		releaseLockFile(lock)
+		return nil, nil, fmt.Errorf("execenv: inspect retained worktree at %s: %w", envRoot, err)
 	}
 	return &EnvRootClaim{rootDir: envRoot, lock: lock}, info, nil
 }
@@ -1625,6 +1686,11 @@ func ReadEnvRootOwner(envRoot string) (*EnvRootOwner, error) {
 // directory instead would drop both the claim and the lock for as long as the
 // recreate takes, which is exactly the window claimEnvRoot exists to close.
 func resetEnvRootContents(envRoot string) error {
+	if present, err := HasRetainedRuntimePaths(envRoot); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("execenv: refusing to reset %s: a task worktree remains for recovery", envRoot)
+	}
 	entries, err := os.ReadDir(envRoot)
 	if err != nil {
 		return err

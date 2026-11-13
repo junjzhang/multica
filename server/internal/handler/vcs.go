@@ -245,6 +245,9 @@ func (h *Handler) ConnectVCS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := h.vcsConnectionToResponse(conn)
+	if err := h.Queries.ResetVCSRefresh(r.Context(), conn.ID); err != nil {
+		slog.Warn("vcs: reset snapshot refresh failed", "err", err)
+	}
 	h.publish(protocol.EventVCSConnectionCreated, workspaceID, "system", "", map[string]any{"id": resp.ID})
 	writeJSON(w, http.StatusOK, VCSConnectResponse{
 		VCSConnectionResponse: resp,

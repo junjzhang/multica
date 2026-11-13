@@ -66,12 +66,17 @@ func newRunOnlyAutopilotFixture(t *testing.T, targetAgentID, triggerOwnerUserID 
 	})
 
 	taskCols := testutil.Cols{
-		"runtime_id":          runtimeID,
-		"status":              "running",
-		"autopilot_run_id":    runID,
-		"originator_user_id":  triggerOwnerUserID,
-		"accountable_user_id": triggerOwnerUserID,
-		"originator_source":   "trigger_owner",
+		"runtime_id":                runtimeID,
+		"status":                    "running",
+		"autopilot_run_id":          runID,
+		"originator_user_id":        triggerOwnerUserID,
+		"accountable_user_id":       triggerOwnerUserID,
+		"originator_source":         "trigger_owner",
+		"session_id":                "autopilot-run-session",
+		"work_dir":                  "/work/autopilot-run",
+		"resource_control_required": true,
+		"session_pin_confirmed":     true,
+		"session_pin_generation":    testutil.Raw("gen_random_uuid()"),
 	}
 	for _, o := range over {
 		for k, v := range o {
@@ -118,6 +123,7 @@ func topLevelIssueRequest(t *testing.T, assigneeType, assigneeID, status, actorA
 	}
 	if taskID != "" {
 		r.Header.Set("X-Task-ID", taskID)
+		r.Header.Set("X-Actor-Source", "task_token")
 	}
 	return r
 }
@@ -139,6 +145,7 @@ func autopilotChildIssueRequest(t *testing.T, assigneeType, assigneeID, parentIs
 	}
 	if taskID != "" {
 		r.Header.Set("X-Task-ID", taskID)
+		r.Header.Set("X-Actor-Source", "task_token")
 	}
 	return r
 }
@@ -161,6 +168,7 @@ func createUnassignedIssueAsRun(t *testing.T, actorAgentID, taskID string) strin
 	})
 	r.Header.Set("X-Agent-ID", actorAgentID)
 	r.Header.Set("X-Task-ID", taskID)
+	r.Header.Set("X-Actor-Source", "task_token")
 
 	var created IssueResponse
 	testutil.Call(t, testHandler.CreateIssue, r).Want(http.StatusCreated).JSON(&created)
@@ -226,6 +234,7 @@ func batchAssignAsRun(t *testing.T, headerUserID, agentID, taskID, targetAgentID
 	})
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Task-ID", taskID)
+	req.Header.Set("X-Actor-Source", "task_token")
 	return testutil.Call(t, testHandler.BatchUpdateIssues, req)
 }
 

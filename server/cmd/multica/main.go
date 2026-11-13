@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/agent"
@@ -45,6 +46,7 @@ func init() {
 	rootCmd.PersistentFlags().String("server-url", "", "Multica server URL (env: MULTICA_SERVER_URL)")
 	rootCmd.PersistentFlags().String("workspace-id", "", "Workspace ID (env: MULTICA_WORKSPACE_ID)")
 	rootCmd.PersistentFlags().String("profile", "", "Configuration profile name (e.g. dev) — isolates config, daemon state, and workspaces")
+	rootCmd.PersistentFlags().String("return-session", "", "Host session that receives delegation results from this external agent (env: MULTICA_RETURN_SESSION; defaults to the current PASEO_AGENT_ID outside a managed task)")
 	rootCmd.PersistentFlags().BoolVar(&debugFlag, "debug", false, "Print full error details on failure (env: MULTICA_DEBUG)")
 
 	// Core commands
@@ -85,6 +87,7 @@ func init() {
 	rootCmd.AddCommand(skillCmd)
 	rootCmd.AddCommand(squadCmd)
 	rootCmd.AddCommand(chatCmd)
+	rootCmd.AddCommand(sessionCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(runtimeCmd)
 	rootCmd.AddCommand(authCmd)
@@ -100,6 +103,9 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "internal-wait-exec" {
+		os.Exit(backgroundwait.ExecuteHelper(os.Stdin))
+	}
 	if len(os.Args) == 2 && os.Args[1] == execenv.PreparationHelperArg {
 		logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 		if err := execenv.RunPreparationHelper(os.Stdin, os.Stdout, logger); err != nil {
