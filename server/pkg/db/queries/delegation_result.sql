@@ -82,7 +82,8 @@ WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
 
 -- name: SetDelegationResultTask :exec
 UPDATE agent_task_delegation_return
-SET notification_task_id = @notification_task_id, notification_delivery_id = @notification_delivery_id, materialized_at = now()
+SET notification_task_id = @notification_task_id, notification_delivery_id = @notification_delivery_id,
+    delivery_return_id = sqlc.narg(delivery_return_id), materialized_at = now()
 WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
 
@@ -114,7 +115,7 @@ SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE curren
     handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
     handling.error AS handling_error
 FROM agent_task_delegation_return l
-JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN issue_delegation_return r ON r.id = COALESCE(l.delivery_return_id, l.delegation_return_id)
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE l.task_id = @task_id AND r.workspace_id = @workspace_id
@@ -195,6 +196,9 @@ WHERE r.workspace_id = @workspace_id AND r.return_kind = 'managed_task'
   AND (rt.daemon_id = @daemon_id OR rt.id IS NULL);
 
 -- name: ListReturnResultDependencies :many
+-- Retain the prospective destination even before forwarding materializes.
+-- Traverse the same certified, terminal-source chain as result delivery;
+-- materialized obligations keep only their frozen physical destination.
 SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
@@ -205,7 +209,9 @@ FROM agent_task_delegation_return l
 LEFT JOIN agent_task_queue t ON t.id = l.task_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
-WHERE l.delegation_return_id = @return_id;
+WHERE COALESCE(l.delivery_return_id, l.delegation_return_id) = @return_id
+ OR (l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL AND l.notification_error IS NULL
+     AND l.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)));
 
 -- name: ConfirmTaskSessionPin :execrows
 UPDATE agent_task_queue SET session_pin_confirmed = true
@@ -216,7 +222,9 @@ WHERE id = @task_id AND session_id = @session_id AND work_dir = @work_dir
 SELECT EXISTS (
  SELECT 1 FROM comment_dispatch_obligation o
  LEFT JOIN comment_delegation_return c ON c.comment_id = o.comment_id
- WHERE o.status = 'pending' AND (o.delegation_return_id = @return_id OR c.delegation_return_id = @return_id)
+ WHERE o.status = 'pending'
+   AND (o.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id))
+     OR c.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)))
 ) AS pending;
 
 -- name: ListIssueResultNotifications :many
@@ -227,7 +235,7 @@ SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE curren
     handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
     handling.error AS handling_error
 FROM agent_task_delegation_return l
-JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN issue_delegation_return r ON r.id = COALESCE(l.delivery_return_id, l.delegation_return_id)
 JOIN agent_task_queue outcome ON outcome.id = l.task_id
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id

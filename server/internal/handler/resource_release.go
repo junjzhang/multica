@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -180,7 +181,7 @@ func (h *Handler) RecordResourcesReleased(w http.ResponseWriter, r *http.Request
 			writeError(w, 500, "load resource receipt ownership failed")
 			return
 		}
-		address, err := h.Queries.GetDelegationReturnByID(r.Context(), link.DelegationReturnID)
+		address, err := h.Queries.GetDelegationReturnByID(r.Context(), delegation.DeliveryReturnID(link))
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, 500, "load resource receipt return failed")
 			return

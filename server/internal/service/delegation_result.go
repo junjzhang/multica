@@ -118,6 +118,24 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if obligation.NotificationTaskID.Valid || obligation.NotificationDeliveryID.Valid || obligation.NotificationError.Valid {
 		return false, false, nil
 	}
+	// The issue write fences serialize dispatch, takeover and materialization;
+	// the runtime share lock freezes provider identity. Resolve a certified chain
+	// once so later continuations cannot retarget a materialized notification.
+	if address.ReturnKind == string(delegation.KindManagedTask) && sourceErr == nil {
+		if _, err := q.LockRuntimeForDelegation(ctx, db.LockRuntimeForDelegationParams{ID: address.RuntimeID, WorkspaceID: address.WorkspaceID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return false, false, err
+		}
+		next, err := q.GetManagedReturnContinuation(ctx, db.GetManagedReturnContinuationParams{
+			WorkspaceID: address.WorkspaceID, IssueID: address.IssueID, AgentID: address.DispatcherAgentID, FromReturnID: address.ID,
+		})
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return false, false, err
+		}
+		if err == nil {
+			address = next
+			source, sourceErr = q.GetAgentTask(ctx, address.SourceTaskID)
+		}
+	}
 	outcome, err = q.GetAgentTask(ctx, taskID)
 	if err != nil {
 		return false, false, err
@@ -197,6 +215,15 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	} // existing queue slot; retain the same obligation
 	if err != nil {
 		return false, false, err
+	}
+	if address.ID != returnID {
+		prior, err := q.GetDelegationReturnByID(ctx, returnID)
+		if err != nil {
+			return false, false, err
+		}
+		if err := delegation.RecordContinuationAudit(ctx, q, prior, address, taskID, "delegation_result_forwarded"); err != nil {
+			return false, false, err
+		}
 	}
 	if err := commitNotification(); err != nil {
 		return false, false, err
@@ -331,7 +358,9 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if err != nil {
 		return empty, err
 	}
-	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(address.ID))
+	// The accepted relationship remains the idempotency key even if several
+	// versions on a coalesced outcome now deliver to the same physical address.
+	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(incoming.DelegationReturnID))
 	payload, err := json.Marshal(map[string]string{"result_task_id": util.UUIDToString(outcome.ID), "delegation_return_id": util.UUIDToString(address.ID), "issue_id": util.UUIDToString(address.IssueID), "outcome": outcome.Status})
 	if err != nil {
 		return empty, err
@@ -343,7 +372,7 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	if err != nil {
 		return empty, err
 	}
-	if err := q.SetDelegationResultTask(ctx, db.SetDelegationResultTaskParams{TaskID: outcome.ID, DelegationReturnID: address.ID, NotificationTaskID: task.ID, NotificationDeliveryID: message.ID}); err != nil {
+	if err := q.SetDelegationResultTask(ctx, db.SetDelegationResultTaskParams{TaskID: outcome.ID, DelegationReturnID: incoming.DelegationReturnID, DeliveryReturnID: address.ID, NotificationTaskID: task.ID, NotificationDeliveryID: message.ID}); err != nil {
 		return empty, err
 	}
 	if _, err := q.PropagateResultSourceReturns(ctx, db.PropagateResultSourceReturnsParams{TaskID: task.ID}); err != nil {
@@ -400,7 +429,7 @@ func VerifiedDelegationResult(ctx context.Context, q *db.Queries, task db.AgentT
 	if parseErr != nil || projected == nil {
 		return nil, resultRefusal("invalid_result_projection")
 	}
-	address, err := q.GetDelegationReturnByID(ctx, link.DelegationReturnID)
+	address, err := q.GetDelegationReturnByID(ctx, delegation.DeliveryReturnID(link))
 	if err != nil {
 		return nil, err
 	}
