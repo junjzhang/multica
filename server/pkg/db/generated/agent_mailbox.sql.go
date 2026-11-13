@@ -1536,6 +1536,7 @@ SET delivery_status = CASE
     END,
     delivery_failure_streak = CASE
         WHEN $1 = 'unknown' OR ($1 = 'pending' AND $4::text = 'unavailable') THEN LEAST(delivery_failure_streak + 1, 3)
+        WHEN $1 = 'pending' AND $4::text = 'dependency' AND withdrawn_at IS NULL THEN delivery_failure_streak
         ELSE 0
     END,
     delivery_retry_class = CASE WHEN $1 = 'pending' AND withdrawn_at IS NULL THEN $4::text ELSE '' END,

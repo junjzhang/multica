@@ -311,6 +311,9 @@ func TestBusyResetsFailureStreakBeforeOffline(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
 	created := enqueueGeneric(t, pool, workspaceID, agentID, "busy-then-offline")
+	if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET delivery_failure_streak = 2 WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
 	queue := NewQueue(db.New(pool), pool)
 	request := ClaimRequest{Scope: Scope{WorkspaceID: workspaceID}, DaemonID: daemonID, OwnerUserID: ownerID}
 	for i := 0; i < 12; i++ {
@@ -338,47 +341,105 @@ func TestBusyResetsFailureStreakBeforeOffline(t *testing.T) {
 	}
 }
 
-func TestHostRecoveryWakesOnlyOfflinePending(t *testing.T) {
+func TestDependencyDoesNotResetOfflineStreak(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
-	session := fixtureSessionID(t, pool, agentID)
-	recovered := enqueueGeneric(t, pool, workspaceID, agentID, "recovered")
-	offline := enqueueGeneric(t, pool, workspaceID, agentID, "offline-wake")
-	unknown := enqueueGeneric(t, pool, workspaceID, agentID, "unknown-keep")
-	dependency := enqueueGeneric(t, pool, workspaceID, agentID, "dependency-keep")
-	other := enqueueGeneric(t, pool, workspaceID, agentID, "other-host")
-	var otherSession string
-	if err := pool.QueryRow(context.Background(), `INSERT INTO external_agent_session (workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, daemon_id) VALUES ($1,$2,$3,'paseo','other-host',$4,'other',$5) RETURNING id::text`, workspaceID, ownerID, agentID, uuid.NewString(), daemonID).Scan(&otherSession); err != nil {
-		t.Fatal(err)
-	}
-	_, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET target_session_id = CASE WHEN id = $5 THEN $6::uuid ELSE target_session_id END, delivery_status = CASE WHEN id = $3 THEN 'unknown' ELSE 'pending' END, delivery_retry_class = CASE WHEN id = $4 THEN 'dependency' ELSE 'unavailable' END, next_attempt_at = now() + interval '10 minutes' WHERE id IN ($1,$2,$3,$4,$5)`, recovered.ID, offline.ID, unknown.ID, dependency.ID, other.ID, otherSession)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, recovered.ID); err != nil {
+	created := enqueueGeneric(t, pool, workspaceID, agentID, "dependency-streak")
+	if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET delivery_failure_streak = 2 WHERE id = $1`, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	queue := NewQueue(db.New(pool), pool)
 	request := ClaimRequest{Scope: Scope{WorkspaceID: workspaceID}, DaemonID: daemonID, OwnerUserID: ownerID}
 	claims, err := queue.Claim(context.Background(), request)
-	if err != nil || len(claims) != 1 || claims[0].Session.SessionID == "" || claims[0].Target.SessionID != session {
+	if err != nil || len(claims) != 1 {
 		t.Fatalf("claims = %v, err = %v", claims, err)
 	}
-	_, err = queue.RecordOutcome(context.Background(), OutcomeRequest{Scope: request.Scope, DeliveryID: recovered.ID, DaemonID: daemonID, LeaseToken: claims[0].LeaseToken, State: OutcomeRetry, RetryClass: RetryBusy})
+	_, err = queue.RecordOutcome(context.Background(), OutcomeRequest{Scope: request.Scope, DeliveryID: created.ID, DaemonID: daemonID, LeaseToken: claims[0].LeaseToken, State: OutcomeRetry, RetryClass: RetryDependency})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		id    string
-		ready bool
-	}{{offline.ID, true}, {unknown.ID, false}, {dependency.ID, false}, {other.ID, false}} {
-		var ready bool
-		if err := pool.QueryRow(context.Background(), `SELECT next_attempt_at <= now() FROM agent_mailbox_message WHERE id = $1`, tc.id).Scan(&ready); err != nil {
-			t.Fatal(err)
+	var streak int
+	if err := pool.QueryRow(context.Background(), `SELECT delivery_failure_streak FROM agent_mailbox_message WHERE id = $1`, created.ID).Scan(&streak); err != nil {
+		t.Fatal(err)
+	}
+	if streak != 2 {
+		t.Fatalf("streak = %d, want 2", streak)
+	}
+}
+
+func TestUnknownBackoffRetainsVerificationOnly(t *testing.T) {
+	pool := openDeliveryTestPool(t)
+	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
+	created := enqueueGeneric(t, pool, workspaceID, agentID, "unknown-backoff")
+	queue := NewQueue(db.New(pool), pool)
+	request := ClaimRequest{Scope: Scope{WorkspaceID: workspaceID}, DaemonID: daemonID, OwnerUserID: ownerID}
+	for i, expected := range []time.Duration{15 * time.Second, 60 * time.Second, 120 * time.Second, 120 * time.Second} {
+		claims, err := queue.Claim(context.Background(), request)
+		if err != nil || len(claims) != 1 || (i > 0 && !claims[0].VerifyOnly) {
+			t.Fatalf("claim %d = %v, err = %v", i, claims, err)
 		}
-		if ready != tc.ready {
-			t.Errorf("delivery %s ready = %v, want %v", tc.id, ready, tc.ready)
+		before := time.Now()
+		stored, err := queue.RecordOutcome(context.Background(), OutcomeRequest{Scope: request.Scope, DeliveryID: created.ID, DaemonID: daemonID, LeaseToken: claims[0].LeaseToken, State: OutcomeUnknown, Error: "unconfirmed"})
+		if err != nil || stored.NextAttemptAt == nil {
+			t.Fatalf("outcome = %v, err = %v", stored, err)
 		}
+		if delay := stored.NextAttemptAt.Sub(before); delay < expected-time.Second || delay > expected+time.Second {
+			t.Fatalf("delay = %v, want %v", delay, expected)
+		}
+		makeClaimableNow(t, pool, created.ID)
+	}
+}
+
+func TestHostRecoveryWakesOnlyOfflinePending(t *testing.T) {
+	for _, state := range []OutcomeState{OutcomeRetry, OutcomeDelivered} {
+		t.Run(string(state), func(t *testing.T) {
+			pool := openDeliveryTestPool(t)
+			workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
+			session := fixtureSessionID(t, pool, agentID)
+			recovered := enqueueGeneric(t, pool, workspaceID, agentID, "recovered")
+			offline := enqueueGeneric(t, pool, workspaceID, agentID, "offline-wake")
+			unknown := enqueueGeneric(t, pool, workspaceID, agentID, "unknown-keep")
+			dependency := enqueueGeneric(t, pool, workspaceID, agentID, "dependency-keep")
+			other := enqueueGeneric(t, pool, workspaceID, agentID, "other-host")
+			var otherSession string
+			if err := pool.QueryRow(context.Background(), `INSERT INTO external_agent_session (workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, daemon_id) VALUES ($1,$2,$3,'paseo','other-host',$4,'other',$5) RETURNING id::text`, workspaceID, ownerID, agentID, uuid.NewString(), daemonID).Scan(&otherSession); err != nil {
+				t.Fatal(err)
+			}
+			_, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET target_session_id = CASE WHEN id = $5 THEN $6::uuid ELSE target_session_id END, delivery_status = CASE WHEN id = $3 THEN 'unknown' ELSE 'pending' END, delivery_retry_class = CASE WHEN id = $4 THEN 'dependency' ELSE 'unavailable' END, next_attempt_at = now() + interval '10 minutes' WHERE id IN ($1,$2,$3,$4,$5)`, recovered.ID, offline.ID, unknown.ID, dependency.ID, other.ID, otherSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, recovered.ID); err != nil {
+				t.Fatal(err)
+			}
+			queue := NewQueue(db.New(pool), pool)
+			request := ClaimRequest{Scope: Scope{WorkspaceID: workspaceID}, DaemonID: daemonID, OwnerUserID: ownerID}
+			claims, err := queue.Claim(context.Background(), request)
+			if err != nil || len(claims) != 1 || claims[0].Session.SessionID == "" || claims[0].Target.SessionID != session {
+				t.Fatalf("claims = %v, err = %v", claims, err)
+			}
+			_, err = queue.RecordOutcome(context.Background(), OutcomeRequest{Scope: request.Scope, DeliveryID: recovered.ID, DaemonID: daemonID, LeaseToken: claims[0].LeaseToken, State: state, RetryClass: func() RetryClass {
+				if state == OutcomeRetry {
+					return RetryBusy
+				}
+				return ""
+			}()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				id    string
+				ready bool
+			}{{offline.ID, true}, {unknown.ID, false}, {dependency.ID, false}, {other.ID, false}} {
+				var ready bool
+				if err := pool.QueryRow(context.Background(), `SELECT next_attempt_at <= now() FROM agent_mailbox_message WHERE id = $1`, tc.id).Scan(&ready); err != nil {
+					t.Fatal(err)
+				}
+				if ready != tc.ready {
+					t.Errorf("delivery %s ready = %v, want %v", tc.id, ready, tc.ready)
+				}
+			}
+		})
 	}
 }
 
