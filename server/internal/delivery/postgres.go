@@ -205,6 +205,10 @@ func deliveryFromRow(row db.AgentMailboxMessage) Delivery {
 	if len(row.Payload) > 0 {
 		out.Payload = append(json.RawMessage(nil), row.Payload...)
 	}
+	if (row.DeliveryStatus == "pending" || row.DeliveryStatus == "unknown") && row.NextAttemptAt.Valid {
+		next := row.NextAttemptAt.Time
+		out.NextAttemptAt = &next
+	}
 	if row.DeliveredAt.Valid {
 		deliveredAt := row.DeliveredAt.Time
 		out.DeliveredAt = &deliveredAt

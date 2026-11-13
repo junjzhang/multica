@@ -128,6 +128,7 @@ type daemonDeliveryOutcome struct {
 	HostReceipt      *string `json:"host_receipt"`
 	LastError        *string `json:"last_error"`
 	DeliveredAt      *string `json:"delivered_at"`
+	NextAttemptAt    *string `json:"next_attempt_at"`
 	ProcessingStatus string  `json:"processing_status"`
 }
 
@@ -201,6 +202,7 @@ func (h *Handler) RecordDaemonDeliveryOutcome(w http.ResponseWriter, r *http.Req
 		HostReceipt:      stringPtr(stored.HostReceipt),
 		LastError:        stringPtr(stored.LastError),
 		DeliveredAt:      timePtr(stored.DeliveredAt),
+		NextAttemptAt:    timePtr(stored.NextAttemptAt),
 		ProcessingStatus: stored.ProcessingStatus,
 	})
 }

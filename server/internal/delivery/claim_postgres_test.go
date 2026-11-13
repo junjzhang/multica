@@ -226,6 +226,9 @@ func TestQueueRecordOutcomeBusyShortDelayAndStaleTokenFences(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
 	created := enqueueGeneric(t, pool, workspaceID, agentID, "run-42")
+	if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET attempts = 100 WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	queue := NewQueue(db.New(pool), pool)
 	claims, err := queue.Claim(context.Background(), ClaimRequest{
@@ -245,7 +248,8 @@ func TestQueueRecordOutcomeBusyShortDelayAndStaleTokenFences(t *testing.T) {
 		RetryClass: RetryBusy,
 		Error:      "agent_busy",
 	}
-	if _, err := queue.RecordOutcome(context.Background(), request); err != nil {
+	stored, err := queue.RecordOutcome(context.Background(), request)
+	if err != nil {
 		t.Fatalf("record busy: %v", err)
 	}
 	var status string
@@ -260,6 +264,9 @@ func TestQueueRecordOutcomeBusyShortDelayAndStaleTokenFences(t *testing.T) {
 	}
 	if delay := time.Until(nextAttempt); delay > 30*time.Second {
 		t.Fatalf("busy retry delay = %v, want a short delay rather than the failure backoff", delay)
+	}
+	if stored.NextAttemptAt == nil || !stored.NextAttemptAt.Equal(nextAttempt) {
+		t.Fatalf("returned next attempt = %v, database = %v", stored.NextAttemptAt, nextAttempt)
 	}
 
 	// The same token cannot acknowledge the row twice.

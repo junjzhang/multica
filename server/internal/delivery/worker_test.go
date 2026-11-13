@@ -1,9 +1,12 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,8 +25,9 @@ type fakeOutcomeClient struct {
 	claims   map[string][][]Claim
 	claimErr map[string]error
 
-	acks    []recordedOutcome
-	ackErrs []error
+	acks        []recordedOutcome
+	ackErrs     []error
+	nextAttempt *time.Time
 }
 
 func newFakeOutcomeClient() *fakeOutcomeClient {
@@ -55,7 +59,35 @@ func (f *fakeOutcomeClient) RecordDeliveryOutcome(_ context.Context, workspaceID
 			return Delivery{}, err
 		}
 	}
-	return Delivery{ID: req.DeliveryID, DeliveryStatus: req.storedStatus()}, nil
+	return Delivery{ID: req.DeliveryID, DeliveryStatus: req.storedStatus(), NextAttemptAt: f.nextAttempt}, nil
+}
+
+func TestWorkerLogsAttemptWithoutPayloadOrCredentials(t *testing.T) {
+	next := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	client := newFakeOutcomeClient()
+	client.nextAttempt = &next
+	claim := testClaim("delivery-1", "session-1", "secret-token")
+	claim.Attempts = 42
+	claim.Payload = []byte("private payload")
+	host := newFakeHost()
+	host.deliverErrs[claim.ID] = &HostError{Kind: HostBusy, Code: "agent_busy", Message: "private payload bearer secret"}
+	var logs bytes.Buffer
+	worker := NewWorker(client, host, nil, "daemon-1", slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err := worker.handleClaim(context.Background(), claim); err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]any{"level": "INFO", "delivery_id": "delivery-1", "kind": "ci_terminal", "session_id": "session-1", "attempt": float64(42), "result": "busy", "next_attempt_at": "2026-01-02T03:04:05Z", "reason": "session busy"} {
+		if entry[key] != want {
+			t.Errorf("%s = %v, want %v", key, entry[key], want)
+		}
+	}
+	if strings.Contains(logs.String(), "private payload") || strings.Contains(logs.String(), "secret") {
+		t.Fatalf("sensitive data in log: %s", logs.String())
+	}
 }
 
 func (f *fakeOutcomeClient) ackSnapshot() []recordedOutcome {
