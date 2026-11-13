@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -328,5 +330,53 @@ func TestTGitSnapshotResponsePreservesGatesWithoutNamedChecks(t *testing.T) {
 		if response.ChecksTotal != 0 || response.ChecksRollup == nil || *response.ChecksRollup != state || response.ChecksConclusion == nil || *response.ChecksConclusion != conclusion {
 			t.Fatalf("gate %s was lost without named checks: %+v", state, response)
 		}
+	}
+}
+
+func TestDescendantTGitSnapshotProjection(t *testing.T) {
+	ctx := context.Background()
+	conn := seedVCSConnection(t, ctx, withVCSBox(t), "tgit", "https://git.test")
+	parent := newVCSIssue(t, "TGit parent")
+	var child IssueResponse
+	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "TGit child", "parent_issue_id": parent.ID})).Want(http.StatusCreated).JSON(&child)
+	t.Cleanup(func() { cleanupVCS(ctx, child.ID); cleanupVCS(ctx, parent.ID) })
+	raw, _ := json.Marshal(map[string]any{"object_kind": "merge_request", "object_attributes": map[string]any{
+		"iid": 42, "title": child.Identifier + " fix", "state": "opened", "action": "open", "source_branch": "feature/test", "url": "https://git.test/org/repo/merge_requests/42", "target": map[string]any{"web_url": "https://git.test/org/repo"}, "last_commit": map[string]any{"id": "head"}, "created_at": "2026-10-26T06:00:00Z", "updated_at": "2026-10-26T07:00:00Z",
+	}})
+	w := httptest.NewRecorder()
+	testHandler.HandleVCSWebhook(w, vcsWebhookReq(conn, map[string]string{"X-Event": "Merge Request Hook", "X-Token": vcsTestSecret}, raw))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("webhook %d: %s", w.Code, w.Body.String())
+	}
+	rows, err := testHandler.Queries.ListVCSPullRequestsByIssue(ctx, parseUUID(child.ID))
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("MR rows: %+v %v", rows, err)
+	}
+	refresher := newTGitSnapshotRefresher(testHandler)
+	refresher.fetch = func(context.Context, string, string, string, string, int32) (vcs.PullRequestEvent, *vcs.TGitSnapshot, error) {
+		ev, snap := snapshotResult()
+		ev.Title = child.Identifier + " fix"
+		snap.Checks[0].State = "failure"
+		conflict := true
+		snap.HasConflicts = &conflict
+		return ev, snap, nil
+	}
+	refresher.refresh(ctx, rows[0].ID)
+	var result struct {
+		PullRequests []GitHubPullRequestResponse `json:"pull_requests"`
+		Descendants  []descendantPullRequest     `json:"descendant_pull_requests"`
+	}
+	testutil.Call(t, testHandler.ListPullRequestsForIssue, withURLParam(newRequest(http.MethodGet, "/api/issues/"+parent.ID+"/pull-requests", nil), "id", parent.ID)).Want(http.StatusOK).JSON(&result)
+	if len(result.Descendants) != 1 {
+		t.Fatalf("projection: %+v", result)
+	}
+	pr := result.Descendants[0]
+	if pr.SourceIdentifier != child.Identifier || pr.Review == nil || pr.Review.State != "approving" || pr.Mergeable == nil || *pr.Mergeable != "conflicting" || pr.ChecksRollup == nil || *pr.ChecksRollup != "failure" {
+		t.Fatalf("snapshot projection: %+v", pr)
+	}
+	testutil.Call(t, testHandler.LinkIssuePullRequest, withURLParam(newRequest(http.MethodPost, "/api/issues/"+parent.ID+"/pull-requests", map[string]any{"url": pr.HtmlURL}), "id", parent.ID)).Want(http.StatusOK)
+	testutil.Call(t, testHandler.ListPullRequestsForIssue, withURLParam(newRequest(http.MethodGet, "/api/issues/"+parent.ID+"/pull-requests", nil), "id", parent.ID)).Want(http.StatusOK).JSON(&result)
+	if len(result.PullRequests) != 1 || len(result.Descendants) != 0 {
+		t.Fatalf("duplicate not removed: %+v", result)
 	}
 }
