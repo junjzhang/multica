@@ -275,6 +275,38 @@ func TestQueueRecordOutcomeBusyShortDelayAndStaleTokenFences(t *testing.T) {
 	}
 }
 
+func TestQueueUnavailableRetryBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		attempts int
+		delay    time.Duration
+	}{
+		{0, 15 * time.Second}, {1, 60 * time.Second}, {100, 900 * time.Second},
+	} {
+		t.Run(fmt.Sprint(tc.attempts), func(t *testing.T) {
+			pool := openDeliveryTestPool(t)
+			workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
+			created := enqueueGeneric(t, pool, workspaceID, agentID, "offline")
+			if _, err := pool.Exec(context.Background(), `UPDATE agent_mailbox_message SET attempts = $2 WHERE id = $1`, created.ID, tc.attempts); err != nil {
+				t.Fatal(err)
+			}
+			queue := NewQueue(db.New(pool), pool)
+			claims, err := queue.Claim(context.Background(), ClaimRequest{Scope: Scope{WorkspaceID: workspaceID}, DaemonID: daemonID, OwnerUserID: ownerID})
+			if err != nil || len(claims) != 1 {
+				t.Fatalf("claim = %+v, err = %v", claims, err)
+			}
+			before := time.Now()
+			stored, err := queue.RecordOutcome(context.Background(), OutcomeRequest{Scope: Scope{WorkspaceID: workspaceID}, DeliveryID: created.ID, DaemonID: daemonID, LeaseToken: claims[0].LeaseToken, State: OutcomeRetry, RetryClass: RetryUnavailable})
+			if err != nil || stored.NextAttemptAt == nil {
+				t.Fatalf("record = %+v, err = %v", stored, err)
+			}
+			delay := stored.NextAttemptAt.Sub(before)
+			if delay < tc.delay-time.Second || delay > tc.delay+time.Second {
+				t.Fatalf("delay = %v, want %v", delay, tc.delay)
+			}
+		})
+	}
+}
+
 func TestQueueReclaimsExpiredLeaseAndUnknownForVerificationOnly(t *testing.T) {
 	pool := openDeliveryTestPool(t)
 	workspaceID, agentID, ownerID, daemonID := newClaimFixture(t, pool)
