@@ -1882,24 +1882,6 @@ func TestFinalizePreservesUnstagedTrackedRuntimeAndReleasesBranch(t *testing.T) 
 	}
 }
 
-func TestPendingRuntimePathsIncludesStagedDeletionAndIgnoredFiles(t *testing.T) {
-	repo := newTestRepo(t)
-	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
-	gitRun(t, repo, "add", "-f", ".multica/tracked")
-	gitRun(t, repo, "commit", "-m", "tracked runtime path")
-	wt := prepareForTest(t, repo)
-	gitRun(t, wt.Path, "rm", "--cached", ".multica/tracked")
-	writeFile(t, filepath.Join(wt.Path, ".multica", "new"), "private")
-	writeFile(t, filepath.Join(wt.Path, ".gitignore"), ".multica/new\n")
-	paths, err := wt.PendingRuntimePaths()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprint(paths) != "[.multica/new .multica/tracked]" {
-		t.Fatalf("paths = %q", paths)
-	}
-}
-
 func TestRemovePreservesRuntimeFilesCreatedAfterFinalize(t *testing.T) {
 	repo := newTestRepo(t)
 	wt := prepareForTest(t, repo)

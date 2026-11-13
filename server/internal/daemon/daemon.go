@@ -8582,12 +8582,6 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 				taskResult.EnvRoot = env.RootDir
 			}
 			if returnErr == nil && taskResult.Status == "completed" && ctx.Err() == nil && d.backgroundWaits != nil && d.backgroundWaits.HasPendingTask(task.ID) {
-				paths, err := env.LocalWorktree.PendingRuntimePaths()
-				if err != nil {
-					taskResult.Comment += fmt.Sprintf("\n\nCould not inspect .multica files in the retained worktree %s: %v", env.LocalWorktree.Path, err)
-				} else if len(paths) > 0 {
-					taskResult.Comment += fmt.Sprintf("\n\nNew .multica paths will not be automatically committed: %q. They remain in the worktree at %s for manual recovery.", paths, env.LocalWorktree.Path)
-				}
 				if err := env.LocalWorktree.SaveForReuse(env.RootDir); err != nil {
 					returnErr = errors.Join(returnErr, err)
 				}
