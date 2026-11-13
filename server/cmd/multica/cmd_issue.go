@@ -504,7 +504,7 @@ const issueListMaxPageSize = 100
 // always sorted ascending (the board's manual drag order), so --direction is
 // only meaningful for the other columns.
 var validIssueSortColumns = []string{
-	"position", "title", "created_at", "start_date", "due_date", "priority",
+	"position", "title", "created_at", "updated_at", "last_activity", "status", "start_date", "due_date", "priority",
 }
 
 // validIssueFields are the top-level keys /api/issues actually emits for
@@ -536,6 +536,29 @@ var directionalIssueSortColumns = func() []string {
 	}
 	return cols
 }()
+
+func parseIssueUpdatedSince(value string, now time.Time) (time.Time, error) {
+	start, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		durationValue := value
+		if strings.HasSuffix(value, "d") {
+			days, dayErr := strconv.ParseUint(strings.TrimSuffix(value, "d"), 10, 64)
+			if dayErr != nil || days > uint64((1<<63-1)/int64(24*time.Hour)) {
+				return time.Time{}, fmt.Errorf("invalid --updated-since %q: use a past RFC3339 timestamp or positive duration (e.g. 24h, 7d)", value)
+			}
+			durationValue = strconv.FormatUint(days*24, 10) + "h"
+		}
+		duration, durationErr := time.ParseDuration(durationValue)
+		if durationErr != nil || duration <= 0 {
+			return time.Time{}, fmt.Errorf("invalid --updated-since %q: use a past RFC3339 timestamp or positive duration (e.g. 24h, 7d)", value)
+		}
+		start = now.Add(-duration)
+	}
+	if !start.Before(now) {
+		return time.Time{}, fmt.Errorf("invalid --updated-since %q: timestamp must be before now", value)
+	}
+	return start, nil
+}
 
 // validateIssueStatus checks the shape of a status key, not its membership.
 //
@@ -617,8 +640,9 @@ func init() {
 	issueListCmd.Flags().StringArray("property", nil, `Filter by custom property, written as "Name=Value" or as a comparison such as "Score>=3", "Ship Date<2026-01-01" or "Notes~=review" (repeatable, one member per flag; quote it so the shell does not read < and > as redirection). Name is a property name (case-insensitive) or its UUID; a name containing =, <, >, ! or ~ has to be given by UUID. Use __none__ to match issues where the property is unset; it works for every type, so an option or member actually named __none__ has to be given by id. Repeating a property matches ANY of its members; different properties must ALL match. The per-type value forms and comparisons are in the command description above.`)
 	issueListCmd.Flags().Int("limit", 50, fmt.Sprintf("Page size, 1 to %d (the server returns at most %d issues per request; use --offset to page through more)", issueListMaxPageSize, issueListMaxPageSize))
 	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination; while --output json reports has_more, advance it by the number of issues in that same response)")
-	issueListCmd.Flags().String("sort", "", "Sort column: position (default, manual board order), title, created_at, start_date, due_date, priority, or property:<name-or-id> to sort by a custom property (select properties sort by option order)")
+	issueListCmd.Flags().String("sort", "", "Sort column: "+strings.Join(validIssueSortColumns, ", ")+", or property:<name-or-id> to sort by a custom property (position is the default manual order; select properties sort by option order)")
 	issueListCmd.Flags().String("direction", "", "Sort direction (asc or desc); requires --sort to be a non-position column or a property sort (position is always ascending)")
+	issueListCmd.Flags().String("updated-since", "", "Only issues updated since an RFC3339 timestamp or positive duration (e.g. 24h, 7d), up to the time of this request")
 	issueListCmd.Flags().String("fields", "", "JSON output only: comma-separated list of issue fields to include (e.g. id,title,status,priority). Filtering happens client-side after the full response is fetched, so this shrinks CLI output size and agent context cost, not network/server-side cost. Omit for the full issue object (default, unchanged). Valid fields: "+strings.Join(validIssueFields, ", "))
 	issueListCmd.Flags().Bool("resolve-properties", false, resolvePropertiesHelp)
 
@@ -793,6 +817,17 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 
 	params := url.Values{}
 	params.Set("workspace_id", client.WorkspaceID)
+	if cmd.Flags().Changed("updated-since") {
+		v, _ := cmd.Flags().GetString("updated-since")
+		now := time.Now().UTC()
+		start, err := parseIssueUpdatedSince(v, now)
+		if err != nil {
+			return err
+		}
+		params.Set("date_field", "updated_at")
+		params.Set("date_start", start.Format(time.RFC3339Nano))
+		params.Set("date_end", now.Format(time.RFC3339Nano))
+	}
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
 		params.Set("status", v)
 	}
