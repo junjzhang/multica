@@ -214,6 +214,47 @@ func TestExternalAgentArchiveRechecksReferencesAfterPreview(t *testing.T) {
 	}
 }
 
+func TestExternalAgentArchiveSquadReferences(t *testing.T) {
+	agent, _, _ := externalAgentFixture(t, "Archive squad references", "archive-squad-daemon")
+	squad := dbfx.Squad(t, "Archive squad references", agent)
+	dbfx.Exec(t, "UPDATE squad SET archived_at=now() WHERE id=$1", squad)
+
+	code, resp, body := archivePreflightCall(t, agent)
+	if code != http.StatusOK || !resp.Archivable || len(resp.Blockers) != 0 {
+		t.Fatalf("archived squad blocked preflight: %d %+v %s", code, resp, body)
+	}
+
+	// The final scan must see a squad restored after the preview.
+	dbfx.Exec(t, "UPDATE squad SET archived_at=NULL WHERE id=$1", squad)
+	rec := testutil.Call(t, testHandler.ArchiveAgent, withURLParam(
+		newRequest(http.MethodPost, "/api/agents/"+agent+"/archive", nil), "id", agent)).Want(http.StatusConflict)
+	var refusal struct {
+		Blockers []ArchiveBlocker `json:"blockers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+		t.Fatal(err)
+	}
+	blockers := blockersByCode(refusal.Blockers)
+	for _, key := range []string{"squad_default_leader", "squad_memberships"} {
+		if blockers[key].Count != 1 || !blockers[key].Blocking {
+			t.Fatalf("restored squad missing %s: %+v", key, refusal.Blockers)
+		}
+	}
+	code, resp, body = archivePreflightCall(t, agent)
+	if code != http.StatusOK || resp.Archivable || len(blockersByCode(resp.Blockers)) != 2 {
+		t.Fatalf("active squad preflight: %d %+v %s", code, resp, body)
+	}
+
+	dbfx.Exec(t, "UPDATE squad SET archived_at=now() WHERE id=$1", squad)
+	testutil.Call(t, testHandler.ArchiveAgent, withURLParam(
+		newRequest(http.MethodPost, "/api/agents/"+agent+"/archive", nil), "id", agent)).Want(http.StatusOK)
+	var got SquadResponse
+	testutil.Call(t, testHandler.GetSquad, squadScopeReq("", http.MethodGet, "/api/squads/"+squad, nil, map[string]string{"id": squad})).Want(http.StatusOK).JSON(&got)
+	if got.LeaderID != agent {
+		t.Fatalf("archived squad leader = %s, want %s", got.LeaderID, agent)
+	}
+}
+
 // A new dispatch and an archive race on the same agent row. Exactly one wins,
 // and the archive can never commit while leaving the new assignment behind.
 func TestExternalAgentArchiveSerializesWithNewAssignment(t *testing.T) {

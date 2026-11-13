@@ -64,7 +64,9 @@ WITH refs AS (
     UNION ALL
     SELECT 'squad_memberships', sm.id::text
     FROM squad_member sm
+    JOIN squad s ON s.id = sm.squad_id
     WHERE sm.member_type = 'agent' AND sm.member_id = $1
+      AND s.archived_at IS NULL
     UNION ALL
     SELECT 'assigned_issues', i.id::text
     FROM issue i
