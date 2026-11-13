@@ -59,9 +59,14 @@ func DeliveryReturnID(link db.AgentTaskDelegationReturn) pgtype.UUID {
 }
 
 func RecordContinuationAudit(ctx context.Context, q *db.Queries, prior, next db.IssueDelegationReturn, result pgtype.UUID, action string) error {
+	source, err := q.GetAgentTask(ctx, prior.SourceTaskID)
+	if err != nil {
+		return fmt.Errorf("load audited continuation source: %w", err)
+	}
 	details, err := json.Marshal(map[string]string{
 		"from_return_id": util.UUIDToString(prior.ID), "to_return_id": util.UUIDToString(next.ID),
 		"from_source_task_id": util.UUIDToString(prior.SourceTaskID), "to_source_task_id": util.UUIDToString(next.SourceTaskID),
+		"source_issue_id": util.UUIDToString(source.IssueID), "from_source_status": source.Status,
 		"result_task_id": util.UUIDToString(result), "reason": "managed_terminal_source_continuation",
 	})
 	if err != nil {

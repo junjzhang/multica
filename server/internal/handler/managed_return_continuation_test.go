@@ -98,6 +98,9 @@ func TestManagedReturnContinuationForwardsLateResultOnce(t *testing.T) {
 	if n := countValue(t, `SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='delegation_result_forwarded' AND details->>'result_task_id'=$2`, result.IssueID, uuidToString(result.ID)); n != 1 {
 		t.Fatalf("forward audit count = %d, want 1", n)
 	}
+	if n := countValue(t, `SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action='delegation_result_forwarded' AND details->>'source_issue_id'=$2 AND details->>'from_source_status'='completed'`, result.IssueID, uuidToString(source.IssueID)); n != 1 {
+		t.Fatal("forward audit omitted the verified source issue or terminal state")
+	}
 	if n := countValue(t, `SELECT count(*) FROM agent_mailbox_message WHERE payload->>'result_task_id'=$1`, uuidToString(result.ID)); n != 1 {
 		t.Fatalf("result delivered %d times", n)
 	}
