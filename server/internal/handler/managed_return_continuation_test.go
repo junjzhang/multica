@@ -138,7 +138,7 @@ func TestManagedReturnContinuationPreservesMaterializedHistory(t *testing.T) {
 }
 
 func TestManagedReturnContinuationRejectsUnsafeSources(t *testing.T) {
-	for _, kind := range []string{"old-active", "concurrent", "other-issue", "unconfirmed-pin", "same-task"} {
+	for _, kind := range []string{"old-active", "concurrent", "other-issue", "unconfirmed-pin", "same-task", "runtime", "provider"} {
 		t.Run(kind, func(t *testing.T) {
 			source, result, original := resultFixture(t, "unsafe-"+kind)
 			run, token := continuationRun(t, source, "unsafe-"+kind)
@@ -155,6 +155,12 @@ func TestManagedReturnContinuationRejectsUnsafeSources(t *testing.T) {
 			case "same-task":
 				dbfx.Exec(t, `UPDATE agent_task_queue SET status='running',session_id='repinned-same-task' WHERE id=$1`, source.ID)
 				token = taskTokenFixture(t, uuidToString(source.AgentID), uuidToString(source.ID))
+			case "runtime":
+				other := dbfx.Runtime(t, "changed continuation runtime", testutil.Cols{"provider": "codex"})
+				dbfx.Exec(t, `UPDATE agent SET runtime_id=$2 WHERE id=$1`, source.AgentID, other)
+				dbfx.Exec(t, `UPDATE agent_task_queue SET runtime_id=$2 WHERE id=$1`, run.ID, other)
+			case "provider":
+				dbfx.Exec(t, `UPDATE agent_runtime SET provider='claude' WHERE id=$1`, source.RuntimeID)
 			}
 			worker, _ := executableTarget(t, "unsafe-reviewer-"+kind)
 			dispatchContinuation(t, token, result, worker, http.StatusConflict)
