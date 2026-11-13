@@ -1900,6 +1900,25 @@ func TestRemovePreservesRuntimeFilesCreatedAfterFinalize(t *testing.T) {
 	}
 }
 
+func TestRemoveReportsUnignoredRuntimeFiles(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if _, err := wt.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, ".multica", "late"), "keep")
+	var retained *RetainedRuntimePathsError
+	if err := wt.Remove(worktreeTestLogger()); !errors.As(err, &retained) {
+		t.Fatalf("Remove = %v", err)
+	}
+	if retained.Worktree != wt.Path || len(retained.Paths) != 1 || retained.Paths[0] != ".multica/late" {
+		t.Fatalf("retained = %+v", retained)
+	}
+	if present, err := HasRetainedRuntimePaths(filepath.Dir(wt.Path)); err != nil || !present {
+		t.Fatalf("recovery marker = %v, %v", present, err)
+	}
+}
+
 // Git must rehash a same-size edit when its timestamp equals the index's.
 // A private index with a newer timestamp would incorrectly make it look clean.
 func TestCaptureUserSnapshotPreservesRacyIndexTimestamp(t *testing.T) {
