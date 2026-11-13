@@ -293,9 +293,9 @@ func TestClaimTasksByRuntime_RepairsStaleCommentPlan(t *testing.T) {
 	var survivorID string
 	if err := testPool.QueryRow(ctx, `
 		INSERT INTO comment (workspace_id, issue_id, author_type, author_id, content)
-		VALUES ($1, $2, 'member', $3, 'please still handle this')
+		VALUES ($1, $2, 'member', $3, '[@Agent](mention://agent/' || $4 || ') please still handle this')
 		RETURNING id
-	`, testWorkspaceID, issueID, testUserID).Scan(&survivorID); err != nil {
+	`, testWorkspaceID, issueID, testUserID, agentID).Scan(&survivorID); err != nil {
 		t.Fatalf("seed survivor comment: %v", err)
 	}
 	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM comment WHERE id = $1`, survivorID) })

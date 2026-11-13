@@ -49,7 +49,7 @@ export function PullRequestsSection({
   // Older backends have no link / auto-complete endpoints; keep the header
   // actions hidden until the server says it supports them.
   const supported = !!data?.auto_complete;
-  const count = data?.pull_requests.length ?? 0;
+  const count = (data?.pull_requests.length ?? 0) + (data?.descendant_pull_requests?.length ?? 0);
 
   return (
     <div>

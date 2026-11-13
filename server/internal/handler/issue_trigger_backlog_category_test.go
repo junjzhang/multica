@@ -12,7 +12,7 @@ import (
 )
 
 // Only the fixed backlog key parks work. A custom unstarted status does not.
-func TestBacklogToCustomUnstartedStatusTriggers(t *testing.T) {
+func TestStatusTransitionsDoNotLaunchRuns(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
@@ -44,7 +44,7 @@ func TestBacklogToCustomUnstartedStatusTriggers(t *testing.T) {
 		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
 	})
 
-	// Leaving the built-in backlog promotes the issue, even within unstarted.
+	// Leaving backlog is a state-only transition, even within unstarted.
 	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": parkedKey})
 	req = withURLParam(req, "id", created.ID)
 	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
@@ -54,8 +54,8 @@ func TestBacklogToCustomUnstartedStatusTriggers(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		created.ID, agentID,
 	).Scan(&tasks)
-	if tasks != 1 {
-		t.Fatalf("leaving built-in backlog must enqueue one run, got %d queued tasks", tasks)
+	if tasks != 0 {
+		t.Fatalf("leaving built-in backlog must not enqueue a run, got %d queued tasks", tasks)
 	}
 
 	// Leaving a custom unstarted status is not a second backlog promotion.
@@ -67,7 +67,22 @@ func TestBacklogToCustomUnstartedStatusTriggers(t *testing.T) {
 		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
 		created.ID, agentID,
 	).Scan(&tasks)
+	if tasks != 0 {
+		t.Fatalf("a second status transition must not enqueue a run, got %d", tasks)
+	}
+	// An explicit assignment is the intentional launch action. Move the
+	// assignee away first so the write is a real assignment change.
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"assignee_type": "member", "assignee_id": testUserID})
+	req = withURLParam(req, "id", created.ID)
+	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"assignee_type": "agent", "assignee_id": agentID})
+	req = withURLParam(req, "id", created.ID)
+	testutil.Call(t, testHandler.UpdateIssue, req).Want(http.StatusOK)
+	dbfx.QueryRow(t,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, agentID,
+	).Scan(&tasks)
 	if tasks != 1 {
-		t.Fatalf("promotion out of the backlog category must enqueue exactly 1 run, got %d", tasks)
+		t.Fatalf("explicit assignment must enqueue one run, got %d", tasks)
 	}
 }

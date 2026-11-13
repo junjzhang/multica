@@ -53,6 +53,7 @@ vi.mock("../../navigation", () => ({
   useNavigation: () => ({ push: vi.fn(), pathname: "/issues" }),
   resolveClickIntent: () => "push",
   useIntentNavigate: () => () => {},
+  useRowLink: () => () => ({ onClick: vi.fn(), onAuxClick: vi.fn() }),
   NavigationProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
@@ -337,7 +338,8 @@ const mockViewState = {
   toggleListCollapsed: vi.fn(),
 };
 
-vi.mock("@multica/core/issues/stores/view-store", () => ({
+vi.mock("@multica/core/issues/stores/view-store", async (importOriginal) => ({
+  effectiveShowSubIssues: (await importOriginal<typeof import("@multica/core/issues/stores/view-store")>()).effectiveShowSubIssues,
   useClearFiltersOnWorkspaceChange: () => {},
   PROPERTY_VIEW_PREFIX: "property:",
   propertyIdFromViewKey: (key: string) =>

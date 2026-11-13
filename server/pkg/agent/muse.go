@@ -425,6 +425,9 @@ func museUUIDv7() string {
 }
 
 func (b *museBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "muse"
@@ -648,15 +651,25 @@ func (b *museBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 				// may still be healthy and the platform retry should resume it.
 				status, message := museRequestFailure(runCtx, opts.Timeout, "session/resume", resumeErr)
 				cleanup()
-				resCh <- Result{
+				resCh <- markStrictResumeResult(Result{
 					Status:         status,
 					Error:          message,
 					DurationMs:     time.Since(startTime).Milliseconds(),
 					ResumeRejected: museSessionGone(resumeErr),
-				}
+				}, opts)
 				return
 			}
 			sessionID = museSessionID(result)
+			if strictErr := requireExactResumedSessionID(opts, sessionID, "muse session/resume"); strictErr != nil {
+				b.cfg.Logger.Warn("muse strict resume refused to continue",
+					"requested", opts.ResumeSessionID,
+					"resolved", sessionID,
+					"error", strictErr,
+				)
+				cleanup()
+				resCh <- strictResumeFailureResult(strictErr, startTime)
+				return
+			}
 			if sessionID == "" {
 				sessionID = opts.ResumeSessionID
 			}

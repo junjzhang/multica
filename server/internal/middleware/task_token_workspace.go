@@ -17,6 +17,8 @@ import (
 // conflicts so clients see one error for one condition.
 const errTaskTokenWorkspaceMismatch = "task token is bound to a different workspace"
 
+const errExternalAgentTokenWorkspaceMismatch = "external agent token is bound to a different workspace"
+
 // checkTaskTokenWorkspaceTarget rejects a task-token request whose explicit
 // workspace selectors disagree with the token's bound workspace (GitHub
 // #9403).
@@ -27,6 +29,19 @@ const errTaskTokenWorkspaceMismatch = "task token is bound to a different worksp
 // on task_token, so without this check a request for workspace B silently
 // ran against A. Running it here, before the overwrite, also covers routes
 // that never pass through the workspace middleware (e.g. file upload).
+func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID string) bool {
+	return checkBoundTokenWorkspaceTarget(w, r, queries, boundWorkspaceID, errTaskTokenWorkspaceMismatch, "task token")
+}
+
+// checkExternalAgentTokenWorkspaceTarget is the same boundary for mea_
+// credentials: an external agent is bound to one workspace and must never be
+// silently redirected into another by a selector.
+func checkExternalAgentTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID string) bool {
+	return checkBoundTokenWorkspaceTarget(w, r, queries, boundWorkspaceID, errExternalAgentTokenWorkspaceMismatch, "external agent token")
+}
+
+// checkBoundTokenWorkspaceTarget implements the shared selector check.
+// mismatchMsg is the wire error; subject names the credential in logs.
 //
 // Every value of every selector is checked — X-Workspace-ID,
 // X-Workspace-Slug, ?workspace_id, ?workspace_slug — so a duplicated
@@ -42,14 +57,14 @@ const errTaskTokenWorkspaceMismatch = "task token is bound to a different worksp
 //   - 404 unknown workspace slug
 //   - 403 selector resolves to a different workspace than the token's
 //   - 500 slug lookup failed for a reason other than "not found"
-func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID string) bool {
+func checkBoundTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queries *db.Queries, boundWorkspaceID, mismatchMsg, subject string) bool {
 	// r.URL.Query() silently drops pairs it cannot decode (bad percent
 	// escapes, unencoded ';'), so `workspace_slug=ws-b%zz` would look like
 	// "no selector" and fall through to the bound workspace. Parse strictly
 	// and refuse anything we cannot read in full.
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
-		slog.Warn("auth: task token request has malformed query string",
+		slog.Warn("auth: "+subject+" request has malformed query string",
 			"path", r.URL.Path,
 			"method", r.Method,
 			"bound_workspace_id", boundWorkspaceID,
@@ -60,7 +75,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 	}
 
 	reject := func(status int, msg, selector, value string) bool {
-		slog.Warn("auth: task token workspace selector rejected",
+		slog.Warn("auth: "+subject+" workspace selector rejected",
 			"path", r.URL.Path,
 			"method", r.Method,
 			"selector", selector,
@@ -91,7 +106,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 				return reject(http.StatusBadRequest, "invalid workspace_id", sel.name, v)
 			}
 			if util.UUIDToString(parsed) != boundWorkspaceID {
-				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, v)
+				return reject(http.StatusForbidden, mismatchMsg, sel.name, v)
 			}
 		}
 	}
@@ -118,7 +133,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 					if errors.Is(err, pgx.ErrNoRows) {
 						return reject(http.StatusNotFound, "workspace not found", sel.name, slug)
 					}
-					slog.Error("auth: task token workspace slug lookup failed", "path", r.URL.Path, "error", err)
+					slog.Error("auth: "+subject+" workspace slug lookup failed", "path", r.URL.Path, "error", err)
 					writeError(w, http.StatusInternalServerError, "failed to resolve workspace")
 					return true
 				}
@@ -126,7 +141,7 @@ func checkTaskTokenWorkspaceTarget(w http.ResponseWriter, r *http.Request, queri
 				resolved[slug] = id
 			}
 			if id != boundWorkspaceID {
-				return reject(http.StatusForbidden, errTaskTokenWorkspaceMismatch, sel.name, slug)
+				return reject(http.StatusForbidden, mismatchMsg, sel.name, slug)
 			}
 		}
 	}

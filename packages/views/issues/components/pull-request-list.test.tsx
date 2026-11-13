@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
@@ -16,7 +16,7 @@ vi.mock("@multica/core/github/queries", async () => {
     ...actual,
     issuePullRequestsOptions: (issueId: string) => ({
       queryKey: ["github", "pull-requests", issueId],
-      queryFn: async () => ({ pull_requests: mockPRs, auto_complete: mockAutoComplete }),
+      queryFn: async () => ({ pull_requests: mockPRs, descendant_pull_requests: mockDescendants, auto_complete: mockAutoComplete }),
       enabled: !!issueId,
     }),
   };
@@ -48,6 +48,7 @@ vi.mock("../../navigation", () => ({
 import { PullRequestList } from "./pull-request-list";
 
 let mockPRs: GitHubPullRequest[] = [];
+let mockDescendants: (GitHubPullRequest & { source_issue_id: string; source_identifier: string })[] = [];
 let mockAutoComplete: PRAutoComplete | null = null;
 
 function makePR(overrides: Partial<GitHubPullRequest> = {}): GitHubPullRequest {
@@ -100,6 +101,21 @@ function renderList() {
 async function waitForRender() {
   return screen.findAllByRole("link");
 }
+
+afterEach(() => { mockDescendants = []; mockAutoComplete = null; });
+
+it("labels descendant PRs and does not offer parent unlink actions", async () => {
+  mockPRs = [makePR()];
+  mockDescendants = [{ ...makePR({ id: "child-pr", number: 2, title: "Child fix" }), source_issue_id: "child", source_identifier: "MUL-2" }];
+  mockAutoComplete = { state: "waiting", pull_request_ids: ["pr-1"], issue_disabled: false, workspace_enabled: true };
+  renderList();
+  await screen.findByText("Child fix");
+  expect(screen.getByText("MUL-2")).toBeInTheDocument();
+  expect(screen.getByText("Subtask pull requests")).toBeInTheDocument();
+  const rows = screen.getAllByTestId("pull-request-row");
+  expect(rows[0]!.parentElement?.querySelector("button")).not.toBeNull();
+  expect(rows[1]!.parentElement?.querySelector("button")).toBeNull();
+});
 
 describe("PullRequestList sidebar rows", () => {
   beforeEach(() => {
@@ -260,6 +276,78 @@ describe("PullRequestList sidebar rows", () => {
     renderList();
     await waitForRender();
     expect(verdict()).toHaveTextContent(expected);
+  });
+
+  it("renders a TGit MR link without inventing a CI verdict", async () => {
+    const url = "https://git.test/org/widget/merge_requests/42";
+    mockPRs = [makePR({
+      provider: "tgit",
+      number: 42,
+      title: "Fix a TGit issue",
+      html_url: url,
+      author_login: null,
+      snapshot_available: undefined,
+      checks_conclusion: null,
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.getByRole("link", { name: /Fix a TGit issue/ })).toHaveAttribute("href", url);
+    expect(screen.queryByTestId("pull-request-verdict")).not.toBeInTheDocument();
+  });
+
+  it("shows review, conflict and CI approval as separate facts", async () => {
+    mockPRs = [makePR({
+      provider: "tgit", mergeable: "conflicting", checks_rollup: "pending",
+      checks_total: 2, checks_passed: 1, checks_running: 1,
+      review: { state: "approving", reviewers: [{ username: "alice", type: "necessary", review_state: "approved" }] },
+      check_details: [
+        { id: 1, context: "pipeline approval", state: "need_approve", target_url: "https://ci.test/approval" },
+        { id: 2, context: "unsafe link", state: "success", target_url: "javascript:bad()" },
+      ],
+    })];
+    renderList();
+    await waitForRender();
+    expect(verdict()).toHaveTextContent("Conflicts");
+    expect(screen.getByText("Review: Pending")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Review: Pending"));
+    expect(screen.getByText("@alice")).toBeVisible();
+    fireEvent.click(screen.getByText("Checks (2)"));
+    expect(screen.getByText("Awaiting CI approval")).toBeVisible();
+    expect(screen.getByRole("link", { name: "pipeline approval" })).toHaveAttribute("href", "https://ci.test/approval");
+    expect(screen.queryByRole("link", { name: "unsafe link" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
+  });
+
+  it("keeps a blocked gate visible even without named checks", async () => {
+    mockPRs = [makePR({ provider: "tgit", checks_rollup: "pending", commit_gate: { state: "pending", blocked: true } })];
+    renderList();
+    await waitForRender();
+    expect(verdict()).toHaveTextContent("Pending");
+    expect(screen.getByText("CI gate blocks merging")).toBeInTheDocument();
+    expect(screen.queryByText("No checks yet")).not.toBeInTheDocument();
+  });
+
+  it("does not expose old approvals on a changed MR head", async () => {
+    mockPRs = [makePR({ provider: "tgit", snapshot_available: false,
+      review: { state: "approved", reviewers: [] },
+      check_details: [{ id: 1, context: "old build", state: "success", target_url: "https://ci.test/old" }],
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.queryByTestId("pull-request-review")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pull-request-check-details")).not.toBeInTheDocument();
+  });
+
+  it("does not infer merge readiness from passing CI and approval", async () => {
+    mockPRs = [makePR({ provider: "tgit", mergeable: "mergeable", checks_rollup: "success", checks_total: 1, checks_passed: 1,
+      review: { state: "approved", reviewers: [] },
+    })];
+    renderList();
+    await waitForRender();
+    expect(screen.getByText("Review: Approved")).toBeInTheDocument();
+    expect(screen.getByText("No merge conflicts")).toBeInTheDocument();
+    expect(verdict()).toHaveTextContent("Checks passed");
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
   });
 
   // --- Terminal PRs --------------------------------------------------------

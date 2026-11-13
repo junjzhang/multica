@@ -24,6 +24,7 @@ import {
   AlertDialogTitle,
 } from "@multica/ui/components/ui/alert-dialog";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { ExternalAuthorSession } from "./external-author-session";
 import { DeferredTooltip } from "../../common/deferred-tooltip";
 import { ReactionBar } from "@multica/ui/components/common/reaction-bar";
 import { QuickEmojiPicker } from "@multica/ui/components/common/quick-emoji-picker";
@@ -40,7 +41,7 @@ import { CommentTriggerChips } from "./comment-trigger-chips";
 import { useCommentTriggerPreview } from "../hooks/use-comment-trigger-preview";
 import { useRecipientActions } from "../hooks/use-recipient-actions";
 import { SteerBadge, SteerReceipts } from "./steer-receipts";
-import type { AgentTask, TimelineEntry, Attachment } from "@multica/core/types";
+import type { Agent, AgentTask, TimelineEntry, Attachment } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import { isDeletedComment } from "@multica/core/issues/comment-deletion";
 import { commentSupplementReceipts, isSupplementInFlight } from "@multica/core/issues/run-steering";
@@ -133,6 +134,8 @@ interface CommentCardProps {
    * `CommentRow` has to rerun the rule per row.
    */
   canModerate?: boolean;
+  /** Workspace agents, used to resolve external author sessions without a per-row query. */
+  externalAgents?: Agent[];
   onReply: (parentId: string, content: string, attachmentIds?: string[], suppressAgentIds?: string[], steerTaskIds?: string[]) => Promise<string | boolean>;
   onReplyAccepted?: (commentId: string) => void;
   onEdit: (commentId: string, content: string, attachmentIds: string[], suppressAgentIds?: string[], contentBase?: string) => Promise<void>;
@@ -631,6 +634,7 @@ function CommentRow({
   entry,
   currentUserId,
   canModerate = false,
+  externalAgents,
   isResolution = false,
   isHighlighted = false,
   hasReplies = false,
@@ -648,6 +652,7 @@ function CommentRow({
   entry: TimelineEntry;
   currentUserId?: string;
   canModerate?: boolean;
+  externalAgents?: Agent[];
   /** True when this reply is the thread's resolution (shows the green badge). */
   isResolution?: boolean;
   /** True when other replies answer this one; they are kept when it is deleted. */
@@ -709,6 +714,7 @@ function CommentRow({
         <span className="cursor-pointer text-body font-medium">
           {entry.actor_name || getActorName(entry.actor_type, entry.actor_id)}
         </span>
+        {entry.actor_type === "agent" && <ExternalAuthorSession agentId={entry.actor_id} agents={externalAgents} />}
         <Tooltip>
           <TooltipTrigger
             render={
@@ -1020,6 +1026,7 @@ function CommentCardImpl({
   replies,
   currentUserId,
   canModerate = false,
+  externalAgents,
   onReply,
   onReplyAccepted,
   onEdit,
@@ -1094,7 +1101,7 @@ function CommentCardImpl({
       replyTo={row.replyTo && <ReplyToQuote entry={row.replyTo} onJump={onJumpToComment} />}
       commentProps={row.reply ? {
         issueId, entry: row.reply, replies: [], currentUserId, canModerate, onReply, onEdit, onDelete,
-        onToggleReaction, onCreateSubIssue, onResolveToggle, onCopyLink, highlightedCommentId, enteringRunIds,
+        onToggleReaction, onCreateSubIssue, onResolveToggle, onCopyLink, highlightedCommentId, enteringRunIds, externalAgents,
       } : undefined} />
   ) : renderReply(row);
 
@@ -1117,6 +1124,7 @@ function CommentCardImpl({
             runMetadata={renderRuns(reply.id)}
             currentUserId={currentUserId}
             canModerate={canModerate}
+            externalAgents={externalAgents}
             isResolution={reply.id === replyResolutionId}
             isHighlighted={highlightedCommentId === reply.id}
             hasReplies={repliedToIds.has(reply.id)}
@@ -1227,6 +1235,7 @@ function CommentCardImpl({
                   <span className="shrink-0 cursor-pointer text-body font-medium">
                     {entry.actor_name || getActorName(entry.actor_type, entry.actor_id)}
                   </span>
+                  {entry.actor_type === "agent" && <ExternalAuthorSession agentId={entry.actor_id} agents={externalAgents} />}
                   <Tooltip>
                     <TooltipTrigger
                       render={

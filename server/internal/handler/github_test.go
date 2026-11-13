@@ -3428,3 +3428,38 @@ func TestWebhook_UninstallDeletesAllBindings(t *testing.T) {
 		t.Errorf("deleted broadcasts must cover both workspaces; saw %v", seen)
 	}
 }
+
+func TestIssuePullRequestsIncludeDeduplicatedDescendants(t *testing.T) {
+	secret := "descendant-pr-secret"
+	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
+	const installationID int64 = 30264987
+	parent := prAutoCompleteTestIssue(t, "parent", installationID)
+	createChild := func(parentID, title string) IssueResponse {
+		t.Helper()
+		var child IssueResponse
+		testutil.Call(t, testHandler.CreateIssue, newRequest("POST", "/api/issues", map[string]any{"title": title, "status": "in_progress", "parent_issue_id": parentID})).Want(http.StatusCreated).JSON(&child)
+		t.Cleanup(func() {
+			testPool.Exec(context.Background(), `DELETE FROM issue_pull_request WHERE issue_id = $1`, child.ID)
+			testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, child.ID)
+		})
+		return child
+	}
+	child := createChild(parent.ID, "child")
+	grandchild := createChild(child.ID, "grandchild")
+	firePRWebhook(t, secret, installationID, 1, parent.Identifier+" direct", "", "direct", "opened")
+	firePRWebhook(t, secret, installationID, 2, grandchild.Identifier+" descendant", "", "descendant", "opened")
+	// The same MR linked directly and to a descendant remains a direct MR.
+	testutil.Call(t, testHandler.LinkIssuePullRequest, withURLParam(newRequest("POST", "/api/issues/"+child.ID+"/pull-requests", map[string]any{"url": "https://github.com/acme/widget/pull/1"}), "id", child.ID)).Want(http.StatusOK)
+	var result struct {
+		PullRequests []GitHubPullRequestResponse `json:"pull_requests"`
+		Descendants  []descendantPullRequest     `json:"descendant_pull_requests"`
+		AutoComplete prAutoCompleteResponse      `json:"auto_complete"`
+	}
+	testutil.Call(t, testHandler.ListPullRequestsForIssue, withURLParam(newRequest("GET", "/api/issues/"+parent.ID+"/pull-requests", nil), "id", parent.ID)).Want(http.StatusOK).JSON(&result)
+	if len(result.PullRequests) != 1 || len(result.Descendants) != 1 || result.Descendants[0].SourceIdentifier != grandchild.Identifier || result.Descendants[0].Number != 2 {
+		t.Fatalf("unexpected projection: %+v", result)
+	}
+	if len(result.AutoComplete.PullRequestIDs) != 1 {
+		t.Fatalf("descendant affected automation: %+v", result.AutoComplete)
+	}
+}

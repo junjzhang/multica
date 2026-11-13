@@ -345,35 +345,15 @@ func TestStatusChangeHandsOffOnDefaultProject(t *testing.T) {
 
 	updateIssueForTest(t, issueID, map[string]any{"status": "in_progress"}).Want(http.StatusOK)
 
+	// A handoff still records the destination owner, but a state transition
+	// never starts a run: work begins when someone explicitly mentions or
+	// assigns the agent.
 	_, assigneeType, assigneeID := issueStatusAndAssignee(t, issueID)
 	if assigneeType != "agent" || assigneeID != agentID {
 		t.Fatalf("assignee = %s/%s, want the column's agent %s", assigneeType, assigneeID, agentID)
 	}
-	tasks, err := testHandler.Queries.ListTasksByIssue(context.Background(), util.MustParseUUID(issueID))
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("tasks = %d (%v), want one handoff run", len(tasks), err)
-	}
-	// The run reads the step's brief from its claim; the handoff note is
-	// left for a caller's own instruction.
-	if tasks[0].HandoffNote.String != "" {
-		t.Fatalf("handoff note = %q, want none: the brief rides the claim", tasks[0].HandoffNote.String)
-	}
-	brief := claimBriefForTest(t, issueID, tasks[0])
-	for _, want := range []string{"Implement it and open a PR.", "This project's workflow — Default (Workflow handoff project)", "Step done      → multica issue status"} {
-		if !strings.Contains(brief, want) {
-			t.Fatalf("claim brief is missing %q:\n%s", want, brief)
-		}
-	}
-
-	// A caller-written note rides beside the step's brief.
-	back := dbfx.Issue(t, "explicit note", testutil.Cols{"project_id": projectID, "status": "todo"})
-	updateIssueForTest(t, back, map[string]any{"status": "in_progress", "handoff_note": "Only the login flow."}).Want(http.StatusOK)
-	backTasks, _ := testHandler.Queries.ListTasksByIssue(context.Background(), util.MustParseUUID(back))
-	if len(backTasks) != 1 || backTasks[0].HandoffNote.String != "Only the login flow." {
-		t.Fatalf("explicit handoff note was not kept: %+v", backTasks)
-	}
-	if !strings.Contains(claimBriefForTest(t, back, backTasks[0]), "Implement it and open a PR.") {
-		t.Fatal("a caller-written note must not cost the run its step brief")
+	if n := taskCountFor(t, issueID, agentID); n != 0 {
+		t.Fatalf("status transition started %d run(s), want 0", n)
 	}
 
 	// A project on a workflow without handoffs hands nothing off.
@@ -664,8 +644,11 @@ func TestMoveIntoWorkflowProjectKeepsEquivalentStatusWithoutHandoff(t *testing.T
 	}
 	updateIssueForTest(t, entering, map[string]any{"project_id": projectID, "enter_workflow_step": true}).Want(http.StatusOK)
 	status, assigneeType, assigneeID := issueStatusAndAssignee(t, entering)
-	if status != "in_review" || assigneeType != "agent" || assigneeID != agentID || taskCountFor(t, entering, agentID) != 1 {
-		t.Fatalf("entering move = %s %s/%s, want in_review handed to the agent with one run", status, assigneeType, assigneeID)
+	if status != "in_review" || assigneeType != "agent" || assigneeID != agentID {
+		t.Fatalf("entering move = %s %s/%s, want in_review handed to the agent", status, assigneeType, assigneeID)
+	}
+	if n := taskCountFor(t, entering, agentID); n != 0 {
+		t.Fatalf("entering a workflow step started %d run(s), want 0", n)
 	}
 }
 
@@ -943,27 +926,19 @@ func taskWorkflowStep(t *testing.T, taskID string) string {
 // The validation report: an agent handling two adjacent columns moves the
 // issue into the second from its own run. Entering the step is new work, so a
 // run for it is queued although the agent is still running.
-func TestSameAgentNextStepQueuesARun(t *testing.T) {
+
+func TestSameAgentNextStepDoesNotQueueARun(t *testing.T) {
 	seedTestCatalog(t)
 	agentID := seededReadyAgentID(t)
 	projectID := deliveryProject(t, "Workflow same agent project", agentID)
 	setColumnHandoff(t, projectID, "in_review", handToAgent(agentID, "Review your own PR.")).Want(http.StatusOK)
 	issueID := dbfx.Issue(t, "same agent twice", testutil.Cols{"project_id": projectID, "status": "todo"})
 
+	// Both transitions are state-only and start nothing.
 	updateIssueForTest(t, issueID, map[string]any{"status": "in_progress"}).Want(http.StatusOK)
-	var taskID string
-	dbfx.QueryRow(t, `SELECT id::text FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, agentID).Scan(&taskID)
-	dbfx.Exec(t, `UPDATE agent_task_queue SET status = 'running', started_at = now() WHERE id = $1`, taskID)
-
-	agentUpdateIssue(t, issueID, agentID, taskID, map[string]any{"status": "in_review"}).Want(http.StatusOK)
-	var queued int
-	dbfx.QueryRow(t, `SELECT count(*) FROM agent_task_queue
-		WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`, issueID, agentID).Scan(&queued)
-	if queued != 1 {
-		t.Fatalf("queued runs for the next step = %d, want one", queued)
-	}
-	if brief := claimBriefForTest(t, issueID, db.AgentTaskQueue{AgentID: util.MustParseUUID(agentID)}); !strings.Contains(brief, "Review your own PR.") {
-		t.Fatalf("the next step's run would not read its instructions:\n%s", brief)
+	updateIssueForTest(t, issueID, map[string]any{"status": "in_review"}).Want(http.StatusOK)
+	if n := taskCountFor(t, issueID, agentID); n != 0 {
+		t.Fatalf("workflow transitions queued %d run(s), want 0", n)
 	}
 }
 
@@ -974,9 +949,21 @@ func TestAgentStatusChangeRefusedAfterIssueMoved(t *testing.T) {
 	seedTestCatalog(t)
 	agentID := seededReadyAgentID(t)
 	projectID := deliveryProject(t, "Workflow stale step project", agentID)
-	issueID := dbfx.Issue(t, "stale step", testutil.Cols{"project_id": projectID, "status": "todo"})
-
-	updateIssueForTest(t, issueID, map[string]any{"status": "in_progress"}).Want(http.StatusOK)
+	// Create with an explicit assignee on the step's status: creation-with-
+	// assignee is the intentional launch, unlike a later status transition.
+	var created IssueResponse
+	testutil.Call(t, testHandler.CreateIssue, newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "stale step",
+		"status":        "in_progress",
+		"project_id":    projectID,
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+	})).Want(http.StatusCreated).JSON(&created)
+	issueID := created.ID
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID)
+	})
 	var taskID string
 	dbfx.QueryRow(t, `SELECT id::text FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2`, issueID, agentID).Scan(&taskID)
 	if got := taskWorkflowStep(t, taskID); got != "in_progress" {
