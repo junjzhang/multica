@@ -501,3 +501,53 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 		t.Fatalf("owned = %+v, want only open parent with 8/8 closed children", response.Owned)
 	}
 }
+
+func TestSessionPullRequestsScopeAndDescendants(t *testing.T) {
+	agent, session, owner := externalAgentFixture(t, "PR session", "pr-session-daemon")
+	other, otherSession, otherOwner := externalAgentFixture(t, "Other PR session", "other-pr-session-daemon")
+	const installationID int64 = 30264988
+	secret := "session-pr-secret"
+	t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
+	root := prAutoCompleteTestIssue(t, "session root", installationID)
+	assign := map[string]any{"assignee_type": "agent", "assignee_id": agent, "recipient_session_id": session, "suppress_run": true}
+	testutil.Call(t, testHandler.UpdateIssue, withURLParam(newRequest(http.MethodPut, "/api/issues/"+root.ID, assign), "id", root.ID)).Want(http.StatusOK)
+	var child IssueResponse
+	testutil.Call(t, testHandler.CreateIssue, newRequest(http.MethodPost, "/api/issues", map[string]any{"title": "session child", "parent_issue_id": root.ID})).Want(http.StatusCreated).JSON(&child)
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue_pull_request WHERE issue_id = $1`, child.ID)
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, child.ID)
+	})
+	firePRWebhook(t, secret, installationID, 8, child.Identifier+" fix", "", "fix", "opened")
+	read := func(user, actor, sid string, external bool) *httptest.ResponseRecorder {
+		req := sessionTasksRequest(user, actor, external, sid)
+		w := httptest.NewRecorder()
+		testHandler.GetAgentSessionPullRequests(w, req)
+		return w
+	}
+	w := read(owner, agent, session, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("session read: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		PullRequests []descendantPullRequest `json:"pull_requests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PullRequests) != 1 || body.PullRequests[0].SourceIssueID != child.ID {
+		t.Fatalf("projection: %+v", body)
+	}
+	w = read(otherOwner, other, otherSession, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("other session: %d %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PullRequests) != 0 {
+		t.Fatalf("other session saw PRs: %+v", body)
+	}
+	if w = read(owner, agent, "", false); w.Code != http.StatusForbidden {
+		t.Fatalf("human read: %d", w.Code)
+	}
+}

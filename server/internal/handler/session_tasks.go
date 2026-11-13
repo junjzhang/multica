@@ -317,3 +317,88 @@ func (h *Handler) sessionReturnItems(r *http.Request, p *sessionTaskProjection, 
 	}
 	return items, len(rows) == sessionTaskLimit, nil
 }
+
+// GetAgentSessionPullRequests returns the PRs linked to this session's work.
+func (h *Handler) GetAgentSessionPullRequests(w http.ResponseWriter, r *http.Request) {
+	if !isExternalAgentActor(r) {
+		writeError(w, http.StatusForbidden, "this read is only available to a session credential")
+		return
+	}
+	agent, ok := h.loadAgentForSessionRead(w, r)
+	if !ok {
+		return
+	}
+	sessionID, ok := h.requireExternalActorSession(w, r)
+	if !ok {
+		return
+	}
+	ws, err := h.Queries.GetWorkspace(r.Context(), agent.WorkspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load workspace")
+		return
+	}
+	rows, err := h.DB.Query(r.Context(), `SELECT DISTINCT i.id FROM issue i
+		LEFT JOIN issue root ON root.id = COALESCE(i.leadership_root_issue_id, i.id) AND root.workspace_id = i.workspace_id
+		WHERE i.workspace_id = $1 AND (
+		  (i.assignee_type = 'agent' AND i.assignee_id = $2 AND EXISTS
+		    (SELECT 1 FROM external_agent_session_binding b WHERE b.workspace_id = i.workspace_id AND b.issue_id = i.id AND b.agent_id = $2 AND b.session_id = $3 AND b.revoked_at IS NULL))
+		  OR (root.leader_agent_id = $2 AND root.leader_external_session_id = $3)
+		  OR i.creator_session_id = $3
+		  OR EXISTS (SELECT 1 FROM issue_delegation_return d WHERE d.workspace_id = i.workspace_id AND d.issue_id = i.id AND d.dispatcher_agent_id = $2 AND d.external_session_id = $3 AND d.is_current)
+		) ORDER BY i.id`, agent.WorkspaceID, agent.ID, sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load session tasks")
+		return
+	}
+	var ids []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		ids = append(ids, id)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load session tasks")
+		return
+	}
+	roots := make([]db.Issue, 0, len(ids))
+	out := make([]descendantPullRequest, 0)
+	seen := make(map[string]bool)
+	var direct []GitHubPullRequestResponse
+	for _, id := range ids {
+		issue, e := h.Queries.GetIssue(r.Context(), id)
+		if e != nil {
+			err = e
+			break
+		}
+		roots = append(roots, issue)
+		prs, e := h.issuePullRequests(r.Context(), ws, issue, false)
+		if e != nil {
+			err = e
+			break
+		}
+		for _, pr := range prs {
+			if seen[pr.ID] {
+				continue
+			}
+			seen[pr.ID] = true
+			direct = append(direct, pr)
+			out = append(out, descendantPullRequest{GitHubPullRequestResponse: pr, SourceIssueID: uuidToString(issue.ID), SourceIdentifier: fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number), SourceURL: service.IssueBrowserURL(h.cfg.AppURL, ws.Slug, fmt.Sprintf("%s-%d", issuePrefixForWorkspace(ws), issue.Number))})
+		}
+	}
+	if err == nil {
+		var descendants []descendantPullRequest
+		descendants, err = h.descendantPullRequests(r.Context(), ws, roots, direct, false)
+		out = append(out, descendants...)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load session pull requests")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pull_requests": out})
+}

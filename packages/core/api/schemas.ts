@@ -462,6 +462,7 @@ export const PRAutoCompleteSchema = z.object({
 
 export const IssuePullRequestsResponseSchema = z.object({
   pull_requests: z.array(GitHubPullRequestSchema).default([]),
+  descendant_pull_requests: z.array(GitHubPullRequestSchema.extend({ source_issue_id: z.string(), source_identifier: z.string() })).catch([]).default([]),
   auto_complete: PRAutoCompleteSchema.nullable().optional().default(null).catch(null),
 }).loose();
 

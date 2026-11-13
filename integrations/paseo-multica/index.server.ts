@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion } from "./shared/contracts";
+import { connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion, sessionPullRequests } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
 import { ConfigurationError, loadOwnerProfile } from "./server/owner-profile";
 import { z } from "zod";
@@ -52,6 +52,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(connectSession, async ({ agentId }, context) => service(context).connect(agentId));
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));
+  server.handle(sessionPullRequests, async ({ agentId }, context) => service(context).pullRequests(agentId));
   server.handle(tasksSummary, async ({ agentId }, context) => service(context).tasks(agentId));
   server.handle(taskDetail, async ({ agentId, issueId, section }, context) => service(context).taskDetail(agentId, issueId, section));
   server.handle(taskExpansion, async ({ agentId, issueId, expanded }) => expansion(homedir(), agentId, issueId, expanded));

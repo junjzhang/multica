@@ -90,8 +90,14 @@ export interface PRAutoComplete {
 
 export interface IssuePullRequestsResponse {
   pull_requests: GitHubPullRequest[];
+  descendant_pull_requests?: DescendantPullRequest[];
   /** Absent on older backends. */
   auto_complete: PRAutoComplete | null;
+}
+
+export interface DescendantPullRequest extends GitHubPullRequest {
+  source_issue_id: string;
+  source_identifier: string;
 }
 
 export interface GitHubPullRequest {

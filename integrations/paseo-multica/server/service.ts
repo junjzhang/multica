@@ -1,3 +1,4 @@
+import type { PullRequest } from "../shared/pull-requests";
 import type { StatusView } from "../shared/contracts";
 import { toTasksView, type SessionTasksView } from "../shared/tasks";
 import type { DetailResult, DetailSection } from "../shared/task-details";
@@ -46,6 +47,7 @@ export interface SessionService {
   status(agentId: string): Promise<StatusView>;
   disconnect(agentId: string): Promise<StatusView>;
   tasks(agentId: string): Promise<SessionTasksView>;
+  pullRequests(agentId: string): Promise<{ pull_requests: PullRequest[] }>;
   taskDetail(agentId: string, issueId: string, section: DetailSection): Promise<DetailResult>;
 }
 
@@ -439,6 +441,12 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     status,
     disconnect,
     tasks,
+    async pullRequests(agentId) {
+      if (!isLocator(agentId)) throw new ConfigurationError("Invalid session ID.");
+      const existing = await store.read(deps.home, agentId);
+      if (existing.status !== "ok" || isExpired(existing.context, now())) throw new ConfigurationError("Session is not connected. Reconnect to Multica.");
+      return { pull_requests: await api.listSessionPullRequests(contextCredential(existing.context), existing.context.agent_id) };
+    },
     async taskDetail(agentId, issueId, section) {
       try {
         if (!isLocator(agentId)) throw new ConfigurationError("Invalid session ID.");
