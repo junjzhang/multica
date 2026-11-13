@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -4308,7 +4309,11 @@ func TestRunIssueListSendsSortAndDirection(t *testing.T) {
 }
 
 func TestIssueSortColumnsMatchListHandler(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "../../internal/handler/issue.go", nil, 0)
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate test source")
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(filepath.Dir(source), "../../internal/handler/issue.go"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -34,6 +34,10 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 	}
 	wsID, agentID := h.resolveWorkspaceID(r), r.Header.Get("X-Agent-ID")
 	if r.Header.Get("X-Actor-Source") == "task_token" {
+		if req.IssueRef != "" {
+			writeError(w, 400, "managed waits derive their issue from the current task")
+			return
+		}
 		if _, ok := parseUUIDOrBadRequest(w, req.ID, "id"); !ok {
 			return
 		}
@@ -49,29 +53,49 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 		writeJSON(w, 200, address)
 		return
 	}
-	// The credential's bound session is the wait's registered address. The
-	// X-Return-Session header is only a consistency parameter and was already
-	// compared against it by the auth middleware.
-	sessionUUID, ok := h.requireExternalActorSession(w, r)
+	address, ok := h.externalWaitScope(w, r, req.DaemonID, true)
 	if !ok {
 		return
 	}
+	issueID := ""
+	if req.IssueRef != "" {
+		readRequest := r.Clone(r.Context())
+		readRequest.Method = http.MethodGet
+		issue, ok := h.loadIssueForUser(w, readRequest, req.IssueRef)
+		if !ok {
+			return
+		}
+		issueID = uuidToString(issue.ID)
+	}
+	address.IssueID = issueID
+	writeJSON(w, http.StatusOK, address)
+}
+
+// externalWaitScope authenticates the fixed session and the selected machine's
+// ownership. Registration also requires its current worker; reading an older
+// wait must remain possible after delivery-worker reassignment.
+func (h *Handler) externalWaitScope(w http.ResponseWriter, r *http.Request, daemonID string, registration bool) (protocol.WaitAddress, bool) {
+	wsID, agentID := h.resolveWorkspaceID(r), r.Header.Get("X-Agent-ID")
+	sessionUUID, ok := h.requireExternalActorSession(w, r)
+	if !ok {
+		return protocol.WaitAddress{}, false
+	}
 	address, err := delegation.ResolveExternal(r.Context(), h.Queries, wsID, agentID, uuidToString(sessionUUID))
 	if err != nil {
-		writeError(w, http.StatusForbidden, "return session is unavailable")
-		return
+		writeError(w, 403, "return session is unavailable")
+		return protocol.WaitAddress{}, false
 	}
 	session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{ID: parseUUID(address.ExternalSessionID), WorkspaceID: parseUUID(wsID)})
-	if err != nil || session.Provider != "paseo" || session.DaemonID != req.DaemonID || uuidToString(session.OwnerUserID) != requestUserID(r) {
-		writeError(w, http.StatusForbidden, "session does not belong to this daemon owner")
-		return
+	if err != nil || session.Provider != "paseo" || (registration && session.DaemonID != daemonID) || uuidToString(session.OwnerUserID) != requestUserID(r) {
+		writeError(w, 403, "session does not belong to this daemon owner")
+		return protocol.WaitAddress{}, false
 	}
-	owned, err := h.Queries.WorkspaceDaemonOwnedByUser(r.Context(), db.WorkspaceDaemonOwnedByUserParams{WorkspaceID: session.WorkspaceID, DaemonID: pgtype.Text{String: session.DaemonID, Valid: true}, OwnerUserID: session.OwnerUserID})
+	owned, err := h.Queries.WorkspaceDaemonOwnedByUser(r.Context(), db.WorkspaceDaemonOwnedByUserParams{WorkspaceID: session.WorkspaceID, DaemonID: pgtype.Text{String: daemonID, Valid: daemonID != ""}, OwnerUserID: session.OwnerUserID})
 	if err != nil || !owned {
-		writeError(w, http.StatusForbidden, "daemon is not owned by the session owner")
-		return
+		writeError(w, 403, "daemon is not owned by the session owner")
+		return protocol.WaitAddress{}, false
 	}
-	writeJSON(w, http.StatusOK, protocol.WaitAddress{WorkspaceID: wsID, AgentID: agentID, SessionID: address.ExternalSessionID, DaemonID: session.DaemonID})
+	return protocol.WaitAddress{WorkspaceID: wsID, AgentID: agentID, SessionID: address.ExternalSessionID, DaemonID: daemonID}, true
 }
 
 // CompleteBackgroundWait is an idempotent outbox sink. The daemon commits its

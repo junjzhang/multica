@@ -85,6 +85,72 @@ func (q *Queries) CreateManagedWaitMailbox(ctx context.Context, arg CreateManage
 	return i, err
 }
 
+const getBackgroundWaitDeliveries = `-- name: GetBackgroundWaitDeliveries :many
+SELECT id, workspace_id, issue_id, comment_id, recipient_agent_id, source_session_id, sender_type, sender_id, delivery_status, processing_status, lease_token_hash, lease_owner, lease_expires_at, attempts, next_attempt_at, delivered_at, host_receipt, last_error, created_at, updated_at, source_type, source_key, kind, recipient_type, payload, target_session_id, notification_key, withdrawn_at, handled_by_task_id, leadership_root_issue_id, leadership_revision, delivery_failure_streak, delivery_retry_class FROM agent_mailbox_message
+WHERE workspace_id = $1
+  AND source_type = 'background_wait'
+  AND notification_key = ANY($2::text[])
+`
+
+type GetBackgroundWaitDeliveriesParams struct {
+	WorkspaceID      pgtype.UUID `json:"workspace_id"`
+	NotificationKeys []string    `json:"notification_keys"`
+}
+
+func (q *Queries) GetBackgroundWaitDeliveries(ctx context.Context, arg GetBackgroundWaitDeliveriesParams) ([]AgentMailboxMessage, error) {
+	rows, err := q.db.Query(ctx, getBackgroundWaitDeliveries, arg.WorkspaceID, arg.NotificationKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentMailboxMessage{}
+	for rows.Next() {
+		var i AgentMailboxMessage
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.IssueID,
+			&i.CommentID,
+			&i.RecipientAgentID,
+			&i.SourceSessionID,
+			&i.SenderType,
+			&i.SenderID,
+			&i.DeliveryStatus,
+			&i.ProcessingStatus,
+			&i.LeaseTokenHash,
+			&i.LeaseOwner,
+			&i.LeaseExpiresAt,
+			&i.Attempts,
+			&i.NextAttemptAt,
+			&i.DeliveredAt,
+			&i.HostReceipt,
+			&i.LastError,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.SourceType,
+			&i.SourceKey,
+			&i.Kind,
+			&i.RecipientType,
+			&i.Payload,
+			&i.TargetSessionID,
+			&i.NotificationKey,
+			&i.WithdrawnAt,
+			&i.HandledByTaskID,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipRevision,
+			&i.DeliveryFailureStreak,
+			&i.DeliveryRetryClass,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTaskMessageSequence = `-- name: GetTaskMessageSequence :one
 SELECT COALESCE(max(seq),0)::integer AS seq FROM task_message WHERE task_id = $1
 `

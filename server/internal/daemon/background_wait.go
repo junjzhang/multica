@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,7 +90,7 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		}
 		hash := sha256.Sum256(data)
 		var address protocol.WaitAddress
-		err = client.PostJSON(ctx, "/api/background-waits/authorize", protocol.WaitAuthorization{DaemonID: d.cfg.DaemonID, ID: req.ID, RequestHash: hex.EncodeToString(hash[:]), Deadline: req.Deadline}, &address)
+		err = client.PostJSON(ctx, "/api/background-waits/authorize", protocol.WaitAuthorization{DaemonID: d.cfg.DaemonID, ID: req.ID, RequestHash: hex.EncodeToString(hash[:]), Deadline: req.Deadline, IssueRef: req.IssueRef}, &address)
 		return address, err
 	}
 	notify := func(ctx context.Context, result protocol.WaitResult) (string, error) {
@@ -145,6 +146,36 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 		err := client.PostJSON(ctx, "/api/background-waits/"+req.ID+"/access", map[string]any{}, &status)
 		return status.Address, err
 	})
+	manager.ConfigureList(func(ctx context.Context, lookups []protocol.WaitLookup) (protocol.WaitDeliveryResponse, error) {
+		out := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}}
+		// The batch endpoint isolates unavailable targets within a workspace.
+		// Keep independent workspace observations when a whole request fails.
+		groups := map[string][]protocol.WaitLookup{}
+		var lastError error
+		for _, lookup := range lookups {
+			groups[lookup.Address.WorkspaceID] = append(groups[lookup.Address.WorkspaceID], lookup)
+		}
+		for workspace, group := range groups {
+			for start := 0; start < len(group); start += 200 {
+				var part protocol.WaitDeliveryResponse
+				err := d.client.postDaemonDeliveryJSON(ctx, workspace, "/api/daemon/background-waits/status", protocol.WaitDeliveryRequest{Waits: group[start:min(start+200, len(group))]}, &part)
+				if err != nil {
+					lastError = err
+					continue
+				}
+				for id, status := range part.Statuses {
+					out.Statuses[id] = status
+				}
+				if out.ObservedAt.IsZero() || part.ObservedAt.Before(out.ObservedAt) {
+					out.ObservedAt = part.ObservedAt
+				}
+			}
+		}
+		if out.ObservedAt.IsZero() {
+			return out, lastError
+		}
+		return out, nil
+	})
 	d.backgroundWaits = manager
 	d.client.backgroundWaitIDs = manager.KnownIDs
 	return nil
@@ -163,6 +194,17 @@ func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {
 			http.Error(w, "background waits unavailable", 503)
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/waits" && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer mea_") {
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			client := cli.NewAPIClient(d.cfg.ServerBaseURL, r.Header.Get("X-Workspace-ID"), token)
+			var address protocol.WaitAddress
+			if err := client.GetJSON(r.Context(), "/api/background-waits/scope?daemon_id="+url.QueryEscape(d.cfg.DaemonID), &address); err != nil {
+				http.Error(w, "external session scope unavailable", 403)
+				return
+			}
+			d.backgroundWaits.ServeSessionList(w, r, address)
+			return
+		}
 		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer mat_") {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			d.repoCheckoutTasksMu.RLock()
@@ -176,7 +218,15 @@ func (d *Daemon) backgroundWaitHandler() http.HandlerFunc {
 			d.repoCheckoutTasksMu.RUnlock()
 			defer task.waitGate.RUnlock()
 			r.Header.Set("X-Wait-Actor-Token", token)
-			if r.Method != http.MethodPost {
+			if r.Method == http.MethodGet && r.URL.Path == "/waits" {
+				client := cli.NewAPIClient(d.cfg.ServerBaseURL, task.WorkspaceID, token)
+				var address protocol.WaitAddress
+				if err := client.GetJSON(r.Context(), "/api/background-waits/scope?daemon_id="+url.QueryEscape(d.cfg.DaemonID), &address); err != nil || address.TaskID != task.TaskID || address.WorkspaceID != task.WorkspaceID {
+					http.Error(w, "current task scope unavailable", 403)
+					return
+				}
+			}
+			if r.Method != http.MethodPost && !(r.Method == http.MethodGet && r.URL.Path == "/waits") {
 				id := strings.TrimPrefix(r.URL.Path, "/waits/")
 				if _, err := util.ParseUUID(id); err != nil {
 					http.Error(w, "invalid wait id", 400)

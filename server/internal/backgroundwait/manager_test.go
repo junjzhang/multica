@@ -164,11 +164,25 @@ func TestWaitConcurrentRegistrationCancelCompletion(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			page := readList(t, m, "/waits", protocol.WaitAddress{}, 200)
+			if len(page.Items) != 1 || page.Items[0].ID != req.ID {
+				t.Errorf("concurrent list lost registered wait: %+v", page.Items)
+			}
+		}()
+	}
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			waitRequest(t, m, "DELETE", "/waits/"+req.ID, "local-capability", "", nil, 200)
 		}()
 	}
 	wg.Wait()
 	result := awaitResult(t, results)
+	latest := readList(t, m, "/waits", protocol.WaitAddress{}, 200)
+	if latest.Items[0].State != result.State {
+		t.Fatal("list lost terminal cancellation decision")
+	}
 	if result.State != "succeeded" && result.State != "cancelled" {
 		t.Fatalf("unexpected race result: %+v", result)
 	}

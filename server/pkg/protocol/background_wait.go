@@ -12,9 +12,12 @@ type WaitAddress struct {
 	RuntimeID   string `json:"runtime_id,omitempty"`
 	Provider    string `json:"provider,omitempty"`
 	WorkDir     string `json:"work_dir,omitempty"`
+	IssueID     string `json:"issue_id,omitempty"`
 }
 
 type WaitStart struct {
+	Description string    `json:"description,omitempty"`
+	IssueRef    string    `json:"issue_ref,omitempty"`
 	ID          string    `json:"id"`
 	WorkspaceID string    `json:"workspace_id"`
 	SessionRef  string    `json:"session_ref"`
@@ -39,6 +42,7 @@ type ManagedWait struct {
 }
 
 type WaitAuthorization struct {
+	IssueRef    string    `json:"issue_ref,omitempty"`
 	DaemonID    string    `json:"daemon_id"`
 	ID          string    `json:"id,omitempty"`
 	RequestHash string    `json:"request_hash,omitempty"`
@@ -67,7 +71,9 @@ func WaitTerminal(state string) bool {
 }
 
 type WaitStatus struct {
-	Consumed bool `json:"consumed,omitempty"`
+	Description string     `json:"description,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	Consumed    bool       `json:"consumed,omitempty"`
 	WaitResult
 	Deadline    time.Time `json:"deadline"`
 	DeliveryID  string    `json:"delivery_id,omitempty"`
@@ -85,4 +91,48 @@ type WaitEndpoint struct {
 type TaskTurn struct {
 	Generation   string   `json:"turn_generation,omitempty"`
 	KnownWaitIDs []string `json:"known_wait_ids"`
+}
+
+// WaitListItem deliberately excludes argv, cwd and local log paths.
+type WaitListItem struct {
+	ID          string             `json:"id"`
+	Address     WaitAddress        `json:"address"`
+	State       string             `json:"state"`
+	Description string             `json:"description,omitempty"`
+	StartedAt   *time.Time         `json:"started_at,omitempty"`
+	FinishedAt  *time.Time         `json:"finished_at,omitempty"`
+	Deadline    time.Time          `json:"deadline"`
+	ExitCode    *int               `json:"exit_code,omitempty"`
+	NotifyError string             `json:"notify_error,omitempty"`
+	Delivery    WaitDeliveryStatus `json:"delivery"`
+}
+
+type WaitDeliveryStatus struct {
+	Known            bool   `json:"known"`
+	Enqueued         bool   `json:"enqueued"`
+	DeliveryID       string `json:"delivery_id,omitempty"`
+	DeliveryStatus   string `json:"delivery_status,omitempty"`
+	ProcessingStatus string `json:"processing_status,omitempty"`
+}
+
+type WaitLookup struct {
+	ID      string      `json:"id"`
+	Address WaitAddress `json:"address"`
+}
+
+type WaitDeliveryRequest struct {
+	Waits []WaitLookup `json:"waits"`
+}
+
+type WaitDeliveryResponse struct {
+	Statuses   map[string]WaitDeliveryStatus `json:"statuses"`
+	ObservedAt time.Time                     `json:"observed_at"`
+}
+
+type WaitList struct {
+	Items              []WaitListItem `json:"items"`
+	SnapshotVersion    string         `json:"snapshot_version"`
+	ObservedAt         time.Time      `json:"observed_at"`
+	DeliveryObservedAt *time.Time     `json:"delivery_observed_at,omitempty"`
+	NextCursor         string         `json:"next_cursor,omitempty"`
 }

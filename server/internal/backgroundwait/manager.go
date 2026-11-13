@@ -57,6 +57,7 @@ type Manager struct {
 	consume               func(context.Context, string, protocol.WaitResult) error
 	checkTask             func(context.Context, protocol.WaitAddress) (bool, error)
 	finished              map[string]chan struct{}
+	readDelivery          ReadDelivery
 }
 
 // Open must be called once under the daemon profile's existing process lock.
@@ -254,6 +255,10 @@ func (m *Manager) ServeManagedHTTP(w http.ResponseWriter, r *http.Request, taskI
 }
 
 func (m *Manager) serve(w http.ResponseWriter, r *http.Request, scope string) {
+	if r.Method == http.MethodGet && r.URL.Path == "/waits" {
+		m.list(w, r, protocol.WaitAddress{TaskID: scope})
+		return
+	}
 	if r.Method == http.MethodPost && r.URL.Path == "/waits" {
 		m.start(w, r, scope)
 		return
@@ -318,6 +323,10 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request, scope string) {
 	}
 	if _, err := util.ParseUUID(req.ID); err != nil {
 		http.Error(w, "request id must be a UUID", 400)
+		return
+	}
+	if len(req.Description) > 1024 || len(req.IssueRef) > 256 {
+		http.Error(w, "display metadata too long", 400)
 		return
 	}
 	req.Deadline = req.Deadline.UTC()
@@ -406,7 +415,8 @@ func (m *Manager) start(w http.ResponseWriter, r *http.Request, scope string) {
 		writeJSON(w, old.WaitStatus)
 		return
 	}
-	row := &record{Request: req, WaitStatus: protocol.WaitStatus{WaitResult: protocol.WaitResult{ID: req.ID, Address: address, State: "running", LogPath: filepath.Join(m.dir, req.ID+".log")}, Deadline: req.Deadline}}
+	startedAt := time.Now().UTC()
+	row := &record{Request: req, WaitStatus: protocol.WaitStatus{Description: req.Description, StartedAt: &startedAt, WaitResult: protocol.WaitResult{ID: req.ID, Address: address, State: "running", LogPath: filepath.Join(m.dir, req.ID+".log")}, Deadline: req.Deadline}}
 	if err := m.save(row); err != nil {
 		if scope != "" {
 			row.State, row.FinishedAt = "lost", time.Now().UTC()

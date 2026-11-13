@@ -28,13 +28,20 @@ func init() {
 	start.Flags().String("request-id", "", "Stable UUID for registration retries")
 	start.Flags().String("deadline", "", "Fixed RFC3339 deadline for identical registration retries")
 	start.Flags().String("cwd", "", "Command directory (defaults to current directory)")
+	start.Flags().String("description", "", "Optional display description (up to 1024 bytes)")
+	start.Flags().String("issue", "", "Optional associated issue; managed waits use their task issue")
+	list := &cobra.Command{Use: "list", Short: "List a read-only snapshot; never consume or acknowledge results", Args: cobra.NoArgs, RunE: runWaitList}
+	for _, name := range []string{"session", "workspace", "task", "state", "delivery-status", "processing-status", "cursor"} {
+		list.Flags().String(name, "", "Filter or pagination "+name)
+	}
+	list.Flags().Int("limit", 50, "Page size (1..200)")
 	get := &cobra.Command{Use: "get <id>", Short: "Read the local durable status and Mailbox delivery ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		return callWait(cmd, http.MethodGet, "/waits/"+url.PathEscape(args[0]), nil, nil)
 	}}
 	cancel := &cobra.Command{Use: "cancel <id>", Short: "Stop the local wait process; the remote CI continues", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		return callWait(cmd, http.MethodDelete, "/waits/"+url.PathEscape(args[0]), nil, nil)
 	}}
-	wait.AddCommand(start, get, cancel)
+	wait.AddCommand(start, get, cancel, list)
 	rootCmd.AddCommand(wait)
 }
 
@@ -89,8 +96,11 @@ func runWaitStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	request := protocol.WaitStart{ID: id, Argv: args, Cwd: cwd, Deadline: deadline}
+	request := protocol.WaitStart{ID: id, Argv: args, Cwd: cwd, Deadline: deadline, Description: flagString(cmd, "description"), IssueRef: flagString(cmd, "issue")}
 	if managed {
+		if request.IssueRef != "" {
+			return fmt.Errorf("managed waits derive their issue from the current task")
+		}
 		request.WorkspaceID, request.TaskID = client.WorkspaceID, client.TaskID
 		request.Cwd, err = filepath.EvalSymlinks(cwd)
 		if err != nil {
@@ -138,6 +148,15 @@ func callWait(cmd *cobra.Command, method, path string, body any, bound *external
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.User != nil || parsed.Path != "" {
 		return fmt.Errorf("wait endpoint must be a loopback HTTP address")
 	}
+	if method == http.MethodGet && strings.HasPrefix(path, "/waits?") && !inDaemonManagedExecutionContext() {
+		bound, err = readExternalSessionContext()
+		if err != nil {
+			return err
+		}
+		if bound != nil {
+			credential = bound.Token
+		}
+	}
 	if bound != nil && bound.DaemonID != endpoint.DaemonID {
 		return fmt.Errorf("the selected local daemon does not own this session")
 	}
@@ -155,6 +174,7 @@ func callWait(cmd *cobra.Command, method, path string, body any, bound *external
 	req.Header.Set("Content-Type", "application/json")
 	if bound != nil {
 		req.Header.Set("X-Wait-Actor-Token", bound.Token)
+		req.Header.Set("X-Workspace-ID", bound.WorkspaceID)
 	}
 	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
@@ -162,16 +182,35 @@ func callWait(cmd *cobra.Command, method, path string, body any, bound *external
 		return fmt.Errorf("local daemon wait request failed; retry with the same request-id and deadline")
 	}
 	defer response.Body.Close()
-	result, err := io.ReadAll(io.LimitReader(response.Body, 32768))
+	result, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	if err != nil {
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("wait request: %s: %s", response.Status, strings.TrimSpace(string(result)))
 	}
+	if method == http.MethodGet && strings.HasPrefix(path, "/waits?") {
+		var list protocol.WaitList
+		if json.Unmarshal(result, &list) != nil || list.SnapshotVersion == "" {
+			return fmt.Errorf("invalid wait list response")
+		}
+		return cli.PrintJSON(os.Stdout, list)
+	}
 	var status protocol.WaitStatus
 	if err := json.Unmarshal(result, &status); err != nil {
 		return fmt.Errorf("invalid wait response")
 	}
 	return cli.PrintJSON(os.Stdout, status)
+}
+
+func runWaitList(cmd *cobra.Command, args []string) error {
+	q := url.Values{}
+	for _, name := range []string{"session", "workspace", "task", "state", "delivery-status", "processing-status", "cursor"} {
+		if value := flagString(cmd, name); value != "" {
+			q.Set(strings.ReplaceAll(name, "-", "_"), value)
+		}
+	}
+	limit, _ := cmd.Flags().GetInt("limit")
+	q.Set("limit", strconv.Itoa(limit))
+	return callWait(cmd, http.MethodGet, "/waits?"+q.Encode(), nil, nil)
 }
