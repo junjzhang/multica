@@ -71,7 +71,9 @@ func TestWaitReceiptBatchReadOnlyAndSessionIsolation(t *testing.T) {
 	wrongHost := request
 	wrongHost.Waits = append([]protocol.WaitLookup(nil), request.Waits...)
 	wrongHost.Waits[0].Address.DaemonID = "other-host"
-	read(wrongHost, 404)
+	if status := read(wrongHost, 200).Statuses[id]; status.Known || status.Enqueued || status.DeliveryID != "" {
+		t.Fatal("foreign host disclosed receipt")
+	}
 }
 
 func TestManagedWaitReceiptDoesNotConsumeAndRejectsOtherTask(t *testing.T) {
@@ -127,6 +129,15 @@ func TestWaitDisplayIssueAuthorizationAndScope(t *testing.T) {
 	if json.Unmarshal(scope.Body.Bytes(), &own) != nil || own.SessionID != session || own.IssueID != "" {
 		t.Fatal("wrong read scope")
 	}
+	dbfx.Exec(t, "UPDATE external_agent_session SET daemon_id='new-delivery-daemon' WHERE id=$1", session)
+	oldHost := serveAuthenticated(t, token, http.HandlerFunc(testHandler.GetBackgroundWaitScope), "GET", "/api/background-waits/scope?daemon_id=display-daemon", nil, nil, nil)
+	if oldHost.Code != 200 {
+		t.Fatalf("frozen executing host scope=%d %s", oldHost.Code, oldHost.Body.String())
+	}
+	wrongStart := serveAuthenticated(t, token, http.HandlerFunc(testHandler.AuthorizeBackgroundWait), "POST", "/api/background-waits/authorize", protocol.WaitAuthorization{DaemonID: "display-daemon"}, nil, nil)
+	if wrongStart.Code != 403 {
+		t.Fatal("read access widened registration authority")
+	}
 	f.Insert(t, "external_agent_session", testutil.Cols{"workspace_id": testWorkspaceID, "agent_id": agent, "owner_user_id": owner, "provider": "paseo", "host_id": "other-host", "session_id": "another-physical-session", "daemon_id": "display-daemon"})
 	legacy := externalTokenFixture(t, agent, owner, time.Now().Add(time.Hour))
 	denied := serveAuthenticated(t, legacy, http.HandlerFunc(testHandler.GetBackgroundWaitScope), "GET", "/api/background-waits/scope?daemon_id=display-daemon", nil, nil, nil)
@@ -143,11 +154,64 @@ func TestWaitReceiptDaemonHostOwnerAndWorkspaceIsolation(t *testing.T) {
 	for _, tc := range []struct {
 		name, workspace, daemon, owner string
 		status                         int
-	}{{"own host", testWorkspaceID, "scope-daemon", owner, 200}, {"other host", testWorkspaceID, "other-host", owner, 404}, {"other owner", testWorkspaceID, "scope-daemon", testUserID, 404}, {"other workspace", uuid.NewString(), "scope-daemon", owner, 403}} {
+	}{{"own host", testWorkspaceID, "scope-daemon", owner, 200}, {"other host", testWorkspaceID, "other-host", owner, 200}, {"other owner", testWorkspaceID, "scope-daemon", testUserID, 200}, {"other workspace", uuid.NewString(), "scope-daemon", owner, 403}} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newDaemonTokenRequest("POST", "/api/daemon/background-waits/status", req, tc.workspace, tc.daemon)
 			r = r.WithContext(middleware.WithDaemonTokenOwnerID(r.Context(), tc.owner))
-			testutil.Call(t, testHandler.BackgroundWaitStatuses, r).Want(tc.status)
+			response := testutil.Call(t, testHandler.BackgroundWaitStatuses, r).Want(tc.status)
+			if tc.status == 200 {
+				var out protocol.WaitDeliveryResponse
+				response.JSON(&out)
+				status := out.Statuses[req.Waits[0].ID]
+				if tc.name == "own host" {
+					if !status.Known {
+						t.Fatal("own host scope unavailable")
+					}
+				} else if status.Known || status.Enqueued || status.DeliveryID != "" {
+					t.Fatal("foreign host or owner disclosed receipt")
+				}
+			}
 		})
+	}
+}
+
+func TestWaitReceiptUsesFrozenProviderSessionAfterTaskRepins(t *testing.T) {
+	f := newManagedWaitFixture(t)
+	f.complete(t)
+	read := serveAuthenticated(t, f.token, http.HandlerFunc(testHandler.ReadBackgroundWait), "POST", "/api/background-waits/"+f.id+"/read", nil, map[string]string{"waitId": f.id}, nil)
+	if read.Code != 200 {
+		t.Fatalf("consume fixture=%d %s", read.Code, read.Body.String())
+	}
+	dbfx.Exec(t, "UPDATE agent_task_queue SET session_id='new-provider-session' WHERE id=$1", f.task)
+	req := protocol.WaitDeliveryRequest{Waits: []protocol.WaitLookup{{ID: f.id, Address: f.address}}}
+	w := serveAuthenticated(t, f.token, http.HandlerFunc(testHandler.BackgroundWaitStatuses), "POST", "/api/background-waits/status", req, nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("frozen receipt after repin=%d %s", w.Code, w.Body.String())
+	}
+	var out protocol.WaitDeliveryResponse
+	if json.Unmarshal(w.Body.Bytes(), &out) != nil || !out.Statuses[f.id].Known || out.Statuses[f.id].ProcessingStatus != "handled" {
+		t.Fatalf("old receipt %+v", out)
+	}
+}
+
+func TestWaitReceiptUnavailableHistoricalTargetDoesNotPoisonBatch(t *testing.T) {
+	f := newManagedWaitFixture(t)
+	f.complete(t)
+	task, err := testHandler.Queries.GetAgentTask(t.Context(), parseUUID(f.task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := dbfx.Task(t, f.agent, testutil.Cols{"runtime_id": f.runtime, "issue_id": dbfx.Issue(t, "Healthy scope"), "status": "running"})
+	healthy := f.address
+	healthy.TaskID = other
+	healthy.SessionID = "healthy-provider-session"
+	healthyID := uuid.NewString()
+	dbfx.Exec(t, "DELETE FROM issue WHERE id=$1", uuidToString(task.IssueID))
+	req := protocol.WaitDeliveryRequest{Waits: []protocol.WaitLookup{{ID: f.id, Address: f.address}, {ID: healthyID, Address: healthy}}}
+	r := newDaemonTokenRequest("POST", "/api/daemon/background-waits/status", req, testWorkspaceID, "managed-wait-daemon")
+	var out protocol.WaitDeliveryResponse
+	testutil.Call(t, testHandler.BackgroundWaitStatuses, r).Want(200).JSON(&out)
+	if out.Statuses[f.id].Known || out.Statuses[f.id].DeliveryID != "" || !out.Statuses[healthyID].Known || out.Statuses[healthyID].Enqueued {
+		t.Fatalf("partial receipt observations %+v", out)
 	}
 }

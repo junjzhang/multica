@@ -1,9 +1,7 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"time"
 
@@ -40,14 +38,16 @@ func (h *Handler) GetBackgroundWaitScope(w http.ResponseWriter, r *http.Request)
 		writeError(w, 403, "session-bound external credential required")
 		return
 	}
-	data, _ := json.Marshal(protocol.WaitAuthorization{DaemonID: r.URL.Query().Get("daemon_id")})
-	clone := r.Clone(r.Context())
-	clone.Body = io.NopCloser(bytes.NewReader(data))
-	h.AuthorizeBackgroundWait(w, clone)
+	address, ok := h.externalWaitScope(w, r, r.URL.Query().Get("daemon_id"), false)
+	if ok {
+		writeJSON(w, 200, address)
+	}
+
 }
 
-// BackgroundWaitStatuses is a batch receipt read. It does not lease, deliver,
-// acknowledge, consume, or create any mailbox entry or managed obligation.
+// BackgroundWaitStatuses reads each authorized receipt independently. An
+// unavailable historical resource produces unknown for that entry, without
+// discarding unrelated receipts. Credential scope violations reject the request.
 func (h *Handler) BackgroundWaitStatuses(w http.ResponseWriter, r *http.Request) {
 	var req protocol.WaitDeliveryRequest
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 262144)).Decode(&req) != nil || len(req.Waits) > 200 {
@@ -55,14 +55,22 @@ func (h *Handler) BackgroundWaitStatuses(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	ws := h.resolveWorkspaceID(r)
+	daemon := middleware.DaemonAuthPathFromContext(r.Context()) != ""
 	if daemonWS := middleware.DaemonWorkspaceIDFromContext(r.Context()); daemonWS != "" {
 		ws = daemonWS
 	}
 	if _, ok := parseUUIDOrBadRequest(w, ws, "workspace_id"); !ok {
 		return
 	}
+	source := r.Header.Get("X-Actor-Source")
+	if !daemon && source != "external_agent" && source != "task_token" {
+		writeError(w, 403, "wait reader credential required")
+		return
+	}
+	out := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}}
 	keys := make([]string, 0, len(req.Waits))
 	seen := map[string]bool{}
+	scopes := map[protocol.WaitAddress]bool{}
 	for _, lookup := range req.Waits {
 		if _, ok := parseUUIDOrBadRequest(w, lookup.ID, "wait_id"); !ok {
 			return
@@ -77,10 +85,44 @@ func (h *Handler) BackgroundWaitStatuses(w http.ResponseWriter, r *http.Request)
 			writeError(w, 403, "wait outside workspace")
 			return
 		}
-		if !h.authorizeWaitLookup(w, r, a) {
+		if _, ok := parseUUIDOrBadRequest(w, a.AgentID, "agent_id"); !ok {
 			return
 		}
-		keys = append(keys, "background_wait:"+lookup.ID)
+		if a.TaskID != "" {
+			if _, ok := parseUUIDOrBadRequest(w, a.TaskID, "task_id"); !ok {
+				return
+			}
+		} else {
+			if _, ok := parseUUIDOrBadRequest(w, a.SessionID, "session_id"); !ok {
+				return
+			}
+		}
+		if !daemon {
+			if source == "task_token" {
+				if a.TaskID == "" || a.TaskID != r.Header.Get("X-Task-ID") || a.AgentID != r.Header.Get("X-Agent-ID") {
+					writeError(w, 403, "current task required")
+					return
+				}
+			} else {
+				session, ok := externalActorSessionID(r)
+				if a.TaskID != "" || !ok || a.SessionID != uuidToString(session) || a.AgentID != r.Header.Get("X-Agent-ID") {
+					writeError(w, 403, "own external session required")
+					return
+				}
+			}
+		}
+		// Display metadata is not authority, and does not split identical scopes.
+		scope := a
+		scope.WorkDir, scope.IssueID = "", ""
+		allowed, checked := scopes[scope]
+		if !checked {
+			allowed = h.canReadWaitLookup(r, a, daemon)
+			scopes[scope] = allowed
+		}
+		out.Statuses[lookup.ID] = protocol.WaitDeliveryStatus{Known: allowed}
+		if allowed {
+			keys = append(keys, "background_wait:"+lookup.ID)
+		}
 	}
 	rows, err := h.Queries.GetBackgroundWaitDeliveries(r.Context(), db.GetBackgroundWaitDeliveriesParams{WorkspaceID: parseUUID(ws), NotificationKeys: keys})
 	if err != nil {
@@ -91,15 +133,17 @@ func (h *Handler) BackgroundWaitStatuses(w http.ResponseWriter, r *http.Request)
 	for _, row := range rows {
 		byKey[row.NotificationKey.String] = row
 	}
-	out := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}, ObservedAt: time.Now().UTC()}
 	for _, lookup := range req.Waits {
-		status := protocol.WaitDeliveryStatus{Known: true}
+		status := out.Statuses[lookup.ID]
+		if !status.Known {
+			continue
+		}
 		if row, ok := byKey["background_wait:"+lookup.ID]; ok {
 			var result protocol.WaitResult
 			a := lookup.Address
 			if json.Unmarshal(row.Payload, &result) != nil || result.ID != lookup.ID || !sameWaitTarget(result.Address, a) || uuidToString(row.RecipientAgentID) != a.AgentID || (a.TaskID == "" && uuidToString(row.TargetSessionID) != a.SessionID) || (a.TaskID != "" && row.TargetSessionID.Valid) {
-				writeError(w, 404, "wait receipt does not match address")
-				return
+				out.Statuses[lookup.ID] = protocol.WaitDeliveryStatus{}
+				continue
 			}
 			status.Enqueued = true
 			status.DeliveryID = uuidToString(row.ID)
@@ -108,6 +152,7 @@ func (h *Handler) BackgroundWaitStatuses(w http.ResponseWriter, r *http.Request)
 		}
 		out.Statuses[lookup.ID] = status
 	}
+	out.ObservedAt = time.Now().UTC()
 	writeJSON(w, 200, out)
 }
 
@@ -115,62 +160,37 @@ func sameWaitTarget(a, b protocol.WaitAddress) bool {
 	return a.WorkspaceID == b.WorkspaceID && a.AgentID == b.AgentID && a.SessionID == b.SessionID && a.DaemonID == b.DaemonID && a.TaskID == b.TaskID && a.RuntimeID == b.RuntimeID
 }
 
-func (h *Handler) authorizeWaitLookup(w http.ResponseWriter, r *http.Request, a protocol.WaitAddress) bool {
-	for field, value := range map[string]string{"agent_id": a.AgentID, "workspace_id": a.WorkspaceID} {
-		if _, ok := parseUUIDOrBadRequest(w, value, field); !ok {
-			return false
-		}
-	}
-	source := r.Header.Get("X-Actor-Source")
-	daemon := middleware.DaemonAuthPathFromContext(r.Context()) != ""
+// Inputs have passed UUID validation and credential scope checks above. Failure
+// reveals no receipt information, including whether a mailbox row exists.
+func (h *Handler) canReadWaitLookup(r *http.Request, a protocol.WaitAddress, daemon bool) bool {
 	if a.TaskID != "" {
-		if _, ok := parseUUIDOrBadRequest(w, a.TaskID, "task_id"); !ok {
-			return false
-		}
-		if !daemon && (source != "task_token" || r.Header.Get("X-Task-ID") != a.TaskID || r.Header.Get("X-Agent-ID") != a.AgentID) {
-			writeError(w, 403, "current task required")
-			return false
-		}
 		task, err := h.Queries.GetAgentTask(r.Context(), parseUUID(a.TaskID))
-		if err != nil || uuidToString(task.AgentID) != a.AgentID || uuidToString(task.RuntimeID) != a.RuntimeID || task.SessionID.String != a.SessionID {
-			writeError(w, 404, "task address unavailable")
+		// A consumed wait can outlive the task's provider pin. The immutable mailbox
+		// payload, rather than the current pin, verifies its historical session.
+		if err != nil || uuidToString(task.AgentID) != a.AgentID || uuidToString(task.RuntimeID) != a.RuntimeID {
 			return false
 		}
-		if err := delegation.ValidateTaskScope(r.Context(), h.Queries, parseUUID(a.WorkspaceID), task); err != nil {
-			writeError(w, 404, "task workspace unavailable")
+		if delegation.ValidateTaskScope(r.Context(), h.Queries, parseUUID(a.WorkspaceID), task) != nil {
 			return false
 		}
 		rt, err := h.Queries.GetAgentRuntime(r.Context(), task.RuntimeID)
 		if err != nil || uuidToString(rt.WorkspaceID) != a.WorkspaceID || rt.DaemonID.String != a.DaemonID {
-			writeError(w, 404, "task daemon unavailable")
 			return false
 		}
-		if daemon {
-			return h.requireDaemonRuntimeAuthorized(w, r, a.WorkspaceID, rt.DaemonID, rt.OwnerID, "task unavailable")
-		}
-		return true
-	}
-	if _, ok := parseUUIDOrBadRequest(w, a.SessionID, "session_id"); !ok {
-		return false
-	}
-	if !daemon {
-		session, ok := externalActorSessionID(r)
-		if source != "external_agent" || !ok || uuidToString(session) != a.SessionID || r.Header.Get("X-Agent-ID") != a.AgentID {
-			writeError(w, 403, "own external session required")
-			return false
-		}
+		return !daemon || h.verifyDaemonRuntimeAuthorized(r, rt)
 	}
 	session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{ID: parseUUID(a.SessionID), WorkspaceID: parseUUID(a.WorkspaceID)})
 	if err != nil || uuidToString(session.AgentID) != a.AgentID {
-		writeError(w, 404, "session unavailable")
 		return false
 	}
 	if daemon {
-		return h.requireDaemonRuntimeAuthorized(w, r, a.WorkspaceID, pgtype.Text{String: a.DaemonID, Valid: a.DaemonID != ""}, session.OwnerUserID, "session unavailable")
-	}
-	if uuidToString(session.OwnerUserID) != requestUserID(r) {
-		writeError(w, 403, "session owner required")
+		rt := db.AgentRuntime{WorkspaceID: session.WorkspaceID, DaemonID: pgtype.Text{String: a.DaemonID, Valid: a.DaemonID != ""}, OwnerID: session.OwnerUserID}
+		if !h.verifyDaemonRuntimeAuthorized(r, rt) {
+			return false
+		}
+	} else if uuidToString(session.OwnerUserID) != requestUserID(r) {
 		return false
 	}
-	return true
+	owned, err := h.Queries.WorkspaceDaemonOwnedByUser(r.Context(), db.WorkspaceDaemonOwnedByUserParams{WorkspaceID: session.WorkspaceID, DaemonID: pgtype.Text{String: a.DaemonID, Valid: a.DaemonID != ""}, OwnerUserID: session.OwnerUserID})
+	return err == nil && owned
 }

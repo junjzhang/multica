@@ -20,6 +20,7 @@ func TestBackgroundWaitListCredentialRouting(t *testing.T) {
 	dir := t.TempDir()
 	taskID, otherTask, session := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	var receipts atomic.Int32
+	var batchReads atomic.Int32
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -36,16 +37,16 @@ func TestBackgroundWaitListCredentialRouting(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(a)
 		case "/api/daemon/background-waits/status":
+			batchReads.Add(1)
 			var req protocol.WaitDeliveryRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
-			for _, lookup := range req.Waits {
-				if lookup.Address.TaskID == otherTask {
-					w.WriteHeader(503)
-					return
-				}
-			}
+
 			response := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}, ObservedAt: time.Now().UTC()}
 			for _, lookup := range req.Waits {
+				if lookup.Address.TaskID == otherTask {
+					response.Statuses[lookup.ID] = protocol.WaitDeliveryStatus{}
+					continue
+				}
 				response.Statuses[lookup.ID] = protocol.WaitDeliveryStatus{Known: true, Enqueued: true, DeliveryStatus: "delivered", ProcessingStatus: "handled"}
 			}
 			_ = json.NewEncoder(w).Encode(response)
@@ -104,10 +105,14 @@ func TestBackgroundWaitListCredentialRouting(t *testing.T) {
 	if err != nil || json.Unmarshal(data, &endpoint) != nil {
 		t.Fatal("read owner endpoint")
 	}
+	beforeReads := batchReads.Load()
 	ownerReq := httptest.NewRequest("GET", "/waits", nil)
 	ownerReq.Header.Set("Authorization", "Bearer "+endpoint.Secret)
 	ownerResponse := httptest.NewRecorder()
 	d.backgroundWaitHandler()(ownerResponse, ownerReq)
+	if batchReads.Load()-beforeReads != 1 {
+		t.Fatal("list made one HTTP request per frozen target")
+	}
 	var ownerList protocol.WaitList
 	if ownerResponse.Code != 200 || json.Unmarshal(ownerResponse.Body.Bytes(), &ownerList) != nil || len(ownerList.Items) != 3 {
 		t.Fatalf("owner list %s", ownerResponse.Body.String())

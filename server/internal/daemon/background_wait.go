@@ -148,19 +148,17 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 	})
 	manager.ConfigureList(func(ctx context.Context, lookups []protocol.WaitLookup) (protocol.WaitDeliveryResponse, error) {
 		out := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}}
-		// A revoked/deleted historical target must not make unrelated receipts
-		// unknown. Preserve independent observations while keeping each query scoped.
-		groups := map[protocol.WaitAddress][]protocol.WaitLookup{}
+		// The batch endpoint isolates unavailable targets within a workspace.
+		// Keep independent workspace observations when a whole request fails.
+		groups := map[string][]protocol.WaitLookup{}
 		var lastError error
 		for _, lookup := range lookups {
-			address := lookup.Address
-			address.WorkDir, address.IssueID = "", ""
-			groups[address] = append(groups[address], lookup)
+			groups[lookup.Address.WorkspaceID] = append(groups[lookup.Address.WorkspaceID], lookup)
 		}
-		for address, group := range groups {
+		for workspace, group := range groups {
 			for start := 0; start < len(group); start += 200 {
 				var part protocol.WaitDeliveryResponse
-				err := d.client.postDaemonDeliveryJSON(ctx, address.WorkspaceID, "/api/daemon/background-waits/status", protocol.WaitDeliveryRequest{Waits: group[start:min(start+200, len(group))]}, &part)
+				err := d.client.postDaemonDeliveryJSON(ctx, workspace, "/api/daemon/background-waits/status", protocol.WaitDeliveryRequest{Waits: group[start:min(start+200, len(group))]}, &part)
 				if err != nil {
 					lastError = err
 					continue

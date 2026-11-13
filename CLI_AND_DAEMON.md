@@ -1216,6 +1216,9 @@ uses that credential's frozen target session; in a managed task it uses only the
 active task token and injected daemon port. Outside either context the private
 local profile capability lists only that daemon's journal, across its workspaces.
 An external session cannot widen its scope by selecting a different profile.
+Read scope follows the frozen session even after delivery-worker reassignment,
+while new registrations still require the current worker. Historical managed
+receipts use their frozen provider session even after that task repins.
 
 Filters: `--session <external-session-row-id>`, `--workspace <uuid>`, `--task <uuid>`,
 `--state <comma-separated execution states>`, `--delivery-status <states>` and
@@ -1244,7 +1247,10 @@ Receipt hydration uses the read-only batch endpoint
 `POST /api/background-waits/status` for the current session/task credential.
 The body is `{"waits":[{"id":"<wait-uuid>","address":{...frozen address...}}]}`
 (maximum 200); all entries must belong to one authorized workspace. Results are
-keyed by wait ID under `statuses`, with `observed_at`. No mailbox leases or processing
+keyed by wait ID under `statuses`, with `observed_at`. Credential scope violations
+reject the request; unavailable or unauthorized individual resources return only
+`known=false`, preserving independent authorized observations in the same batch.
+No mailbox leases or processing
 receipts change. `known=true, enqueued=false` means no matching mailbox entry was
 found; `enqueued=true` means durable inbox insertion, **not** host delivery.
 `delivery_status=delivered` means host acceptance; `processing_status=handled`
