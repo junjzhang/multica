@@ -34,7 +34,7 @@ func addListRow(t *testing.T, m *Manager, a protocol.WaitAddress) string {
 func readList(t *testing.T, m *Manager, path string, scope protocol.WaitAddress, code int) protocol.WaitList {
 	t.Helper()
 	req := httptest.NewRequest("GET", path, nil)
-	req.Header.Set("Authorization", "Bearer owner")
+	req.Header.Set("Authorization", "Bearer "+m.secret)
 	w := httptest.NewRecorder()
 	if scope.SessionID != "" {
 		m.ServeSessionList(w, req, scope)

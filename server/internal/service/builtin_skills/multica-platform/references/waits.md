@@ -29,7 +29,7 @@ must not be interpreted as no waits or handled results. Local notify retries and
 `lost` after daemon restart remain visible. Listing never replays a command.
 
 For bridges, use the same local `GET /waits` snapshot interface. It hydrates receipts
-through a read-only, workspace-scoped batch API. See `CLI_AND_DAEMON.md` for request,
-authentication, pagination and freshness details. Never refresh a UI by calling
+through a read-only, workspace-scoped batch API. Local query parameters match the
+CLI flags, with underscores for `delivery_status` and `processing_status`. Never refresh a UI by calling
 managed `wait get`: terminal get consumes the result. External `get` does not ACK
 Mailbox. Processing receipt and task acceptance remain separate operations.

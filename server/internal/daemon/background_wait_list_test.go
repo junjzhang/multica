@@ -38,6 +38,12 @@ func TestBackgroundWaitListCredentialRouting(t *testing.T) {
 		case "/api/daemon/background-waits/status":
 			var req protocol.WaitDeliveryRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
+			for _, lookup := range req.Waits {
+				if lookup.Address.TaskID == otherTask {
+					w.WriteHeader(503)
+					return
+				}
+			}
 			response := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}, ObservedAt: time.Now().UTC()}
 			for _, lookup := range req.Waits {
 				response.Statuses[lookup.ID] = protocol.WaitDeliveryStatus{Known: true, Enqueued: true, DeliveryStatus: "delivered", ProcessingStatus: "handled"}
@@ -92,6 +98,30 @@ func TestBackgroundWaitListCredentialRouting(t *testing.T) {
 				}
 			}
 		})
+	}
+	var endpoint protocol.WaitEndpoint
+	data, err := os.ReadFile(filepath.Join(dir, "wait.endpoint.json"))
+	if err != nil || json.Unmarshal(data, &endpoint) != nil {
+		t.Fatal("read owner endpoint")
+	}
+	ownerReq := httptest.NewRequest("GET", "/waits", nil)
+	ownerReq.Header.Set("Authorization", "Bearer "+endpoint.Secret)
+	ownerResponse := httptest.NewRecorder()
+	d.backgroundWaitHandler()(ownerResponse, ownerReq)
+	var ownerList protocol.WaitList
+	if ownerResponse.Code != 200 || json.Unmarshal(ownerResponse.Body.Bytes(), &ownerList) != nil || len(ownerList.Items) != 3 {
+		t.Fatalf("owner list %s", ownerResponse.Body.String())
+	}
+	for _, item := range ownerList.Items {
+		if item.Address.TaskID == otherTask {
+			if item.Delivery.Known {
+				t.Fatal("failed scope appeared current")
+			}
+			continue
+		}
+		if !item.Delivery.Known || item.Delivery.ProcessingStatus != "handled" {
+			t.Fatalf("unavailable scope poisoned healthy receipt %+v", item)
+		}
 	}
 	if receipts.Load() != 0 {
 		t.Fatal("list wrote a processing receipt")

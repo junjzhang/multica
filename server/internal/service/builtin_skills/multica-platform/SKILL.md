@@ -1,6 +1,6 @@
 ---
 name: multica-platform
-description: "Use for Multica platform actions the runtime brief does not fully cover: issue and PR contracts, charts and files in comments, mentions, agents, squads, autopilots, projects, runtimes, skill import. Not for the product code you are working on."
+description: "Use for Multica platform actions the runtime brief does not fully cover: issue and PR contracts, charts and files in comments, mentions, agents, squads, autopilots, projects, runtimes, waits, skill import. Not for the product code you are working on."
 user-invocable: false
 allowed-tools: Bash(multica *), Bash(git *), Bash(gh *)
 ---
@@ -34,7 +34,7 @@ crosses domains needs each domain it touches — creating a squad, assigning it 
 issue, then writing a mention needs `squads.md`, `issues.md` and `mentions.md`,
 and skipping one of those means acting on a contract you have not read.
 
-What is never right is reading all eight because you are not sure. Each
+What is never right is reading every reference because you are not sure. Each
 reference states its own contracts in full and none depends on another, so
 pick by domain and skip the rest.
 

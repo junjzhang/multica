@@ -89,7 +89,9 @@ func (m *Manager) list(w http.ResponseWriter, r *http.Request, scope protocol.Wa
 		}
 		result, err := read(r.Context(), lookups)
 		if err == nil {
-			deliveryObservedAt = &result.ObservedAt
+			if !result.ObservedAt.IsZero() {
+				deliveryObservedAt = &result.ObservedAt
+			}
 			for i := range items {
 				if status, ok := result.Statuses[items[i].ID]; ok {
 					items[i].Delivery = status

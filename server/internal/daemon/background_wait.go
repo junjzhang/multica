@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/multica-ai/multica/server/internal/backgroundwait"
 	"github.com/multica-ai/multica/server/internal/cli"
@@ -149,16 +148,22 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 	})
 	manager.ConfigureList(func(ctx context.Context, lookups []protocol.WaitLookup) (protocol.WaitDeliveryResponse, error) {
 		out := protocol.WaitDeliveryResponse{Statuses: map[string]protocol.WaitDeliveryStatus{}}
-		groups := map[string][]protocol.WaitLookup{}
+		// A revoked/deleted historical target must not make unrelated receipts
+		// unknown. Preserve independent observations while keeping each query scoped.
+		groups := map[protocol.WaitAddress][]protocol.WaitLookup{}
+		var lastError error
 		for _, lookup := range lookups {
-			groups[lookup.Address.WorkspaceID] = append(groups[lookup.Address.WorkspaceID], lookup)
+			address := lookup.Address
+			address.WorkDir, address.IssueID = "", ""
+			groups[address] = append(groups[address], lookup)
 		}
-		for workspace, group := range groups {
+		for address, group := range groups {
 			for start := 0; start < len(group); start += 200 {
 				var part protocol.WaitDeliveryResponse
-				err := d.client.postDaemonDeliveryJSON(ctx, workspace, "/api/daemon/background-waits/status", protocol.WaitDeliveryRequest{Waits: group[start:min(start+200, len(group))]}, &part)
+				err := d.client.postDaemonDeliveryJSON(ctx, address.WorkspaceID, "/api/daemon/background-waits/status", protocol.WaitDeliveryRequest{Waits: group[start:min(start+200, len(group))]}, &part)
 				if err != nil {
-					return out, err
+					lastError = err
+					continue
 				}
 				for id, status := range part.Statuses {
 					out.Statuses[id] = status
@@ -169,7 +174,7 @@ func (d *Daemon) openBackgroundWaits(ctx context.Context, dir, localURL string, 
 			}
 		}
 		if out.ObservedAt.IsZero() {
-			out.ObservedAt = time.Now().UTC()
+			return out, lastError
 		}
 		return out, nil
 	})

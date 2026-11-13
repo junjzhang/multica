@@ -1251,7 +1251,8 @@ found; `enqueued=true` means durable inbox insertion, **not** host delivery.
 means processing receipt (managed consumption also records `handled`). A mailbox
 `delivery_status=unknown` is an observed ambiguous host receipt, distinct from
 `known=false` when receipt lookup failed. List keeps local execution facts and
-marks receipt knowledge false if the server is unreachable; a cached delivery ID
+marks receipt knowledge false for targets whose lookup fails, preserving fresh
+receipts for other targets; a cached delivery ID
 or local handled receipt is not a fresh server observation. `notify_error` records
 outbox retries. Restart can mark an unfinished command `lost`; listing never
 replays it. `GET /api/background-waits/scope?daemon_id=<id>` resolves only the
