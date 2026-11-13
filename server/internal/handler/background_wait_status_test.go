@@ -134,3 +134,20 @@ func TestWaitDisplayIssueAuthorizationAndScope(t *testing.T) {
 		t.Fatal("unbound external credential got session scope")
 	}
 }
+
+func TestWaitReceiptDaemonHostOwnerAndWorkspaceIsolation(t *testing.T) {
+	agent, session, owner := externalAgentFixture(t, "Read host scope", "scope-daemon")
+	f := testutil.New(testPool, testWorkspaceID, owner)
+	f.Runtime(t, "Scope host", testutil.Cols{"daemon_id": "scope-daemon"})
+	req := protocol.WaitDeliveryRequest{Waits: []protocol.WaitLookup{{ID: uuid.NewString(), Address: protocol.WaitAddress{WorkspaceID: testWorkspaceID, AgentID: agent, SessionID: session, DaemonID: "scope-daemon"}}}}
+	for _, tc := range []struct {
+		name, workspace, daemon, owner string
+		status                         int
+	}{{"own host", testWorkspaceID, "scope-daemon", owner, 200}, {"other host", testWorkspaceID, "other-host", owner, 404}, {"other owner", testWorkspaceID, "scope-daemon", testUserID, 404}, {"other workspace", uuid.NewString(), "scope-daemon", owner, 403}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDaemonTokenRequest("POST", "/api/daemon/background-waits/status", req, tc.workspace, tc.daemon)
+			r = r.WithContext(middleware.WithDaemonTokenOwnerID(r.Context(), tc.owner))
+			testutil.Call(t, testHandler.BackgroundWaitStatuses, r).Want(tc.status)
+		})
+	}
+}

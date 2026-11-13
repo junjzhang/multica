@@ -14,8 +14,8 @@ import (
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
-// GetBackgroundWaitScope resolves only an external credential's own session.
-// Unlike managed authorization, this path never registers a continuation.
+// GetBackgroundWaitScope resolves only the credential's own external session
+// or active task. It never registers a continuation.
 func (h *Handler) GetBackgroundWaitScope(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Actor-Source") == "task_token" {
 		ws, agent, taskID := h.resolveWorkspaceID(r), r.Header.Get("X-Agent-ID"), r.Header.Get("X-Task-ID")
