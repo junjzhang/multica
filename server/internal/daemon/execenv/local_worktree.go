@@ -814,6 +814,32 @@ func untrackedRuntimePaths(dir string) ([]string, error) {
 	return paths, nil
 }
 
+// PendingRuntimePaths reports files that a later automatic commit would skip,
+// including tracked paths staged for deletion while their working copy remains.
+func (w *LocalWorktree) PendingRuntimePaths() ([]string, error) {
+	paths, err := untrackedRuntimePaths(w.Path)
+	if err != nil {
+		return nil, err
+	}
+	deleted, err := runGitStdout(w.Path, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=D", "-z", "HEAD", "--", ":(glob)**/.multica", ":(glob)**/.multica/**")
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range strings.Split(deleted, "\x00") {
+		if path == "" || slices.Contains(paths, path) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(w.Path, path)); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 // Remove deletes only the exact clean worktree Finalize persisted. The caller
 // must hold its env-root lock and have authoritative permission to release the
 // resource. New ownership or edits after finalization always preserve the tree.
