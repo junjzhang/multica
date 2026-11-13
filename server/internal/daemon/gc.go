@@ -983,6 +983,7 @@ func (d *Daemon) cleanTaskDir(ctx context.Context, taskDir string) (bytes int64,
 					return 0, false
 				}
 				if err := w.Remove(d.logger); err != nil {
+					logRetainedRuntimePaths(d.logger, resource.OwnerTaskID, err)
 					return 0, false
 				}
 				request := resource.Address

@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,24 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
+
+func TestLogRetainedRuntimePaths(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	err := fmt.Errorf("delayed finalization: %w", &execenv.RetainedRuntimePathsError{
+		Worktree: "/task/worktree", Paths: []string{".multica/file", ".multica/line\nbreak"},
+	})
+	logRetainedRuntimePaths(logger, "task-123", err)
+	line := output.String()
+	for _, want := range []string{"preserved_runtime_paths", "task_id=task-123", "worktree=/task/worktree", ".multica/file", ".multica/line"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log missing %q: %s", want, line)
+		}
+	}
+	if strings.Count(line, "\n") != 1 {
+		t.Fatalf("log must be a single line: %q", line)
+	}
+}
 
 func TestGCReleaseHoldsExecutionLockAndRechecksCurrentOwner(t *testing.T) {
 	var releaseCalls atomic.Int32

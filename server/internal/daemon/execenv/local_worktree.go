@@ -294,6 +294,16 @@ type LocalWorktreeOutcome struct {
 
 const retainedRuntimeMarker = ".retained-runtime-paths"
 
+// RetainedRuntimePathsError identifies paths left in a preserved worktree.
+type RetainedRuntimePathsError struct {
+	Worktree string
+	Paths    []string
+}
+
+func (e *RetainedRuntimePathsError) Error() string {
+	return fmt.Sprintf("new .multica paths were not committed: %s; the task worktree is preserved at %s — recover these files, then remove the worktree and %s", quotedPaths(e.Paths), e.Worktree, filepath.Join(filepath.Dir(e.Worktree), retainedRuntimeMarker))
+}
+
 func markRetainedRuntimePaths(worktreePath string) error {
 	err := os.Mkdir(filepath.Join(filepath.Dir(worktreePath), retainedRuntimeMarker), 0o700)
 	if errors.Is(err, os.ErrExist) {
@@ -747,10 +757,11 @@ func (w *LocalWorktree) Finalize(logger *slog.Logger) (LocalWorktreeOutcome, err
 
 	if len(skipped) > 0 {
 		outcome.PreservedPath = w.Path
+		retained := &RetainedRuntimePathsError{Worktree: w.Path, Paths: skipped}
 		if out, err := runGit(w.Path, "checkout", "--detach", "HEAD"); err != nil {
-			return outcome, fmt.Errorf("could not release branch %s: %s: %w; the task worktree is preserved at %s with uncommitted paths %s", w.Branch, strings.TrimSpace(out), err, w.Path, quotedPaths(skipped))
+			return outcome, fmt.Errorf("could not release branch %s: %s: %w; %w", w.Branch, strings.TrimSpace(out), err, retained)
 		}
-		return outcome, fmt.Errorf("new .multica paths were not committed: %s; the task worktree is preserved at %s — recover these files, then remove the worktree and %s", quotedPaths(skipped), w.Path, filepath.Join(filepath.Dir(w.Path), retainedRuntimeMarker))
+		return outcome, retained
 	}
 	info, infoErr := os.Lstat(w.Path)
 	if infoErr != nil {
@@ -837,17 +848,17 @@ func (w *LocalWorktree) Remove(logger *slog.Logger) error {
 	if err != nil || tip != w.finalizedTip {
 		return fmt.Errorf("finalized worktree commit changed: %s", w.Path)
 	}
-	dirty, err := worktreeIsDirty(w.Path)
-	if err != nil || dirty {
-		return fmt.Errorf("finalized worktree is no longer clean: %s", w.Path)
-	}
 	if paths, err := untrackedRuntimePaths(w.Path); err != nil {
 		return fmt.Errorf("could not inspect runtime files in %s: %w", w.Path, err)
 	} else if len(paths) > 0 {
 		if err := markRetainedRuntimePaths(w.Path); err != nil {
 			return fmt.Errorf("could not protect runtime files from cleanup: %w; inspect %s immediately", err, w.Path)
 		}
-		return fmt.Errorf("new .multica paths remain in %s: %s", w.Path, quotedPaths(paths))
+		return &RetainedRuntimePathsError{Worktree: w.Path, Paths: paths}
+	}
+	dirty, err := worktreeIsDirty(w.Path)
+	if err != nil || dirty {
+		return fmt.Errorf("finalized worktree is no longer clean: %s", w.Path)
 	}
 	if err := removeLocalWorktreeDir(w.GitRoot, w.Path, logger); err != nil {
 		return err
