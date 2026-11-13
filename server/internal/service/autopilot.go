@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -762,6 +763,23 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		return fmt.Errorf("create issue: %w", err)
 	}
 
+	if ap.AssigneeType == "squad" {
+		squad, err := qtx.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: ap.AssigneeID, WorkspaceID: ap.WorkspaceID})
+		if err != nil {
+			return err
+		}
+		bound, err := issueleader.Ensure(ctx, qtx, issue, squad, pgtype.UUID{}, pgtype.UUID{}, "")
+		if err != nil {
+			return err
+		}
+		if bound.Agent.ID != leader.ID {
+			return issueleader.ErrConflict
+		}
+		issue, err = qtx.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issue.ID, WorkspaceID: issue.WorkspaceID})
+		if err != nil {
+			return err
+		}
+	}
 	// Fan out the default subscriber template inside the same tx as the
 	// issue insert, before EventIssueCreated fires — so notification
 	// listeners see the full subscriber set on the first event instead of
@@ -1326,6 +1344,9 @@ func (s *AutopilotService) shouldSkipDispatch(ctx context.Context, ap db.Autopil
 		return "autopilot has no assignee", dispatch.ReasonTargetUnavailable, true
 	}
 	agent, squadResolved, err := s.resolveAutopilotLeader(ctx, ap)
+	if errors.Is(err, issueleader.ErrDefaultExternal) {
+		return issueleader.ErrDefaultExternal.Error(), dispatch.ReasonTargetUnavailable, true
+	}
 	if err != nil {
 		// Hard-skip the cases where another retry will produce the same
 		// outcome. Logging is unconditional so ops can still spot a run of
@@ -1474,7 +1495,8 @@ func (s *AutopilotService) resolveAutopilotLeader(ctx context.Context, ap db.Aut
 		if squad.ArchivedAt.Valid {
 			return db.Agent{}, true, errSquadArchived
 		}
-		agent, err = s.Queries.GetAgent(ctx, squad.LeaderID)
+		resolved, resolveErr := issueleader.ResolveIssueLeader(ctx, s.Queries, db.Issue{WorkspaceID: ap.WorkspaceID}, squad)
+		agent, err = resolved.Agent, resolveErr
 		if err != nil {
 			return db.Agent{}, true, fmt.Errorf("load squad leader: %w", err)
 		}

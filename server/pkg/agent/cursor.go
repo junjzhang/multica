@@ -23,6 +23,9 @@ type cursorBackend struct {
 }
 
 func (b *cursorBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResumeSupport("cursor", opts); err != nil {
+		return nil, err
+	}
 	execName := b.cfg.ExecutablePath
 	if execName == "" {
 		execName = "cursor-agent"

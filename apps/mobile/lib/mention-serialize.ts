@@ -22,7 +22,7 @@ import { isMentionBoundaryAfter } from "@multica/core/markdown";
 
 const SENTINEL = "⁣";
 
-export type MentionType = "member" | "agent" | "squad" | "all" | "issue";
+export type MentionType = "member" | "agent" | "agent-notify" | "squad" | "all" | "issue";
 
 export interface MentionMarker {
   type: MentionType;

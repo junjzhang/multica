@@ -526,6 +526,9 @@ func finalizeOK(t *testing.T, wt *LocalWorktree) LocalWorktreeOutcome {
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
+	if err := wt.Remove(worktreeTestLogger()); err != nil {
+		t.Fatalf("Remove finalized worktree: %v", err)
+	}
 	return outcome
 }
 

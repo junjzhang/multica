@@ -1,0 +1,5 @@
+# The plugin is loaded directly by Paseo and is not part of the Multica
+# web/mobile dependency graph. This workspace root keeps its install and
+# lockfile self-contained under integrations/paseo-multica.
+packages:
+  - "."

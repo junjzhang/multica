@@ -20,11 +20,13 @@
 
 import { NodeViewWrapper } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
+import { useT } from "../../i18n";
 import { IssueMentionCard } from "../../issues/components/issue-mention-card";
 import { ProjectMentionCard } from "../../projects/components/project-mention-card";
 
 export function MentionView({ node }: NodeViewProps) {
   const { type, id, label } = node.attrs;
+  const { t } = useT("editor");
 
   // stopPropagation mirrors the readonly renderer's mention wrappers: a chip
   // click must not reach surrounding click handlers.
@@ -54,7 +56,7 @@ export function MentionView({ node }: NodeViewProps) {
 
   return (
     <NodeViewWrapper as="span" className="inline">
-      <span className="mention">@{label ?? id}</span>
+      <span className="mention">@{label ?? id}{type === "agent-notify" ? ` · ${t(($) => $.mention.notify_badge)}` : ""}</span>
     </NodeViewWrapper>
   );
 }
