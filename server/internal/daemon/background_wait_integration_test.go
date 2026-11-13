@@ -82,6 +82,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 			h.AuthorizeBackgroundWait(w, req)
 		})
 		r.Get("/api/agents/{id}/mailbox", h.ListAgentMailbox)
+		r.Get("/api/background-waits/scope", h.GetBackgroundWaitScope)
 	})
 	router.Group(func(r chi.Router) {
 		r.Use(middleware.DaemonAuth(q, nil, nil, nil))
@@ -101,6 +102,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 				completed <- out.ID
 			}
 		})
+		r.Post("/api/daemon/background-waits/status", h.BackgroundWaitStatuses)
 		r.Post("/api/daemon/deliveries/claim", h.ClaimDaemonDeliveries)
 		r.Post("/api/daemon/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
 	})
@@ -127,7 +129,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if err := backgroundwait.WritePrivate(contextPath, bound); err != nil {
 		t.Fatal(err)
 	}
-	runCLI := func(args ...string) protocol.WaitStatus {
+	runCLIRaw := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command(binary, args...)
 		cmd.Dir = dir
@@ -143,6 +145,10 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CLI %v: %v %s %s", args, err, out, stderr.String())
 		}
+		return out
+	}
+	runCLI := func(args ...string) protocol.WaitStatus {
+		out := runCLIRaw(args...)
 		var result protocol.WaitStatus
 		if err := json.Unmarshal(out, &result); err != nil {
 			t.Fatalf("CLI response: %s %v", out, err)
@@ -151,7 +157,7 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	}
 	requestID := uuid.NewString()
 	deadline := time.Now().Add(60 * time.Second).UTC().Format(time.RFC3339Nano)
-	args := []string{"wait", "start", "--request-id", requestID, "--deadline", deadline, "--cwd", dir, "--", "/bin/sh", "-c", "while [ ! -e release ]; do sleep 0.01; done; printf x >> executions; exit 7"}
+	args := []string{"wait", "start", "--request-id", requestID, "--deadline", deadline, "--cwd", dir, "--description", "Test verification", "--", "/bin/sh", "-c", "while [ ! -e release ]; do sleep 0.01; done; printf x >> executions; exit 7"}
 	started := runCLI(args...)
 	if started.ID != requestID || started.State != "running" {
 		t.Fatalf("registration waited for command: %+v", started)
@@ -185,6 +191,19 @@ func TestBackgroundWaitCLIToMailboxAndFrozenHost(t *testing.T) {
 	if status.State != "failed" || status.ExitCode == nil || *status.ExitCode != 7 {
 		t.Fatalf("status = %+v", status)
 	}
+	var listing protocol.WaitList
+	raw := runCLIRaw("wait", "list", "--limit", "1")
+	if json.Unmarshal(raw, &listing) != nil || len(listing.Items) != 1 || listing.Items[0].ID != requestID || listing.Items[0].Description != "Test verification" || listing.Items[0].StartedAt == nil || !listing.Items[0].Delivery.Enqueued || listing.Items[0].Delivery.DeliveryStatus != "pending" {
+		t.Fatalf("CLI snapshot %s", raw)
+	}
+	if strings.Contains(string(raw), "printf x") || strings.Contains(string(raw), "log_path") || strings.Contains(string(raw), "work_dir") {
+		t.Fatal("unsafe list fields")
+	}
+	var processing string
+	if err := pool.QueryRow(t.Context(), "SELECT processing_status FROM agent_mailbox_message WHERE id=$1", deliveryID).Scan(&processing); err != nil || processing != "unread" {
+		t.Fatalf("list consumed result: %s %v", processing, err)
+	}
+
 	if !d.trySetClaimBarrier() {
 		t.Fatal("completed wait still blocked reload")
 	}

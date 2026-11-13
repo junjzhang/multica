@@ -1200,3 +1200,59 @@ The immutable `runtime_type` selects model discovery, skills paths, and launch b
 the server derives `protocol_family` (`pi` for `omp`). Custom command/path overrides and
 fixed arguments still apply, and the runtime retains its custom-profile provenance.
 Existing profiles and the legacy `--protocol-family` flag retain their original target.
+
+### Background wait snapshots and receipts
+
+`multica wait start --description "Build verification" --issue WORK-123 --timeout 3h -- <command>`
+registers an optional display description and an associated issue. The server
+resolves the issue reference and checks access before execution. Managed waits
+always derive the issue from their task and reject `--issue`. New records persist
+`started_at` when execution is registered; restart preserves it. Older journals
+omit missing start time, description and issue metadata rather than inventing them.
+
+`multica wait list [--daemon-profile <local-profile>]` reads a snapshot without
+consuming results, ACKing messages, or creating waits. In an external session it
+uses that credential's frozen target session; in a managed task it uses only the
+active task token and injected daemon port. Outside either context the private
+local profile capability lists only that daemon's journal, across its workspaces.
+An external session cannot widen its scope by selecting a different profile.
+
+Filters: `--session <external-session-row-id>`, `--workspace <uuid>`, `--task <uuid>`,
+`--state <comma-separated execution states>`, `--delivery-status <states>` and
+`--processing-status <states>`. Managed callers cannot select a session or another
+task. External callers cannot select another workspace, session or any task.
+Execution states are `running`, `cancelling`, `succeeded`, `failed`, `timed_out`,
+`cancelled`, `lost`. Receipt filters accept mailbox delivery states (`pending`,
+`leased`, `unknown`, `delivered`, `failed`) plus `not_enqueued`;
+processing accepts `unread`, `read`, `handled`, `unknown`.
+
+The local read-only HTTP interface is `GET /waits` with the same query names
+(use underscores for `delivery_status` and `processing_status`). Authenticate with
+`Authorization: Bearer <private-profile-capability|session-token|task-token>`;
+session tokens also supply `X-Workspace-ID`. Session/task credentials are checked
+with the server before reading. Credentials stay on the service side of bridges.
+The response has safe `items` (no argv, cwd or log paths), `snapshot_version`,
+`observed_at`, optional `delivery_observed_at`, and `next_cursor`. IDs sort ascending.
+Pass `--limit 1..200` (default 50) and then `--cursor <next_cursor>` with identical
+filters. A change to matching rows or receipts returns HTTP 409: restart pagination
+instead of combining different snapshots. Snapshot hashes survive daemon restart
+when their content is unchanged; they are content versions, not event counters.
+Execution state is a local snapshot; delivery receipts are observed separately.
+
+Receipt hydration uses the read-only batch endpoint
+`POST /api/daemon/background-waits/status` for the executing daemon, or
+`POST /api/background-waits/status` for the current session/task credential.
+The body is `{"waits":[{"id":"<wait-uuid>","address":{...frozen address...}}]}`
+(maximum 200); all entries must belong to one authorized workspace. Results are
+keyed by wait ID under `statuses`, with `observed_at`. No mailbox leases or processing
+receipts change. `known=true, enqueued=false` means no matching mailbox entry was
+found; `enqueued=true` means durable inbox insertion, **not** host delivery.
+`delivery_status=delivered` means host acceptance; `processing_status=handled`
+means processing receipt (managed consumption also records `handled`). A mailbox
+`delivery_status=unknown` is an observed ambiguous host receipt, distinct from
+`known=false` when receipt lookup failed. List keeps local execution facts and
+marks receipt knowledge false if the server is unreachable; a cached delivery ID
+or local handled receipt is not a fresh server observation. `notify_error` records
+outbox retries. Restart can mark an unfinished command `lost`; listing never
+replays it. `GET /api/background-waits/scope?daemon_id=<id>` resolves only the
+credential's own external session or active managed task and has no write effects.

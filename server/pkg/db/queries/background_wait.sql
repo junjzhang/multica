@@ -43,3 +43,9 @@ WHERE agent_mailbox_message.recipient_agent_id = EXCLUDED.recipient_agent_id
   AND agent_mailbox_message.payload = EXCLUDED.payload
   AND agent_mailbox_message.target_session_id IS NULL
 RETURNING *;
+
+-- name: GetBackgroundWaitDeliveries :many
+SELECT * FROM agent_mailbox_message
+WHERE workspace_id = @workspace_id
+  AND source_type = 'background_wait'
+  AND notification_key = ANY(@notification_keys::text[]);

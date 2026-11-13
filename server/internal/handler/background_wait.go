@@ -34,6 +34,10 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 	}
 	wsID, agentID := h.resolveWorkspaceID(r), r.Header.Get("X-Agent-ID")
 	if r.Header.Get("X-Actor-Source") == "task_token" {
+		if req.IssueRef != "" {
+			writeError(w, 400, "managed waits derive their issue from the current task")
+			return
+		}
 		if _, ok := parseUUIDOrBadRequest(w, req.ID, "id"); !ok {
 			return
 		}
@@ -71,7 +75,17 @@ func (h *Handler) AuthorizeBackgroundWait(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusForbidden, "daemon is not owned by the session owner")
 		return
 	}
-	writeJSON(w, http.StatusOK, protocol.WaitAddress{WorkspaceID: wsID, AgentID: agentID, SessionID: address.ExternalSessionID, DaemonID: session.DaemonID})
+	issueID := ""
+	if req.IssueRef != "" {
+		readRequest := r.Clone(r.Context())
+		readRequest.Method = http.MethodGet
+		issue, ok := h.loadIssueForUser(w, readRequest, req.IssueRef)
+		if !ok {
+			return
+		}
+		issueID = uuidToString(issue.ID)
+	}
+	writeJSON(w, http.StatusOK, protocol.WaitAddress{WorkspaceID: wsID, AgentID: agentID, SessionID: address.ExternalSessionID, DaemonID: session.DaemonID, IssueID: issueID})
 }
 
 // CompleteBackgroundWait is an idempotent outbox sink. The daemon commits its

@@ -79,7 +79,7 @@ func (s *TaskService) RegisterManagedWait(ctx context.Context, workspace, actor,
 		if req.Deadline.IsZero() || !req.Deadline.After(time.Now()) || req.Deadline.After(time.Now().Add(7*24*time.Hour)) {
 			return ErrManagedWaitConflict
 		}
-		out = protocol.WaitAddress{WorkspaceID: util.UUIDToString(workspace), AgentID: util.UUIDToString(actor), TaskID: util.UUIDToString(task.ID), RuntimeID: util.UUIDToString(runtime.ID), DaemonID: req.DaemonID, Provider: runtime.Provider, SessionID: task.SessionID.String, WorkDir: task.WorkDir.String}
+		out = protocol.WaitAddress{WorkspaceID: util.UUIDToString(workspace), AgentID: util.UUIDToString(actor), TaskID: util.UUIDToString(task.ID), RuntimeID: util.UUIDToString(runtime.ID), DaemonID: req.DaemonID, Provider: runtime.Provider, IssueID: util.UUIDToString(task.IssueID), SessionID: task.SessionID.String, WorkDir: task.WorkDir.String}
 		return storeTaskWait(ctx, q, task, &protocol.ManagedWait{ID: req.ID, Generation: util.UUIDToString(task.SessionPinGeneration), Address: out, RequestHash: req.RequestHash, Deadline: req.Deadline.UTC()})
 	})
 	return out, err
