@@ -280,10 +280,9 @@ func ResolveExternal(ctx context.Context, q *db.Queries, workspaceID, agentID, s
 // Ensure records addr as the accepted return for one (issue, dispatcher agent)
 // pair and returns its current immutable address version. An existing current
 // version is returned unchanged when the current
-// trusted source is the same physical session. Only explicit takeover changes
-// which version is current. A different physical session for
-// the same actor on the same issue is a conflict, not a silent reuse of the old
-// run and not a silent overwrite with the new one.
+// trusted source is the same physical session. A verified managed continuation
+// may create a new current version after the previous source has terminated.
+// Other address changes require explicit takeover.
 //
 // A managed address is re-validated under a row lock inside the caller's
 // transaction. Passing a transaction-bound *db.Queries is therefore required
@@ -472,7 +471,7 @@ func reuseAccepted(ctx context.Context, q *db.Queries, existing db.IssueDelegati
 			existing.WorkDir.String == currentTask.WorkDir.String {
 			return existing, nil
 		}
-		return db.IssueDelegationReturn{}, fmt.Errorf("%w: current managed address differs from the accepted snapshot", ErrReturnConflict)
+		return continueManagedReturn(ctx, q, existing, original, currentTask, currentRuntime)
 	case existing.ReturnKind == string(KindExternalSession) && hasBinding:
 		if uuidEqual(existing.ExternalSessionID, parseUUIDOrZero(binding.SessionID)) {
 			return existing, nil

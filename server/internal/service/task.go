@@ -51,7 +51,7 @@ type TaskService struct {
 	Bus       *events.Bus
 	// AppURL is the browser application origin copied into delivery prompts.
 	// Empty degrades to identifier and title only.
-	AppURL string
+	AppURL    string
 	Analytics analytics.Client
 	Metrics   *obsmetrics.BusinessMetrics
 	Wakeup    TaskWakeupNotifier
@@ -7956,7 +7956,7 @@ func (s *TaskService) ResolveTaskWorkspaceIDChecked(ctx context.Context, task db
 		if err != nil {
 			return "", err
 		}
-		address, err := s.Queries.GetDelegationReturnByID(ctx, link.DelegationReturnID)
+		address, err := s.Queries.GetDelegationReturnByID(ctx, delegation.DeliveryReturnID(link))
 		if err != nil {
 			return "", err
 		}

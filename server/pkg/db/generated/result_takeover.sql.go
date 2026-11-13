@@ -19,7 +19,7 @@ INSERT INTO issue_delegation_return (
  $1, $2, $3, $4, $5,
  $6, $7, $8,
  $9, $10, $11, $12, false
-) RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current
+) RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current, continued_from_return_id
 `
 
 type CreateDelegationReturnVersionParams struct {
@@ -68,6 +68,7 @@ func (q *Queries) CreateDelegationReturnVersion(ctx context.Context, arg CreateD
 		&i.CreatedAt,
 		&i.ScopeTaskID,
 		&i.IsCurrent,
+		&i.ContinuedFromReturnID,
 	)
 	return i, err
 }
@@ -145,7 +146,7 @@ func (q *Queries) CreateTakeoverResultObligation(ctx context.Context, arg Create
 }
 
 const getResultReturnObligation = `-- name: GetResultReturnObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids FROM agent_task_delegation_return
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids, delivery_return_id FROM agent_task_delegation_return
 WHERE task_id = $1 AND delegation_return_id = $2
 `
 
@@ -168,6 +169,7 @@ func (q *Queries) GetResultReturnObligation(ctx context.Context, arg GetResultRe
 		&i.LastAttemptAt,
 		&i.TakeoverID,
 		&i.CallerTaskIds,
+		&i.DeliveryReturnID,
 	)
 	return i, err
 }

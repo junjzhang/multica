@@ -399,7 +399,7 @@ RETURNING *;
 
 -- name: GetMailboxResultReturn :one
 SELECT r.* FROM issue_delegation_return r
-JOIN agent_task_delegation_return l ON l.delegation_return_id=r.id
+JOIN agent_task_delegation_return l ON COALESCE(l.delivery_return_id, l.delegation_return_id)=r.id
 WHERE l.notification_delivery_id= @message_id AND r.workspace_id= @workspace_id;
 
 -- name: LockMailboxConsumptionTasks :many

@@ -690,7 +690,7 @@ func (q *Queries) GetLegacyCommentDelivery(ctx context.Context, arg GetLegacyCom
 }
 
 const getMailboxResultObligation = `-- name: GetMailboxResultObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids FROM agent_task_delegation_return WHERE notification_delivery_id = $1
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids, delivery_return_id FROM agent_task_delegation_return WHERE notification_delivery_id = $1
 `
 
 func (q *Queries) GetMailboxResultObligation(ctx context.Context, messageID pgtype.UUID) (AgentTaskDelegationReturn, error) {
@@ -707,13 +707,14 @@ func (q *Queries) GetMailboxResultObligation(ctx context.Context, messageID pgty
 		&i.LastAttemptAt,
 		&i.TakeoverID,
 		&i.CallerTaskIds,
+		&i.DeliveryReturnID,
 	)
 	return i, err
 }
 
 const getMailboxResultReturn = `-- name: GetMailboxResultReturn :one
-SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current FROM issue_delegation_return r
-JOIN agent_task_delegation_return l ON l.delegation_return_id=r.id
+SELECT r.id, r.workspace_id, r.issue_id, r.dispatcher_agent_id, r.return_kind, r.external_session_id, r.source_task_id, r.runtime_id, r.provider, r.session_id, r.work_dir, r.created_at, r.scope_task_id, r.is_current, r.continued_from_return_id FROM issue_delegation_return r
+JOIN agent_task_delegation_return l ON COALESCE(l.delivery_return_id, l.delegation_return_id)=r.id
 WHERE l.notification_delivery_id= $1 AND r.workspace_id= $2
 `
 
@@ -740,6 +741,7 @@ func (q *Queries) GetMailboxResultReturn(ctx context.Context, arg GetMailboxResu
 		&i.CreatedAt,
 		&i.ScopeTaskID,
 		&i.IsCurrent,
+		&i.ContinuedFromReturnID,
 	)
 	return i, err
 }
@@ -1064,7 +1066,7 @@ func (q *Queries) ListClaimableDeliveryIDs(ctx context.Context, arg ListClaimabl
 }
 
 const listConsumedResultObligations = `-- name: ListConsumedResultObligations :many
-SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, l.caller_task_ids FROM agent_task_delegation_return l
+SELECT l.task_id, l.delegation_return_id, l.created_at, l.notification_delivery_id, l.notification_task_id, l.notification_error, l.materialized_at, l.last_attempt_at, l.takeover_id, l.caller_task_ids, l.delivery_return_id FROM agent_task_delegation_return l
 JOIN agent_mailbox_message m ON m.id = l.notification_delivery_id
 JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE m.handled_by_task_id = $1 AND m.processing_status = 'handled'
@@ -1091,6 +1093,7 @@ func (q *Queries) ListConsumedResultObligations(ctx context.Context, taskID pgty
 			&i.LastAttemptAt,
 			&i.TakeoverID,
 			&i.CallerTaskIds,
+			&i.DeliveryReturnID,
 		); err != nil {
 			return nil, err
 		}

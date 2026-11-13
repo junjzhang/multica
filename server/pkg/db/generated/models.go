@@ -157,6 +157,7 @@ type AgentTaskDelegationReturn struct {
 	LastAttemptAt          pgtype.Timestamptz `json:"last_attempt_at"`
 	TakeoverID             pgtype.UUID        `json:"takeover_id"`
 	CallerTaskIds          []pgtype.UUID      `json:"caller_task_ids"`
+	DeliveryReturnID       pgtype.UUID        `json:"delivery_return_id"`
 }
 
 type AgentTaskQueue struct {
@@ -1057,20 +1058,21 @@ type IssueContract struct {
 }
 
 type IssueDelegationReturn struct {
-	ID                pgtype.UUID        `json:"id"`
-	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
-	IssueID           pgtype.UUID        `json:"issue_id"`
-	DispatcherAgentID pgtype.UUID        `json:"dispatcher_agent_id"`
-	ReturnKind        string             `json:"return_kind"`
-	ExternalSessionID pgtype.UUID        `json:"external_session_id"`
-	SourceTaskID      pgtype.UUID        `json:"source_task_id"`
-	RuntimeID         pgtype.UUID        `json:"runtime_id"`
-	Provider          pgtype.Text        `json:"provider"`
-	SessionID         pgtype.Text        `json:"session_id"`
-	WorkDir           pgtype.Text        `json:"work_dir"`
-	CreatedAt         pgtype.Timestamptz `json:"created_at"`
-	ScopeTaskID       pgtype.UUID        `json:"scope_task_id"`
-	IsCurrent         bool               `json:"is_current"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	IssueID               pgtype.UUID        `json:"issue_id"`
+	DispatcherAgentID     pgtype.UUID        `json:"dispatcher_agent_id"`
+	ReturnKind            string             `json:"return_kind"`
+	ExternalSessionID     pgtype.UUID        `json:"external_session_id"`
+	SourceTaskID          pgtype.UUID        `json:"source_task_id"`
+	RuntimeID             pgtype.UUID        `json:"runtime_id"`
+	Provider              pgtype.Text        `json:"provider"`
+	SessionID             pgtype.Text        `json:"session_id"`
+	WorkDir               pgtype.Text        `json:"work_dir"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ScopeTaskID           pgtype.UUID        `json:"scope_task_id"`
+	IsCurrent             bool               `json:"is_current"`
+	ContinuedFromReturnID pgtype.UUID        `json:"continued_from_return_id"`
 }
 
 type IssueDependency struct {

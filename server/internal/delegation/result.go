@@ -60,7 +60,7 @@ func ManagedSourceTaskScope(ctx context.Context, q *db.Queries, source db.AgentT
 	if err != nil {
 		return pgtype.UUID{}, fmt.Errorf("load result source notification: %w", err)
 	}
-	accepted, err := q.GetDelegationReturnByID(ctx, link.DelegationReturnID)
+	accepted, err := q.GetDelegationReturnByID(ctx, DeliveryReturnID(link))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pgtype.UUID{}, fmt.Errorf("%w: result source return is missing", ErrReturnInvalid)
 	}
