@@ -624,6 +624,28 @@ func TestApplyGCAction_RefusesEveryMutationWithoutOwner(t *testing.T) {
 	}
 }
 
+func TestApplyGCActionPreservesTaskWorktree(t *testing.T) {
+	d := newGCTestDaemon(t, http.NewServeMux())
+	taskDir := createTaskDir(t, d.cfg.WorkspacesRoot, "ws-1", "task-1", &execenv.GCMeta{Kind: execenv.GCKindIssue, WorkspaceID: "ws-1", TaskID: "task-1", IssueID: "issue-1"})
+	path := filepath.Join(taskDir, "worktree", ".multica", "data")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, ".retained-runtime-paths"), []byte(".multica/data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stats := &gcStats{byPattern: map[string]int{}}
+	if removed := d.applyGCAction(context.Background(), taskDir, gcActionClean, stats); removed != 0 {
+		t.Fatalf("removed %d tasks", removed)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "keep" {
+		t.Fatalf("retained data = %q, %v", got, err)
+	}
+}
+
 func TestCleanTaskDir_RefusesOwnerPathMismatch(t *testing.T) {
 	t.Parallel()
 

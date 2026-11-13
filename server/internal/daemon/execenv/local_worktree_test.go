@@ -1744,6 +1744,181 @@ func TestCaptureUserSnapshotExcludesMulticaSidecars(t *testing.T) {
 	}
 }
 
+func TestAutomaticTreesExcludeUntrackedRuntimeFiles(t *testing.T) {
+	for _, snapshot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("snapshot=%t", snapshot), func(t *testing.T) {
+			repo := newTestRepo(t)
+			writeFile(t, filepath.Join(repo, ".multica", "tracked.txt"), "original")
+			gitRun(t, repo, "add", "-f", ".multica/tracked.txt")
+			gitRun(t, repo, "commit", "-m", "track project file")
+			writeFile(t, filepath.Join(repo, ".multica", "tracked.txt"), "updated")
+			writeFile(t, filepath.Join(repo, ".multica", "private.txt"), "secret")
+			writeFile(t, filepath.Join(repo, "sub", ".multica", "private.txt"), "secret")
+			writeFile(t, filepath.Join(repo, "business.txt"), "business")
+			gitRun(t, repo, "add", "-f", ".multica/private.txt")
+			commit := "HEAD"
+			if snapshot {
+				var err error
+				commit, err = captureUserSnapshot(repo, t.TempDir(), gitRun(t, repo, "rev-parse", "HEAD"), worktreeTestLogger())
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := commitEverything(repo, "automatic", false); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitRun(t, repo, "show", commit+":.multica/tracked.txt"); got != "updated" {
+				t.Errorf("tracked file: %q", got)
+			}
+			if got := gitRun(t, repo, "show", commit+":business.txt"); got != "business" {
+				t.Errorf("business file: %q", got)
+			}
+			for _, name := range []string{".multica/private.txt", "sub/.multica/private.txt"} {
+				if _, err := gitTry(t, repo, "cat-file", "-e", commit+":"+name); err == nil {
+					t.Errorf("private file %s included", name)
+				}
+			}
+		})
+	}
+}
+
+func TestAutomaticCommitExcludesStagedRuntimeSymlink(t *testing.T) {
+	repo := newTestRepo(t)
+	if err := os.Symlink("tracked.txt", filepath.Join(repo, ".multica")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	gitRun(t, repo, "add", "-f", ".multica")
+	writeFile(t, filepath.Join(repo, "business.txt"), "business")
+	if _, err := commitEverything(repo, "automatic", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitTry(t, repo, "cat-file", "-e", "HEAD:.multica"); err == nil {
+		t.Fatal("runtime symlink was committed")
+	}
+}
+
+func TestFinalizePreservesNewRuntimePaths(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
+	gitRun(t, repo, "add", "-f", ".multica/tracked")
+	gitRun(t, repo, "commit", "-m", "tracked runtime path")
+	wt := prepareForTest(t, repo)
+	gitRun(t, wt.Path, "mv", ".multica/tracked", ".multica/renamed")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "new"), "new work")
+	writeFile(t, filepath.Join(wt.Path, "business.txt"), "business")
+	outcome, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica/renamed") || !strings.Contains(err.Error(), ".multica/new") {
+		t.Fatalf("expected preserved paths in error, got %v", err)
+	}
+	if outcome.PreservedPath != wt.Path {
+		t.Fatalf("preserved path = %q", outcome.PreservedPath)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "renamed")); got != "original" {
+		t.Fatalf("renamed contents = %q", got)
+	}
+	if err := resetEnvRootContents(filepath.Dir(wt.Path)); err == nil {
+		t.Fatal("reset removed a retained worktree")
+	}
+	env := &Environment{RootDir: filepath.Dir(wt.Path), logger: worktreeTestLogger()}
+	if err := env.Cleanup(true); err == nil {
+		t.Fatal("cleanup removed a retained worktree")
+	}
+	root, err := os.OpenRoot(filepath.Dir(wt.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if claim, _, err := LockEnvRootForReuse(root, ".", filepath.Dir(wt.Path)); err == nil {
+		if claim != nil {
+			claim.Release()
+		}
+		t.Fatal("retained worktree was available for reuse")
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "renamed")); got != "original" {
+		t.Fatalf("reset lost file: %q", got)
+	}
+	if got := gitRun(t, repo, "show", wt.Branch+":business.txt"); got != "business" {
+		t.Fatalf("business = %q", got)
+	}
+	for _, name := range []string{".multica/renamed", ".multica/new", ".multica/tracked"} {
+		if _, err := gitTry(t, repo, "cat-file", "-e", wt.Branch+":"+name); err == nil {
+			t.Errorf("%s unexpectedly committed", name)
+		}
+	}
+}
+
+func TestFinalizePreservesRuntimeSymlink(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if err := os.Symlink("tracked.txt", filepath.Join(wt.Path, ".multica")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	outcome, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica") || outcome.PreservedPath != wt.Path {
+		t.Fatalf("symlink was not reported and preserved: outcome=%+v error=%v", outcome, err)
+	}
+	if _, err := os.Lstat(filepath.Join(wt.Path, ".multica")); err != nil {
+		t.Fatalf("symlink lost: %v", err)
+	}
+}
+
+func TestFinalizePreservesUnstagedTrackedRuntimeAndReleasesBranch(t *testing.T) {
+	repo := newTestRepo(t)
+	writeFile(t, filepath.Join(repo, ".multica", "tracked"), "original")
+	gitRun(t, repo, "add", "-f", ".multica/tracked")
+	gitRun(t, repo, "commit", "-m", "tracked runtime path")
+	wt := prepareTurn(t, repo, "MUL-6881", turnOneTask)
+	gitRun(t, wt.Path, "rm", "--cached", ".multica/tracked")
+	writeFile(t, filepath.Join(wt.Path, ".multica", "tracked"), "changed")
+	_, err := wt.Finalize(worktreeTestLogger())
+	if err == nil || !strings.Contains(err.Error(), ".multica/tracked") {
+		t.Fatalf("Finalize = %v", err)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "tracked")); got != "changed" {
+		t.Fatalf("lost file: %q", got)
+	}
+	second := prepareTurn(t, repo, "MUL-6881", turnTwoTask)
+	if !second.Continued || second.Branch != wt.Branch {
+		t.Fatalf("branch not continued: %+v", second)
+	}
+}
+
+func TestRemovePreservesRuntimeFilesCreatedAfterFinalize(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if _, err := wt.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, ".multica", "late"), "keep")
+	gitRun(t, repo, "config", "core.excludesFile", filepath.Join(t.TempDir(), "ignores"))
+	ignoreFile := gitRun(t, repo, "config", "core.excludesFile")
+	writeFile(t, ignoreFile, ".multica/\n")
+	if err := wt.Remove(worktreeTestLogger()); err == nil || !strings.Contains(err.Error(), ".multica/late") {
+		t.Fatalf("Remove = %v", err)
+	}
+	if got := readFile(t, filepath.Join(wt.Path, ".multica", "late")); got != "keep" {
+		t.Fatalf("lost file: %q", got)
+	}
+}
+
+func TestRemoveReportsUnignoredRuntimeFiles(t *testing.T) {
+	repo := newTestRepo(t)
+	wt := prepareForTest(t, repo)
+	if _, err := wt.Finalize(worktreeTestLogger()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(wt.Path, ".multica", "late"), "keep")
+	var retained *RetainedRuntimePathsError
+	if err := wt.Remove(worktreeTestLogger()); !errors.As(err, &retained) {
+		t.Fatalf("Remove = %v", err)
+	}
+	if retained.Worktree != wt.Path || len(retained.Paths) != 1 || retained.Paths[0] != ".multica/late" {
+		t.Fatalf("retained = %+v", retained)
+	}
+	if present, err := HasRetainedRuntimePaths(filepath.Dir(wt.Path)); err != nil || !present {
+		t.Fatalf("recovery marker = %v, %v", present, err)
+	}
+}
+
 // Git must rehash a same-size edit when its timestamp equals the index's.
 // A private index with a newer timestamp would incorrectly make it look clean.
 func TestCaptureUserSnapshotPreservesRacyIndexTimestamp(t *testing.T) {
@@ -2294,6 +2469,9 @@ func TestIsolatedPrepareCarriesTheStateFinalizeNeeds(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(wt.WorkDir, "agent.txt"), "work from turn one\n")
+	if err := CleanupSidecars(first.RootDir); err != nil {
+		t.Fatalf("cleanup sidecars: %v", err)
+	}
 	finalizeOK(t, wt)
 
 	// Finalize's record is the observable proof it had the state: the checkpoint

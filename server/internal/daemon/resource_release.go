@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +17,13 @@ import (
 )
 
 const managedResourceFile = ".managed_resource.json"
+
+func logRetainedRuntimePaths(logger *slog.Logger, taskID string, err error) {
+	var retained *execenv.RetainedRuntimePathsError
+	if logger != nil && errors.As(err, &retained) {
+		logger.Warn("preserved_runtime_paths", "task_id", taskID, "worktree", retained.Worktree, "paths", fmt.Sprintf("%q", retained.Paths))
+	}
+}
 
 type managedResource struct {
 	FinalizationPending bool                            `json:"finalization_pending,omitempty"`
@@ -162,6 +171,7 @@ func (d *Daemon) releaseCompletedWorktree(ctx context.Context, completed *comple
 	}
 	if current.FinalizationPending {
 		if _, err := completed.tree.Finalize(d.logger); err != nil {
+			logRetainedRuntimePaths(d.logger, current.OwnerTaskID, err)
 			d.logger.Warn("retaining unfinished worktree", "path", completed.tree.Path, "error", err)
 			return
 		}
@@ -170,6 +180,7 @@ func (d *Daemon) releaseCompletedWorktree(ctx context.Context, completed *comple
 		}
 	}
 	if err := completed.tree.Remove(d.logger); err != nil {
+		logRetainedRuntimePaths(d.logger, current.OwnerTaskID, err)
 		d.logger.Warn("retaining finalized worktree", "error", err)
 		return
 	}
