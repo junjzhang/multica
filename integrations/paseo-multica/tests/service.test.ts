@@ -538,7 +538,8 @@ describe("background wait source", () => {
     const { createPaseoApi } = await import("@getpaseo/client");
     const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
     const home = await makeHome();
-    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: DAEMON_ID}));
+    let currentDaemon = DAEMON_ID;
+    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: currentDaemon}));
     let handled = false;
     let terminal = false;
     const calls: string[] = [];
@@ -548,14 +549,14 @@ describe("background wait source", () => {
       if (url.pathname === "/waits") return Response.json({
         observed_at: NOW.toISOString(), snapshot_version: "one",
         items: [
-          {id: "wait-a", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: DAEMON_ID}, state: terminal ? "succeeded" : "running", deadline: NOW.toISOString(), delivery: {known: true, enqueued: terminal, processing_status: handled ? "handled" : "unread", delivery_status: "pending"}},
-          {id: "managed", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: DAEMON_ID, task_id: "task"}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
-          {id: "foreign-host", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-b", daemon_id: DAEMON_ID}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
+          {id: "wait-a", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: currentDaemon}, state: terminal ? "succeeded" : "running", deadline: NOW.toISOString(), delivery: {known: true, enqueued: terminal, processing_status: handled ? "handled" : "unread", delivery_status: "pending"}},
+          {id: "managed", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: currentDaemon, task_id: "task"}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
+          {id: "foreign-host", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-b", daemon_id: currentDaemon}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
         ],
       });
       if (url.pathname === `/api/agents/${AGENT_A}/sessions`) return Response.json({sessions: [
-        {id: "frozen-a", provider: "paseo", host_id: HOST_ID, session_id: SESSION_A, daemon_id: DAEMON_ID},
-        {id: "frozen-b", provider: "paseo", host_id: "other-host", session_id: SESSION_B, daemon_id: DAEMON_ID},
+        {id: "frozen-a", provider: "paseo", host_id: HOST_ID, session_id: SESSION_A, daemon_id: currentDaemon},
+        {id: "frozen-b", provider: "paseo", host_id: "other-host", session_id: SESSION_B, daemon_id: currentDaemon},
       ]});
       if (url.pathname === `/api/workspaces/${WORKSPACE_ID}`) return Response.json({slug: "test"});
       if (url.pathname === "/waits/wait-a" && init?.method === "DELETE") { terminal = true; return Response.json({state: "succeeded"}); }
@@ -564,7 +565,7 @@ describe("background wait source", () => {
     // The real SDK object supplies the registration context; only its host read is stubbed.
     const paseo = createPaseoApi(new DaemonClient({url: "ws://127.0.0.1:1/ws", clientId: "test"}));
     vi.spyOn(paseo.hosts, "list").mockResolvedValue({self: {serverId: HOST_ID, label: "Test"}, hosts: []});
-    const source = backgroundWorkSource({home, fetchImpl, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: "default"})});
+    const source = backgroundWorkSource({home, fetchImpl, readSettings: async () => ({ownerProfile: "", daemonId: currentDaemon, daemonProfile: "default"})});
     const first = await source.fetch({paseo});
     expect(first.status).toBe("ready");
     if (first.status !== "ready") throw new Error("Expected snapshot");
@@ -581,6 +582,15 @@ describe("background wait source", () => {
     handled = true;
     const consumed = await source.fetch({paseo});
     expect(consumed).toMatchObject({status: "ready", items: []});
+    currentDaemon = "another-local-daemon";
+    handled = false;
+    terminal = false;
+    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: currentDaemon}));
+    const switched = await source.fetch({paseo});
+    if (switched.status !== "ready") throw new Error("Expected switched daemon snapshot");
+    expect(switched.items[0]?.id).not.toBe(first.items[0]?.id);
+    await expect(source.stop(first.items[0]!, {paseo})).rejects.toThrow("no longer belongs");
+    expect(calls.filter((call) => call.startsWith("DELETE"))).toHaveLength(1);
     await paseo.dispose();
   });
 

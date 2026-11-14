@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 
-// COMPAT(externalBackgroundWork): the installed SDK predates the host extension.
-// Remove these structural types when the fork publishes its next SDK release.
+// COMPAT(externalBackgroundWork): added after v0.15.3; remove after 2027-05-14
+// once the published SDK exposes the host extension.
 export interface BackgroundWorkEntry {
   agentId: string; id: string; kind: string; description: string | null; startedAt: string | null; canStop: boolean;
   external: { status: string; running: boolean; deadline: string | null; finishedAt: string | null; issue: {label: string; url: string} | null };
@@ -114,7 +114,7 @@ export function backgroundWorkSource(environment: Environment): BackgroundWorkSo
       if (!session || handledWaits.has(identity)) continue;
       const running = wait.state === "running" || wait.state === "cancelling";
       items.push({
-        agentId: session.session_id, id: wait.id, kind: "monitor", description: wait.description ?? "Multica wait", startedAt: wait.started_at ?? null,
+        agentId: session.session_id, id: JSON.stringify([wait.address.daemon_id, wait.id]), kind: "monitor", description: wait.description ?? "Multica wait", startedAt: wait.started_at ?? null,
         canStop: wait.state === "running",
         external: {
           status: statusText(wait), running, deadline: wait.deadline, finishedAt: wait.finished_at ?? null,
@@ -143,7 +143,8 @@ export function backgroundWorkSource(environment: Environment): BackgroundWorkSo
       const target = current.items.find((item) => item.id === entry.id && item.agentId === entry.agentId);
       if (!target) throw new ConfigurationError("This wait no longer belongs to this Paseo session.");
       if (!target.external.running) return;
-      await json(`${endpoint.url}/waits/${encodeURIComponent(target.id)}`, endpoint.secret, owner.workspaceId, "DELETE");
+      const [, waitId] = z.tuple([z.string(), z.string()]).parse(JSON.parse(target.id));
+      await json(`${endpoint.url}/waits/${encodeURIComponent(waitId)}`, endpoint.secret, owner.workspaceId, "DELETE");
     },
   };
 }

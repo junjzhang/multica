@@ -95,12 +95,13 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
 
 function BackgroundSupportNotice() {
   const readSupport = useRpc(backgroundWorkSupport);
-  const [supported, setSupported] = useState<boolean | null>(null);
+  const [support, setSupport] = useState<"loading" | "supported" | "unsupported" | "error">("loading");
   useEffect(() => {
     let active = true;
-    void readSupport({}).then((result) => { if (active) setSupported(result.supported); }, () => { if (active) setSupported(false); });
+    void readSupport({}).then((result) => { if (active) setSupport(result.supported ? "supported" : "unsupported"); }, () => { if (active) setSupport("error"); });
     return () => { active = false; };
   }, [readSupport]);
-  if (supported !== false) return null;
+  if (support === "error") return <SettingsRow label="Background waits" error="Could not check this host. Reconnect and reopen settings." />;
+  if (support !== "unsupported") return null;
   return <SettingsRow label="Background waits" error="Update this Paseo host to enable external background sources. The Multica waits continue running." />;
 }
