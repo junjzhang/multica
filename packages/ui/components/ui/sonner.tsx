@@ -10,11 +10,11 @@ const Toaster = ({ ...props }: ToasterProps) => {
   // `prefers-color-scheme` itself, and the Electron renderer's media query
   // can disagree with next-themes' `html.dark` class — that's why the toast
   // sometimes rendered light on a dark UI.
-  const { resolvedTheme = "system" } = useTheme()
+  const { forcedTheme, resolvedTheme = "system" } = useTheme()
 
   return (
     <Sonner
-      theme={resolvedTheme as ToasterProps["theme"]}
+      theme={(forcedTheme ?? resolvedTheme) as ToasterProps["theme"]}
       className="toaster group"
       icons={{
         success: (

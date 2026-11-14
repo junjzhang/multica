@@ -191,6 +191,41 @@ conversation, its history, or any other agent's binding.
 interactive opening of a session that already has a valid local binding. It
 skips history replay and never injects an owner credential.
 
+## Embedded appearance
+
+The plugin passes the renderer's resolved `PluginTheme.colorScheme` to each resident
+page. Update the Paseo desktop renderer as well as the plugin and Multica web app;
+a daemon update alone cannot expose the client field. Older clients keep page access
+and show an update notice.
+
+The web app uses a temporary next-themes `forcedTheme`. Theme changes do not call
+`setTheme`, write storage, change `src` or replace a resident page. Initial URL
+parameters supply appearance before the live bridge is ready. Browser messages use
+the configured guest origin, and the receiver checks the exact parent window and
+origin. Electron sends only a validated light/dark value through a fixed script
+restricted to the configured guest origin, after `dom-ready`. Guest navigation clears
+that readiness gate. Partition and sign-in behavior are unchanged.
+
+`e2e/paseo-theme.spec.ts` uses the production resident component, web theme provider,
+SDK mapper and UI tokens in isolated fixtures. It checks opposite OS/host settings,
+live changes, drafts, scrolling, reopening, multiple hosts and untouched standalone
+storage and forced-theme toast appearance. OS preferences are emulated through
+Chromium media emulation/CDP; the host system setting is unchanged. The Electron case uses a real webview with `persist:paseo-browser` inside a
+temporary user-data directory. These are bridge integration fixtures, not a login or
+full-application journey. iOS/Android are not covered.
+
+Run from the repository root with `PASEO_THEME_HOST_CHECKOUT` pointing to the SDK
+checkout and `PLAYWRIGHT_BROWSER_EXECUTABLE` pointing to Chromium. For Electron, set
+`PASEO_THEME_ELECTRON` and run under an available display (for example `xvfb-run -a`):
+
+```bash
+pnpm exec playwright test e2e/paseo-theme.spec.ts
+```
+
+Before/after evidence is in [the theme capture directory](../../docs/assets/work398-theme).
+The `iframe-*` and `electron-*` files identify the actual embedding path. Captures
+labelled `before` use the legacy bridge with no host appearance field.
+
 ## Development
 
 This plugin is its own pnpm project with its own lockfile. It is loaded by
