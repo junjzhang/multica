@@ -203,7 +203,10 @@ resident pages running the previous web bundle.
 The web app uses a temporary next-themes `forcedTheme`. Theme changes do not call
 `setTheme`, write storage, change `src` or replace a resident page. The iframe's
 browsing-context name binds its parent origin and latest appearance across same-origin
-login redirects and route reloads. Login 302 and language-change reloads discard route
+login redirects and route reloads. Accepted theme messages update the guest's actual
+`window.name`; changing the iframe element's name alone does not update that value.
+Each mounted document requests the current theme after registering its receiver,
+because `load` can occur before application hydration. Login 302 and language-change reloads discard route
 query parameters, so they cannot own this binding. Webviews receive initial URL state
 and later the fixed script channel. Browser messages use
 the configured guest origin, and the receiver checks the exact parent window and

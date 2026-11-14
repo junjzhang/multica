@@ -162,9 +162,35 @@ it("updates a resident iframe in place and applies the latest theme after parkin
       { type: "multica-paseo-theme", colorScheme: "light" },
       "https://multica.test",
     );
+    const ready = host.addEventListener.mock.calls.find(
+      ([name]: [string]) => name === "message",
+    )[1];
+    const calls = view.contentWindow.postMessage.mock.calls.length;
+    ready({
+      source: {},
+      origin: "https://multica.test",
+      data: { type: "multica-paseo-theme-ready" },
+    });
+    ready({
+      source: view.contentWindow,
+      origin: "https://untrusted.test",
+      data: { type: "multica-paseo-theme-ready" },
+    });
+    expect(view.contentWindow.postMessage).toHaveBeenCalledTimes(calls);
+    ready({
+      source: view.contentWindow,
+      origin: "https://multica.test",
+      data: { type: "multica-paseo-theme-ready" },
+    });
+    expect(view.contentWindow.postMessage).toHaveBeenCalledTimes(calls + 1);
+    expect(view.contentWindow.postMessage).toHaveBeenLastCalledWith(
+      { type: "multica-paseo-theme", colorScheme: "light" },
+      "https://multica.test",
+    );
     await act(async () => {
       renderer!.unmount();
     });
+    expect(host.removeEventListener).toHaveBeenCalledWith("message", ready);
     expect(view.remove).not.toHaveBeenCalled();
     await act(async () => {
       renderer = create(component("dark"), { createNodeMock: makeElement });

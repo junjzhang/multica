@@ -54,11 +54,22 @@ export function ThemeProvider(props: React.ComponentProps<typeof SharedThemeProv
       )
         return;
       const scheme = event.data.colorScheme;
-      if (scheme === "light" || scheme === "dark") setHostTheme(scheme);
+      if (scheme === "light" || scheme === "dark") {
+        window.name = JSON.stringify({
+          type: "multica-paseo-theme",
+          parentOrigin: event.origin,
+          colorScheme: scheme,
+        });
+        window.__multicaPaseoTheme = scheme;
+        setHostTheme(scheme);
+      }
     };
     update();
     window.addEventListener("multica-paseo-theme", update);
     window.addEventListener("message", receive);
+    const context = frameTheme();
+    if (context)
+      window.parent.postMessage({ type: "multica-paseo-theme-ready" }, context.parentOrigin);
     return () => {
       window.removeEventListener("multica-paseo-theme", update);
       window.removeEventListener("message", receive);

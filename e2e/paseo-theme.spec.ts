@@ -81,8 +81,11 @@ test.describe("Paseo embedded appearance", () => {
         /<\/script/gi,
         "<\\/script",
       );
+      const startup = request.url?.startsWith("/guest/next")
+        ? `setTimeout(()=>{${script}},1000);`
+        : script;
       response.end(
-        `<html><head><style>${isGuest ? tokens : ""}body{margin:0;font:16px system-ui;background:var(--background,#202020);color:var(--foreground,white)}nav{height:48px;display:flex;gap:16px;align-items:center;padding:0 16px}#root{height:calc(100vh - ${isGuest ? 0 : 48}px);display:flex;flex-direction:column}h1,p,textarea{margin:24px}textarea{min-height:100px}</style></head><body><div id="root"></div><script>${script}</script></body></html>`,
+        `<html><head><style>${isGuest ? tokens : ""}body{margin:0;font:16px system-ui;background:var(--background,#202020);color:var(--foreground,white)}nav{height:48px;display:flex;gap:16px;align-items:center;padding:0 16px}#root{height:calc(100vh - ${isGuest ? 0 : 48}px);display:flex;flex-direction:column}h1,p,textarea{margin:24px}textarea{min-height:100px}</style></head><body><div id="root"></div><script>window.addEventListener('load',()=>window.__fixtureLoaded=true);${startup}</script></body></html>`,
       );
     });
     await new Promise<void>((done) => server.listen(0, "0.0.0.0", done));
@@ -165,7 +168,20 @@ test.describe("Paseo embedded appearance", () => {
     await host.getByRole("button", { name: "Switch host" }).click();
     await waitScheme("dark");
     expect(await read("window.__themeIdentity")).toBe(original);
+    await host.getByRole("button", { name: "Toggle theme" }).click();
+    await waitScheme("light");
+    if (!electron) expect(await read("JSON.parse(window.name).colorScheme")).toBe("light");
     await read("history.pushState({},'', '/guest/next');setTimeout(()=>location.reload(),0);true");
+    await waitScheme("light");
+    await read("setTimeout(()=>location.reload(),0);true");
+    await expect
+      .poll(() =>
+        read(
+          "window.__fixtureLoaded === true && document.getElementById('root').children.length === 0",
+        ),
+      )
+      .toBe(true);
+    await host.getByRole("button", { name: "Toggle theme" }).click();
     await waitScheme("dark");
     for (const scheme of ["light", "dark"]) {
       await host.getByRole("button", { name: "Toggle theme" }).click();

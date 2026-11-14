@@ -31,14 +31,19 @@ interface ResizeObserverInstance {
   observe(target: Element): void;
   disconnect(): void;
 }
+interface HostEvent {
+  source?: unknown;
+  origin?: string;
+  data?: unknown;
+}
 interface Host {
   document: Document;
   location: { origin: string };
   ResizeObserver: new (callback: () => void) => ResizeObserverInstance;
   requestAnimationFrame(callback: () => void): number;
   cancelAnimationFrame(handle: number): void;
-  addEventListener(name: string, listener: () => void, capture?: boolean): void;
-  removeEventListener(name: string, listener: () => void, capture?: boolean): void;
+  addEventListener(name: string, listener: (event: HostEvent) => void, capture?: boolean): void;
+  removeEventListener(name: string, listener: (event: HostEvent) => void, capture?: boolean): void;
   paseoDesktop?: { browser?: { profilePartition?: string } };
   __paseoMulticaPages?: Map<string, ResidentPage>;
 }
@@ -249,11 +254,27 @@ export function ResidentWebPage({
     };
     const observer = new host.ResizeObserver(update);
     observer.observe(anchor);
+    const guestOrigin = new URL(url).origin;
+    const ready = (event: HostEvent) => {
+      if (
+        current.owner !== owner ||
+        event.source !== current.view.contentWindow ||
+        event.origin !== guestOrigin ||
+        !event.data ||
+        typeof event.data !== "object" ||
+        !("type" in event.data) ||
+        event.data.type !== "multica-paseo-theme-ready"
+      )
+        return;
+      if (current.colorScheme) current.syncTheme();
+    };
+    host.addEventListener("message", ready);
     host.addEventListener("resize", schedule);
     host.addEventListener("scroll", schedule, true);
     update();
     return () => {
       observer.disconnect();
+      host.removeEventListener("message", ready);
       host.removeEventListener("resize", schedule);
       host.removeEventListener("scroll", schedule, true);
       host.cancelAnimationFrame(frame);
