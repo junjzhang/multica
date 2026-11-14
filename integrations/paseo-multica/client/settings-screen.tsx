@@ -1,5 +1,5 @@
 import type { PluginSurfaceProps, SettingsState } from "@getpaseo/plugin/client";
-import { useSettings } from "@getpaseo/plugin/client";
+import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
@@ -8,6 +8,7 @@ import {
   SettingsSection,
 } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
+import { backgroundWorkSupport } from "../shared/contracts";
 import { connectionSettings } from "../shared/settings";
 
 type ReadySettings = Extract<SettingsState<typeof connectionSettings.schema>, { status: "ready" }>;
@@ -15,10 +16,10 @@ type ReadySettings = Extract<SettingsState<typeof connectionSettings.schema>, { 
 export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
   const settings = useSettings(connectionSettings);
   const ready: ReadySettings | null = settings.status === "ready" ? settings : null;
-  const [draft, setDraft] = useState({ ownerProfile: "", daemonId: "" });
+  const [draft, setDraft] = useState({ ownerProfile: "", daemonId: "", daemonProfile: "" });
 
   useEffect(() => {
-    if (ready) setDraft({ ownerProfile: ready.values.ownerProfile, daemonId: ready.values.daemonId });
+    if (ready) setDraft({ ownerProfile: ready.values.ownerProfile, daemonId: ready.values.daemonId, daemonProfile: ready.values.daemonProfile });
   }, [ready?.revision]);
 
   if (settings.status === "loading") {
@@ -42,7 +43,7 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
 
   const save = () =>
     void settings.save(
-      { ownerProfile: draft.ownerProfile.trim(), daemonId: draft.daemonId.trim() },
+      { ownerProfile: draft.ownerProfile.trim(), daemonId: draft.daemonId.trim(), daemonProfile: draft.daemonProfile.trim() },
       settings.revision,
     );
 
@@ -51,6 +52,7 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
       title="Multica connection"
       info="The owner profile supplies registration and token management. Its credential stays on this host and is never shown here or sent to the agent."
     >
+      <BackgroundSupportNotice />
       <SettingsCard>
         <SettingsInput
           label="Owner profile"
@@ -58,6 +60,14 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
           initialValue={settings.values.ownerProfile}
           placeholder="default"
           onChangeText={(ownerProfile) => setDraft((current) => ({ ...current, ownerProfile }))}
+          disabled={settings.saving}
+        />
+        <SettingsInput
+          label="Local wait daemon profile"
+          hint='The local Multica profile that runs waits. Enter "default" to select the default profile. Cancelling a wait stops only its local monitor.'
+          initialValue={settings.values.daemonProfile}
+          placeholder="default"
+          onChangeText={(daemonProfile) => setDraft((current) => ({ ...current, daemonProfile }))}
           disabled={settings.saving}
         />
         <SettingsInput
@@ -81,4 +91,16 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
       </SettingsRow>
     </SettingsSection>
   );
+}
+
+function BackgroundSupportNotice() {
+  const readSupport = useRpc(backgroundWorkSupport);
+  const [supported, setSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    let active = true;
+    void readSupport({}).then((result) => { if (active) setSupported(result.supported); }, () => { if (active) setSupported(false); });
+    return () => { active = false; };
+  }, [readSupport]);
+  if (supported !== false) return null;
+  return <SettingsRow label="Background waits" error="Update this Paseo host to enable external background sources. The Multica waits continue running." />;
 }

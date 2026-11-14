@@ -1,6 +1,7 @@
+import { backgroundWorkSource } from "./server/background-work";
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion, sessionPullRequests } from "./shared/contracts";
+import { backgroundWorkSupport, connectSession, disconnectSession, statusSession, tasksSummary, taskDetail, taskExpansion, sessionPullRequests } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
 import { ConfigurationError, loadOwnerProfile } from "./server/owner-profile";
 import { z } from "zod";
@@ -11,8 +12,11 @@ import { openWeb } from "./shared/web";
 import { webSignInLink } from "./server/web";
 import { expansion } from "./server/task-expansion";
 
-export default function contribute(server: PluginServerContext) {
+export default function contribute(server: PluginServerContext & {
+  registerBackgroundWorkSource?: (source: ReturnType<typeof backgroundWorkSource>) => void;
+}) {
   const settings = server.registerSettings(connectionSettings);
+  server.handle(backgroundWorkSupport, () => ({ supported: typeof server.registerBackgroundWorkSource === "function" }));
 
   async function readSettings(): Promise<ConnectionConfig> {
     const state = await settings.read();
@@ -23,6 +27,15 @@ export default function contribute(server: PluginServerContext) {
     }
     return state.values;
   }
+
+  server.registerBackgroundWorkSource?.(backgroundWorkSource({
+    home: homedir(),
+    async readSettings() {
+      const state = await settings.read();
+      if (state.status !== "ready") throw new ConfigurationError("Repair the Paseo Multica connection settings.");
+      return state.values;
+    },
+  }));
 
   function service(context: { paseo: Parameters<typeof paseoHostAdapter>[0] }) {
     return createSessionService({

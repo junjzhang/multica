@@ -11,6 +11,7 @@ export const connectionSettings = defineSettings({
   version: 1,
   schema: z.object({
     ownerProfile: z.string().trim().max(100).default(""),
+    daemonProfile: z.string().trim().max(64).default(""),
     daemonId: z.string().trim().max(200).default(""),
   }),
 });

@@ -65,3 +65,9 @@ export const taskExpansion = defineRpc({
 });
 
 export const sessionPullRequests = defineRpc({ name: "session.pull-requests", input: agentInput, output: pullRequestsSchema });
+
+export const backgroundWorkSupport = defineRpc({
+  name: "background.support",
+  input: z.object({}),
+  output: z.object({ supported: z.boolean() }),
+});
