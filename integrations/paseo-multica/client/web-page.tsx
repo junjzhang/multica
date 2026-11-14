@@ -226,7 +226,7 @@ export function ResidentWebPage({
     current.owner = owner;
     current.onError = onError;
     current.colorScheme = colorScheme;
-    current.syncTheme();
+    if (colorScheme) current.syncTheme();
     if (current.failed) onError();
 
     let frame = 0;
@@ -259,7 +259,7 @@ export function ResidentWebPage({
   useLayoutEffect(() => {
     if (Platform.OS !== "web") return;
     const page = pages().get(hostId);
-    if (!page) return;
+    if (!page || !colorScheme) return;
     page.colorScheme = colorScheme;
     page.syncTheme();
   }, [hostId, colorScheme]);

@@ -170,6 +170,23 @@ it("updates a resident iframe in place and applies the latest theme after parkin
       { type: "multica-paseo-theme", colorScheme: "dark" },
       "https://multica.test",
     );
+    await act(async () => {
+      renderer!.unmount();
+    });
+    // An older plugin's renderer cache has no theme transport callback.
+    delete host.__paseoMulticaPages.get("theme-test").syncTheme;
+    await act(async () => {
+      renderer = create(
+        <ResidentWebPage
+          hostId="theme-test"
+          url="https://multica.test/work/issues/WORK-1"
+          onError={onError}
+        />,
+        { createNodeMock: makeElement },
+      );
+    });
+    expect(elements.filter((e) => e.attrs.src)).toHaveLength(1);
+    expect(onError).not.toHaveBeenCalled();
   } finally {
     await act(async () => renderer?.unmount());
     resetResidentPage("theme-test");

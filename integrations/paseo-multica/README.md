@@ -196,7 +196,9 @@ skips history replay and never injects an owner credential.
 The plugin passes the renderer's resolved `PluginTheme.colorScheme` to each resident
 page. Update the Paseo desktop renderer as well as the plugin and Multica web app;
 a daemon update alone cannot expose the client field. Older clients keep page access
-and show an update notice.
+and show an update notice. After publishing the web app and plugin, refresh the
+desktop renderer to load the new guest application. A plugin reload alone retains
+resident pages running the previous web bundle.
 
 The web app uses a temporary next-themes `forcedTheme`. Theme changes do not call
 `setTheme`, write storage, change `src` or replace a resident page. Initial URL
