@@ -531,3 +531,82 @@ describe("session tasks service", () => {
     expect(view.reason).not.toContain(EXTERNAL_TOKEN);
   });
 });
+
+describe("background wait source", () => {
+  it("maps frozen session ids, separates lifecycle states, and cancels only the selected local wait", async () => {
+    const { backgroundWorkSource } = await import("../server/background-work");
+    const { createPaseoApi } = await import("@getpaseo/client");
+    const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
+    const home = await makeHome();
+    let currentDaemon = DAEMON_ID;
+    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: currentDaemon}));
+    let handled = false;
+    let terminal = false;
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      calls.push(`${init?.method ?? "GET"} ${url.origin}${url.pathname}`);
+      if (url.pathname === "/waits") return Response.json({
+        observed_at: NOW.toISOString(), snapshot_version: "one",
+        items: [
+          {id: "wait-a", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: currentDaemon}, state: terminal ? "succeeded" : "running", deadline: NOW.toISOString(), delivery: {known: true, enqueued: terminal, processing_status: handled ? "handled" : "unread", delivery_status: "pending"}},
+          {id: "managed", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-a", daemon_id: currentDaemon, task_id: "task"}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
+          {id: "foreign-host", address: {workspace_id: WORKSPACE_ID, agent_id: AGENT_A, session_id: "frozen-b", daemon_id: currentDaemon}, state: "running", deadline: NOW.toISOString(), delivery: {known: false, enqueued: false}},
+        ],
+      });
+      if (url.pathname === `/api/agents/${AGENT_A}/sessions`) return Response.json({sessions: [
+        {id: "frozen-a", provider: "paseo", host_id: HOST_ID, session_id: SESSION_A, daemon_id: currentDaemon},
+        {id: "frozen-b", provider: "paseo", host_id: "other-host", session_id: SESSION_B, daemon_id: currentDaemon},
+      ]});
+      if (url.pathname === `/api/workspaces/${WORKSPACE_ID}`) return Response.json({slug: "test"});
+      if (url.pathname === "/waits/wait-a" && init?.method === "DELETE") { terminal = true; return Response.json({state: "succeeded"}); }
+      throw new Error("Unexpected request");
+    };
+    // The real SDK object supplies the registration context; only its host read is stubbed.
+    const paseo = createPaseoApi(new DaemonClient({url: "ws://127.0.0.1:1/ws", clientId: "test"}));
+    vi.spyOn(paseo.hosts, "list").mockResolvedValue({self: {serverId: HOST_ID, label: "Test"}, hosts: []});
+    const source = backgroundWorkSource({home, fetchImpl, readSettings: async () => ({ownerProfile: "", daemonId: currentDaemon, daemonProfile: "default"})});
+    const first = await source.fetch({paseo});
+    expect(first.status).toBe("ready");
+    if (first.status !== "ready") throw new Error("Expected snapshot");
+    expect(first.items.map((item) => item.agentId)).toEqual([SESSION_A]);
+    expect(first.items[0]?.startedAt).toBeNull();
+    expect(JSON.stringify(first)).not.toMatch(/private-endpoint|argv|token|log_path/);
+    await source.stop(first.items[0]!, {paseo});
+    const ended = await source.fetch({paseo});
+    if (ended.status !== "ready") throw new Error("Expected ended snapshot");
+    expect(ended.items[0]?.external.status).toContain("Succeeded");
+    expect(ended.items[0]?.external.running).toBe(false);
+    await source.stop(first.items[0]!, {paseo});
+    expect(calls.filter((call) => call.startsWith("DELETE"))).toEqual(["DELETE http://127.0.0.1:31555/waits/wait-a"]);
+    handled = true;
+    const consumed = await source.fetch({paseo});
+    expect(consumed).toMatchObject({status: "ready", items: []});
+    currentDaemon = "another-local-daemon";
+    handled = false;
+    terminal = false;
+    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: currentDaemon}));
+    const switched = await source.fetch({paseo});
+    if (switched.status !== "ready") throw new Error("Expected switched daemon snapshot");
+    expect(switched.items[0]?.id).not.toBe(first.items[0]?.id);
+    await expect(source.stop(first.items[0]!, {paseo})).rejects.toThrow("no longer belongs");
+    expect(calls.filter((call) => call.startsWith("DELETE"))).toHaveLength(1);
+    await paseo.dispose();
+  });
+
+  it("reports missing profile and offline sources without turning failure into an empty snapshot", async () => {
+    const { backgroundWorkSource } = await import("../server/background-work");
+    const { createPaseoApi } = await import("@getpaseo/client");
+    const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
+    const home = await makeHome();
+    const paseo = createPaseoApi(new DaemonClient({url: "ws://127.0.0.1:1/ws", clientId: "test"}));
+    const source = backgroundWorkSource({home, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: ""})});
+    expect(await source.fetch({paseo})).toMatchObject({status: "unavailable", message: expect.stringContaining("local wait daemon profile")});
+    await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: DAEMON_ID}));
+    vi.spyOn(paseo.hosts, "list").mockResolvedValue({self: {serverId: HOST_ID, label: "Test"}, hosts: []});
+    const offline = backgroundWorkSource({home, fetchImpl: async () => { throw new Error(OWNER_TOKEN); }, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: "default"})});
+    expect(await offline.fetch({paseo})).toMatchObject({status: "unavailable", message: expect.stringContaining("offline")});
+    expect(JSON.stringify(await offline.fetch({paseo}))).not.toContain(OWNER_TOKEN);
+    await paseo.dispose();
+  });
+});

@@ -270,3 +270,24 @@ with `paseo plugin install <absolute path>` on the daemon host.
   `multica session connect` (or `/multica connect` in the composer) does that explicitly.
 - No automatic enrollment of existing sessions, no automatic model messages, no
   MCP server, and no provider reload.
+
+## Background waits
+
+The server plugin contributes Multica waits to Paseo's existing background-task
+pill. It reconciles immediately and about every five seconds even with the app
+closed. This requires the Paseo host's external background source extension and
+a Multica daemon with `wait list`; old hosts show an upgrade notice in plugin
+settings.
+
+Set **Local wait daemon profile** explicitly in the connection settings. Enter
+`default` for `~/.multica`, or the named profile owning the waits. Its endpoint
+must match **Delivery daemon**. The local endpoint secret and owner credential
+stay in the server process. The owner profile supplies read access to frozen
+registered session addresses; a provider session pin does not establish a
+Paseo address.
+
+Ended waits remain visible until Multica reports `handled`. A failed read retains
+the last snapshot as stale and disables cancellation. **Cancel local wait** stops
+the local monitor only; remote CI/GPU jobs continue. Plugin unload removes the
+projection without stopping waits. Reload and daemon restart reconstruct it from
+Multica; a wait that Multica marks lost after restart is shown as lost.
