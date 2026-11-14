@@ -648,3 +648,30 @@ Worktree:
 ```bash
 make check-worktree
 ```
+
+## Manual CI scope
+
+The **CI** workflow's **Run workflow** form defaults to incremental validation.
+On a feature branch it compares the dispatched commit with its merge base against
+`origin/<default branch>` and uses `.github/ci-paths.json`, the same scope map as
+PR and main-push CI. This covers all changes on the branch, including stacked
+branches; it is not a comparison with the last successful run or the last commit.
+The run log and job summary show the comparison and selected scopes.
+
+Select **full** for all suites and platform stress tests. Scheduled runs remain
+full. Manual runs on the default branch or a tag, missing or incomplete history,
+an unavailable/ambiguous merge base, an empty diff, and hidden or unknown paths
+also run full. Known documentation-only changes may skip product suites; unmatched code
+or configuration never silently counts as documentation. A checkout that does
+not match the dispatched revision fails selection.
+
+Incremental manual runtime changes retain Windows and macOS runtime tests;
+installer changes retain the Linux/macOS/Windows matrix. Aggregate gates require
+all selected jobs to succeed. Incremental success covers the reported scopes,
+not a full regression pass. Mobile remains in the separate Mobile Verify workflow.
+
+Validate selection and gate changes locally with:
+
+```bash
+node --test scripts/ci-scope.test.mjs scripts/check-image-budget.test.mjs
+```

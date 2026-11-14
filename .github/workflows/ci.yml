@@ -8,14 +8,19 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run all scopes, including platform stress tests
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # PRs and main pushes use the same paths. Scheduled/manual runs validate all
-  # scopes, including platform stress tests, without charging every merge for them.
+  # Manual branch runs use the same paths against their default-branch merge base.
+  # Scheduled, explicit full and unsafe-to-compare runs validate every scope.
   changes:
     runs-on: ubuntu-latest
     permissions:
@@ -31,9 +36,13 @@ jobs:
       installer: ${{ steps.decide.outputs.installer }}
       images: ${{ steps.decide.outputs.images }}
       full: ${{ steps.decide.outputs.full }}
+      macos_runtime: ${{ steps.decide.outputs.macos_runtime }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Only incremental manual runs need all branch history for merge-base.
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && !inputs.full && '0' || '1' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -58,6 +67,8 @@ jobs:
         id: decide
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL_RUN: ${{ inputs.full }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           FILTER_RESULTS: ${{ toJSON(steps.filter.outputs) }}
         run: node scripts/ci-scope.mjs decide
 
@@ -509,7 +520,7 @@ jobs:
       - name: Check backend job results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          JOB_SCOPES: '{"backend-tests":"backend","backend-agent-tests":"backend","sqlc-check":"sqlc","go-vulnerability-scan":"backend","macos-runtime":"full","windows-execenv":"runtime","script-checks":"scripts","installer":"installer"}'
+          JOB_SCOPES: '{"backend-tests":"backend","backend-agent-tests":"backend","sqlc-check":"sqlc","go-vulnerability-scan":"backend","macos-runtime":"macos_runtime","windows-execenv":"runtime","script-checks":"scripts","installer":"installer"}'
         run: node scripts/ci-scope.mjs gate
 
   windows-execenv:
@@ -791,11 +802,11 @@ jobs:
   # windows-execenv, but macOS has no sibling job to join, and this covers one
   # integration's background shell rather than the shared launch path every
   # agent uses. So the daily full run carries it instead of charging every
-  # backend merge for a macOS runner; `full` also means the stress counts below
-  # are now the only finalization pass, replacing the single-count merge variant.
+  # backend merge for a macOS runner. Manual runtime changes also retain this
+  # coverage; the stress counts below are the only finalization pass.
   macos-runtime:
     needs: changes
-    if: ${{ needs.changes.outputs.full == 'true' }}
+    if: ${{ needs.changes.outputs.macos_runtime == 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
