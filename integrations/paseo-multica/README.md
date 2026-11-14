@@ -201,8 +201,11 @@ desktop renderer to load the new guest application. A plugin reload alone retain
 resident pages running the previous web bundle.
 
 The web app uses a temporary next-themes `forcedTheme`. Theme changes do not call
-`setTheme`, write storage, change `src` or replace a resident page. Initial URL
-parameters supply appearance before the live bridge is ready. Browser messages use
+`setTheme`, write storage, change `src` or replace a resident page. The iframe's
+browsing-context name binds its parent origin and latest appearance across same-origin
+login redirects and route reloads. Login 302 and language-change reloads discard route
+query parameters, so they cannot own this binding. Webviews receive initial URL state
+and later the fixed script channel. Browser messages use
 the configured guest origin, and the receiver checks the exact parent window and
 origin. Electron sends only a validated light/dark value through a fixed script
 restricted to the configured guest origin, after `dom-ready`. Guest navigation clears
@@ -210,7 +213,8 @@ that readiness gate. Partition and sign-in behavior are unchanged.
 
 `e2e/paseo-theme.spec.ts` uses the production resident component, web theme provider,
 SDK mapper and UI tokens in isolated fixtures. It checks opposite OS/host settings,
-live changes, drafts, scrolling, reopening, multiple hosts and untouched standalone
+default login redirects, route reloads, live changes, drafts, scrolling, reopening,
+multiple hosts and untouched standalone
 storage and forced-theme toast appearance. OS preferences are emulated through
 Chromium media emulation/CDP; the host system setting is unchanged. The Electron case uses a real webview with `persist:paseo-browser` inside a
 temporary user-data directory. These are bridge integration fixtures, not a login or

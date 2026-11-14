@@ -81,21 +81,26 @@ function park(page: ResidentPage): void {
   });
 }
 
+function frameThemeName(colorScheme: "light" | "dark") {
+  return JSON.stringify({
+    type: "multica-paseo-theme",
+    parentOrigin: host.location.origin,
+    colorScheme,
+  });
+}
+
 function createPage(
   hostId: string,
   url: string,
   signInUrl?: string,
   colorScheme?: "light" | "dark",
 ): ResidentPage {
+  const partition = host.paseoDesktop?.browser?.profilePartition;
   const target = new URL(url);
   const origin = target.origin;
-  if (colorScheme) {
-    target.searchParams.set("paseoTheme", colorScheme);
-    target.searchParams.set("paseoParentOrigin", host.location.origin);
-  }
+  if (colorScheme && partition) target.searchParams.set("paseoTheme", colorScheme);
   const embeddedUrl = target.href;
   const { document } = host;
-  const partition = host.paseoDesktop?.browser?.profilePartition;
   const surface = document.createElement("div");
   surface.setAttribute("data-multica-host", hostId);
   // Same paint plane as Paseo's resident browsers; its overlay root sits above at z-index 1.
@@ -126,6 +131,7 @@ function createPage(
     view.setAttribute("allow", "clipboard-read; clipboard-write");
     view.setAttribute("referrerpolicy", "no-referrer");
   }
+  if (colorScheme && !partition) view.setAttribute("name", frameThemeName(colorScheme));
   if (signInUrl) {
     let signedIn = false;
     view.addEventListener(partition ? "did-finish-load" : "load", () => {
@@ -148,6 +154,7 @@ function createPage(
     syncTheme() {
       if (!page.colorScheme || !page.ready) return;
       if (!partition) {
+        view.setAttribute("name", frameThemeName(page.colorScheme));
         view.contentWindow?.postMessage(
           { type: "multica-paseo-theme", colorScheme: page.colorScheme },
           origin,

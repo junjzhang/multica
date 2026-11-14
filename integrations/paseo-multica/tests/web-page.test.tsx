@@ -148,8 +148,12 @@ it("updates a resident iframe in place and applies the latest theme after parkin
     });
     const view = elements.find((e) => e.attrs.src)!;
     const initialUrl = view.attrs.src;
-    expect(new URL(initialUrl).searchParams.get("paseoTheme")).toBe("dark");
-    expect(new URL(initialUrl).searchParams.get("paseoParentOrigin")).toBe("https://paseo.test");
+    expect(initialUrl).toBe("https://multica.test/work/issues/WORK-1");
+    expect(JSON.parse(view.attrs.name)).toEqual({
+      type: "multica-paseo-theme",
+      parentOrigin: "https://paseo.test",
+      colorScheme: "dark",
+    });
     await act(async () => {
       renderer!.update(component("light"));
     });

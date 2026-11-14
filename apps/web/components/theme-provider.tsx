@@ -11,23 +11,45 @@ declare global {
   }
 }
 
+function frameTheme() {
+  if (typeof window === "undefined" || window.parent === window) return undefined;
+  try {
+    const value: unknown = JSON.parse(window.name);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("type" in value) ||
+      value.type !== "multica-paseo-theme" ||
+      !("parentOrigin" in value) ||
+      typeof value.parentOrigin !== "string" ||
+      !("colorScheme" in value) ||
+      (value.colorScheme !== "light" && value.colorScheme !== "dark")
+    )
+      return undefined;
+    return { parentOrigin: value.parentOrigin, colorScheme: value.colorScheme };
+  } catch {
+    return undefined;
+  }
+}
+
 function initialTheme(): ColorScheme | undefined {
   if (typeof window === "undefined") return undefined;
   const value =
-    window.__multicaPaseoTheme ?? new URLSearchParams(window.location.search).get("paseoTheme");
+    window.__multicaPaseoTheme ??
+    frameTheme()?.colorScheme ??
+    new URLSearchParams(window.location.search).get("paseoTheme");
   return value === "light" || value === "dark" ? value : undefined;
 }
 
 export function ThemeProvider(props: React.ComponentProps<typeof SharedThemeProvider>) {
   const [hostTheme, setHostTheme] = useState(initialTheme);
   useEffect(() => {
-    const parentOrigin = new URLSearchParams(window.location.search).get("paseoParentOrigin");
     const update = () => setHostTheme(initialTheme());
     const receive = (event: MessageEvent) => {
       if (
         window.parent === window ||
         event.source !== window.parent ||
-        event.origin !== parentOrigin ||
+        event.origin !== frameTheme()?.parentOrigin ||
         event.data?.type !== "multica-paseo-theme"
       )
         return;
@@ -47,7 +69,7 @@ export function ThemeProvider(props: React.ComponentProps<typeof SharedThemeProv
       <script
         suppressHydrationWarning
         dangerouslySetInnerHTML={{
-          __html: `(function(){var t=new URLSearchParams(location.search).get("paseoTheme");if(t==="light"||t==="dark"){window.__multicaPaseoTheme=t;document.documentElement.classList.remove("light","dark");document.documentElement.classList.add(t);document.documentElement.style.colorScheme=t;}})();`,
+          __html: `(function(){var context=(${frameTheme.toString()})();var t=window.__multicaPaseoTheme||(context&&context.colorScheme)||new URLSearchParams(location.search).get("paseoTheme");if(t==="light"||t==="dark"){window.__multicaPaseoTheme=t;document.documentElement.classList.remove("light","dark");document.documentElement.classList.add(t);document.documentElement.style.colorScheme=t;}})();`,
         }}
       />
       {props.children}
