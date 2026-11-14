@@ -15,7 +15,10 @@ interface Element {
   setAttribute(name: string, value: string): void;
   appendChild(child: Element): void;
   remove(): void;
-  addEventListener(name: string, listener: (event: { errorCode?: number }) => void): void;
+  addEventListener(
+    name: string,
+    listener: (event: { errorCode?: number; isMainFrame?: boolean; isInPlace?: boolean }) => void,
+  ): void;
   contentWindow?: { postMessage(value: unknown, origin: string): void };
   executeJavaScript?(script: string): Promise<unknown>;
   getBoundingClientRect(): { left: number; top: number; width: number; height: number };
@@ -163,8 +166,8 @@ function createPage(
     page.syncTheme();
   });
   if (partition)
-    view.addEventListener("did-start-loading", () => {
-      page.ready = false;
+    view.addEventListener("did-start-navigation", (event) => {
+      if (event.isMainFrame && !event.isInPlace) page.ready = false;
     });
   view.addEventListener(partition ? "did-fail-load" : "error", (event) => {
     // The sign-in redirect aborts the first navigation in Chromium (ERR_ABORTED).

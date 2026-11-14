@@ -67,6 +67,10 @@ test.describe("Paseo embedded appearance", () => {
     const tokens = await readFile("packages/ui/styles/tokens.css", "utf8");
     server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
+      if (request.url === "/frame.html") {
+        response.end("<p>Nested content</p>");
+        return;
+      }
       const isGuest = request.url?.startsWith("/guest");
       const script = (isGuest ? guest : host).outputFiles[0].text.replace(
         /<\/script/gi,
@@ -129,6 +133,9 @@ test.describe("Paseo embedded appearance", () => {
     const original = await read("window.__themeIdentity ??= crypto.randomUUID()");
     await read(
       "document.querySelector('textarea').value='unsaved draft';window.scrollTo(0,180);true",
+    );
+    await read(
+      "new Promise(resolve=>{const frame=document.createElement('iframe');frame.src='/frame.html';frame.onload=()=>resolve(true);document.body.appendChild(frame);})",
     );
     for (const scheme of ["light", "dark", "light"]) {
       await host.getByRole("button", { name: "Toggle theme" }).click();
