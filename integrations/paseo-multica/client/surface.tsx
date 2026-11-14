@@ -6,7 +6,17 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { openWeb } from "../shared/web";
 import { resetResidentPage, ResidentWebPage } from "./web-page";
 
-export function MulticaSurface({ host, theme, layout, path, pageKey }: PluginSurfaceProps & { path?: string; pageKey?: string }) {
+export function MulticaSurface({
+  host,
+  theme,
+  layout,
+  path,
+  pageKey,
+}: PluginSurfaceProps & { path?: string; pageKey?: string }) {
+  const colorScheme =
+    "colorScheme" in theme && (theme.colorScheme === "light" || theme.colorScheme === "dark")
+      ? theme.colorScheme
+      : undefined;
   const pageId = path ? `${host.id}:${pageKey}:${path}` : host.id;
   const getLink = useRpc(openWeb);
   const [loadError, setLoadError] = useState("");
@@ -23,7 +33,12 @@ export function MulticaSurface({ host, theme, layout, path, pageKey }: PluginSur
   const error = link.error?.message || loadError;
   const styles = useMemo(
     () => ({
-      container: { flex: 1, gap: 16, padding: layout.compact ? 16 : 24, backgroundColor: theme.colors.surface0 },
+      container: {
+        flex: 1,
+        gap: 16,
+        padding: layout.compact ? 16 : 24,
+        backgroundColor: theme.colors.surface0,
+      },
       text: { color: theme.colors.foreground },
       muted: { color: theme.colors.foregroundMuted },
       action: { color: theme.colors.accent },
@@ -31,7 +46,10 @@ export function MulticaSurface({ host, theme, layout, path, pageKey }: PluginSur
     [theme, layout.compact],
   );
 
-  const failed = useCallback(() => setLoadError("Multica could not be loaded. Check the server, then retry."), []);
+  const failed = useCallback(
+    () => setLoadError("Multica could not be loaded. Check the server, then retry."),
+    [],
+  );
   const retry = useCallback(() => {
     resetResidentPage(pageId);
     setLoadError("");
@@ -40,15 +58,34 @@ export function MulticaSurface({ host, theme, layout, path, pageKey }: PluginSur
   }, [pageId, refetch]);
   const openInBrowser = useCallback(() => {
     if (link.data)
-      void openExternalUrl(link.data.externalUrl).catch(() => setLoadError("The browser could not be opened."));
+      void openExternalUrl(link.data.externalUrl).catch(() =>
+        setLoadError("The browser could not be opened."),
+      );
   }, [link.data]);
 
   if (link.data && !error && Platform.OS === "web") {
-    return <ResidentWebPage key={revision} hostId={pageId} url={link.data.url} signInUrl={link.data.signInUrl} onError={failed} retain={!path} />;
+    return (
+      <View style={{ flex: 1 }}>
+        {!colorScheme && (
+          <Text style={styles.muted}>Update the Paseo client to sync the page theme.</Text>
+        )}
+        <ResidentWebPage
+          key={revision}
+          hostId={pageId}
+          url={link.data.url}
+          signInUrl={link.data.signInUrl}
+          colorScheme={colorScheme}
+          onError={failed}
+          retain={!path}
+        />
+      </View>
+    );
   }
   return (
     <View style={styles.container}>
-      <Text style={styles.text}>{error || (link.data ? "Open Multica in your browser." : "Opening Multica…")}</Text>
+      <Text style={styles.text}>
+        {error || (link.data ? "Open Multica in your browser." : "Opening Multica…")}
+      </Text>
       {error ? (
         <Pressable accessibilityRole="button" onPress={retry}>
           <Text style={styles.action}>Retry</Text>
