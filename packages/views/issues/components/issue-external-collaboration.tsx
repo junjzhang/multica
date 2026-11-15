@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { Mailbox, Users } from "lucide-react";
+import { Mail, Users } from "@multica/ui/icons";
 import type { Agent, Issue, IssueSessionBinding, MailboxMessage } from "@multica/core/types";
 import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { useActorName } from "@multica/core/workspace/hooks";
@@ -214,7 +214,7 @@ export function IssueExternalCollaboration({
                   className="min-w-0 rounded-md border border-border/70 p-2 text-micro"
                 >
                   <div className="flex min-w-0 items-center gap-1.5">
-                    <Mailbox className="size-3 shrink-0 text-muted-foreground" />
+                    <Mail className="size-3 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 truncate font-medium text-caption">
                       {recipient?.name ?? delivery.recipient_agent_id}
                     </span>

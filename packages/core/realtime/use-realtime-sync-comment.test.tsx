@@ -222,7 +222,7 @@ it("refetches an observed fresh task-runs query on the mailbox event without pol
     expect(read).not.toHaveBeenCalled();
     await act(async () => handlers["issue_mailbox:changed"]!({ issue_id: "issue-1" }));
     await waitFor(() => expect(view.result.current.data?.[0]?.result_notifications?.[0]?.status).toBe("delivered"));
-    expect(read).toHaveBeenCalledExactlyOnceWith("issue-1");
+    expect(read).toHaveBeenCalledExactlyOnceWith("issue-1", false, { view: "timeline" });
     expect(view.result.current.data?.[0]?.result).toEqual(task.result);
     expect(qc.getQueryState(issueKeys.tasks("issue-2"))?.isInvalidated).toBe(false);
   } finally {

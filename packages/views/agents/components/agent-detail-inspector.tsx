@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import type {
   Agent,
   AgentConversationStarter,
@@ -13,10 +12,6 @@ import {
   AGENT_MAX_CONCURRENT_TASKS_MAX,
   AGENT_MAX_CONCURRENT_TASKS_MIN,
 } from "@multica/core/agents";
-import {
-  isRuntimeUsableForUser,
-  runtimeModelsOptions,
-} from "@multica/core/runtimes";
 import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { useConfigStore } from "@multica/core/config";
 import { isImeComposing } from "@multica/core/utils";
@@ -38,13 +33,10 @@ import { ConversationStartersEditor } from "./conversation-starters-editor";
 import { NewChatPreview } from "./new-chat-preview";
 import { useConversationStartersFocus } from "./use-conversation-starters-focus";
 import { ModelPicker } from "./inspector/model-picker";
-import {
-  buildModelChangeUpdate,
-  type ModelCatalog,
-} from "./inspector/model-change-cleanup";
 import { RuntimePicker } from "./inspector/runtime-picker";
 import { ThinkingSettingField } from "./inspector/thinking-prop-row";
 import { ServiceTierSettingField } from "./inspector/service-tier-setting-field";
+import { useExecutionControls } from "./inspector/use-execution-controls";
 import { AgentExecutionStatus } from "../../issues/components/agent-execution-identity";
 
 interface InspectorProps {
@@ -146,11 +138,13 @@ export function AgentDetailInspector({
     isEqual: profileDraftsEqual,
   });
 
-  // A Qoder agent is bound to a QCA agent, and the model lives there. Moving
-  // between Qoder and any other runtime would need a different configuration
-  // the server either rejects or the bridge refuses, so neither direction is
-  // offered here. It also never opens a chat, so nothing chat-facing applies.
-  const qoderRuntime = runtime?.provider === "qoder_cloud";
+  const {
+    qoderRuntime,
+    canDiscoverRuntimeModels,
+    runtimeOptions,
+    changeModel,
+    changeRuntime,
+  } = useExecutionControls({ agent, runtime, runtimes, currentUserId, update });
   // Managed-only execution controls. External identities run in their host
   // session, so a runtime/model/concurrency form here would offer a fake
   // rebind; an unknown kind exposes nothing executable either.
@@ -158,8 +152,7 @@ export function AgentDetailInspector({
   const conversationStartersEnabled = useConfigStore(
     (state) => state.agentConversationStartersSupported,
   );
-  const showStarters =
-    conversationStartersEnabled && !qoderRuntime && managedExecution;
+  const showStarters = conversationStartersEnabled && managedExecution;
   const startersComplete = starters.every(
     (item) => item.label.trim() && item.prompt.trim(),
   );
@@ -181,47 +174,7 @@ export function AgentDetailInspector({
     isEqual: startersEqual,
   });
   const startersFocus = useConversationStartersFocus(agent.id, showStarters);
-  const isOnline = runtime?.status === "online";
-  const canReadRuntime =
-    runtime != null && isRuntimeUsableForUser(runtime, currentUserId);
-  const canDiscoverRuntimeModels = isOnline && canReadRuntime && !qoderRuntime;
   const nameInvalid = name.trim().length === 0;
-  const runtimeOptions = useMemo(
-    () =>
-      qoderRuntime
-        ? runtimes
-        : runtimes.filter((r) => r.provider !== "qoder_cloud"),
-    [qoderRuntime, runtimes],
-  );
-
-  // Same query the Thinking / Speed fields already use, so switching model
-  // costs no extra request. `null` = not authoritative (offline runtime, still
-  // loading, or discovery failed) and must not trigger any clearing.
-  const modelsQuery = useQuery(
-    runtimeModelsOptions(canDiscoverRuntimeModels ? agent.runtime_id : null),
-  );
-  const modelCatalog = useMemo<ModelCatalog>(
-    () =>
-      modelsQuery.isSuccess
-        ? modelsQuery.data.supported
-          ? modelsQuery.data.models
-          : []
-        : null,
-    [modelsQuery.data, modelsQuery.isSuccess],
-  );
-  const handleModelChange = useCallback(
-    (model: string) =>
-      update(
-        buildModelChangeUpdate({
-          provider: runtime?.provider ?? "",
-          model,
-          thinkingLevel: agent.thinking_level ?? "",
-          serviceTier: agent.service_tier ?? "",
-          catalog: modelCatalog,
-        }),
-      ),
-    [agent.service_tier, agent.thinking_level, modelCatalog, runtime?.provider, update],
-  );
 
   return (
     <div className="@container">
@@ -354,17 +307,7 @@ export function AgentDetailInspector({
                   members={members}
                   currentUserId={currentUserId}
                   canEdit={canEdit && !qoderRuntime}
-                  // Model, thinking level, and service tier are runtime/model
-                  // native. Clear them together so the new runtime resolves its
-                  // own defaults instead of inheriting incompatible tokens.
-                  onChange={(id) =>
-                    update({
-                      runtime_id: id,
-                      model: "",
-                      thinking_level: "",
-                      service_tier: "",
-                    })
-                  }
+                  onChange={changeRuntime}
                 />
               </SettingsRow>
               {qoderRuntime ? null : (
@@ -380,7 +323,7 @@ export function AgentDetailInspector({
                       runtimeOnline={canDiscoverRuntimeModels}
                       value={agent.model ?? ""}
                       canEdit={canEdit}
-                      onChange={handleModelChange}
+                      onChange={changeModel}
                     />
                   </SettingsRow>
                   <ThinkingSettingField
@@ -430,7 +373,7 @@ export function AgentDetailInspector({
           </SettingsSection>
         </div>
 
-        {qoderRuntime || !managedExecution ? null : (
+        {managedExecution ? (
           <SettingsSection
             title={t(($) => $.conversation_starters.preview_label)}
             className="hidden @4xl:sticky @4xl:top-0 @4xl:block"
@@ -442,7 +385,7 @@ export function AgentDetailInspector({
               starters={showStarters ? starters : []}
             />
           </SettingsSection>
-        )}
+        ) : null}
       </div>
     </div>
   );
