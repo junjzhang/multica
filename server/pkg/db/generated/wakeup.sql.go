@@ -1165,10 +1165,17 @@ const listPausedWakeupIssues = `-- name: ListPausedWakeupIssues :many
 SELECT w.issue_id,w.id,w.agent_id,w.paused_reason
 FROM issue_wakeup w JOIN issue i ON i.id=w.issue_id AND i.workspace_id=w.workspace_id
 WHERE w.workspace_id= $1 AND NOT w.enabled AND w.paused_reason IN ('loop','rate','max_fires')
+ -- MUL-8472: private projects the caller cannot see.
+ AND ($2::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY($2::uuid[])))
  AND i.status NOT IN ('done','cancelled')
  AND NOT EXISTS(SELECT 1 FROM issue_status s WHERE s.workspace_id=i.workspace_id AND s.key=i.status AND s.category IN ('done','closed'))
 ORDER BY w.updated_at DESC LIMIT 200
 `
+
+type ListPausedWakeupIssuesParams struct {
+	WorkspaceID      pgtype.UUID   `json:"workspace_id"`
+	HiddenProjectIds []pgtype.UUID `json:"hidden_project_ids"`
+}
 
 type ListPausedWakeupIssuesRow struct {
 	IssueID      pgtype.UUID `json:"issue_id"`
@@ -1179,8 +1186,8 @@ type ListPausedWakeupIssuesRow struct {
 
 // Rules the platform paused on open issues, for board cues and the
 // workspace banner. Access follows shared issue visibility.
-func (q *Queries) ListPausedWakeupIssues(ctx context.Context, workspaceID pgtype.UUID) ([]ListPausedWakeupIssuesRow, error) {
-	rows, err := q.db.Query(ctx, listPausedWakeupIssues, workspaceID)
+func (q *Queries) ListPausedWakeupIssues(ctx context.Context, arg ListPausedWakeupIssuesParams) ([]ListPausedWakeupIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listPausedWakeupIssues, arg.WorkspaceID, arg.HiddenProjectIds)
 	if err != nil {
 		return nil, err
 	}
@@ -1478,6 +1485,8 @@ LEFT JOIN member actor_member ON w.filter_actor_type='member' AND actor_member.u
 LEFT JOIN "user" actor_user ON actor_user.id=actor_member.user_id
 LEFT JOIN agent source ON source.id=w.filter_agent_id AND source.workspace_id=w.workspace_id AND source.id=ANY($1::uuid[])
  WHERE w.workspace_id= $2 AND w.enabled
+  -- MUL-8472: private projects the caller cannot see.
+  AND ($3::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY($3::uuid[])))
   AND i.status NOT IN ('done','cancelled')
   AND NOT EXISTS(SELECT 1 FROM issue_status s WHERE s.workspace_id=i.workspace_id AND s.key=i.status AND s.category IN ('done','closed'))
 )
@@ -1486,8 +1495,9 @@ FROM ranked WHERE rank<=3 ORDER BY issue_id,rank
 `
 
 type ListWorkspaceWakeupSummaryRowsParams struct {
-	AgentIds    []pgtype.UUID `json:"agent_ids"`
-	WorkspaceID pgtype.UUID   `json:"workspace_id"`
+	AgentIds         []pgtype.UUID `json:"agent_ids"`
+	WorkspaceID      pgtype.UUID   `json:"workspace_id"`
+	HiddenProjectIds []pgtype.UUID `json:"hidden_project_ids"`
 }
 
 type ListWorkspaceWakeupSummaryRowsRow struct {
@@ -1514,7 +1524,7 @@ type ListWorkspaceWakeupSummaryRowsRow struct {
 
 // No prompts/history; at most three previews per issue plus exact counts.
 func (q *Queries) ListWorkspaceWakeupSummaryRows(ctx context.Context, arg ListWorkspaceWakeupSummaryRowsParams) ([]ListWorkspaceWakeupSummaryRowsRow, error) {
-	rows, err := q.db.Query(ctx, listWorkspaceWakeupSummaryRows, arg.AgentIds, arg.WorkspaceID)
+	rows, err := q.db.Query(ctx, listWorkspaceWakeupSummaryRows, arg.AgentIds, arg.WorkspaceID, arg.HiddenProjectIds)
 	if err != nil {
 		return nil, err
 	}
@@ -1606,7 +1616,7 @@ func (q *Queries) LockIssueWakeup(ctx context.Context, id pgtype.UUID) (IssueWak
 }
 
 const lockWakeupIssue = `-- name: LockWakeupIssue :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE id= $1 FOR NO KEY UPDATE
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE id= $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) LockWakeupIssue(ctx context.Context, id pgtype.UUID) (Issue, error) {
@@ -1650,6 +1660,7 @@ func (q *Queries) LockWakeupIssue(ctx context.Context, id pgtype.UUID) (Issue, e
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,

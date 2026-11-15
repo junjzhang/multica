@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, ExternalLink, Link2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Link2 } from "@multica/ui/icons";
 import { toast } from "sonner";
 import type { ExternalSession } from "@multica/core/types";
 import { parsePaseoSessionUrl } from "@multica/core/agents/paseo-session-url";

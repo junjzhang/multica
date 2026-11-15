@@ -20,6 +20,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/issueleader"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/issueworkflow"
+	"github.com/multica-ai/multica/server/internal/projectaccess"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -613,7 +614,7 @@ func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, s
 
 func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previous, actorType, actorID string) {
 	resp := h.issueResponseForEvent(ctx, issue)
-	h.fillStatusCategory(ctx, issue.WorkspaceID, &resp)
+	h.fillStatusCategory(ctx, issue.WorkspaceID, projectaccess.Hidden{}, &resp)
 	h.publish(protocol.EventIssueUpdated, uuidToString(issue.WorkspaceID), actorType, actorID, map[string]any{"issue": resp, "status_changed": previous != issue.Status, "prev_status": previous})
 }
 
@@ -625,7 +626,7 @@ func (h *Handler) publishIssueChange(ctx context.Context, issue db.Issue, previo
 // handoff keeps the assignee unchanged and therefore emits no such flag.
 func (h *Handler) publishExecutorHandoffChange(ctx context.Context, updated, previous db.Issue, actorType, actorID string) {
 	resp := h.issueResponseForEvent(ctx, updated)
-	h.fillStatusCategory(ctx, updated.WorkspaceID, &resp)
+	h.fillStatusCategory(ctx, updated.WorkspaceID, projectaccess.Hidden{}, &resp)
 	assigneeChanged := previous.AssigneeType.String != updated.AssigneeType.String ||
 		uuidToString(previous.AssigneeID) != uuidToString(updated.AssigneeID)
 	h.publish(protocol.EventIssueUpdated, uuidToString(updated.WorkspaceID), actorType, actorID, map[string]any{

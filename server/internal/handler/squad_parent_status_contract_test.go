@@ -53,7 +53,7 @@ func TestSquadAssignedLeaderCanWrapUpOnCommentTurn(t *testing.T) {
 	squad := seedSquadForBriefing(t, leaderID, "Owning Squad", "")
 
 	// The issue is assigned to this squad → the server grants status ownership.
-	briefing := squadbriefing.Build(ctx, testHandler.Queries, squad, true)
+	briefing := squadbriefing.Build(ctx, testHandler.Queries, squad, true, squadbriefing.Options{})
 	brief := leaderCommentRuntimeBrief(t, briefing)
 
 	if !strings.Contains(briefing, "Own the parent issue status") {
@@ -97,7 +97,7 @@ func TestGuestLeaderCannotChangeStatusOnCommentTurn(t *testing.T) {
 	squad := seedSquadForBriefing(t, leaderID, "Guest Squad", "")
 
 	// The issue is assigned to someone else → no status ownership.
-	briefing := squadbriefing.Build(ctx, testHandler.Queries, squad, false)
+	briefing := squadbriefing.Build(ctx, testHandler.Queries, squad, false, squadbriefing.Options{})
 	brief := leaderCommentRuntimeBrief(t, briefing)
 
 	// The leader still gets the coordination context it was pulled in for —

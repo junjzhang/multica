@@ -129,7 +129,7 @@ func ExternalAssignment(ctx context.Context, q *db.Queries, issue db.Issue, targ
 	}
 	if target.Squad != nil {
 		payload.SquadID = util.UUIDToString(target.Squad.ID)
-		payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, *target.Squad, true)
+		payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, *target.Squad, true, squadbriefing.Options{})
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

@@ -269,7 +269,7 @@ describe("issue surface view store registry", () => {
 
     const store = getIssueSurfaceViewStore("project:legacy");
     const migrated = store.getState();
-    expect([migrated.sortBy, migrated.sortDirection]).toEqual(["created_at", "desc"]);
+    expect([migrated.sortBy, migrated.sortDirection]).toEqual(["updated_at", "desc"]);
     expect(migrated.cardProperties.project).toBe(false);
     expect(migrated.hiddenStatuses).toEqual(["cancelled"]);
     expect(migrated.showSubIssues).toBe(false);
@@ -354,7 +354,7 @@ describe("issue surface view store registry", () => {
 
     const legacy = getIssueSurfaceViewStore("workspace:legacy").getState();
     expect([legacy.sortBy, legacy.sortDirection]).toEqual([
-      "created_at",
+      "updated_at",
       "desc",
     ]);
     expect(legacy.cardProperties.description).toBe(false);
@@ -473,6 +473,40 @@ describe("issue surface view store registry", () => {
     setCurrentWorkspace("beta", "ws_b");
     await flush();
     expect(projectA.getState().viewMode).toBe("swimlane");
+  });
+
+  // Later opens of a saved view read this local copy, not the definition, so
+  // a condition missing here silently drops out of the view.
+  it("keeps a saved view's agent running filter across a reload", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    seedIssueSurfaceViewState("view:running", { agentRunningFilter: true });
+    const view = getIssueSurfaceViewStore("view:running");
+    expect(view.getState().agentRunningFilter).toBe(true);
+
+    setCurrentWorkspace("beta", "ws_b");
+    await flush();
+    expect(view.getState().agentRunningFilter).toBe(false);
+
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    expect(view.getState().agentRunningFilter).toBe(true);
+  });
+
+  it("persists Idle per workspace and resets it with the other filters", async () => {
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    seedIssueSurfaceViewState("view:idle", { agentIdleFilter: true });
+    const view = getIssueSurfaceViewStore("view:idle");
+    expect(view.getState().agentIdleFilter).toBe(true);
+    setCurrentWorkspace("beta", "ws_b");
+    await flush();
+    expect(view.getState().agentIdleFilter).toBe(false);
+    setCurrentWorkspace("acme", "ws_a");
+    await flush();
+    expect(view.getState().agentIdleFilter).toBe(true);
+    view.getState().clearFilters();
+    expect(view.getState().agentIdleFilter).toBe(false);
   });
 
   it("clears one surface without touching sibling surfaces", async () => {

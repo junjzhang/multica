@@ -9,6 +9,7 @@ import enIssues from "../../locales/en/issues.json";
 
 const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 
+let queryFails = false;
 let mockAutoComplete: PRAutoComplete | null = null;
 let mockDescendants: unknown[] = [];
 vi.mock("@multica/core/github/queries", async () => {
@@ -19,7 +20,10 @@ vi.mock("@multica/core/github/queries", async () => {
     ...actual,
     issuePullRequestsOptions: (issueId: string) => ({
       queryKey: ["github", "pull-requests", issueId],
-      queryFn: async () => ({ pull_requests: [], descendant_pull_requests: mockDescendants, auto_complete: mockAutoComplete }),
+      queryFn: async () => {
+        if (queryFails) throw new Error("Offline");
+        return { pull_requests: [], descendant_pull_requests: mockDescendants, auto_complete: mockAutoComplete };
+      },
       enabled: !!issueId,
     }),
   };
@@ -47,8 +51,11 @@ vi.mock("@multica/core/paths", async (importOriginal) => ({
 
 import { PullRequestsSection } from "./pull-requests-section";
 
-function renderSection() {
+function renderSection(cachedDecision?: PRAutoComplete) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (cachedDecision) {
+    qc.setQueryData(["github", "pull-requests", "issue-1"], { pull_requests: [], auto_complete: cachedDecision });
+  }
   return render(
     <QueryClientProvider client={qc}>
       <I18nProvider resources={TEST_RESOURCES} locale="en">
@@ -68,6 +75,7 @@ const decision: PRAutoComplete = {
 describe("PullRequestsSection (MUL-7429)", () => {
   beforeEach(() => {
     mockDescendants = [];
+    queryFails = false;
     mockAutoComplete = decision;
     mockWorkspaceSettings = {};
     apiMock.linkIssuePullRequest.mockReset();
@@ -80,6 +88,27 @@ describe("PullRequestsSection (MUL-7429)", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={qc}><I18nProvider resources={TEST_RESOURCES} locale="en"><PullRequestsSection issueId="issue-1" identifier="MUL-1" open={false} onOpenChange={() => {}} /></I18nProvider></QueryClientProvider>);
     expect(await screen.findByText("1")).toBeInTheDocument();
+  });
+
+  it("keeps the empty title static and retains linking without redundant copy", async () => {
+    renderSection();
+    expect(await screen.findByRole("button", { name: "Link pull request" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Pull requests" })).not.toBeInTheDocument();
+    expect(screen.queryByText(enIssues.detail.pull_requests_empty_title)).not.toBeInTheDocument();
+  });
+
+  it("keeps a retry entry when loading fails with no cached PRs", async () => {
+    queryFails = true;
+    renderSection();
+    expect(await screen.findByRole("button", { name: "Could not load. Retry" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Link pull request" })).not.toBeInTheDocument();
+  });
+
+  it("retains linking after a failed refresh when cached data confirms backend support", async () => {
+    queryFails = true;
+    renderSection(decision);
+    expect(await screen.findByRole("button", { name: "Could not load. Retry" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Link pull request" })).toBeVisible();
   });
 
   it("links a pasted PR URL", async () => {
@@ -158,7 +187,7 @@ describe("PullRequestsSection (MUL-7429)", () => {
   it("hides the actions on a backend without auto-complete", async () => {
     mockAutoComplete = null;
     renderSection();
-    await screen.findByText("No linked pull requests.");
+    await waitFor(() => expect(screen.queryByText("Pull requests")).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Link pull request" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Pull request automation" })).toBeNull();
   });

@@ -126,7 +126,7 @@ SET properties = properties - $1::text,
     END,
     updated_at = CASE WHEN properties ? $1::text THEN now() ELSE updated_at END
 WHERE id = $2::uuid AND workspace_id = $3::uuid
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type DeleteIssuePropertyValueParams struct {
@@ -176,6 +176,7 @@ func (q *Queries) DeleteIssuePropertyValue(ctx context.Context, arg DeleteIssueP
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -297,7 +298,7 @@ SET properties = jsonb_set(properties, ARRAY[$1::text], $2::jsonb, true),
     END,
     updated_at = CASE WHEN properties -> $1::text IS DISTINCT FROM $2::jsonb THEN now() ELSE updated_at END
 WHERE id = $3::uuid AND workspace_id = $4::uuid
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type SetIssuePropertyValueParams struct {
@@ -356,6 +357,7 @@ func (q *Queries) SetIssuePropertyValue(ctx context.Context, arg SetIssuePropert
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,

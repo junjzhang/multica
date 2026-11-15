@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Lock, UserMinus } from "lucide-react";
+import { Lock, UserMinus } from "@multica/ui/icons";
 import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@multica/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
@@ -17,6 +17,7 @@ import { ActorAvatar } from "../../../common/actor-avatar";
 import { DeferredPopup } from "../../../common/deferred-popup";
 import {
   PropertyPicker,
+  PickerPanel,
   PickerItem,
   PickerSection,
   PickerEmpty,
@@ -114,15 +115,118 @@ function AssigneePickerImpl({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
-  const [recipient, setRecipient] = useState<{ type: "agent" | "squad"; id: string; agentId: string } | null>(null);
-  const [sessionId, setSessionId] = useState("");
+  const [recipient, setRecipient] = useState<ExternalRecipient | null>(null);
+  const choices = useAssigneeChoices(filter);
+  const { getActorName } = useActorName();
+  const pick = (updates: Partial<UpdateIssueRequest>) => {
+    onUpdate(updates);
+    setRecipient(null);
+    setOpen(false);
+  };
+
+  const triggerLabel =
+    assigneeType && assigneeId
+      ? getActorName(assigneeType, assigneeId)
+      : t(($) => $.pickers.assignee.trigger_unassigned);
+
+  return (
+    <PropertyPicker
+      open={open}
+      onOpenChange={(v: boolean) => {
+        setOpen(v);
+        if (!v) { setFilter(""); setRecipient(null); }
+      }}
+      width="w-64"
+      align={align}
+      searchable={!recipient}
+      searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
+      onSearchChange={setFilter}
+      triggerRender={triggerRender}
+      tooltip={tooltip}
+      trigger={
+        customTrigger ? customTrigger : assigneeType && assigneeId ? (
+          <>
+            <ActorAvatar actorType={assigneeType} actorId={assigneeId} size="sm" enableHoverCard showStatusDot />
+            <span className="truncate">{triggerLabel}</span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">{t(($) => $.pickers.assignee.trigger_unassigned)}</span>
+        )
+      }
+    >
+      {recipient ? (
+        <ExternalRecipientStep recipient={recipient} onPick={pick} onCancel={() => setRecipient(null)} />
+      ) : (
+        <AssigneeOptions
+          choices={choices}
+          filter={filter}
+          assigneeType={assigneeType}
+          assigneeId={assigneeId}
+          mixed={mixed}
+          onPick={pick}
+          onChooseExternal={setRecipient}
+        />
+      )}
+    </PropertyPicker>
+  );
+}
+
+/**
+ * The assignee picker's search box and list without the popover, for hosting
+ * inside a menu. `onPicked` runs after the choice is applied so the host can
+ * close itself.
+ */
+export function AssigneePickerPanel({
+  assigneeType,
+  assigneeId,
+  onUpdate,
+  onPicked,
+}: {
+  assigneeType: IssueAssigneeType | null;
+  assigneeId: string | null;
+  onUpdate: (updates: Partial<UpdateIssueRequest>) => void;
+  onPicked: () => void;
+}) {
+  const { t } = useT("issues");
+  const [filter, setFilter] = useState("");
+  const [recipient, setRecipient] = useState<ExternalRecipient | null>(null);
+  const choices = useAssigneeChoices(filter);
+  const pick = (updates: Partial<UpdateIssueRequest>) => {
+    onUpdate(updates);
+    setRecipient(null);
+    onPicked();
+  };
+
+  return (
+    <PickerPanel
+      searchable={!recipient}
+      autoFocusSearch
+      searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
+      onSearchChange={setFilter}
+    >
+      {recipient ? (
+        <ExternalRecipientStep recipient={recipient} onPick={pick} onCancel={() => setRecipient(null)} />
+      ) : (
+        <AssigneeOptions
+          choices={choices}
+          filter={filter}
+          assigneeType={assigneeType}
+          assigneeId={assigneeId}
+          onPick={pick}
+          onChooseExternal={setRecipient}
+        />
+      )}
+    </PickerPanel>
+  );
+}
+
+function useAssigneeChoices(filter: string) {
   const user = useAuthStore((s) => s.user);
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: squads = [] } = useQuery(squadListOptions(wsId));
   const { data: frequency = [] } = useQuery(assigneeFrequencyOptions(wsId));
-  const { getActorName } = useActorName();
 
   const currentMember = members.find((m) => m.user_id === user?.id);
   const memberRole = currentMember?.role;
@@ -155,86 +259,101 @@ function AssigneePickerImpl({
   const liveAgentsById = new Map(
     agents.filter((agent) => !agent.archived_at).map((agent) => [agent.id, agent]),
   );
-  const agentActionState = (agent: Agent) => {
-    const kind = agentExecutionKind(agent);
-    if (kind === "unknown") return "unsupported" as const;
-    if (kind === "external") return "ready" as const;
-    return agentNeedsRuntime(agent) ? ("needs-runtime" as const) : ("ready" as const);
-  };
 
-  const chooseAssignee = (type: "agent" | "squad", id: string, agent: Agent) => {
-    if (agentExecutionKind(agent) === "external") {
-      setFilter("");
-      setSessionId("");
-      setRecipient({ type, id, agentId: agent.id });
-      return;
-    }
-    onUpdate({ assignee_type: type, assignee_id: id });
-    setOpen(false);
+  return {
+    userId: user?.id ?? null,
+    memberRole,
+    filteredMembers,
+    filteredAgents,
+    filteredSquads,
+    liveAgentsById,
   };
+}
+
+/** An agent or squad whose executor is external: assigning it picks a session first. */
+interface ExternalRecipient {
+  type: "agent" | "squad";
+  id: string;
+  agentId: string;
+}
+
+function ExternalRecipientStep({
+  recipient,
+  onPick,
+  onCancel,
+}: {
+  recipient: ExternalRecipient;
+  onPick: (updates: Partial<UpdateIssueRequest>) => void;
+  onCancel: () => void;
+}) {
+  const { t } = useT("issues");
+  const [sessionId, setSessionId] = useState("");
+  const assignee = { assignee_type: recipient.type, assignee_id: recipient.id };
+  return (
+    <div className="space-y-2 p-2">
+      <p className="text-caption font-medium">{t(($) => $.detail.external_binding_choose_title)}</p>
+      <AgentSessionChoices agentId={recipient.agentId} selected={sessionId} onSelect={setSessionId} />
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={onCancel}>{t(($) => $.detail.external_binding_cancel)}</Button>
+        <Button type="button" size="sm" disabled={!sessionId} onClick={() => onPick({ ...assignee, recipient_session_id: sessionId })}>
+          {t(($) => $.detail.external_binding_save)}
+        </Button>
+        <Button type="button" size="sm" variant="ghost" className="w-full" onClick={() => onPick({ ...assignee, suppress_run: true })}>
+          {t(($) => $.pickers.assignee.assign_without_starting)}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function agentActionState(agent: Agent) {
+  const kind = agentExecutionKind(agent);
+  if (kind === "unknown") return "unsupported" as const;
+  if (kind === "external") return "ready" as const;
+  return agentNeedsRuntime(agent) ? ("needs-runtime" as const) : ("ready" as const);
+}
+
+function AssigneeOptions({
+  choices,
+  filter,
+  assigneeType,
+  assigneeId,
+  mixed = false,
+  onPick,
+  onChooseExternal,
+}: {
+  choices: ReturnType<typeof useAssigneeChoices>;
+  filter: string;
+  assigneeType: IssueAssigneeType | null;
+  assigneeId: string | null;
+  mixed?: boolean;
+  onPick: (updates: Partial<UpdateIssueRequest>) => void;
+  onChooseExternal: (recipient: ExternalRecipient) => void;
+}) {
+  const { t } = useT("issues");
+  const { userId, memberRole, filteredMembers, filteredAgents, filteredSquads, liveAgentsById } =
+    choices;
 
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
 
-  const triggerLabel =
-    assigneeType && assigneeId
-      ? getActorName(assigneeType, assigneeId)
-      : t(($) => $.pickers.assignee.trigger_unassigned);
+  const chooseAssignee = (type: "agent" | "squad", id: string, agent: Agent) => {
+    if (agentExecutionKind(agent) === "external") {
+      onChooseExternal({ type, id, agentId: agent.id });
+      return;
+    }
+    onPick({ assignee_type: type, assignee_id: id });
+  };
 
   return (
-    <PropertyPicker
-      open={open}
-      onOpenChange={(v: boolean) => {
-        setOpen(v);
-        if (!v) { setFilter(""); setRecipient(null); setSessionId(""); }
-      }}
-      width="w-64"
-      align={align}
-      searchable={!recipient}
-      searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
-      onSearchChange={setFilter}
-      triggerRender={triggerRender}
-      tooltip={tooltip}
-      trigger={
-        customTrigger ? customTrigger : assigneeType && assigneeId ? (
-          <>
-            <ActorAvatar actorType={assigneeType} actorId={assigneeId} size="sm" enableHoverCard showStatusDot />
-            <span className="truncate">{triggerLabel}</span>
-          </>
-        ) : (
-          <span className="text-muted-foreground">{t(($) => $.pickers.assignee.trigger_unassigned)}</span>
-        )
-      }
-    >
-      {recipient ? (
-        <div className="space-y-2 p-2">
-          <p className="text-caption font-medium">{t(($) => $.detail.external_binding_choose_title)}</p>
-          <AgentSessionChoices agentId={recipient.agentId} selected={sessionId} onSelect={setSessionId} />
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button type="button" size="sm" variant="outline" onClick={() => setRecipient(null)}>{t(($) => $.detail.external_binding_cancel)}</Button>
-            <Button type="button" size="sm" disabled={!sessionId} onClick={() => {
-              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, recipient_session_id: sessionId });
-              setRecipient(null);
-              setOpen(false);
-            }}>{t(($) => $.detail.external_binding_save)}</Button>
-            <Button type="button" size="sm" variant="ghost" className="w-full" onClick={() => {
-              onUpdate({ assignee_type: recipient.type, assignee_id: recipient.id, suppress_run: true });
-              setRecipient(null);
-              setOpen(false);
-            }}>{t(($) => $.pickers.assignee.assign_without_starting)}</Button>
-          </div>
-        </div>
-      ) : <>
+    <>
       {/* Unassigned — always the first row, search active or not. Every
           picker in the app puts the empty value there, so "clear this field"
           never moves. */}
       <PickerItem
         emptyValue
         selected={!mixed && !assigneeType && !assigneeId}
-        onClick={() => {
-          onUpdate({ assignee_type: null, assignee_id: null });
-          setOpen(false);
-        }}
+        onClick={() => onPick({ assignee_type: null, assignee_id: null })}
       >
         <UserMinus className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="text-muted-foreground">{t(($) => $.pickers.assignee.trigger_unassigned)}</span>
@@ -247,13 +366,12 @@ function AssigneePickerImpl({
             <PickerItem
               key={m.user_id}
               selected={isSelected("member", m.user_id)}
-              onClick={() => {
-                onUpdate({
+              onClick={() =>
+                onPick({
                   assignee_type: "member",
                   assignee_id: m.user_id,
-                });
-                setOpen(false);
-              }}
+                })
+              }
             >
               <ActorAvatar actorType="member" actorId={m.user_id} size="sm" />
               <span className="truncate">{m.name}</span>
@@ -267,7 +385,7 @@ function AssigneePickerImpl({
         <PickerSection label={t(($) => $.pickers.assignee.agents_group)}>
           {filteredAgents.map((a) => {
             const decision = canAssignAgentToIssue(a, {
-              userId: user?.id ?? null,
+              userId,
               role:
                 memberRole === "owner" ||
                 memberRole === "admin" ||
@@ -352,7 +470,6 @@ function AssigneePickerImpl({
         filteredAgents.length === 0 &&
         filteredSquads.length === 0 &&
         filter && <PickerEmpty />}
-      </>}
-    </PropertyPicker>
+    </>
   );
 }

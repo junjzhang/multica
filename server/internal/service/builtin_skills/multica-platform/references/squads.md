@@ -197,6 +197,8 @@ Current behavior:
   and keep it there while members work; the leader moves the parent to
   `in_review` only on a later turn started by an explicit @mention or the
   separate stage-barrier wakeup, when it confirms the overall goal is met.
+  When the run carries a `[Project workflow]` block, the parent stays at its
+  current step instead and the leader runs that block's Step done command.
   Completing a leader task (including the first dispatch) does not itself
   change issue status;
 - that status authority is granted only when the issue's `assignee_type` /
@@ -282,7 +284,8 @@ These actions can trigger agent work or mutate durable state:
 - A worker's ordinary reply does not wake the leader. If the leader or another
   agent needs to act, the worker must mention it explicitly.
 - First leader dispatch is not parent completion — parent stays `in_progress`
-  until the leader later confirms the overall goal and moves it to `in_review`.
+  until the leader later confirms the overall goal and moves it to `in_review`
+  (under a `[Project workflow]` block: stays at its step until Step done).
 - The server does not auto-flip parent status when child issues finish; the
   sub-issue wakeup starts a leader run, and its instruction still asks for an
   explicit `@`/rerun before the next stage starts.

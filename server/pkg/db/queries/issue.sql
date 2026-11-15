@@ -6,7 +6,7 @@
 -- because that is already the meaning of the `assignee_id` filter (tab 1
 -- "Assigned to me"), and the two filters must produce disjoint result sets.
 SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
-       i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
+       i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.requester_user_id,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.last_activity_at, i.number, i.project_id, i.metadata, i.stage, i.properties,
        i.revision, i.duplicate_of_issue_id
 FROM issue i
@@ -16,7 +16,10 @@ WHERE i.workspace_id = $1
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
   AND (sqlc.narg('assignee_ids')::uuid[] IS NULL OR i.assignee_id = ANY(sqlc.narg('assignee_ids')::uuid[]))
   AND (sqlc.narg('creator_id')::uuid IS NULL OR i.creator_id = sqlc.narg('creator_id'))
+  AND (sqlc.narg('created_by_user_id')::uuid IS NULL OR (i.creator_type = 'member' AND i.creator_id = sqlc.narg('created_by_user_id')) OR i.requester_user_id = sqlc.narg('created_by_user_id'))
   AND (sqlc.narg('project_id')::uuid IS NULL OR i.project_id = sqlc.narg('project_id'))
+  -- MUL-8472: private projects the caller cannot see.
+  AND (sqlc.narg('hidden_project_ids')::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY(sqlc.narg('hidden_project_ids')::uuid[])))
   AND (sqlc.narg('scheduled')::bool IS NULL OR (i.start_date IS NOT NULL OR i.due_date IS NOT NULL))
   AND (sqlc.narg('metadata_filter')::jsonb IS NULL OR i.metadata @> sqlc.narg('metadata_filter')::jsonb)
   AND (
@@ -432,7 +435,7 @@ WHERE id = $1 AND workspace_id = $2;
 -- name: ListIssueRefsInWorkspace :many
 -- GetIssueRefInWorkspace for a page: every original the page's duplicates
 -- point at, in one read.
-SELECT id, number, title, status FROM issue
+SELECT id, number, title, status, project_id FROM issue
 WHERE workspace_id = sqlc.arg('workspace_id')
   AND id = ANY(sqlc.arg('ids')::uuid[]);
 
@@ -456,11 +459,11 @@ INSERT INTO issue (
     assignee_type, assignee_id, creator_type, creator_id,
     parent_issue_id, position, start_date, due_date, number, project_id,
     origin_type, origin_id, stage, properties, last_activity_at, id,
-    coordinator_type, coordinator_id
+    coordinator_type, coordinator_id, requester_user_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
     sqlc.narg('origin_type'), sqlc.narg('origin_id'), sqlc.narg('stage'), COALESCE(sqlc.narg('properties')::jsonb, '{}'::jsonb), now(), COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()),
-    sqlc.narg('coordinator_type'), sqlc.narg('coordinator_id')
+    sqlc.narg('coordinator_type'), sqlc.narg('coordinator_id'), sqlc.narg('requester_user_id')
 ) RETURNING *;
 
 -- name: LockIssueDuplicateKey :exec
@@ -551,6 +554,23 @@ cleared_pr_automation AS (
 ),
 cleared_pr_exclusions AS (
     DELETE FROM issue_pull_request_exclusion WHERE issue_id IN (SELECT target.id FROM target)
+),
+cleared_unread AS (
+    DELETE FROM issue_unread WHERE issue_id IN (SELECT target.id FROM target)
+),
+cleared_environments AS (
+    DELETE FROM issue_environment WHERE issue_id IN (SELECT target.id FROM target)
+),
+cleared_environment_commands AS (
+    DELETE FROM issue_environment_command WHERE issue_id IN (SELECT target.id FROM target)
+),
+cleared_environment_configs AS (
+    DELETE FROM issue_environment_config WHERE issue_id IN (SELECT target.id FROM target)
+),
+-- task_context_receipt has no FK; the issue's tasks go by the legacy cascade,
+-- so their receipts are swept here by the issue_id copied onto each row.
+cleared_task_context_receipts AS (
+    DELETE FROM task_context_receipt WHERE issue_id IN (SELECT target.id FROM target)
 )
 DELETE FROM issue WHERE issue.id IN (SELECT target.id FROM target);
 
@@ -558,7 +578,7 @@ DELETE FROM issue WHERE issue.id IN (SELECT target.id FROM target);
 -- See ListIssues for the semantics of involves_user_id (mirrors the 4-branch
 -- filter; member-direct assignment is intentionally excluded).
 SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
-       i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
+       i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.requester_user_id,
        i.parent_issue_id, i.position, i.start_date, i.due_date, i.created_at, i.updated_at, i.last_activity_at, i.number, i.project_id, i.metadata, i.stage, i.properties,
        i.revision, i.duplicate_of_issue_id
 FROM issue i
@@ -569,7 +589,10 @@ WHERE i.workspace_id = $1
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
   AND (sqlc.narg('assignee_ids')::uuid[] IS NULL OR i.assignee_id = ANY(sqlc.narg('assignee_ids')::uuid[]))
   AND (sqlc.narg('creator_id')::uuid IS NULL OR i.creator_id = sqlc.narg('creator_id'))
+  AND (sqlc.narg('created_by_user_id')::uuid IS NULL OR (i.creator_type = 'member' AND i.creator_id = sqlc.narg('created_by_user_id')) OR i.requester_user_id = sqlc.narg('created_by_user_id'))
   AND (sqlc.narg('project_id')::uuid IS NULL OR i.project_id = sqlc.narg('project_id'))
+  -- MUL-8472: private projects the caller cannot see.
+  AND (sqlc.narg('hidden_project_ids')::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY(sqlc.narg('hidden_project_ids')::uuid[])))
   AND (sqlc.narg('metadata_filter')::jsonb IS NULL OR i.metadata @> sqlc.narg('metadata_filter')::jsonb)
   -- properties_filter is a jsonb array of groups, each group an array of
   -- patterns (built by parsePropertiesFilterParam): the issue must match at
@@ -671,7 +694,10 @@ WHERE i.workspace_id = $1
   AND (sqlc.narg('assignee_id')::uuid IS NULL OR i.assignee_id = sqlc.narg('assignee_id'))
   AND (sqlc.narg('assignee_ids')::uuid[] IS NULL OR i.assignee_id = ANY(sqlc.narg('assignee_ids')::uuid[]))
   AND (sqlc.narg('creator_id')::uuid IS NULL OR i.creator_id = sqlc.narg('creator_id'))
+  AND (sqlc.narg('created_by_user_id')::uuid IS NULL OR (i.creator_type = 'member' AND i.creator_id = sqlc.narg('created_by_user_id')) OR i.requester_user_id = sqlc.narg('created_by_user_id'))
   AND (sqlc.narg('project_id')::uuid IS NULL OR i.project_id = sqlc.narg('project_id'))
+  -- MUL-8472: private projects the caller cannot see.
+  AND (sqlc.narg('hidden_project_ids')::uuid[] IS NULL OR i.project_id IS NULL OR NOT (i.project_id = ANY(sqlc.narg('hidden_project_ids')::uuid[])))
   AND (sqlc.narg('scheduled')::bool IS NULL OR (i.start_date IS NOT NULL OR i.due_date IS NOT NULL))
   AND (sqlc.narg('metadata_filter')::jsonb IS NULL OR i.metadata @> sqlc.narg('metadata_filter')::jsonb)
   AND (
@@ -764,6 +790,8 @@ SELECT parent_issue_id,
 FROM issue
 WHERE workspace_id = $1
   AND parent_issue_id IS NOT NULL
+  -- MUL-8472: private projects the caller cannot see.
+  AND (sqlc.narg('hidden_project_ids')::uuid[] IS NULL OR project_id IS NULL OR NOT (project_id = ANY(sqlc.narg('hidden_project_ids')::uuid[])))
 GROUP BY parent_issue_id;
 
 -- SearchIssues: moved to handler (dynamic SQL for multi-word search support).
@@ -829,3 +857,14 @@ SELECT i.* FROM issue i JOIN tree t ON t.id = i.id
 WHERE i.workspace_id = sqlc.arg('workspace_id')
   AND NOT (i.id = ANY(sqlc.arg('root_ids')::uuid[]))
 ORDER BY i.number, i.id;
+
+-- name: ResolveIssueRequester :one
+SELECT t.originator_user_id FROM agent_task_queue t
+JOIN agent a ON a.id = t.agent_id
+WHERE t.id = sqlc.arg(origin_id)::uuid
+  AND a.id = sqlc.arg(creator_id)::uuid
+  AND a.workspace_id = sqlc.arg(workspace_id)::uuid
+  AND t.originator_user_id IS NOT NULL
+  AND t.originator_source = 'direct_human'
+  AND (sqlc.arg(origin_type)::text = 'quick_create'
+       OR (sqlc.arg(origin_type)::text = 'agent_create' AND t.trigger_evidence_kind = 'chat'));
