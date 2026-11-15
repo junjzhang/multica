@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link2 } from "lucide-react";
+import { Link2 } from "@multica/ui/icons";
 import type { Agent, IssueSessionBinding } from "@multica/core/types";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useAgentPermissions } from "@multica/core/permissions";

@@ -1,6 +1,7 @@
 export type { Issue, IssueStatus, BuiltInIssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction, SourceContextAttachment, SourceContextAuthor, SourceContextIssueSnapshot, SourceContextCommentSnapshot, SourceContextSnapshot, SourceContextLimitUsage, SourceContextPreview, SourceContextAuthorState, IssueSourceContext,
   IssueDuplicateOf, IssueCoordinator, IssueMergeAuthorization, MailboxMessage, MailboxDeliveryStatus, MailboxProcessingStatus,
   IssueSessionBinding,
+  IssueUnread,
 } from "./issue";
 export type {
   IssueStatusCategory,
@@ -44,6 +45,10 @@ export type {
   AgentTask,
   ResultNotification,
   TaskUsage,
+  ContextReceipt,
+  ContextReceiptLoad,
+  ContextReceiptSource,
+  TaskContextReceiptResponse,
   TaskAttribution,
   AttributionUser,
   TaskCancellationActor,
@@ -77,6 +82,9 @@ export type {
   DisabledRuntimeSkill,
   SetAgentRuntimeSkillEnabledRequest,
   SkillFile,
+  SkillVersion,
+  SkillVersionSource,
+  SkillVersionSummary,
   CreateSkillRequest,
   SkillImportResult,
   UpdateSkillRequest,
@@ -145,7 +153,7 @@ export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferen
 export type { Comment, CommentType, CommentAuthorType, CommentSupplementReceipt, CommentSupplementStatus, CommentTriggerPreview, CommentTriggerPreviewAgent, CommentTriggerSource, CommentTriggerOutcome, CommentTriggerStatus, Reaction } from "./comment";
 export type { Label, LabelResourceType, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse, ResourceLabelsResponse } from "./label";
 export type { IssueProperty, IssuePropertyType, ScalarIssuePropertyType, ListIssuePropertyType, IssuePropertyOption, IssuePropertyConfig, IssuePropertyValue, IssuePropertyValues, CreatePropertyRequest, UpdatePropertyRequest, ListPropertiesResponse, IssuePropertiesResponse, IssuePropertyActorKind, IssuePropertyActorRef, PropertyFilterOp, PropertyOperatorFilter, PropertyFilterValue } from "./property";
-export { ISSUE_PROPERTY_TYPES, isKnownPropertyType, ISSUE_PROPERTY_ACTOR_KINDS, MAX_ISSUE_PROPERTY_ACTOR_VALUES, isActorPropertyType, isFilterablePropertyType, isScalarPropertyType, isListPropertyType, formatActorRef, parseActorRef, actorRefsFromValue, actorRefValuesFromValue, hasUnknownActorRef, isPropertyOperatorFilter, isKnownPropertyFilterOp, propertyFilterValueKey, PROPERTY_FILTER_OP_SYMBOLS, PROPERTY_FILTER_OPS_BY_TYPE } from "./property";
+export { ISSUE_PROPERTY_TYPES, isKnownPropertyType, ISSUE_PROPERTY_ACTOR_KINDS, MAX_ISSUE_PROPERTY_ACTOR_VALUES, MAX_ISSUE_PROPERTY_SELECT_VALUES, MAX_ISSUE_PROPERTY_SELECT_OPTIONS, MAX_ISSUE_PROPERTY_FILTER_VALUES, isActorPropertyType, isFilterablePropertyType, isScalarPropertyType, isListPropertyType, formatActorRef, parseActorRef, actorRefsFromValue, actorRefValuesFromValue, hasUnknownActorRef, isPropertyOperatorFilter, isKnownPropertyFilterOp, propertyFilterValueKey, PROPERTY_FILTER_OP_SYMBOLS, PROPERTY_FILTER_OPS_BY_TYPE } from "./property";
 export type {
   QuickAction,
   QuickActionVisibility,
@@ -171,6 +179,7 @@ export type { Attachment } from "./attachment";
 export {
   attachmentDownloadPath,
   attachmentIdFromDownloadURL,
+  attachmentIdFromStorageURL,
   contentReferencesAttachment,
   stripChannelMediaMarkers,
 } from "./attachment-url";
@@ -200,10 +209,14 @@ export type { StorageAdapter } from "./storage";
 export type {
   Project,
   ProjectStatus,
+  ProjectVisibility,
+  ProjectMember,
+  ListProjectMembersResponse,
   ProjectPriority,
   CreateProjectRequest,
   UpdateProjectRequest,
   ListProjectsResponse,
+  ArchiveProjectResponse,
   ProjectResource,
   ProjectResourceType,
   ProjectResourceRef,
@@ -225,6 +238,8 @@ export type {
   GitHubPullRequestMergeStateStatus,
   GitHubPullRequestState,
   IssuePullRequestsResponse,
+  IssuePullRequestSummary,
+  IssuePullRequestSummariesResponse,
   PRAutoComplete,
   PRAutoCompleteState,
   PullRequestLinkSource,
@@ -233,6 +248,20 @@ export type {
   ListGitHubRepositoriesResponse,
   GitHubConnectResponse,
 } from "./github";
+export type {
+  DeclaredEnvironment,
+  IssueEnvironment,
+  IssueEnvironmentAction,
+  IssueEnvironmentActionRecord,
+  IssueEnvironmentActionStatus,
+  IssueEnvironmentCommand,
+  IssueEnvironmentConfig,
+  IssueEnvironmentSource,
+  IssueEnvironmentKind,
+  IssueEnvironmentState,
+  IssueEnvironmentsResponse,
+  StartIssueEnvironmentRequest,
+} from "./environment";
 export type {
   VCSProvider,
   VCSConnection,
@@ -252,6 +281,29 @@ export type {
   ComposioConnection,
   ComposioConnectInitResponse,
 } from "./composio";
+export type {
+  AppAccountScope,
+  AppAccessLevel,
+  AppActionClass,
+  AppActionPolicy,
+  AppCatalogMode,
+  AppConnection,
+  AgentApp,
+  AppsOverview,
+  AppCatalogEntry,
+  AppCatalogResponse,
+  AppRule,
+  AppTool,
+  AppToolCall,
+  AppCallOutcome,
+  IssueAppCall,
+  TeamAppImpact,
+  AppRequestStatus,
+  AppRequest,
+  AppRequestList,
+  UpdateAgentAppsRequest,
+  AppRequestChangedPayload,
+} from "./connected-apps";
 export type {
   SlackInstallation,
   ListSlackInstallationsResponse,
@@ -273,6 +325,8 @@ export type {
   ListWecomInstallationsResponse,
   RegisterWecomBYORequest,
   RedeemWecomBindingTokenResponse,
+  BeginWecomInstallResponse,
+  WecomInstallStatusResponse,
 } from "./wecom";
 export type {
   TelegramInstallation,

@@ -224,7 +224,7 @@ func TestCompletedRemovedWorktreeGC(t *testing.T) {
 			}
 			restarted := New(Config{WorkspacesRoot: d.cfg.WorkspacesRoot}, slog.Default())
 			restarted.client = d.client
-			removed := restarted.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta)
+			removed := restarted.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{})
 			wantRemoved := mode == "acknowledged" || mode == "no_edits" || mode == "response_lost" || mode == "linked_scope"
 			if (removed == 1) != wantRemoved {
 				t.Fatalf("root GC=%d, want removed=%v", removed, wantRemoved)

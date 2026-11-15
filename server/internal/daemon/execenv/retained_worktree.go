@@ -158,9 +158,8 @@ func (w *LocalWorktree) RestoreRemovalProof() error {
 	if err != nil || tip != w.finalizedTip {
 		return errors.New("worktree changed after persisted finalization")
 	}
-	dirty, err := worktreeIsDirty(w.Path)
-	if err != nil || dirty {
-		return errors.New("worktree has changes after persisted finalization")
+	if err := w.verifyFinalizedContent(); err != nil {
+		return fmt.Errorf("worktree has changes after persisted finalization: %w", err)
 	}
 	info, err := os.Lstat(w.Path)
 	if err != nil {

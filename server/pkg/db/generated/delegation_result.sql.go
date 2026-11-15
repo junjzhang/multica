@@ -1239,7 +1239,7 @@ func (q *Queries) ListUnresolvedDelegationFailures(ctx context.Context, batchSiz
 }
 
 const lockDelegationResultIssues = `-- name: LockDelegationResultIssues :many
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at FROM issue WHERE workspace_id = $1 AND id = ANY($2::uuid[])
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id FROM issue WHERE workspace_id = $1 AND id = ANY($2::uuid[])
 ORDER BY id FOR UPDATE
 `
 
@@ -1297,6 +1297,7 @@ func (q *Queries) LockDelegationResultIssues(ctx context.Context, arg LockDelega
 			&i.MergeTargetBranch,
 			&i.MergeGrantedBy,
 			&i.MergeGrantedAt,
+			&i.RequesterUserID,
 		); err != nil {
 			return nil, err
 		}

@@ -41,7 +41,7 @@ func TestGCReleaseHoldsExecutionLockAndRechecksCurrentOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan int, 1)
-	go func() { done <- d.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta) }()
+	go func() { done <- d.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}) }()
 	<-entered
 	ws, err := os.OpenRoot(d.cfg.WorkspacesRoot)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestGCReleaseHoldsExecutionLockAndRechecksCurrentOwner(t *testing.T) {
 	}))
 	defer unknown.Close()
 	d.client = NewClient(unknown.URL)
-	if got := d.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta); got != 0 {
+	if got := d.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}); got != 0 {
 		t.Fatal("stale GC deleted new owner")
 	}
 	if _, err := os.Stat(root); err != nil {
@@ -313,7 +313,7 @@ func TestSourceTerminalPreservesReturnWorktreeUntilDependencyCloses(t *testing.T
 			restarted := New(Config{WorkspacesRoot: d.cfg.WorkspacesRoot, GCOrphanTTL: time.Nanosecond}, slog.Default())
 			restarted.client = d.client
 			dependencyClosed.Store(true)
-			if got := restarted.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta); got != 1 {
+			if got := restarted.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}); got != 1 {
 				t.Fatalf("closed dependency did not release persisted root: %d", got)
 			}
 			if _, err := os.Stat(workdir); !os.IsNotExist(err) {
@@ -339,7 +339,7 @@ func TestGCIncompletePermissionCannotDeleteOwnedRoot(t *testing.T) {
 	d.client = NewClient(srv.URL)
 	meta := &execenv.GCMeta{Kind: execenv.GCKindQuickCreate, WorkspaceID: "workspace", TaskID: "source", CompletedAt: time.Now().Add(-time.Hour)}
 	root := createTaskDir(t, d.cfg.WorkspacesRoot, "workspace", "source", meta)
-	if got := d.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta); got != 0 {
+	if got := d.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}); got != 0 {
 		t.Fatal("incomplete permission deleted the resource")
 	}
 	if _, err := os.Stat(root); err != nil {
@@ -509,14 +509,14 @@ func TestGCProtectsHistoricalSessionThroughPhysicalAlias(t *testing.T) {
 	}))
 	defer srv.Close()
 	d.client = NewClient(srv.URL)
-	if got := d.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta); got != 0 {
+	if got := d.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}); got != 0 {
 		t.Fatal("string-only permission deleted another session's physical resource")
 	}
 	if _, err := os.Stat(workdir); err != nil {
 		t.Fatal(err)
 	}
 	closed.Store(true)
-	if got := d.applyGCActionForMeta(context.Background(), root, gcActionClean, &gcStats{}, meta); got != 1 {
+	if got := d.applyGCActionWithChatMeta(context.Background(), root, gcActionClean, &gcStats{}, meta, gcRemovalDetails{}); got != 1 {
 		t.Fatal("closed dependency kept owned root indefinitely")
 	}
 	if _, err := os.Lstat(alias); err != nil {

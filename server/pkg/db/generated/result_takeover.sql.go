@@ -306,7 +306,7 @@ func (q *Queries) ListResultTakeoverManagedSources(ctx context.Context, arg List
 }
 
 const lockResultTakeoverMember = `-- name: LockResultTakeoverMember :one
-SELECT id, workspace_id, user_id, role, created_at FROM member WHERE workspace_id = $1 AND user_id = $2 FOR SHARE
+SELECT id, workspace_id, user_id, role, created_at, pinned_at FROM member WHERE workspace_id = $1 AND user_id = $2 FOR SHARE
 `
 
 type LockResultTakeoverMemberParams struct {
@@ -323,6 +323,7 @@ func (q *Queries) LockResultTakeoverMember(ctx context.Context, arg LockResultTa
 		&i.UserID,
 		&i.Role,
 		&i.CreatedAt,
+		&i.PinnedAt,
 	)
 	return i, err
 }

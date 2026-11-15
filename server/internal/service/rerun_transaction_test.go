@@ -36,7 +36,7 @@ func TestRerunReplacementRollsBackOnInsertFailure(t *testing.T) {
 	})
 	cancelEvents := 0
 	svc.Bus.Subscribe(protocol.EventTaskCancelled, func(events.Event) { cancelEvents++ })
-	_, err = svc.RerunIssue(ctx, util.MustParseUUID(issueID), pgtype.UUID{}, pgtype.UUID{}, util.MustParseUUID(creatorID), nil)
+	_, err = svc.RerunIssue(ctx, util.MustParseUUID(issueID), pgtype.UUID{}, pgtype.UUID{}, util.MustParseUUID(creatorID), false, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected rerun insert failure") {
 		t.Fatalf("expected injected enqueue failure, got %v", err)
 	}
@@ -69,7 +69,7 @@ func TestConcurrentRerunsKeepOnePendingReplacement(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			_, err := svc.RerunIssue(ctx, util.MustParseUUID(issueID), pgtype.UUID{}, pgtype.UUID{}, util.MustParseUUID(creatorID), nil)
+			_, err := svc.RerunIssue(ctx, util.MustParseUUID(issueID), pgtype.UUID{}, pgtype.UUID{}, util.MustParseUUID(creatorID), false, nil)
 			results <- err
 		}()
 	}

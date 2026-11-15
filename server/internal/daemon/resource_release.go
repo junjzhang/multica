@@ -235,7 +235,9 @@ func (d *Daemon) resourceForGC(root string) (managedResource, error) {
 	}
 	taskID := owner.TaskID
 	if meta, metaErr := execenv.ReadGCMeta(root); metaErr == nil && meta.TaskID != "" {
-		if meta.WorkspaceID != owner.WorkspaceID {
+		// Older completion metadata omits the workspace; the owner marker has
+		// already proven it. Only a recorded, different workspace is a conflict.
+		if meta.WorkspaceID != "" && meta.WorkspaceID != owner.WorkspaceID {
 			return resource, errors.New("GC workspace differs from directory owner")
 		}
 		taskID = meta.TaskID
