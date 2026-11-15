@@ -28,7 +28,7 @@ func (q *Queries) AdoptIssueSessionSemantics(ctx context.Context, arg AdoptIssue
 const attachIssueLeadershipRoot = `-- name: AttachIssueLeadershipRoot :one
 UPDATE issue SET leadership_root_issue_id= $1
 WHERE id= $2 AND workspace_id= $3 AND leadership_root_issue_id IS NULL
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type AttachIssueLeadershipRootParams struct {
@@ -78,6 +78,7 @@ func (q *Queries) AttachIssueLeadershipRoot(ctx context.Context, arg AttachIssue
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -133,7 +134,7 @@ UPDATE issue SET leadership_root_issue_id=id, leadership_squad_id= $1,
     leadership_revision=leadership_revision+1
 WHERE id= $4 AND workspace_id= $5 AND (leadership_root_issue_id IS NULL OR leadership_squad_id IS DISTINCT FROM $1)
     AND leadership_revision= $6
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type ClaimIssueLeadershipParams struct {
@@ -193,6 +194,7 @@ func (q *Queries) ClaimIssueLeadership(ctx context.Context, arg ClaimIssueLeader
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -206,7 +208,7 @@ func (q *Queries) ClaimIssueLeadership(ctx context.Context, arg ClaimIssueLeader
 }
 
 const getIssueLeadershipRoot = `-- name: GetIssueLeadershipRoot :one
-SELECT r.id, r.workspace_id, r.title, r.description, r.status, r.priority, r.assignee_type, r.assignee_id, r.creator_type, r.creator_id, r.parent_issue_id, r.acceptance_criteria, r.context_refs, r.position, r.due_date, r.created_at, r.updated_at, r.number, r.project_id, r.origin_type, r.origin_id, r.first_executed_at, r.start_date, r.metadata, r.stage, r.properties, r.revision, r.last_activity_at, r.triage_state, r.duplicate_of_issue_id, r.coordinator_type, r.coordinator_id, r.merge_allowed, r.merge_repository_url, r.merge_target_branch, r.merge_granted_by, r.merge_granted_at, r.leadership_root_issue_id, r.leadership_squad_id, r.leader_agent_id, r.leader_external_session_id, r.leadership_revision, r.creator_session_id, r.session_semantics, r.requester_leadership_root_id FROM issue i JOIN issue r
+SELECT r.id, r.workspace_id, r.title, r.description, r.status, r.priority, r.assignee_type, r.assignee_id, r.creator_type, r.creator_id, r.parent_issue_id, r.acceptance_criteria, r.context_refs, r.position, r.due_date, r.created_at, r.updated_at, r.number, r.project_id, r.origin_type, r.origin_id, r.first_executed_at, r.start_date, r.metadata, r.stage, r.properties, r.revision, r.last_activity_at, r.triage_state, r.duplicate_of_issue_id, r.coordinator_type, r.coordinator_id, r.merge_allowed, r.merge_repository_url, r.merge_target_branch, r.merge_granted_by, r.merge_granted_at, r.requester_user_id, r.leadership_root_issue_id, r.leadership_squad_id, r.leader_agent_id, r.leader_external_session_id, r.leadership_revision, r.creator_session_id, r.session_semantics, r.requester_leadership_root_id FROM issue i JOIN issue r
 ON r.id=COALESCE(i.leadership_root_issue_id,i.id) AND r.workspace_id=i.workspace_id
 WHERE i.id=$1 AND i.workspace_id=$2
 `
@@ -257,6 +259,7 @@ func (q *Queries) GetIssueLeadershipRoot(ctx context.Context, arg GetIssueLeader
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -273,7 +276,7 @@ const handoffIssueExecutor = `-- name: HandoffIssueExecutor :one
 UPDATE issue SET assignee_id= $1, revision=revision+1, updated_at=now(), session_semantics=true
 WHERE id= $2 AND workspace_id= $3 AND assignee_type='agent'
  AND assignee_id= $4 AND revision= $5
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type HandoffIssueExecutorParams struct {
@@ -331,6 +334,7 @@ func (q *Queries) HandoffIssueExecutor(ctx context.Context, arg HandoffIssueExec
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -349,7 +353,7 @@ UPDATE issue SET leader_agent_id= $1,
     leadership_revision=leadership_revision+1, revision=revision+1, updated_at=now()
 WHERE id= $3 AND workspace_id= $4 AND leadership_root_issue_id=id
     AND leadership_revision= $5 AND revision= $6
-RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
+RETURNING id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id
 `
 
 type HandoffIssueLeadershipParams struct {
@@ -409,6 +413,7 @@ func (q *Queries) HandoffIssueLeadership(ctx context.Context, arg HandoffIssueLe
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,
@@ -476,7 +481,7 @@ func (q *Queries) ListLeadershipAffectedContracts(ctx context.Context, arg ListL
 }
 
 const listLeadershipIssues = `-- name: ListLeadershipIssues :many
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE workspace_id= $1
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE workspace_id= $1
  AND (id= $2 OR leadership_root_issue_id= $2) ORDER BY id FOR UPDATE NOWAIT
 `
 
@@ -532,6 +537,7 @@ func (q *Queries) ListLeadershipIssues(ctx context.Context, arg ListLeadershipIs
 			&i.MergeTargetBranch,
 			&i.MergeGrantedBy,
 			&i.MergeGrantedAt,
+			&i.RequesterUserID,
 			&i.LeadershipRootIssueID,
 			&i.LeadershipSquadID,
 			&i.LeaderAgentID,
@@ -582,7 +588,7 @@ func (q *Queries) ListLeadershipReferencingIssues(ctx context.Context, arg ListL
 }
 
 const lockBoundLeadershipRoot = `-- name: LockBoundLeadershipRoot :one
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE id=$1 AND workspace_id=$2 AND leadership_root_issue_id=id
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue WHERE id=$1 AND workspace_id=$2 AND leadership_root_issue_id=id
 FOR SHARE
 `
 
@@ -632,6 +638,7 @@ func (q *Queries) LockBoundLeadershipRoot(ctx context.Context, arg LockBoundLead
 		&i.MergeTargetBranch,
 		&i.MergeGrantedBy,
 		&i.MergeGrantedAt,
+		&i.RequesterUserID,
 		&i.LeadershipRootIssueID,
 		&i.LeadershipSquadID,
 		&i.LeaderAgentID,

@@ -11,7 +11,12 @@ func validateRetainedHermesStore(params ReuseParams) error {
 	if root == "" {
 		root = filepath.Dir(params.WorkDir)
 	}
+	// A conversation session store is itself the Hermes home; otherwise the
+	// task-local overlay under the env root is.
 	home := filepath.Join(root, "hermes-home")
+	if params.HermesSessionStore != "" {
+		home = params.HermesSessionStore
+	}
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return fmt.Errorf("original Hermes home is unavailable: %s", home)
 	}

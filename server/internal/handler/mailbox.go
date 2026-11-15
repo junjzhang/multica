@@ -516,7 +516,7 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 				continue
 			}
 			payload.SquadID = uuidToString(squad.ID)
-			payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID)
+			payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID, squadbriefing.Options{})
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {

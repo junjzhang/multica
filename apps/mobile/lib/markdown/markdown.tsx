@@ -132,9 +132,9 @@ export function Markdown({
   const { t } = useT("issues");
   const notificationLabel = t("suggestions.notify");
   const segments = useMemo(() => {
-    const processed = preprocessMobileMarkdown(content);
+    const processed = preprocessMobileMarkdown(content, attachments);
     return splitMarkdown(processed, notificationLabel);
-  }, [content, notificationLabel]);
+  }, [content, attachments, notificationLabel]);
 
   const onLinkPress = useCallback(
     ({ url }: { url: string }) => {

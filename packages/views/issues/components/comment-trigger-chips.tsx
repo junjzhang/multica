@@ -1,11 +1,12 @@
 "use client";
 
 import { useMemo, useState, type ReactElement } from "react";
-import { ChevronDown, Mailbox, TriangleAlert, Users } from "lucide-react";
+import { ChevronDown, Mail, TriangleAlert, Users } from "@multica/ui/icons";
 import type { CommentTriggerPreviewAgent, CommentTriggerOutcome } from "@multica/core/types";
 import type { AgentRunState, RecipientAction } from "@multica/core/issues/run-steering";
 import { useAgentPresenceDetail } from "@multica/core/agents";
 import { mentionLabelsByTarget } from "@multica/core/issues/comment-trigger-outcomes";
+import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { ActorAvatar as ActorAvatarBase } from "@multica/ui/components/common/actor-avatar";
 import { AVATAR_SIZE_PX } from "@multica/ui/lib/avatar-size";
@@ -26,6 +27,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@multica/ui/components/
 import { cn } from "@multica/ui/lib/utils";
 import { AgentStatusDot } from "../../common/actor-avatar";
 import { useT } from "../../i18n";
+import { useEditorOverlayOwner } from "../../editor/overlay-owner";
 import { blockedReasonLabel, blockedShortReasonLabel } from "../blocked-trigger-copy";
 import type { RecipientEntry } from "../hooks/use-recipient-actions";
 
@@ -259,7 +261,7 @@ function MailboxRecipientChip({
             className="inline-flex h-6 min-w-0 max-w-full animate-in fade-in items-center gap-1.5 rounded-md border border-transparent px-1.5 text-micro font-medium text-muted-foreground"
             aria-label={label}
           >
-            <Mailbox className="size-3 shrink-0" />
+            <Mail className="size-3 shrink-0" />
             <span className="truncate">{label}</span>
           </span>
         }
@@ -330,12 +332,13 @@ function RecipientActionMenu({
   trigger: ReactElement;
   t: IssuesT;
 }) {
+  const overlayOwner = useEditorOverlayOwner();
   const presenceLine = useTriggerPresenceLine(entry.agent.id, t);
   const state = stateLabel(entry.state, t);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={trigger} />
-      <DropdownMenuContent side="top" align="start" className="w-80">
+      <DropdownMenuContent side="top" align="start" className="w-80" data-editor-overlay-owner={overlayOwner}>
         <div className="flex min-w-0 items-center gap-2 px-1.5 pt-1 pb-1.5 text-caption text-muted-foreground">
           <TriggerAgentAvatar agent={entry.agent} suppressed={false} />
           <span className="min-w-0 truncate font-medium text-foreground">{entry.agent.name}</span>
@@ -375,8 +378,8 @@ function SingleRecipientChip({
   t: IssuesT;
 }) {
   const label = actionLabel(entry.action, entry.state, t);
-  // The avatar carries "who"; the sentence carries only the outcome, so it
-  // stays fixed-width and never truncates on long agent names.
+  // Name, then outcome. A long name truncates; the outcome never does.
+  const quiet = entry.action !== "steer" && entry.action !== "restart" && entry.action !== "skip";
   return (
     <RecipientActionMenu
       entry={entry}
@@ -392,7 +395,11 @@ function SingleRecipientChip({
           )}
         >
           <TriggerAgentAvatar agent={entry.agent} suppressed={entry.action === "skip"} />
-          <span className="truncate">{label}</span>
+          <span className="inline-flex min-w-0 items-center gap-1">
+            <span className={cn("truncate", quiet && "text-foreground")}>{entry.agent.name}</span>
+            <span aria-hidden className="shrink-0">·</span>
+            <span className="shrink-0">{label}</span>
+          </span>
           <ChevronDown aria-hidden className="size-3 shrink-0 text-faint-foreground" />
         </button>
       }
@@ -409,6 +416,7 @@ function MultiRecipientChip({
   onActionChange: (agentId: string, action: RecipientAction) => void;
   t: IssuesT;
 }) {
+  const overlayOwner = useEditorOverlayOwner();
   const [open, setOpen] = useState(false);
   const [tooltipHover, setTooltipHover] = useState(false);
   const activeCount = recipients.filter((r) => r.action !== "skip").length;
@@ -473,7 +481,7 @@ function MultiRecipientChip({
           {t(($) => $.comment.trigger_click_to_manage)}
         </TooltipContent>
       </Tooltip>
-      <PopoverContent align="start" className="w-80 p-2">
+      <PopoverContent align="start" className="w-80 p-2" data-editor-overlay-owner={overlayOwner}>
         <div className="px-1.5 pb-1 text-caption font-medium text-muted-foreground">
           {t(($) => $.comment.trigger_preview_title)}
         </div>
@@ -534,7 +542,7 @@ function TriggerAgentAvatar({
       <ActorAvatarBase
         name={agent.name}
         initials=""
-        avatarUrl={agent.avatar_url}
+        avatarUrl={resolvePublicFileUrl(agent.avatar_url)}
         isAgent
         size="xs"
       />

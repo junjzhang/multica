@@ -2,7 +2,7 @@
 
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, FileCheck2 } from "lucide-react";
+import { ChevronRight, FileText } from "@multica/ui/icons";
 import { ApiError } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import {
@@ -233,7 +233,7 @@ function ContractSection({
         aria-expanded={open}
         className="flex w-full items-center gap-1 px-2 text-caption font-medium text-muted-foreground"
       >
-        <FileCheck2 className="size-3" />
+        <FileText className="size-3" />
         {t(($) => $.contract.title)}
         <ChevronRight
           className={`ml-auto size-3 transition-transform ${open ? "rotate-90" : ""}`}
