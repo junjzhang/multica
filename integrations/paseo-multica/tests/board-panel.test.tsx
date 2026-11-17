@@ -122,3 +122,22 @@ it("folds a task's MRs into one signal", () => {
   expect(prSignal(task([pr("a", "open", { myReview: "approving" })], { contract: { accepted: true } }))).toMatchObject({ tone: "action" });
   expect(prSignal(task([pr("a", "draft")]))).toMatchObject({ icon: "GitPullRequestDraft" });
 });
+
+it("draws a staged parent as a pipeline with only the current batch open", async () => {
+  const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage });
+  const parent = { ...base, id: "p", identifier: "P", title: "流水线", status: "in_progress", activeRun: true };
+  getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid("a", 1, true), kid("b", 2, false), kid("c", 2, false), kid("d", 3, false)], rootIds: ["p"] });
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection agentId="graph" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  expect(text(renderer!)).toMatch(/流水线\s+第 2\/3 批/);
+  await press(renderer!, "展开 P");
+  const graph = text(renderer!);
+  expect(graph).toMatch(/第 1 批[\s\S]*1\/1[\s\S]*第 2 批[\s\S]*0\/2[\s\S]*子任务 b[\s\S]*子任务 c[\s\S]*第 3 批/);
+  expect(graph).not.toContain("子任务 a");
+  expect(graph).not.toContain("子任务 d");
+  await press(renderer!, "第 1 批");
+  expect(text(renderer!)).toContain("子任务 a");
+  await press(renderer!, "第 2 批");
+  expect(text(renderer!)).not.toContain("子任务 b");
+  await act(async () => { renderer!.unmount(); });
+});
