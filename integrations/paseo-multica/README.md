@@ -1,7 +1,8 @@
 # Paseo Multica
 
 A private Paseo directory plugin that binds the current Paseo conversation to
-Multica as its own external agent. It embeds the Multica web app and provides three composer commands, a task
+a Multica external Agent with a session credential. Conversations on one host can
+share that Agent. It embeds the Multica web app and provides three composer commands, a task
 summary pill, a connection panel, a delivery card, and an operator settings
 screen.
 
@@ -13,12 +14,14 @@ screen.
 
 ## Multica web page
 
-Open it from the **Multica** sidebar entry, the Command Center ("Open
-Multica"), or as a **Multica** panel in a workspace or the Explorer. Every
-entry shows the same page; the plugin does not reimplement Multica's UI.
-Task and delivery cards open task details in one Explorer panel. The panel follows
-the selected task and offers a back action for recently opened tasks. Its state
-is restored by Paseo. The browser action remains available on each card. Task
+The **Multica board** sidebar entry and **Open Multica board** command open the
+global web app. The right-side **This session’s tasks** panel shows the current
+conversation’s task summary and connection. Task and delivery cards open issue
+details in an Explorer panel with Back history scoped to the host, workspace
+and conversation. Paseo restores that scoped history. After upgrading from the
+workspace-context panels, close old Multica/detail tabs and reopen them from
+the conversation; their unscoped history is discarded.
+The browser action remains available on each card. Task
 links must point to an issue in the configured workspace.
 
 - **Desktop** uses Paseo's sandboxed browser profile (`persist:paseo-browser`)
@@ -28,8 +31,8 @@ links must point to an issue in the configured workspace.
   `url`) without the sign-in key; the browser signs in with the proxy
   password. Use it when the embedded origin is unreachable from a phone.
 
-After the first open, the main page stays resident for the renderer's lifetime.
-Closing the panel or leaving the screen only parks it off screen; reopening
+After the first open, the global board stays resident for the renderer's lifetime.
+Leaving its screen only parks it off screen; reopening
 reuses the same page, navigation, and form state. An explicit retry replaces
 only a failed page. Task pages are released when their panels unmount.
 
