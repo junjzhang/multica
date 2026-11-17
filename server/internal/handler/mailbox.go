@@ -202,32 +202,44 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rows, err := h.Queries.ListAgentMailboxMessages(r.Context(), db.ListAgentMailboxMessagesParams{
+	params := db.ListAgentMailboxMessagesParams{
 		RecipientAgentID: agent.ID,
 		SourceType:       sourceType,
 		WorkspaceID:      agent.WorkspaceID,
 		TargetSessionID:  actorSession,
 		AfterCreatedAt:   afterCreated,
 		AfterID:          afterID,
-		PageLimit:        int32(limit),
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list mailbox")
-		return
 	}
-	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
-	messages := make([]MailboxMessageResponse, 0, len(rows))
-	for _, row := range rows {
-		if managedActor {
-			visible, err := service.ManagedMailboxResultVisible(r.Context(), h.Queries, row, caller)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to verify mailbox scope")
-				return
-			}
-			if !visible {
-				continue
-			}
+	visibleRows := make([]db.AgentMailboxMessage, 0, limit)
+	for len(visibleRows) < limit {
+		params.PageLimit = int32(limit - len(visibleRows))
+		rows, err := h.Queries.ListAgentMailboxMessages(r.Context(), params)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list mailbox")
+			return
 		}
+		for _, row := range rows {
+			if managedActor {
+				visible, err := service.ManagedMailboxResultVisible(r.Context(), h.Queries, row, caller)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to verify mailbox scope")
+					return
+				}
+				if !visible {
+					continue
+				}
+			}
+			visibleRows = append(visibleRows, row)
+		}
+		if len(rows) < int(params.PageLimit) {
+			break
+		}
+		last := rows[len(rows)-1]
+		params.AfterCreatedAt, params.AfterID = last.CreatedAt, last.ID
+	}
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(visibleRows))
+	messages := make([]MailboxMessageResponse, 0, len(visibleRows))
+	for _, row := range visibleRows {
 		messages = append(messages, mailboxMessageToResponse(
 			row,
 			sessions[uuidToString(row.SourceSessionID)],
@@ -235,8 +247,8 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		))
 	}
 	var nextCursor *string
-	if len(rows) == limit {
-		last := rows[len(rows)-1]
+	if len(visibleRows) == limit {
+		last := visibleRows[len(visibleRows)-1]
 		cursor := encodeMailboxCursor(last.CreatedAt, last.ID)
 		nextCursor = &cursor
 	}
