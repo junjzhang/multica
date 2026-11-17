@@ -240,12 +240,12 @@ describe("composer pill", () => {
   it("names the most urgent tree and counts to-dos on one line", () => {
     const root = issue({ identifier: "WORK-494", status: "backlog" });
     const children = [issue({ parentId: root.id, contract: contract(SESSION) }), issue({ parentId: root.id, status: "blocked" }), issue({ parentId: root.id, contract: contract(USER) })];
-    expect(pillLabel(data([root, ...children], [root.id]), NOW).label).toBe("WORK-494 · 待办 3");
+    expect(pillLabel(data([root, ...children], [root.id]), NOW)).toMatchObject({ label: "WORK-494 · 待办 3", progress: { done: 0, total: 3 } });
   });
 
   it("shows explicit no-to-do, empty, disconnected and unavailable states", () => {
     const quiet = issue({ identifier: "WORK-7", contract: contract(EXECUTOR) });
-    expect(pillLabel(data([quiet], [quiet.id]), NOW).label).toBe("WORK-7 · 无待办");
+    expect(pillLabel(data([quiet], [quiet.id]), NOW)).toEqual({ label: "WORK-7 · 无待办", title: `WORK-7 ${quiet.title}` });
     expect(pillLabel(data([], []), NOW).label).toBe("Multica · 无任务");
     expect(pillLabel({ state: "disconnected", reason: "no binding", checkedAt: "x" }, NOW)).toEqual({ label: "Multica · 未连接", title: "no binding" });
     expect(pillLabel({ state: "unavailable", reason: "offline", checkedAt: "x" }, NOW).label).toBe("Multica · 不可用");
