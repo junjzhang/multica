@@ -1,16 +1,16 @@
 import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Icon, Loading } from "@getpaseo/plugin/client/ui";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Linking, Pressable, Text, View } from "react-native";
 import {
   buildBoard,
   currentStage,
   groupByProject,
-  MARKER_GLYPH,
-  STALE_AFTER_DAYS,
   type BoardData,
   type BoardPullRequest,
   type BoardScope,
+  type Marker,
   type ReadyBoardData,
   type Section,
   type StageGroup,
@@ -24,10 +24,32 @@ type Colors = PluginAgentPanelProps["theme"]["colors"];
 type OpenTask = (url: string, identifier?: string) => void;
 type Props = Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask: OpenTask };
 
-const SCOPE_LABEL: Record<BoardScope, string> = { session: "本会话", all: "全部" };
+// Paseo's theme ramp: base 14 / sm 12, spacing 4·6·8·12·16·24, radius lg 8.
+const FONT = { base: 14, sm: 12 } as const;
+const SPACE = { xs: 4, sm: 6, md: 8, lg: 12, xl: 16, xxl: 24 } as const;
+const RADIUS = 8;
+const ICON = { sm: 14, md: 16 } as const;
+const RAIL = 16;
+const DOT = 6;
+// Where a row's title ink starts at depth 0: disclosure slot, row padding, dot slot, gap.
+const TITLE_RAIL = RAIL - 4 + 8 + RAIL + 8;
+
+const SCOPES: { value: BoardScope; label: string }[] = [{ value: "session", label: "本会话" }, { value: "all", label: "全部" }];
 const SECTION_LABEL: Record<Section, string> = { attention: "需要处理", active: "进行中", parked: "搁置", done: "已完成" };
-const TODO_LABEL: Record<TodoKind, string> = { approval: "等你审批", user: "等你处理", acceptance: "等验收", session: "待本会话处理", anomaly: "异常" };
-const LEGEND = "● 要你动手  ◐ 等 Leader 验收  ▲ 异常  ✓ 完成  ○ 未开始  ⋯ 运行中";
+const TODO_ICON: Record<TodoKind, string> = { approval: "GitPullRequest", user: "CircleDot", acceptance: "ClipboardCheck", session: "MessageSquare", anomaly: "TriangleAlert" };
+const TODO_HINT: Record<TodoKind, string> = { approval: "等你审批", user: "等你处理", acceptance: "等验收", session: "待本会话处理", anomaly: "异常" };
+
+function dotColor(marker: Marker, colors: Colors): string | null {
+  if (marker === "anomaly") return colors.statusDanger;
+  if (marker === "you" || marker === "leader") return colors.statusWarning;
+  if (marker === "running") return colors.foregroundMuted;
+  if (marker === "done") return colors.border;
+  return null;
+}
+
+function todoColor(kind: TodoKind, colors: Colors): string {
+  return kind === "anomaly" ? colors.statusDanger : colors.statusWarning;
+}
 
 export function BoardSection(props: Props) {
   return <BoardContent key={props.agentId} {...props} />;
@@ -73,77 +95,155 @@ function BoardContent({ agentId, theme, openTask }: Props) {
   const colors = theme.colors;
   const ready = data?.state === "ready" ? data : null;
   const board = useMemo(() => (ready ? buildBoard(ready, Date.now()) : null), [ready]);
-  const row = { colors, openTask, expandedIds, toggle };
-  return <View style={{ gap: 12 }}>
-    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-      <Text style={{ color: colors.foreground, fontWeight: "600" }}>Multica</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="切换范围" onPress={() => setScope(scope === "session" ? "all" : "session")}>
-        <Text style={{ color: colors.accent }}>[{SCOPE_LABEL[scope]} ▾]</Text>
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="刷新" disabled={loading} onPress={() => void load(true)}>
-        <Text style={{ color: colors.accent }}>⟳ {loading ? "…" : data ? clock(data.checkedAt) : ""}</Text>
-      </Pressable>
+  const row: RowContext = { colors, openTask, expandedIds, toggle };
+  const empty = board && board.todos.length === 0 && (["attention", "active", "parked", "done"] as const).every((section) => board.sections[section].length === 0);
+
+  return <View style={{ gap: SPACE.lg }}>
+    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: SPACE.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+      <View accessibilityRole="tablist" style={{ flexDirection: "row", gap: SPACE.xs }}>
+        {SCOPES.map((option) => <Segment key={option.value} label={option.label} selected={scope === option.value} colors={colors} onPress={() => setScope(option.value)} />)}
+      </View>
+      <IconButton name="RefreshCw" label="刷新" disabled={loading} colors={colors} onPress={() => void load(true)} />
     </View>
-    {expansionError ? <Text style={{ color: colors.statusDanger }}>展开状态未保存：{expansionError}</Text> : null}
-    {error ? <Text style={{ color: colors.statusDanger }}>{error}</Text>
-      : data && data.state !== "ready" ? <Text style={{ color: colors.foregroundMuted }}>{data.state === "disconnected" ? "未连接 Multica。" : "Multica 暂不可用。"}{data.reason}</Text>
-      : !board || !ready ? <Text style={{ color: colors.foregroundMuted }}>正在读取任务…</Text>
-      : <>
-        <TodoQueue todos={board.todos} colors={colors} openTask={openTask} />
-        <View style={{ height: 1, backgroundColor: colors.border }} />
-        {(["attention", "active"] as const).map((section) => <TreeSection key={section} title={`${SECTION_LABEL[section]} ${board.sections[section].length}`} nodes={board.sections[section]} data={ready} row={row} />)}
-        <TreeSection
-          title={`${SECTION_LABEL.parked} ${board.sections.parked.length}`}
-          note={board.sections.parked.length ? `（Backlog ${board.parkedReasons.backlog} · ${STALE_AFTER_DAYS} 天无动静 ${board.parkedReasons.stale}${board.parkedReasons.other ? ` · 其他 ${board.parkedReasons.other}` : ""}）` : ""}
-          nodes={board.sections.parked} data={ready} row={row}
-          open={open.parked} onToggle={() => setOpen((value) => ({ ...value, parked: !value.parked }))}
-        />
-        <TreeSection
-          title={`${SECTION_LABEL.done} ${board.sections.done.length}`}
-          nodes={board.sections.done} data={ready} row={row}
-          open={open.done} onToggle={() => setOpen((value) => ({ ...value, done: !value.done }))}
-        />
-        {ready.truncated ? <Text style={{ color: colors.foregroundMuted }}>任务过多，部分子任务未显示。</Text> : null}
-        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{LEGEND}</Text>
-      </>}
+    {expansionError ? <Text style={{ color: colors.statusDanger, fontSize: FONT.sm }}>展开状态未保存：{expansionError}</Text> : null}
+    {error ? <Text style={{ color: colors.statusDanger, fontSize: FONT.sm }}>{error}</Text>
+      : data && data.state !== "ready" ? <Notice colors={colors} title={data.state === "disconnected" ? "未连接 Multica" : "Multica 暂不可用"} detail={data.reason} />
+      : !board || !ready ? <Loading />
+      : empty ? <Notice colors={colors} title="暂无任务" />
+      : <View style={{ gap: SPACE.xxl }}>
+        {board.todos.length > 0 ? <TodoCard todos={board.todos} colors={colors} openTask={openTask} /> : null}
+        {(["attention", "active"] as const).map((section) => <TreeSection key={section} section={section} nodes={board.sections[section]} data={ready} row={row} />)}
+        {(["parked", "done"] as const).map((section) => <TreeSection
+          key={section} section={section} nodes={board.sections[section]} data={ready} row={row}
+          open={open[section]} onToggle={() => setOpen((value) => ({ ...value, [section]: !value[section] }))}
+        />)}
+        {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>部分子任务未显示</Text> : null}
+      </View>}
   </View>;
 }
 
-function TodoQueue({ todos, colors, openTask }: { todos: Todo[]; colors: Colors; openTask: OpenTask }) {
-  return <View style={{ gap: 6 }}>
-    <Text style={{ color: colors.foreground, fontWeight: "600" }}>待办 {todos.length}</Text>
-    {todos.length === 0 ? <Text style={{ color: colors.foregroundMuted }}>没有待办。</Text> : null}
-    {todos.map((todo) => {
-      const glyph = todo.kind === "anomaly" ? MARKER_GLYPH.anomaly : todo.kind === "approval" || todo.kind === "user" ? MARKER_GLYPH.you : MARKER_GLYPH.leader;
-      const target = todo.kind === "approval" ? todo.pullRequests[0]?.url : todo.issue.url;
-      const action = todo.kind === "acceptance" ? "去验收" : "打开";
+function Notice({ colors, title, detail }: { colors: Colors; title: string; detail?: string }) {
+  return <View style={{ gap: SPACE.xs, paddingVertical: SPACE.xl }}>
+    <Text style={{ color: colors.foregroundMuted, fontSize: FONT.base }}>{title}</Text>
+    {detail ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{detail}</Text> : null}
+  </View>;
+}
+
+function useHover() {
+  const [hovered, setHovered] = useState(false);
+  return { hovered, onHoverIn: () => setHovered(true), onHoverOut: () => setHovered(false) };
+}
+
+function Segment({ label, selected, colors, onPress }: { label: string; selected: boolean; colors: Colors; onPress(): void }) {
+  const hover = useHover();
+  return <Pressable
+    accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected }} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{ height: 28, justifyContent: "center", paddingHorizontal: SPACE.lg, borderRadius: 999, backgroundColor: selected || hover.hovered ? colors.surface2 : "transparent" }}
+  >
+    <Text style={{ fontSize: FONT.sm, fontWeight: "500", color: selected ? colors.foreground : colors.foregroundMuted }}>{label}</Text>
+  </Pressable>;
+}
+
+function IconButton({ name, label, disabled, colors, onPress }: { name: string; label: string; disabled?: boolean; colors: Colors; onPress(): void }) {
+  const hover = useHover();
+  return <Pressable
+    accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center", borderRadius: 999, backgroundColor: hover.hovered && !disabled ? colors.surface2 : "transparent", opacity: disabled ? 0.5 : 1 }}
+  >
+    <Icon name={name} size={ICON.md} color={hover.hovered ? colors.foreground : colors.foregroundMuted} />
+  </Pressable>;
+}
+
+/** A pressable row with Paseo's hover and pressed fill; the fill never moves the content. */
+function RowPress({ label, onPress, disabled, children, colors }: { label: string; onPress?(): void; disabled?: boolean; children: ReactNode; colors: Colors }) {
+  const hover = useHover();
+  const [pressed, setPressed] = useState(false);
+  return <Pressable
+    accessibilityRole="link" accessibilityLabel={label} disabled={disabled || !onPress} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
+    style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, paddingVertical: SPACE.md, paddingHorizontal: SPACE.md, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}
+  >
+    {children}
+  </Pressable>;
+}
+
+function TodoCard({ todos, colors, openTask }: { todos: Todo[]; colors: Colors; openTask: OpenTask }) {
+  return <View style={{ borderWidth: 1, borderColor: colors.border, borderRadius: RADIUS + 4, paddingVertical: SPACE.xs, paddingHorizontal: SPACE.xs }}>
+    {todos.map((todo, index) => {
+      const pr = todo.pullRequests[0];
+      const external = todo.kind === "approval" && pr ? pr.url : undefined;
+      const target = external ?? todo.issue.url;
       const since = todo.kind === "anomaly" ? elapsed(todo.issue.lastActivityAt) : "";
-      return <View key={`${todo.kind}:${todo.issue.id}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <Text style={{ color: colors.foreground, flexShrink: 1 }}>
-          {glyph} {TODO_LABEL[todo.kind]}  {todo.issue.identifier}{todo.pullRequests.map((pr) => `  ${prRef(pr)}  ${prState(pr)}`).join("")}{since ? ` · ${since}` : ""}
-        </Text>
-        {target ? <Pressable accessibilityRole="link" onPress={() => (todo.kind === "approval" ? void Linking.openURL(target) : openTask(target, todo.issue.identifier))}>
-          <Text style={{ color: colors.accent }}>[{action}]</Text>
-        </Pressable> : null}
+      return <View key={`${todo.kind}:${todo.issue.id}`} style={index > 0 ? { borderTopWidth: 1, borderTopColor: colors.border } : undefined}>
+        <RowPress
+          label={`${TODO_HINT[todo.kind]} ${todo.issue.identifier}`} colors={colors} disabled={!target}
+          onPress={() => target && (external ? void Linking.openURL(external) : openTask(target, todo.issue.identifier))}
+        >
+          <Icon name={TODO_ICON[todo.kind]} size={ICON.md} color={todoColor(todo.kind, colors)} />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: FONT.base }}>{todo.issue.title}</Text>
+            <Meta colors={colors} identifier={todo.issue.identifier} pullRequests={todo.pullRequests} trailing={since} />
+          </View>
+          <Icon name={external ? "ArrowUpRight" : "ChevronRight"} size={ICON.sm} color={colors.foregroundMuted} />
+        </RowPress>
       </View>;
     })}
   </View>;
 }
 
+function Meta({ colors, identifier, progress, pullRequests, trailing }: { colors: Colors; identifier: string; progress?: string; pullRequests: BoardPullRequest[]; trailing?: string }) {
+  const muted = { color: colors.foregroundMuted, fontSize: FONT.sm };
+  return <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: SPACE.md, rowGap: 2 }}>
+    <Text style={muted}>{identifier}</Text>
+    {progress ? <Text style={muted}>{progress}</Text> : null}
+    {pullRequests.map((pr) => <PullRequestMeta key={pr.id} pr={pr} colors={colors} />)}
+    {trailing ? <Text style={muted}>{trailing}</Text> : null}
+  </View>;
+}
+
+function PullRequestMeta({ pr, colors }: { pr: BoardPullRequest; colors: Colors }) {
+  const muted = { color: colors.foregroundMuted, fontSize: FONT.sm };
+  const closed = pr.state === "merged" || pr.state === "closed";
+  const ci = closed ? null : pr.ci === "passed" ? { name: "CircleCheck", color: colors.statusSuccess, label: "CI 通过" }
+    : pr.ci === "failed" ? { name: "CircleX", color: colors.statusDanger, label: "CI 失败" }
+    : pr.ci === "pending" ? { name: "CircleDashed", color: colors.foregroundMuted, label: "CI 运行中" } : null;
+  const conflict = !closed && pr.mergeable?.toLowerCase() === "conflicting";
+  return <View accessibilityLabel={`${prRef(pr)}${ci ? ` ${ci.label}` : ""}${conflict ? " 有冲突" : ""}${pr.state === "merged" ? " 已合并" : pr.state === "closed" ? " 已关闭" : ""}`} style={{ flexDirection: "row", alignItems: "center", gap: SPACE.xs }}>
+    {pr.state === "merged" ? <Icon name="GitMerge" size={12} color={colors.foregroundMuted} /> : null}
+    <Text style={[muted, pr.state === "closed" ? { textDecorationLine: "line-through" } : null]}>{prRef(pr)}</Text>
+    {ci ? <Icon name={ci.name} size={12} color={ci.color} /> : null}
+    {conflict ? <Text style={{ color: colors.statusDanger, fontSize: FONT.sm }}>冲突</Text> : null}
+  </View>;
+}
+
 type RowContext = { colors: Colors; openTask: OpenTask; expandedIds: string[]; toggle(id: string, expanded: boolean): void };
 
-function TreeSection({ title, note, nodes, data, row, open = true, onToggle }: { title: string; note?: string; nodes: TreeNode[]; data: ReadyBoardData; row: RowContext; open?: boolean; onToggle?(): void }) {
+function TreeSection({ section, nodes, data, row, open = true, onToggle }: { section: Section; nodes: TreeNode[]; data: ReadyBoardData; row: RowContext; open?: boolean; onToggle?(): void }) {
   const { colors } = row;
+  if (nodes.length === 0) return null;
   const groups = data.scope === "all" ? groupByProject(nodes, data.projects) : [{ name: "", nodes }];
-  return <View style={{ gap: 4 }}>
-    <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
-      <Text style={{ color: colors.foreground, fontWeight: "600" }}>{title}<Text style={{ color: colors.foregroundMuted, fontWeight: "400" }}>{note ?? ""}</Text></Text>
-      {onToggle && nodes.length > 0 ? <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}><Text style={{ color: colors.accent }}>[{open ? "收起" : "展开"}]</Text></Pressable> : null}
-    </View>
-    {open ? groups.map((group) => <View key={group.id ?? group.name} style={{ gap: 2 }}>
-      {group.name ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{group.name}</Text> : null}
+  const heading = <View style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, flex: 1, paddingRight: SPACE.md }}>
+    <Text style={{ color: colors.foregroundMuted, fontSize: FONT.base, fontWeight: "500" }}>{SECTION_LABEL[section]}</Text>
+    <Text style={{ color: colors.foregroundMuted, fontSize: FONT.base }}>{nodes.length}</Text>
+    {onToggle ? <View style={{ marginLeft: "auto", transform: [{ rotate: open ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={ICON.sm} color={colors.foregroundMuted} /></View> : null}
+  </View>;
+  return <View style={{ gap: SPACE.xs }}>
+    {onToggle
+      ? <Pressable accessibilityRole="button" accessibilityLabel={SECTION_LABEL[section]} accessibilityState={{ expanded: open }} onPress={onToggle} style={{ flexDirection: "row", paddingVertical: SPACE.xs }}>{heading}</Pressable>
+      : <View style={{ flexDirection: "row", paddingVertical: SPACE.xs }}>{heading}</View>}
+    {open ? groups.map((group) => <View key={group.id ?? group.name} style={{ gap: 0 }}>
+      {group.name ? <GroupLabel colors={colors} text={group.name} depth={0} /> : null}
       {group.nodes.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
     </View>) : null}
+  </View>;
+}
+
+function GroupLabel({ colors, text, depth, trailing }: { colors: Colors; text: string; depth: number; trailing?: string }) {
+  return <View style={{ flexDirection: "row", gap: SPACE.sm, paddingTop: SPACE.md, paddingBottom: SPACE.xs, paddingLeft: TITLE_RAIL + RAIL * depth }}>
+    <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, fontWeight: "500" }}>{text}</Text>
+    {trailing ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{trailing}</Text> : null}
   </View>;
 }
 
@@ -152,49 +252,41 @@ function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: Row
   const { issue } = tree;
   const expandable = tree.total > 0;
   const expanded = expandable && expandedIds.includes(issue.id);
-  const glyph = MARKER_GLYPH[expanded ? tree.classification.marker : tree.marker];
+  const dot = dotColor(expanded ? tree.classification.marker : tree.marker, colors);
   const stage = currentStage(tree);
-  const progress = stage?.stage !== undefined ? `第${stage.stage}批 ${stage.done}/${stage.total}` : expandable ? `${tree.done}/${tree.total}` : "";
-  const meta = [progress, issue.statusName ?? issue.status.replace(/_/g, " "), ...issue.pullRequests.map((pr) => `${prRef(pr)} ${prState(pr)}`)].filter(Boolean).join("  ");
-  return <View style={{ gap: 2 }}>
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginLeft: depth * 16 }}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "收起" : "展开"} ${issue.identifier}`} accessibilityState={{ expanded }} disabled={!expandable} onPress={() => toggle(issue.id, !expanded)}>
-        <Text style={{ color: colors.foregroundMuted, width: 12 }}>{expandable ? (expanded ? "▾" : "▸") : depth > 0 ? "├" : " "}</Text>
+  const progress = stage?.stage !== undefined ? `第 ${stage.stage} 批 ${stage.done}/${stage.total}` : expandable ? `${tree.done}/${tree.total}` : "";
+  return <View>
+    <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: RAIL * depth }}>
+      <Pressable
+        accessibilityRole="button" accessibilityLabel={`${expanded ? "收起" : "展开"} ${issue.identifier}`} accessibilityState={{ expanded }}
+        disabled={!expandable} onPress={() => toggle(issue.id, !expanded)}
+        hitSlop={SPACE.sm} style={{ width: RAIL, alignItems: "center", justifyContent: "center", alignSelf: "stretch", marginRight: -SPACE.xs }}
+      >
+        {expandable ? <View style={{ transform: [{ rotate: expanded ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={ICON.sm} color={colors.foregroundMuted} /></View> : null}
       </Pressable>
-      <Pressable accessibilityRole="link" disabled={!issue.url} onPress={() => issue.url && openTask(issue.url, issue.identifier)} style={{ flexShrink: 1 }}>
-        <Text style={{ color: colors.foreground }}>{glyph} {issue.identifier} {issue.title}<Text style={{ color: colors.foregroundMuted }}>  {meta}</Text></Text>
-      </Pressable>
+      <RowPress label={`${issue.identifier} ${issue.title}`} colors={colors} disabled={!issue.url} onPress={() => issue.url && openTask(issue.url, issue.identifier)}>
+        <View style={{ width: RAIL, alignItems: "center" }}>
+          {dot ? <View style={{ width: DOT, height: DOT, borderRadius: DOT / 2, backgroundColor: dot }} /> : null}
+        </View>
+        <View style={{ flex: 1, gap: 2 }}>
+          <Text numberOfLines={1} style={{ color: tree.section === "done" ? colors.foregroundMuted : colors.foreground, fontSize: FONT.base }}>{issue.title}</Text>
+          <Meta colors={colors} identifier={issue.identifier} progress={progress} pullRequests={issue.pullRequests} />
+        </View>
+      </RowPress>
     </View>
     {expanded ? tree.stages.map((group) => <StageRows key={group.stage ?? "unstaged"} group={group} depth={depth + 1} row={row} />) : null}
   </View>;
 }
 
 function StageRows({ group, depth, row }: { group: StageGroup; depth: number; row: RowContext }) {
-  const { colors } = row;
-  const state = group.done === group.total ? "✓" : group.nodes.some((child) => child.section === "active" || child.section === "attention") ? "进行中" : "未开始";
-  return <View style={{ gap: 2 }}>
-    {group.stage !== undefined ? <Text style={{ color: colors.foregroundMuted, marginLeft: depth * 16 }}>├ 第 {group.stage} 批 ── {group.done}/{group.total} {state}</Text> : null}
-    {group.nodes.map((child) => <TreeRow key={child.issue.id} tree={child} depth={depth + (group.stage !== undefined ? 1 : 0)} row={row} />)}
+  return <View>
+    {group.stage !== undefined ? <GroupLabel colors={row.colors} text={`第 ${group.stage} 批`} trailing={`${group.done}/${group.total}`} depth={depth} /> : null}
+    {group.nodes.map((child) => <TreeRow key={child.issue.id} tree={child} depth={depth} row={row} />)}
   </View>;
 }
 
 function prRef(pr: BoardPullRequest): string {
-  return `${pr.repo} ${/github\.com/i.test(pr.url) ? "#" : "!"}${pr.number}`;
-}
-
-function prState(pr: BoardPullRequest): string {
-  if (pr.state === "merged") return "已合并";
-  if (pr.state === "closed") return "已关闭";
-  const ci = pr.ci === "passed" ? "✓" : pr.ci === "failed" ? "✗" : pr.ci === "pending" ? "⋯" : "—";
-  const review = pr.review === "approved" ? "✓" : pr.review === "change_required" || pr.review === "change_denied" || pr.review === "changes_requested" ? "✗" : pr.review ? "⋯" : "—";
-  const mergeable = pr.mergeable?.toLowerCase();
-  const merge = mergeable === "mergeable" ? "✓" : mergeable === "conflicting" ? "✗" : "—";
-  return `CI ${ci} 审 ${review} 合 ${merge}`;
-}
-
-function clock(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "" : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${pr.repo}${/github\.com/i.test(pr.url) ? "#" : "!"}${pr.number}`;
 }
 
 function elapsed(value?: string): string {
