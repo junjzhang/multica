@@ -4,16 +4,17 @@ import { Icon, Loading } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Linking, Pressable, Text, View } from "react-native";
 import {
+  awaitingApproval,
   buildBoard,
   currentStage,
   groupByProject,
   isFresh,
   isOpenPullRequest,
+  isTerminal,
   type BoardData,
   type BoardIssue,
   type BoardPullRequest,
   type BoardScope,
-  type ReadyBoardData,
   type Todo,
   type TodoKind,
   type TreeNode,
@@ -42,6 +43,10 @@ export function displayTitle(title: string): string {
 }
 
 function prRef(pr: BoardPullRequest): string {
+  return `${pr.repo}${/github\.com/i.test(pr.url) ? "#" : "!"}${pr.number}`;
+}
+
+function prNumber(pr: BoardPullRequest): string {
   return `${/github\.com/i.test(pr.url) ? "#" : "!"}${pr.number}`;
 }
 
@@ -65,7 +70,7 @@ export function todoPhrase(todo: Todo, now: number): Phrase {
   switch (todo.kind) {
     case "approval": {
       const pr = todo.pullRequests[0];
-      return { text: pr ? `${prRef(pr)} 待你审批` : "待你审批", tone: "action" };
+      return { text: pr ? `${prNumber(pr)} 待你审批` : "待你审批", tone: "action" };
     }
     case "user":
       return { text: "待你处理", tone: "action" };
@@ -87,10 +92,32 @@ export function treePhrase(tree: TreeNode): Phrase | undefined {
     if (stage && staged.length > 1) return { text: `第 ${staged.indexOf(stage) + 1}/${staged.length} 批` };
     return { text: `${tree.done}/${tree.total}` };
   }
-  const pr = tree.issue.pullRequests.find(isOpenPullRequest);
-  if (pr) return pr.ci === "failed" ? { text: `${prRef(pr)} CI 失败`, tone: "danger" } : { text: `${prRef(pr)}${pr.ci === "passed" ? " ✓" : ""}` };
   const text = STATUS_PHRASE[tree.issue.status];
   return text ? { text } : undefined;
+}
+
+type Tone = Phrase["tone"];
+
+/** A task's MRs as one icon: open ones with a count, otherwise a merged mark; red for failed CI, amber when it waits for you. */
+export function prSignal(issue: BoardIssue): { icon: string; count: number; tone?: Tone; label: string } | undefined {
+  const open = issue.pullRequests.filter(isOpenPullRequest);
+  if (open.length === 0) {
+    // A closed task's merged MRs are the expected end state, not news.
+    const merged = isTerminal(issue) ? 0 : issue.pullRequests.filter((pr) => pr.state === "merged").length;
+    return merged > 0 ? { icon: "GitMerge", count: 0, label: `已合并 ${merged} 个 MR` } : undefined;
+  }
+  const tone: Tone = open.some((pr) => pr.ci === "failed") ? "danger" : awaitingApproval(issue).length > 0 ? "action" : undefined;
+  const icon = open.every((pr) => pr.state === "draft") ? "GitPullRequestDraft" : "GitPullRequest";
+  return { icon, count: open.length, ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
+}
+
+function prDetail(pr: BoardPullRequest, issue: BoardIssue): Phrase | undefined {
+  if (pr.ci === "failed") return { text: "CI 失败", tone: "danger" };
+  if (awaitingApproval(issue).includes(pr)) return { text: "待你审批", tone: "action" };
+  if (pr.mergeable?.toLowerCase() === "conflicting") return { text: "有冲突", tone: "danger" };
+  if (pr.ci === "pending") return { text: "CI 运行中" };
+  if (pr.ci === "passed") return { text: "CI 通过" };
+  return pr.state === "draft" ? { text: "草稿" } : undefined;
 }
 
 /** One row per issue; an issue with several to-dos shows its most urgent one, already first in board order. */
@@ -167,12 +194,14 @@ function BoardContent({ agentId, theme, openTask }: Props) {
         {todos.length > 0 ? <Section title="需要你" colors={colors}>
           {todos.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
         </Section> : null}
-        {active.length > 0 ? <Section title="进行中" colors={colors}><Trees nodes={active} data={ready} row={row} /></Section> : null}
+        {active.length === 0 ? null
+          : ready.scope === "all" ? <View style={{ gap: 2 }}>{groupByProject(active, ready.projects).map((group) => <Folder key={group.id ?? group.name} name={group.name} nodes={group.nodes} row={row} />)}</View>
+          : <Section title="进行中" colors={colors}>{active.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}</Section>}
         {(["parked", "done"] as const).map((section) => board.sections[section].length > 0 ? <Section
           key={section} title={section === "parked" ? "搁置" : "已完成"} count={board.sections[section].length} colors={colors}
           open={open[section]} onToggle={() => setOpen((value) => ({ ...value, [section]: !value[section] }))}
         >
-          <Trees nodes={board.sections[section]} data={ready} row={row} />
+          {board.sections[section].map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
         </Section> : null)}
         {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, paddingLeft: GUTTER + SPACE.sm }}>部分子任务未显示</Text> : null}
       </View>}
@@ -231,15 +260,20 @@ type RowContext = { colors: Colors; openTask: OpenTask; expandedIds: string[]; t
  * One line: disclosure gutter, title, then the muted phrase. Hover reveals the
  * issue number in front of the phrase instead of spending a second line on it.
  */
-function Row({ issue, phrase, depth, row, running, muted, onPress, disclosure }: {
-  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; muted?: boolean; onPress?(): void;
+function toneColor(tone: Tone, colors: Colors): string {
+  return tone === "danger" ? colors.statusDanger : tone === "action" ? colors.statusWarning : colors.foregroundMuted;
+}
+
+function Row({ issue, phrase, depth, row, running, muted, signal, onPress, disclosure }: {
+  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; muted?: boolean; signal?: boolean; onPress?(): void;
   disclosure?: { expanded: boolean; onToggle(): void };
 }) {
   const { colors } = row;
   const hover = useHover();
   const [pressed, setPressed] = useState(false);
-  const tone = phrase?.tone === "danger" ? colors.statusDanger : phrase?.tone === "action" ? colors.statusWarning : colors.foregroundMuted;
+  const tone = toneColor(phrase?.tone, colors);
   const title = displayTitle(issue.title);
+  const prs = signal ? prSignal(issue) : undefined;
   return <View
     style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}
   >
@@ -251,7 +285,7 @@ function Row({ issue, phrase, depth, row, running, muted, onPress, disclosure }:
       {disclosure ? <View style={{ transform: [{ rotate: disclosure.expanded ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={colors.foregroundMuted} /></View> : null}
     </Pressable>
     <Pressable
-      accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${title}${phrase ? ` ${phrase.text}` : ""}`}
+      accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${title}${prs ? ` ${prs.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
       disabled={!onPress} onPress={onPress}
       onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
       style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
@@ -259,6 +293,10 @@ function Row({ issue, phrase, depth, row, running, muted, onPress, disclosure }:
       <Text numberOfLines={1} style={{ flex: 1, color: muted ? colors.foregroundMuted : colors.foreground, fontSize: FONT.base }}>{title}</Text>
       {running ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
       {hover.hovered ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{issue.identifier}</Text> : null}
+      {prs ? <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+        <Icon name={prs.icon} size={13} color={toneColor(prs.tone, colors)} />
+        {prs.count > 1 ? <Text style={{ color: toneColor(prs.tone, colors), fontSize: FONT.sm }}>{prs.count}</Text> : null}
+      </View> : null}
       {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
     </Pressable>
   </View>;
@@ -274,25 +312,59 @@ function TodoRow({ todo, now, row }: { todo: Todo; now: number; row: RowContext 
   />;
 }
 
-function Trees({ nodes, data, row }: { nodes: TreeNode[]; data: ReadyBoardData; row: RowContext }) {
-  const groups = data.scope === "all" ? groupByProject(nodes, data.projects) : [{ name: "", nodes }];
-  return <>{groups.map((group) => <View key={group.id ?? group.name}>
-    {group.name ? <Text style={{ color: row.colors.foregroundMuted, fontSize: FONT.sm, paddingTop: SPACE.sm, paddingBottom: 2, paddingLeft: GUTTER + SPACE.sm }}>{group.name}</Text> : null}
-    {group.nodes.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
-  </View>)}</>;
+/** A project in the all view: a collapsible folder whose count turns amber when something inside needs you. */
+function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: RowContext }) {
+  const { colors } = row;
+  const [open, setOpen] = useState(true);
+  const hover = useHover();
+  const urgent = nodes.some((tree) => tree.section === "attention");
+  return <View>
+    <Pressable
+      accessibilityRole="button" accessibilityLabel={name} accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)}
+      onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+      style={{ flexDirection: "row", alignItems: "center", borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface1 : "transparent" }}
+    >
+      <View style={{ width: GUTTER, alignItems: "center", transform: [{ rotate: open ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={colors.foregroundMuted} /></View>
+      <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingVertical: SPACE.sm, paddingHorizontal: SPACE.sm }}>
+        <Icon name={open ? "FolderOpen" : "Folder"} size={14} color={colors.foregroundMuted} />
+        <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.base, fontWeight: "500" }}>{name}</Text>
+        <Text style={{ color: urgent ? colors.statusWarning : colors.foregroundMuted, fontSize: FONT.sm }}>{nodes.length}</Text>
+      </View>
+    </Pressable>
+    {open ? nodes.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={1} row={row} />) : null}
+  </View>;
 }
 
 function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: RowContext }) {
   const { expandedIds, toggle, openTask } = row;
   const { issue } = tree;
-  const expanded = tree.total > 0 && expandedIds.includes(issue.id);
+  const openPrs = issue.pullRequests.filter(isOpenPullRequest);
+  const expandable = tree.total > 0 || openPrs.length > 0;
+  const expanded = expandable && expandedIds.includes(issue.id);
   const children = tree.stages.flatMap((group) => group.nodes);
   return <View>
     <Row
-      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} muted={tree.section === "done"}
+      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} muted={tree.section === "done"} signal
       onPress={issue.url ? () => openTask(issue.url!, issue.identifier) : undefined}
-      disclosure={tree.total > 0 ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
+      disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
     />
+    {expanded ? openPrs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
     {expanded ? children.map((child) => <TreeRow key={child.issue.id} tree={child} depth={depth + 1} row={row} />) : null}
   </View>;
+}
+
+/** An open MR under its task: number and title, then its one state that matters; opens the MR. */
+function PullRequestRow({ pr, issue, depth, row }: { pr: BoardPullRequest; issue: BoardIssue; depth: number; row: RowContext }) {
+  const { colors } = row;
+  const hover = useHover();
+  const detail = prDetail(pr, issue);
+  return <Pressable
+    accessibilityRole="link" accessibilityLabel={`${prRef(pr)} ${displayTitle(pr.title)}${detail ? ` ${detail.text}` : ""}`} onPress={() => void Linking.openURL(pr.url)}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingLeft: INDENT * depth + GUTTER + SPACE.sm, paddingRight: SPACE.sm, paddingVertical: SPACE.sm, borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface1 : "transparent" }}
+  >
+    <Icon name={pr.state === "draft" ? "GitPullRequestDraft" : "GitPullRequest"} size={13} color={colors.foregroundMuted} />
+    <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: FONT.sm }}>{prRef(pr)} {displayTitle(pr.title)}</Text>
+    {detail ? <Text numberOfLines={1} style={{ color: toneColor(detail.tone, colors), fontSize: FONT.sm, fontWeight: detail.tone ? "500" : "400" }}>{detail.text}</Text> : null}
+  </Pressable>;
 }

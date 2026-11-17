@@ -17,10 +17,11 @@ const issues: BoardIssue[] = [
   { ...base, id: "delivered", identifier: "WORK-496", title: "删除会话 MR", status: "in_review", parentId: "root", stage: 1, url: "https://app.example/acme/issues/WORK-496", contract: { pendingActor: session, acceptor: session, accepted: false } },
   { ...base, id: "approval", identifier: "WORK-470", title: "slime 修复", status: "in_review", projectId: "p1", contract: { accepted: true }, pullRequests: [{ id: "pr", number: 813, repo: "slime", title: "fix", state: "open", url: "https://git.woa.com/o/slime/merge_requests/813", ci: "passed", review: "approving", myReview: "approving", mergeable: "mergeable" }] },
   { ...base, id: "old", identifier: "WORK-100", title: "旧任务", status: "backlog" },
+  { ...base, id: "mr", identifier: "WORK-497", title: "接入 MR 行", status: "in_progress", projectId: "p1", activeRun: true, pullRequests: [{ id: "pr2", number: 818, repo: "mimikyu", title: "refactor(lint): 清理分支", state: "open", url: "https://git.woa.com/o/mimikyu/merge_requests/818", ci: "pending" }, { id: "pr3", number: 700, repo: "mimikyu", title: "旧", state: "merged", url: "https://git.woa.com/o/mimikyu/merge_requests/700" }] },
 ];
-const ready = (scope: "session" | "all"): ReadyBoardData => ({ state: "ready", scope, viewer: { agentId: "leader", sessionId: "s1", forgeUsernames: ["me"] }, issues, rootIds: ["root", "approval", "old"], projects: [{ id: "p1", name: "Paseo" }], truncated: false, checkedAt: "2026-11-17T07:08:00Z" });
+const ready = (scope: "session" | "all"): ReadyBoardData => ({ state: "ready", scope, viewer: { agentId: "leader", sessionId: "s1", forgeUsernames: ["me"] }, issues, rootIds: ["root", "approval", "old", "mr"], projects: [{ id: "p1", name: "Paseo" }], truncated: false, checkedAt: "2026-11-17T07:08:00Z" });
 const getBoard = vi.fn(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
-import { BoardSection, displayTitle, todoPhrase, treePhrase } from "../client/board-panel";
+import { BoardSection, displayTitle, prSignal, todoPhrase, treePhrase } from "../client/board-panel";
 import { buildBoard } from "../shared/board";
 
 type Rendered = ReturnType<ReactTestRenderer["toJSON"]>;
@@ -64,9 +65,19 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   await press(renderer!, "WORK-470 slime 修复 !813 待你审批");
   expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
 
+  await press(renderer!, "展开 WORK-497");
+  expect(text(renderer!)).toContain("mimikyu!818 清理分支\nCI 运行中");
+  expect(text(renderer!)).not.toContain("mimikyu!700");
+  await press(renderer!, "mimikyu!818 清理分支 CI 运行中");
+  expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/mimikyu/merge_requests/818");
+
   await press(renderer!, "全部");
   expect(getBoard).toHaveBeenLastCalledWith({ agentId: "agent", scope: "all", refresh: false });
-  expect(text(renderer!)).toContain("Paseo");
+  const all = text(renderer!);
+  expect(all).not.toContain("进行中");
+  expect(all.indexOf("Paseo")).toBeLessThan(all.indexOf("统一 Leader 视图"));
+  await press(renderer!, "Paseo");
+  expect(text(renderer!)).not.toContain("统一 Leader 视图");
 
   await press(renderer!, "刷新");
   expect(getBoard).toHaveBeenLastCalledWith({ agentId: "agent", scope: "all", refresh: true });
@@ -99,4 +110,15 @@ it("reserves red for fresh failures", () => {
   const failed = (days: number) => ({ kind: "anomaly" as const, pullRequests: [], issue: { ...base, id: "f", identifier: "F", title: "F", status: "in_progress", lastRunFailed: true, lastActivityAt: new Date(Date.now() - days * 86400000).toISOString() } });
   expect(todoPhrase(failed(1), Date.now())).toEqual({ text: "运行失败 · 1d", tone: "danger" });
   expect(todoPhrase(failed(9), Date.now())).toEqual({ text: "运行失败 · 9d" });
+});
+
+it("folds a task's MRs into one signal", () => {
+  const pr = (id: string, state: string, extra = {}) => ({ id, number: 1, repo: "r", title: "t", state, url: "https://git.woa.com/o/r/merge_requests/1", ...extra });
+  const task = (pullRequests: ReturnType<typeof pr>[], extra = {}) => ({ ...base, id: "t", identifier: "T", title: "T", status: "in_progress", pullRequests, ...extra });
+  expect(prSignal(task([]))).toBeUndefined();
+  expect(prSignal(task([pr("a", "merged")]))).toMatchObject({ icon: "GitMerge", count: 0 });
+  expect(prSignal(task([pr("a", "merged")], { status: "done", statusCategory: "completed" }))).toBeUndefined();
+  expect(prSignal(task([pr("a", "open"), pr("b", "draft", { ci: "failed" })]))).toMatchObject({ icon: "GitPullRequest", count: 2, tone: "danger" });
+  expect(prSignal(task([pr("a", "open", { myReview: "approving" })], { contract: { accepted: true } }))).toMatchObject({ tone: "action" });
+  expect(prSignal(task([pr("a", "draft")]))).toMatchObject({ icon: "GitPullRequestDraft" });
 });
