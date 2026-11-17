@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { redactSecrets } from "../shared/redaction";
 import { isUuid } from "../shared/session";
+import { sessionTasksWireSchema, type SessionTasksWire } from "../shared/tasks";
 
 export interface ApiCredential {
   serverUrl: string;
@@ -15,11 +16,25 @@ export interface RegisterExternalAgentInput {
   displayName: string;
   url: string;
   daemonId: string;
+  /**
+   * Ask the server to attach a new session to the host template instead of
+   * minting one agent per session. Servers that have not opened template
+   * writes reject it; the caller falls back to legacy registration.
+   */
+  template?: boolean;
+  /**
+   * Host template display name. Kept separate from name so a legacy server
+   * (which ignores this field) still mints a session-scoped agent name.
+   */
+  templateName?: string;
 }
 
 export interface ExternalAgentRegistration {
   id: string;
   name: string;
+  /** Registered session UUID the issued credential will act for. */
+  sessionId: string;
+  templateId?: string;
 }
 
 export interface IssuedToken {
@@ -36,17 +51,24 @@ export interface MulticaApi {
   createExternalAgentToken(
     credential: ApiCredential,
     agentId: string,
+    externalSessionId: string,
     expiresAt: string,
   ): Promise<IssuedToken>;
   revokeExternalAgentToken(credential: ApiCredential, agentId: string, tokenId: string): Promise<void>;
   /** A live external credential for this exact agent is the only "valid" answer. */
   verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid">;
+  /** Read-only "this session's tasks" projection; scoped by the credential. */
+  listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire>;
+  /** A read-only GET of an existing Multica endpoint; the caller validates the body. */
+  get(credential: ApiCredential, path: string): Promise<unknown>;
 }
 
 export class MulticaApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Machine-readable error code from the response body, when present. */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "MulticaApiError";
@@ -56,12 +78,15 @@ export class MulticaApiError extends Error {
 const agentResponseSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
+  external_session: z.object({ id: z.string() }).nullish(),
+  external_template: z.object({ id: z.string() }).nullish(),
 });
 
 const tokenResponseSchema = z.object({
   id: z.string(),
   token: z.string(),
   expires_at: z.string(),
+  external_session_id: z.string().optional(),
 });
 
 const MAX_ERROR_BODY = 500;
@@ -109,9 +134,12 @@ export function createMulticaApi(options: {
       }
       if (response.status >= 400) {
         const detail = redactSecrets(text.slice(0, MAX_ERROR_BODY)).trim();
+        const body = parseJson(text) as { code?: unknown } | null;
+        const code = typeof body?.code === "string" && body.code !== "" ? body.code : undefined;
         throw new MulticaApiError(
           response.status,
           `Multica API ${method} ${path} returned ${response.status}${detail ? `: ${detail}` : ""}`,
+          code,
         );
       }
       return text;
@@ -121,9 +149,15 @@ export function createMulticaApi(options: {
   }
 
   return {
+    async get(credential, path) {
+      if (!path.startsWith("/api/")) throw new Error("Invalid Multica API path");
+      return parseJson(await request(credential, "GET", path, credential.token));
+    },
     async registerExternalAgent(credential, input) {
       const text = await request(credential, "POST", "/api/agents/external", credential.token, {
         name: input.name,
+        template: input.template === true ? true : undefined,
+        template_name: input.templateName,
         external_session: {
           provider: "paseo",
           host_id: input.hostId,
@@ -134,23 +168,34 @@ export function createMulticaApi(options: {
         },
       });
       const parsed = agentResponseSchema.safeParse(parseJson(text));
-      if (!parsed.success || !isUuid(parsed.data.id)) {
+      const sessionId = parsed.success ? parsed.data.external_session?.id : undefined;
+      if (!parsed.success || !isUuid(parsed.data.id) || !sessionId || !isUuid(sessionId)) {
         throw new MulticaApiError(0, "Multica did not return a valid external agent registration.");
       }
-      return { id: parsed.data.id, name: parsed.data.name ?? input.name };
+      return {
+        id: parsed.data.id,
+        name: parsed.data.name ?? input.name,
+        sessionId,
+        ...(parsed.data.external_template?.id ? { templateId: parsed.data.external_template.id } : {}),
+      };
     },
 
-    async createExternalAgentToken(credential, agentId, expiresAt) {
+    async createExternalAgentToken(credential, agentId, externalSessionId, expiresAt) {
       const text = await request(
         credential,
         "POST",
         `/api/agents/${encodeURIComponent(agentId)}/tokens`,
         credential.token,
-        { expires_at: expiresAt },
+        { expires_at: expiresAt, external_session_id: externalSessionId },
       );
       const parsed = tokenResponseSchema.safeParse(parseJson(text));
       if (!parsed.success || !isUuid(parsed.data.id) || !parsed.data.token.startsWith("mea_")) {
         throw new MulticaApiError(0, "Multica did not return a valid external agent credential.");
+      }
+      // A credential for another session would defeat the session boundary the
+      // plugin exists to establish.
+      if (parsed.data.external_session_id && parsed.data.external_session_id !== externalSessionId) {
+        throw new MulticaApiError(0, "Multica bound the new credential to a different session.");
       }
       return { id: parsed.data.id, token: parsed.data.token, expiresAt: parsed.data.expires_at };
     },
@@ -162,6 +207,20 @@ export function createMulticaApi(options: {
         `/api/agents/${encodeURIComponent(agentId)}/tokens/${encodeURIComponent(tokenId)}`,
         credential.token,
       );
+    },
+
+    async listSessionTasks(credential, agentId) {
+      const text = await request(
+        credential,
+        "GET",
+        `/api/agents/${encodeURIComponent(agentId)}/session-tasks`,
+        credential.token,
+      );
+      const parsed = sessionTasksWireSchema.safeParse(parseJson(text));
+      if (!parsed.success) {
+        throw new MulticaApiError(0, "Multica did not return a valid session task summary.");
+      }
+      return parsed.data;
     },
 
     async verifyExternalAgentToken(credential, agentId) {

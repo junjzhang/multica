@@ -51,7 +51,31 @@ export type MarkdownSegment =
   | { type: "code"; lang: string | undefined; code: string }
   | { type: "image"; uri: string; alt: string };
 
-export function splitMarkdown(input: string): MarkdownSegment[] {
+type RawToken = { type: string; raw: string; href?: string; tokens?: RawToken[]; items?: RawToken[]; header?: { tokens: RawToken[] }[]; rows?: { tokens: RawToken[] }[][] };
+
+// Annotate only parsed mention links; code spans and code blocks stay literal.
+function labelNotifications(token: RawToken, label: string): string {
+  if (token.type === "code" || token.type === "codespan") return token.raw;
+  if (token.type === "link" && token.href?.startsWith("mention://agent-notify/")) {
+    const marker = token.raw.lastIndexOf("](");
+    if (marker >= 0) return `${token.raw.slice(0, marker)} · ${label}${token.raw.slice(marker)}`;
+  }
+  const children = token.type === "table"
+    ? [...(token.header ?? []), ...(token.rows ?? []).flat()].flatMap((cell) => cell.tokens)
+    : token.tokens ?? token.items;
+  if (!children) return token.raw;
+  let result = "";
+  let cursor = 0;
+  for (const child of children) {
+    const at = token.raw.indexOf(child.raw, cursor);
+    if (at < 0) continue;
+    result += token.raw.slice(cursor, at) + labelNotifications(child, label);
+    cursor = at + child.raw.length;
+  }
+  return result + token.raw.slice(cursor);
+}
+
+export function splitMarkdown(input: string, notificationLabel?: string): MarkdownSegment[] {
   if (!input) return [];
 
   const tokens = marked.lexer(input);
@@ -85,7 +109,7 @@ export function splitMarkdown(input: string): MarkdownSegment[] {
       const hasImage = inline.some((t) => t.type === "image");
 
       if (!hasImage) {
-        proseBuffer += para.raw;
+        proseBuffer += notificationLabel ? labelNotifications(para as RawToken, notificationLabel) : para.raw;
         continue;
       }
 
@@ -115,7 +139,7 @@ export function splitMarkdown(input: string): MarkdownSegment[] {
             alt: img.text ?? "",
           });
         } else {
-          textBuffer += (t as { raw?: string }).raw ?? "";
+          textBuffer += notificationLabel ? labelNotifications(t as RawToken, notificationLabel) : (t as { raw?: string }).raw ?? "";
         }
       }
       flushText();
@@ -124,7 +148,7 @@ export function splitMarkdown(input: string): MarkdownSegment[] {
 
     // Every other top-level block (heading, list, blockquote, table,
     // hr, html, space, def, …) goes to prose verbatim via token.raw.
-    proseBuffer += (token as { raw?: string }).raw ?? "";
+    proseBuffer += notificationLabel ? labelNotifications(token as RawToken, notificationLabel) : (token as { raw?: string }).raw ?? "";
   }
 
   flushProse();

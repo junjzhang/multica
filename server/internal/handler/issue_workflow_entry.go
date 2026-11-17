@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -198,8 +199,11 @@ func (h *Handler) handedToAgent(ctx context.Context, prev db.Issue, params db.Up
 		return uuidToString(params.AssigneeID)
 	case "squad":
 		squad, err := h.Queries.GetSquadInWorkspace(ctx, db.GetSquadInWorkspaceParams{ID: params.AssigneeID, WorkspaceID: prev.WorkspaceID})
-		if err == nil && squad.LeaderID.Valid {
-			return uuidToString(squad.LeaderID)
+		if err == nil {
+			leader, err := issueleader.ResolveIssueLeader(ctx, h.Queries, prev, squad)
+			if err == nil {
+				return uuidToString(leader.Agent.ID)
+			}
 		}
 	}
 	return ""

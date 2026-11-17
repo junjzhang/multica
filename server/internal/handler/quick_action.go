@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -80,7 +81,7 @@ var quickActionTemplateTokenRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
 //
 // `mention://issue/...` is the sole exception: it renders as a link and
 // reaches nobody, so a prompt may legitimately point at related work.
-var quickActionSideEffectMentionRe = regexp.MustCompile(`mention://(agent|squad|member|all)/`)
+var quickActionSideEffectMentionRe = regexp.MustCompile(`mention://(agent|agent-notify|squad|member|all)/`)
 
 // Types
 
@@ -198,7 +199,7 @@ func normalizeQuickActionVisibility(raw string) (string, error) {
 // resolveQuickActionTarget loads the execution target. A missing/archived
 // agent, or a missing/archived squad, resolves to Found=false — the caller
 // renders that as an unavailable target rather than failing the whole list.
-func (h *Handler) resolveQuickActionTarget(ctx context.Context, qa db.QuickAction) quickActionTarget {
+func (h *Handler) resolveQuickActionTarget(ctx context.Context, qa db.QuickAction, issue db.Issue) quickActionTarget {
 	switch qa.AssigneeType {
 	case "":
 		// An intentionally unset target is available, not an orphaned binding.
@@ -211,7 +212,8 @@ func (h *Handler) resolveQuickActionTarget(ctx context.Context, qa db.QuickActio
 		if err != nil || squad.ArchivedAt.Valid {
 			return quickActionTarget{}
 		}
-		leader, err := h.Queries.GetAgent(ctx, squad.LeaderID)
+		resolved, err := issueleader.ResolveIssueLeader(ctx, h.Queries, issue, squad)
+		leader := resolved.Agent
 		if err != nil || leader.ArchivedAt.Valid {
 			return quickActionTarget{}
 		}
@@ -389,7 +391,7 @@ func baseQuickActionResponse(qa db.QuickAction) QuickActionResponse {
 // list endpoint uses quickActionToResponseFrom instead.
 func (h *Handler) quickActionToResponse(ctx context.Context, qa db.QuickAction) QuickActionResponse {
 	resp := baseQuickActionResponse(qa)
-	target := h.resolveQuickActionTarget(ctx, qa)
+	target := h.resolveQuickActionTarget(ctx, qa, db.Issue{WorkspaceID: qa.WorkspaceID})
 	resp.TargetMissing = !target.Found
 	if target.Found {
 		resp.TargetName = target.Name
@@ -757,7 +759,7 @@ func (h *Handler) validateQuickActionBinding(w http.ResponseWriter, r *http.Requ
 		return true
 	}
 	qa := db.QuickAction{AssigneeType: assigneeType, AssigneeID: id, WorkspaceID: workspaceID}
-	target := h.resolveQuickActionTarget(r.Context(), qa)
+	target := h.resolveQuickActionTarget(r.Context(), qa, db.Issue{WorkspaceID: qa.WorkspaceID})
 	if !target.Found {
 		writeError(w, http.StatusBadRequest, "assignee not found in this workspace")
 		return false
@@ -796,7 +798,7 @@ func (h *Handler) RenderQuickAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := h.resolveQuickActionTarget(r.Context(), qa)
+	target := h.resolveQuickActionTarget(r.Context(), qa, issue)
 	if !target.Found {
 		h.writeDispatchBlocked(w, http.StatusConflict, ReasonTargetUnavailable)
 		return
@@ -862,7 +864,7 @@ func (h *Handler) RunQuickAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := h.resolveQuickActionTarget(r.Context(), qa)
+	target := h.resolveQuickActionTarget(r.Context(), qa, issue)
 	if !target.Found {
 		h.writeDispatchBlocked(w, http.StatusConflict, ReasonTargetUnavailable)
 		return

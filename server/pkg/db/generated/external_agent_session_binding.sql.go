@@ -17,6 +17,7 @@ INSERT INTO external_agent_session_binding (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
+ON CONFLICT (workspace_id, agent_id, issue_id) WHERE revoked_at IS NULL DO NOTHING
 RETURNING id, workspace_id, agent_id, issue_id, session_id, created_by, created_at, revoked_at
 `
 
@@ -107,6 +108,7 @@ WHERE b.workspace_id = $1
   AND b.agent_id = $2
   AND b.issue_id = $3
   AND b.revoked_at IS NULL
+  AND s.revoked_at IS NULL
   AND a.execution_kind = 'external'
   AND a.archived_at IS NULL
 FOR SHARE OF b
@@ -171,6 +173,7 @@ SELECT b.id AS binding_id,
        s.url,
        s.daemon_id,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id
@@ -196,20 +199,21 @@ type GetActiveAgentSessionBindingViewParams struct {
 }
 
 type GetActiveAgentSessionBindingViewRow struct {
-	BindingID     pgtype.UUID        `json:"binding_id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	AgentID       pgtype.UUID        `json:"agent_id"`
-	IssueID       pgtype.UUID        `json:"issue_id"`
-	SessionID     pgtype.UUID        `json:"session_id"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	Provider      string             `json:"provider"`
-	HostID        string             `json:"host_id"`
-	HostSessionID string             `json:"host_session_id"`
-	DisplayName   string             `json:"display_name"`
-	Url           pgtype.Text        `json:"url"`
-	DaemonID      string             `json:"daemon_id"`
-	AgentArchived bool               `json:"agent_archived"`
-	OwnerIsMember bool               `json:"owner_is_member"`
+	BindingID      pgtype.UUID        `json:"binding_id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	AgentID        pgtype.UUID        `json:"agent_id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	Provider       string             `json:"provider"`
+	HostID         string             `json:"host_id"`
+	HostSessionID  string             `json:"host_session_id"`
+	DisplayName    string             `json:"display_name"`
+	Url            pgtype.Text        `json:"url"`
+	DaemonID       string             `json:"daemon_id"`
+	AgentArchived  bool               `json:"agent_archived"`
+	SessionRevoked bool               `json:"session_revoked"`
+	OwnerIsMember  bool               `json:"owner_is_member"`
 }
 
 // Read-only projection of the exact (workspace, agent, issue) target. Unlike
@@ -233,6 +237,7 @@ func (q *Queries) GetActiveAgentSessionBindingView(ctx context.Context, arg GetA
 		&i.Url,
 		&i.DaemonID,
 		&i.AgentArchived,
+		&i.SessionRevoked,
 		&i.OwnerIsMember,
 	)
 	return i, err
@@ -252,6 +257,7 @@ SELECT b.id AS binding_id,
        s.url,
        s.daemon_id,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id
@@ -276,20 +282,21 @@ type ListIssueActiveSessionBindingsParams struct {
 }
 
 type ListIssueActiveSessionBindingsRow struct {
-	BindingID     pgtype.UUID        `json:"binding_id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	AgentID       pgtype.UUID        `json:"agent_id"`
-	IssueID       pgtype.UUID        `json:"issue_id"`
-	SessionID     pgtype.UUID        `json:"session_id"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	Provider      string             `json:"provider"`
-	HostID        string             `json:"host_id"`
-	HostSessionID string             `json:"host_session_id"`
-	DisplayName   string             `json:"display_name"`
-	Url           pgtype.Text        `json:"url"`
-	DaemonID      string             `json:"daemon_id"`
-	AgentArchived bool               `json:"agent_archived"`
-	OwnerIsMember bool               `json:"owner_is_member"`
+	BindingID      pgtype.UUID        `json:"binding_id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	AgentID        pgtype.UUID        `json:"agent_id"`
+	IssueID        pgtype.UUID        `json:"issue_id"`
+	SessionID      pgtype.UUID        `json:"session_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	Provider       string             `json:"provider"`
+	HostID         string             `json:"host_id"`
+	HostSessionID  string             `json:"host_session_id"`
+	DisplayName    string             `json:"display_name"`
+	Url            pgtype.Text        `json:"url"`
+	DaemonID       string             `json:"daemon_id"`
+	AgentArchived  bool               `json:"agent_archived"`
+	SessionRevoked bool               `json:"session_revoked"`
+	OwnerIsMember  bool               `json:"owner_is_member"`
 }
 
 // Every active target recorded for this issue, regardless of whether the
@@ -318,6 +325,7 @@ func (q *Queries) ListIssueActiveSessionBindings(ctx context.Context, arg ListIs
 			&i.Url,
 			&i.DaemonID,
 			&i.AgentArchived,
+			&i.SessionRevoked,
 			&i.OwnerIsMember,
 		); err != nil {
 			return nil, err

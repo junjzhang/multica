@@ -269,6 +269,8 @@ func writeAvailableCommands(b *strings.Builder, ctx TaskContextForEnv) {
 	b.WriteString("`--output json` writes JSON to stdout; confirmations and warnings go to stderr. Do not merge them (`2>&1`) into anything that parses the output — that makes a write that SUCCEEDED look like it failed and invites a duplicate retry.\n\n")
 	b.WriteString("### Core\n")
 	b.WriteString("- `multica issue get <id> --output json` — full issue.\n")
+	b.WriteString("- `multica issue contract get <id> --output json` — agreement versions and delivery history. `issue get` includes the current agreement and who owes the next action. `multica issue contract apply <id> --request-file <path>` submits or accepts/returns delivery against an explicit version and expected_sequence; use a stable client_request_id when retrying. Contract acceptance is separate from mailbox handled and run completion.\n")
+	b.WriteString("  Contract authorization_note records agreed scope and grants no API, merge or deployment capability. Follow existing permissions and the issue's structured merge_authorization; never infer a grant from note text. A verified original request agent may maintain its own issue agreement in its existing scope; the executor may not revise its own criteria or authorization note.\n")
 	b.WriteString("- `multica issue comment list <issue-id> [--roots-only] [--summary] [--thread <comment-id> [--tail N] | --recent N] [--since <RFC3339>] [--compact] --output json` — thread-aware comment reads. Read in two bounded steps: scan with `--roots-only --summary`, then expand one thread with `--thread <id> --tail N`. Careful with `--recent N`: it caps THREADS, not comments, and can return the whole history on a small issue. Resolved-thread folding, paging cursors, and full flag semantics: `--help`.\n")
 	b.WriteString("- `multica issue create --title \"...\" [--description-file <path>] [--priority X] [--status X] [--assignee X | --assignee-id <uuid>] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>] [--attachment <path>]` — create an issue. Put agent-authored long descriptions in `--description-file <path>` (heredoc stdin can swallow trailing flags, #4182); write that file inside your working directory, never `/tmp` or shared paths.\n")
 	b.WriteString("- `multica issue update <id> [--title X] [--description-file <path>] [--priority X] [--status X] [--assignee X] [--parent <issue-id>] [--stage N] [--project <project-id>] [--due-date <YYYY-MM-DD>]` — update fields; pass `--parent \"\"` to clear parent.\n")
@@ -750,7 +752,7 @@ const platformSkillName = "multica-platform"
 // description, repeated in the brief's recall hint for agents that never read
 // the skill listing. TestPlatformSkillDomainsMatchDescription keeps it equal to
 // the description, so a new reference cannot ship without reaching the brief.
-const platformSkillDomains = "issue and PR contracts, sub-issues, batch changes, saved views, charts and files in comments, mentions, agents, squads, autopilots, projects, runtimes, local environments, skill import, themes"
+const platformSkillDomains = "issue and PR contracts, sub-issues, batch changes, saved views, charts and files in comments, mentions, agents, squads, autopilots, projects, runtimes, waits, local environments, skill import, themes"
 
 // subIssueContractsSkill returns how the brief should refer to the skill
 // carrying the sub-issue contracts, and whether any such skill is installed.
@@ -845,7 +847,7 @@ func writeMentions(b *strings.Builder) {
 	// client unfurls into the same chip) a project reference stays dead text.
 	b.WriteString("- `[Project Name](mention://project/<project-id>)` — clickable link (no side effect)\n")
 	b.WriteString("- `[@Name](mention://member/<user-id>)` — **notifies a human**\n")
-	b.WriteString("- `[@Name](mention://agent/<agent-id>)` — **enqueues a new run for that agent**; an external agent bound to a host session gets one mailbox request instead, delivered by its host adapter\n\n")
+	b.WriteString("- `[@Name](mention://agent-notify/<agent-id>)` — wakes the agent without creating a new result return. Use for notifications. If the same agent is also delegated to, delegation wins; a squad mention delegates to its leader even if the leader is also notified.\n- `[@Name](mention://agent/<agent-id>)` — delegates and **enqueues a new run for that agent**; an external agent bound to a host session gets one mailbox request instead, delivered by its host adapter\n\n")
 	// No prescriptive default here (MUL-6417): the mention syntax hides its
 	// semantics — it reads like a free social gesture but is a spawn/notify
 	// operation — so what this paragraph must supply is the facts that

@@ -145,7 +145,7 @@ ORDER BY s.created_at ASC;
 -- name: TransferSquadAssignees :exec
 -- Transfer all issues assigned to a squad to the squad's leader agent.
 UPDATE issue SET assignee_type = 'agent', assignee_id = $2, revision = revision + 1, updated_at = now()
-WHERE assignee_type = 'squad' AND assignee_id = $1;
+WHERE assignee_type = 'squad' AND assignee_id = $1 AND leadership_root_issue_id IS NULL;
 
 -- name: TransferSquadAutopilotsToLeader :exec
 -- Mirrors TransferSquadAssignees for autopilot rows: when a squad is archived,
@@ -195,3 +195,7 @@ LEFT JOIN issue i
        ON i.id = atq.issue_id
 WHERE sm.squad_id = $1
 ORDER BY sm.created_at ASC, atq.dispatched_at DESC NULLS LAST;
+
+-- name: ListSquadsWithExternalDefaultLeaders :many
+SELECT s.id FROM squad s JOIN agent a ON a.id=s.leader_id AND a.workspace_id=s.workspace_id
+WHERE s.workspace_id=$1 AND s.archived_at IS NULL AND a.execution_kind='external';

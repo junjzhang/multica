@@ -187,7 +187,7 @@ multica issue comment list MUL-123 --thread <comment-id> --tail 5 --output json 
 
 一覧も必要なフィールドだけに絞れます：`multica issue list --output json --fields id,identifier,title,status`。絞り込みは CLI 側で行われるので、減るのは出力とコンテキストで、リクエストの量は変わりません。
 
-最終更新日時でタスクを絞り込むには、RFC3339 形式の `--updated-since` と `--updated-until` を両方指定します。サーバーは、現在の `updated_at` が `since` 以上、`until` 未満のタスクを返します：`[since, until)`。既存のフィルター、並べ替え、ページネーションと組み合わせて使えます。ページ間で同じ期間を指定してください。ページネーションはスナップショットを提供しないため、同時に更新が行われると結果が変わる場合があります。
+最終更新日時でタスクを絞り込むには、`--updated-since` に RFC3339 形式のタイムスタンプか `24h`・`7d` のような期間を指定し、必要なら `--updated-until` に RFC3339 形式のタイムスタンプを指定します（省略時は現在時刻）。サーバーは、現在の `updated_at` が `since` 以上、`until` 未満のタスクを返します：`[since, until)`。ページを送るときは両方を固定のタイムスタンプで指定してください。既存のフィルター、並べ替え、ページネーションと組み合わせて使えます。ページ間で同じ期間を指定してください。ページネーションはスナップショットを提供しないため、同時に更新が行われると結果が変わる場合があります。
 
 ```bash
 multica issue list --updated-since 2026-11-05T10:00:00Z \
@@ -383,7 +383,7 @@ CLI の設定ファイルには、あなたとして Multica にアクセスで�
 
 | コマンド | サブコマンド | 用途 | 主なフラグ |
 | --- | --- | --- | --- |
-| `issue` | `list` | タスクを一覧 | `--status`、`--priority`、`--assignee`、`--project`、`--updated-since` / `--updated-until`（RFC3339 の期間指定、両方必須）、`--metadata`（繰り返し可）、`--property`（繰り返し可、`"名前=値"` または `"Score>=3"`、`"Due<2026-01-01"`、`"Notes~=text"` のような比較；`__none__` は未設定に一致）、`--limit`、`--offset`、`--sort`（`property:<名前または id>` に対応）、`--full-id`、`--resolve-properties`（JSON のみ；保存された id に加えてプロパティ名・選択肢名・メンバー名を返します）、`--fields`（JSON のみ；カンマ区切りで残すフィールドを指定） |
+| `issue` | `list` | タスクを一覧 | `--status`、`--priority`、`--assignee`、`--project`、`--updated-since`（RFC3339 または期間）/ `--updated-until`、`--metadata`（繰り返し可）、`--property`（繰り返し可、`"名前=値"` または `"Score>=3"`、`"Due<2026-01-01"`、`"Notes~=text"` のような比較；`__none__` は未設定に一致）、`--limit`、`--offset`、`--sort`（`property:<名前または id>` に対応）、`--full-id`、`--resolve-properties`（JSON のみ；保存された id に加えてプロパティ名・選択肢名・メンバー名を返します）、`--fields`（JSON のみ；カンマ区切りで残すフィールドを指定） |
 | | `get <id>` | 単一のタスクを表示 | `--resolve-properties`（JSON のみ；保存された id に加えてプロパティ名・選択肢名・メンバー名を返します） |
 | | `create` | タスクを作成 | `--title`（必須）、`--description` / `--description-stdin` / `--description-file`、`--pr-auto-complete on/off`、`--status`、`--priority`、`--assignee`、`--parent`、`--stage`、`--project`、`--start-date`、`--due-date`、`--attachment`（繰り返し可）、`--property`（繰り返し可）、`--allow-duplicate`（同じタイトルの未完了タスクがあっても作成） |
 | | `update <id>` | タスクのフィールドを更新 | `create` と同系のフィールドに加え `--position`、`--no-start`、`--duplicate-of` |

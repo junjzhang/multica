@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +95,25 @@ func (h *Handler) BindAgentSession(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
+	issueUUID, ok := parseUUIDOrBadRequest(w, req.IssueID, "issue_id")
+	if !ok {
+		return
+	}
+	q := h.Queries.WithTx(tx)
+	issue, err := q.LockIssueForDescriptionUpdate(r.Context(), db.LockIssueForDescriptionUpdateParams{ID: issueUUID, WorkspaceID: wsUUID})
+	if err != nil {
+		writeError(w, 404, "issue not found")
+		return
+	}
+	root, err := q.GetIssueLeadershipRoot(r.Context(), db.GetIssueLeadershipRootParams{ID: issue.ID, WorkspaceID: wsUUID})
+	if err != nil {
+		writeError(w, 500, "load task leadership failed")
+		return
+	}
+	if issue.AssigneeType.String == "agent" && issue.AssigneeID == agentID || root.LeaderAgentID == agentID {
+		writeError(w, 409, "executor bindings may only change through assignment or explicit leadership handoff")
+		return
+	}
 	binding, err := sessionroute.Bind(r.Context(), h.Queries.WithTx(tx), sessionroute.BindRequest{
 		WorkspaceID: workspaceID,
 		AgentID:     uuidToString(agentID),
@@ -180,7 +200,10 @@ func (h *Handler) loadAgentForSessionRead(w http.ResponseWriter, r *http.Request
 	return agent, true
 }
 
-func sessionAvailability(agentArchived, ownerIsMember bool) (bool, string) {
+func sessionAvailability(agentArchived, ownerIsMember, sessionRevoked bool) (bool, string) {
+	if sessionRevoked {
+		return false, "session_revoked"
+	}
 	if agentArchived {
 		return false, "agent_archived"
 	}
@@ -208,7 +231,7 @@ func (h *Handler) ListAgentSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	sessions := make([]AgentSessionSummaryResponse, 0, len(rows))
 	for _, row := range rows {
-		deliverable, reason := sessionAvailability(row.AgentArchived, row.OwnerIsMember)
+		deliverable, reason := sessionAvailability(row.AgentArchived, row.OwnerIsMember, row.SessionRevoked)
 		sessions = append(sessions, AgentSessionSummaryResponse{
 			ExternalSessionResponse: ExternalSessionResponse{
 				ID:          uuidToString(row.ID),
@@ -223,7 +246,34 @@ func (h *Handler) ListAgentSessions(w http.ResponseWriter, r *http.Request) {
 			UnavailableReason: reason,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	total := len(sessions)
+	// Absent limit keeps the pre-pagination contract: every session. A caller
+	// that asks for a page gets one bounded page plus the true total.
+	limit, offset := total, 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed <= 0 || parsed > 100 {
+			writeError(w, http.StatusBadRequest, "limit must be an integer between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, convErr := strconv.Atoi(raw)
+		if convErr != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = parsed
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions[offset:end], "total": total})
 }
 
 // GetAgentSessionBinding reads the exact active (workspace, agent, issue)
@@ -264,19 +314,20 @@ func (h *Handler) GetAgentSessionBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	binding := sessionBindingViewToResponse(sessionBindingView{
-		BindingID:     row.BindingID,
-		AgentID:       row.AgentID,
-		IssueID:       row.IssueID,
-		SessionID:     row.SessionID,
-		CreatedAt:     row.CreatedAt,
-		Provider:      row.Provider,
-		HostID:        row.HostID,
-		HostSessionID: row.HostSessionID,
-		DisplayName:   row.DisplayName,
-		URL:           row.Url,
-		DaemonID:      row.DaemonID,
-		AgentArchived: row.AgentArchived,
-		OwnerIsMember: row.OwnerIsMember,
+		BindingID:      row.BindingID,
+		AgentID:        row.AgentID,
+		IssueID:        row.IssueID,
+		SessionID:      row.SessionID,
+		CreatedAt:      row.CreatedAt,
+		Provider:       row.Provider,
+		HostID:         row.HostID,
+		HostSessionID:  row.HostSessionID,
+		DisplayName:    row.DisplayName,
+		URL:            row.Url,
+		DaemonID:       row.DaemonID,
+		AgentArchived:  row.AgentArchived,
+		OwnerIsMember:  row.OwnerIsMember,
+		SessionRevoked: row.SessionRevoked,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"binding": binding})
 }
@@ -284,23 +335,24 @@ func (h *Handler) GetAgentSessionBinding(w http.ResponseWriter, r *http.Request)
 // sessionBindingView flattens the two generated row shapes that join a
 // binding to its frozen session, so the wire projection is written once.
 type sessionBindingView struct {
-	BindingID     pgtype.UUID
-	AgentID       pgtype.UUID
-	IssueID       pgtype.UUID
-	SessionID     pgtype.UUID
-	CreatedAt     pgtype.Timestamptz
-	Provider      string
-	HostID        string
-	HostSessionID string
-	DisplayName   string
-	URL           pgtype.Text
-	DaemonID      string
-	AgentArchived bool
-	OwnerIsMember bool
+	BindingID      pgtype.UUID
+	AgentID        pgtype.UUID
+	IssueID        pgtype.UUID
+	SessionID      pgtype.UUID
+	CreatedAt      pgtype.Timestamptz
+	Provider       string
+	HostID         string
+	HostSessionID  string
+	DisplayName    string
+	URL            pgtype.Text
+	DaemonID       string
+	AgentArchived  bool
+	OwnerIsMember  bool
+	SessionRevoked bool
 }
 
 func sessionBindingViewToResponse(view sessionBindingView) AgentSessionBindingViewResponse {
-	deliverable, reason := sessionAvailability(view.AgentArchived, view.OwnerIsMember)
+	deliverable, reason := sessionAvailability(view.AgentArchived, view.OwnerIsMember, view.SessionRevoked)
 	return AgentSessionBindingViewResponse{
 		ID:      uuidToString(view.BindingID),
 		AgentID: uuidToString(view.AgentID),

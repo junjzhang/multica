@@ -57,7 +57,45 @@ export interface ExternalSession {
 export interface AgentSessionSummary extends ExternalSession {
   id: string;
   deliverable: boolean;
+  /** Server-side reason when deliverable is false; "" while deliverable. */
   unavailable_reason?: string;
+}
+
+/**
+ * The host template an external session belongs to. One Agent row is the
+ * template; each registered host session is an address under it. Absent for
+ * legacy per-session external agents and for every managed agent.
+ */
+export interface ExternalAgentTemplate {
+  id: string;
+  provider: string;
+  host_id: string;
+  name: string;
+}
+
+/**
+ * One category of in-flight reference found by the external-agent archive
+ * preflight. Blocking entries must be resolved before archiving; a non-blocking
+ * pending notification is withdrawn by the archive itself.
+ */
+export interface AgentArchiveBlocker {
+  code: string;
+  blocking: boolean;
+  count: number;
+  sample_ids: string[];
+}
+
+export interface AgentArchivePreflight {
+  agent_id: string;
+  archivable: boolean;
+  blockers: AgentArchiveBlocker[];
+}
+
+/** One page of an agent's registered sessions, as the agents list reads them. */
+export interface AgentSessionPage {
+  sessions: AgentSessionSummary[];
+  /** Total registered sessions, or sessions.length when an older server omits it. */
+  total: number;
 }
 
 /** The frozen wire shape returned when an explicit binding is saved. */
@@ -378,6 +416,14 @@ export interface ResultNotification {
   error?: string;
 }
 
+export interface AcceptedReturn {
+  return_id: string;
+  recipient_agent_id: string;
+  kind: "external_session" | "managed_task";
+  source_task_id?: string;
+  external_session_id?: string;
+}
+
 export interface AgentTask {
   /** Owning issue labels supplied by subtree execution-history reads. */
   issue_identifier?: string;
@@ -412,6 +458,7 @@ export interface AgentTask {
   error: string | null;
   /** Undefined means unknown/unhydrated; [] means hydrated with no notifications. */
   result_notifications?: ResultNotification[];
+  accepted_returns?: AcceptedReturn[];
   // Empty string when the task is not in a failed state (the backend uses
   // `omitempty`, so the field may also be missing on non-failed tasks).
   // Open string on the wire, not a closed enum: the backend's classifier
@@ -647,6 +694,17 @@ export interface Agent {
   execution_kind?: AgentExecutionKind | string;
   /** Set only for an external agent; managed agents never carry one. */
   external_session?: ExternalSession | null;
+  /**
+   * The host template this external agent represents. Present only when the
+   * server grouped its sessions under a template (the template switch is on
+   * and this agent was registered as one). Absent keeps legacy rendering.
+   */
+  external_template?: ExternalAgentTemplate | null;
+  /**
+   * Registered session count for an external template. Undefined on older
+   * servers; treat it as "unknown", never as zero.
+   */
+  external_session_count?: number;
   name: string;
   description: string;
   /** What this agent's owner wrote. For a system agent this holds only the

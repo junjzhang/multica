@@ -11,6 +11,7 @@ const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 
 let queryFails = false;
 let mockAutoComplete: PRAutoComplete | null = null;
+let mockDescendants: unknown[] = [];
 vi.mock("@multica/core/github/queries", async () => {
   const actual = await vi.importActual<typeof import("@multica/core/github/queries")>(
     "@multica/core/github/queries",
@@ -21,7 +22,7 @@ vi.mock("@multica/core/github/queries", async () => {
       queryKey: ["github", "pull-requests", issueId],
       queryFn: async () => {
         if (queryFails) throw new Error("Offline");
-        return { pull_requests: [], auto_complete: mockAutoComplete };
+        return { pull_requests: [], descendant_pull_requests: mockDescendants, auto_complete: mockAutoComplete };
       },
       enabled: !!issueId,
     }),
@@ -73,12 +74,20 @@ const decision: PRAutoComplete = {
 
 describe("PullRequestsSection (MUL-7429)", () => {
   beforeEach(() => {
+    mockDescendants = [];
     queryFails = false;
     mockAutoComplete = decision;
     mockWorkspaceSettings = {};
     apiMock.linkIssuePullRequest.mockReset();
     apiMock.setIssuePRAutoComplete.mockReset();
     navigatePush.mockReset();
+  });
+
+  it("counts descendant PRs when the section is collapsed", async () => {
+    mockDescendants = [{ id: "pr-2" }];
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={qc}><I18nProvider resources={TEST_RESOURCES} locale="en"><PullRequestsSection issueId="issue-1" identifier="MUL-1" open={false} onOpenChange={() => {}} /></I18nProvider></QueryClientProvider>);
+    expect(await screen.findByText("1")).toBeInTheDocument();
   });
 
   it("keeps the empty title static and retains linking without redundant copy", async () => {

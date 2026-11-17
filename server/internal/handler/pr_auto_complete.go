@@ -306,8 +306,7 @@ func (h *Handler) maybeAutoCompleteIssue(ctx context.Context, workspaceID, issue
 		h.processChildEvents(ctx, updated.ParentIssueID)
 	}
 
-	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
-	resp := issueToResponse(updated, prefix)
+	resp := h.issueResponseForEvent(ctx, updated)
 	h.fillStatusCategory(ctx, updated.WorkspaceID, projectaccess.Hidden{}, &resp)
 	h.publish(protocol.EventIssueUpdated, uuidToString(workspaceID), "system", "", map[string]any{
 		"issue":          resp,

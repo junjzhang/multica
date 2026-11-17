@@ -55,6 +55,7 @@ import type {
 import { propertyListOptions } from "@multica/core/properties";
 import {
   effectiveNegatedFilters,
+  effectiveShowSubIssues,
   propertyIdFromViewKey,
 } from "@multica/core/issues/stores/view-store";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
@@ -271,7 +272,6 @@ export function useIssueSurfaceController({
   const agentRunningFilter = useViewStore((s) => s.agentRunningFilter);
   const agentIdleFilter = useViewStore((s) => s.agentIdleFilter);
   const unreadFilter = useViewStore((s) => s.unreadFilter);
-  const showSubIssues = useViewStore((s) => s.showSubIssues);
   const ganttShowCompleted = useViewStore((s) => s.ganttShowCompleted);
   const cardProperties = useViewStore((s) => s.cardProperties);
   const swimlaneGrouping = useViewStore((s) => s.swimlaneGrouping);
@@ -451,6 +451,7 @@ export function useIssueSurfaceController({
   const usesTable = effectiveViewMode === "table";
   const activeSearch = usesTable ? tableSearch : search;
   const debouncedActiveSearch = useDebouncedTableSearch(activeSearch);
+  const showSubIssues = useViewStore((s) => effectiveShowSubIssues(s, debouncedActiveSearch));
   const usesServerStatusSurface =
     effectiveViewMode === "list" ||
     (effectiveViewMode === "board" && effectiveGrouping === "status");

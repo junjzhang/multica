@@ -38,16 +38,15 @@ FOR UPDATE;
 SELECT * FROM agent
 WHERE id = $1 AND workspace_id = $2 AND kind = 'user';
 
--- name: LockAgentForAutopilotAssignment :one
--- Serializes creating, retargeting, or resuming an active Autopilot with
--- Runtime teardown. Teardown takes FOR UPDATE on this same Agent row before it
--- clears runtime_id and pauses matching Autopilots. FOR SHARE also stabilizes
--- runtime_id and archived_at against concurrent ordinary Agent updates. The
--- shared lock makes the
--- two outcomes exhaustive:
---   * assignment commits first, then teardown sees and pauses it; or
---   * teardown commits first, then assignment re-reads runtime_id=NULL and
---     rejects the active Autopilot.
+-- name: LockAgentForSharedWrite :one
+-- The shared lock every write that stores an Agent reference or route takes:
+-- assignment and Autopilot creation, contract basis, task leadership, issue
+-- coordinator and squad membership. Archive holds FOR UPDATE on the same row,
+-- so a reference either commits before the archive's final scan or reads
+-- archived_at and is refused. Teardown takes the same row FOR UPDATE before it
+-- clears runtime_id, which makes assignment-versus-teardown exhaustive:
+--   * assignment commits first, then teardown sees it; or
+--   * teardown commits first, then the assignment re-reads runtime_id=NULL.
 SELECT * FROM agent
 WHERE id = $1 AND workspace_id = $2 AND kind = 'user'
 FOR SHARE;
@@ -456,13 +455,20 @@ WHERE id = @id
 -- Quick-create tasks have no issue / chat / autopilot link; the entire job
 -- description (prompt, requester, workspace) lives in context JSONB. The
 -- daemon detects this variant via context.type == "quick_create".
--- The requester who opened the quick-create modal is a direct_human originator
--- and accountable; attribution provenance is stamped so this path is not a
--- NULL-source enqueue bypass (MUL-4302 §2).
+-- Current invocation provenance is explicit. A managed source is locked after
+-- workspace ownership and must remain live with the same authorization principal.
+WITH owner_fence AS MATERIALIZED (
+    SELECT lock_task_owner_rows($1, NULL, $2) AS allowed
+), invocation_source AS MATERIALIZED (
+    SELECT task.id, task.status, task.originator_user_id
+    FROM agent_task_queue task CROSS JOIN owner_fence
+    WHERE owner_fence.allowed AND task.id = sqlc.narg(delegated_from_task_id)::uuid
+    FOR SHARE OF task
+)
 INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, status, priority, context, originator_user_id,
     accountable_user_id, runtime_mcp_overlay, runtime_connected_apps,
-    originator_source, trigger_evidence_kind, trigger_evidence_ref_id,
+    originator_source, trigger_evidence_kind, trigger_evidence_ref_id, delegated_from_task_id,
     id
 )
 SELECT
@@ -474,8 +480,15 @@ SELECT
     sqlc.narg(originator_source),
     sqlc.narg(trigger_evidence_kind),
     sqlc.narg(trigger_evidence_ref_id),
+    sqlc.narg(delegated_from_task_id),
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid())
-WHERE lock_task_owner_rows($1, NULL, $2)
+FROM owner_fence
+WHERE owner_fence.allowed
+  AND (sqlc.narg(delegated_from_task_id)::uuid IS NULL OR EXISTS (
+      SELECT 1 FROM invocation_source
+      WHERE status NOT IN ('completed', 'failed', 'cancelled')
+        AND originator_user_id IS NOT DISTINCT FROM sqlc.narg(originator_user_id)::uuid
+  ))
 RETURNING *;
 
 -- name: LinkTaskToIssue :exec
@@ -819,6 +832,8 @@ WHERE id = (
     WHERE atq.agent_id = @agent_id
       AND atq.runtime_id = @runtime_id
       AND atq.status = 'queued'
+      AND (atq.leadership_root_issue_id IS NULL OR EXISTS (SELECT 1 FROM issue r WHERE r.id=atq.leadership_root_issue_id AND r.leadership_revision=atq.leadership_revision AND r.leader_agent_id=atq.agent_id))
+      AND NOT EXISTS (SELECT 1 FROM agent_task_delegation_return l JOIN agent_mailbox_message m ON m.id = l.notification_delivery_id WHERE l.notification_task_id = atq.id AND m.processing_status = 'handled')
       AND (atq.context->>'wakeup_id' IS NULL OR EXISTS (SELECT 1 FROM issue_wakeup w WHERE w.id=(atq.context->>'wakeup_id')::uuid AND w.disabled_at IS NULL AND w.revision=(atq.context->>'wakeup_revision')::bigint))
       AND EXISTS (
           SELECT 1
@@ -1322,7 +1337,7 @@ UPDATE agent_task_queue
 SET status = 'failed', completed_at = now(), error = 'task timed out',
     failure_reason = 'timeout',
     prepare_lease_expires_at = NULL
-WHERE (
+WHERE ((
     status = 'dispatched'
     AND dispatched_at < now() - make_interval(secs => @dispatch_timeout_secs::double precision)
     AND (prepare_lease_expires_at IS NULL OR prepare_lease_expires_at < now())
@@ -1359,7 +1374,9 @@ WHERE (
               now() - make_interval(secs => @runtime_reconnect_grace_secs::double precision)
       )
     )
-  )
+  ))
+  AND NOT COALESCE(context->'background_wait'->'address'->>'task_id'=id::text
+      AND context->'background_wait'->>'consumed' IS DISTINCT FROM 'true',false)
 RETURNING *;
 
 -- name: ExpireStaleQueuedTasks :many

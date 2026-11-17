@@ -121,6 +121,15 @@ describe("useRealtimeSync — ws instance change", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
   });
 
+  it.each(["agent:archived", "agent:restored"])("refreshes contract authority after %s", (type) => {
+    const ws = createMockWs();
+    renderHook(() => useRealtimeSync(ws, stores), { wrapper: createWrapper(qc) });
+    const onAny = vi.mocked(ws.onAny).mock.calls[0]![0];
+    onAny({ type, payload: {} } as never);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: [...issueKeys.all("ws-1"), "contract"] });
+    expect(invalidateSpy).not.toHaveBeenCalledWith({ queryKey: [...issueKeys.all("ws-2"), "contract"] });
+  });
+
   it("does not invalidate when ws goes from instance to null", () => {
     const ws1 = createMockWs();
     const { rerender } = renderHook(

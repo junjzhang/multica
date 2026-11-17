@@ -89,6 +89,26 @@ func externalTokenFixture(t *testing.T, agentID, ownerID string, expiresAt time.
 	return raw
 }
 
+// externalSessionTokenFixture mints a credential bound to one registered
+// session, which is what the plugin now receives. Legacy unbound credentials
+// stay available through externalTokenFixture for their own regression tests.
+func externalSessionTokenFixture(t *testing.T, agentID, sessionID, ownerID string, expiresAt time.Time) string {
+	t.Helper()
+	raw, err := auth.GenerateExternalAgentToken()
+	if err != nil {
+		t.Fatalf("generate external token: %v", err)
+	}
+	dbfx.Insert(t, "external_agent_token", testutil.Cols{
+		"agent_id":            agentID,
+		"workspace_id":        testWorkspaceID,
+		"owner_user_id":       ownerID,
+		"token_hash":          auth.HashToken(raw),
+		"expires_at":          expiresAt,
+		"external_session_id": sessionID,
+	})
+	return raw
+}
+
 // serveExternalAuth runs one request through the real Auth middleware and
 // returns the response plus the headers the authenticated request carried.
 func serveExternalAuth(t *testing.T, raw string, mutate func(*http.Request)) (*httptest.ResponseRecorder, http.Header) {
@@ -209,6 +229,8 @@ func TestExternalAgentsAreDistinctAuthors(t *testing.T) {
 		r := newRequest(http.MethodPost, "/api/issues/"+issueID+"/comments", map[string]any{"content": content})
 		r.Header.Set("X-Actor-Source", "external_agent")
 		r.Header.Set("X-Agent-ID", agentID)
+		r.Header.Set(ActorSessionHeader, oldestExternalSessionID(t, agentID))
+		r.Header.Set(ActorSessionHeader, oldestExternalSessionID(t, agentID))
 		r = withURLParam(r, "id", issueID)
 		testHandler.CreateComment(w, r)
 		if w.Code != http.StatusCreated {

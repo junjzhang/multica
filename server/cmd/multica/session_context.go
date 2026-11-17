@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -35,10 +37,11 @@ const (
 	externalSessionVersion     = 1
 	externalSessionProvider    = "paseo"
 	externalSessionTokenPrefix = "mea_"
-	externalSessionConnectHint = "run `/multica connect` in the Paseo session to connect it"
+	externalSessionConnectHint = "run `multica session connect` in the Paseo session (or `/multica connect` in the composer)"
 )
 
 var (
+	sessionSecretPattern = regexp.MustCompile(`(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 	// errExternalSessionFileMissing lets session status report `disconnected`
 	// for a default path that was never written (or was removed by
 	// `/multica disconnect`) instead of calling that file invalid. Commands
@@ -49,6 +52,16 @@ var (
 	// Visibility of that agent says nothing about who the token belongs to.
 	errExternalSessionActorMismatch = errors.New("the session credential does not belong to the agent named in the binding")
 )
+
+func safeSessionDiagnostic(message string) string {
+	message = strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, message)
+	return sessionSecretPattern.ReplaceAllString(message, "[redacted]")
+}
 
 // verifyExternalSessionActor proves the credential's own identity before a
 // business command runs. GET /api/agents/{id}/mailbox is the existing
@@ -112,11 +125,16 @@ func externalSessionFilePath() (path string, explicit, present bool, err error) 
 	if !externalSessionIDCLIPattern.MatchString(agentID) {
 		return "", false, false, fmt.Errorf("%s %q is not a usable Paseo agent id", paseoAgentIDEnv, agentID)
 	}
+	path, err = defaultExternalSessionFilePath(agentID)
+	return path, false, true, err
+}
+
+func defaultExternalSessionFilePath(agentID string) (string, error) {
 	dir, err := cli.ProfileDir("")
 	if err != nil {
-		return "", false, false, fmt.Errorf("resolve external session directory: %w", err)
+		return "", fmt.Errorf("resolve external session directory: %w", err)
 	}
-	return filepath.Join(dir, "external-sessions", externalSessionProvider, agentID+".json"), false, true, nil
+	return filepath.Join(dir, "external-sessions", externalSessionProvider, agentID+".json"), nil
 }
 
 // readExternalSessionContext loads and validates the binding for this process.

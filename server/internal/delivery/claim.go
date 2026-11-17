@@ -221,6 +221,9 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		return nil, fmt.Errorf("delivery: begin claim: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
+		return nil, err
+	}
 	qtx := q.q.WithTx(tx)
 
 	candidates, err := qtx.ListClaimableDeliveryIDs(ctx, db.ListClaimableDeliveryIDsParams{
@@ -243,6 +246,22 @@ func (q *Queue) Claim(ctx context.Context, req ClaimRequest) ([]Claim, error) {
 		if !locked {
 			// Another claim transaction is already leasing this session.
 			continue
+		}
+		message, err := qtx.GetAgentMailboxMessage(ctx, db.GetAgentMailboxMessageParams{ID: candidate.ID, WorkspaceID: workspaceID})
+		if err != nil {
+			return nil, err
+		}
+		if message.DeliveryStatus == "pending" && message.LeadershipRootIssueID.Valid {
+			root, err := qtx.LockBoundLeadershipRoot(ctx, db.LockBoundLeadershipRootParams{ID: message.LeadershipRootIssueID, WorkspaceID: workspaceID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("delivery: lock task leadership: %w", err)
+			}
+			if root.LeadershipRevision != message.LeadershipRevision.Int64 || root.LeaderExternalSessionID != message.TargetSessionID {
+				continue
+			}
 		}
 		// The candidate list carried no status on purpose. Read the row under
 		// the same lock the lease takes: another worker may have leased and sent
@@ -373,7 +392,13 @@ func (q *Queue) RecordOutcome(ctx context.Context, req OutcomeRequest) (Delivery
 			retryClass = string(RetryUnavailable)
 		}
 	}
-	row, err := q.q.RecordDeliveryOutcome(ctx, db.RecordDeliveryOutcomeParams{
+	tx, err := q.tx.Begin(ctx)
+	if err != nil {
+		return Delivery{}, fmt.Errorf("delivery: begin outcome: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := q.q.WithTx(tx)
+	row, err := qtx.RecordDeliveryOutcome(ctx, db.RecordDeliveryOutcomeParams{
 		ID:             deliveryID,
 		WorkspaceID:    workspaceID,
 		Status:         req.storedStatus(),
@@ -388,6 +413,16 @@ func (q *Queue) RecordOutcome(ctx context.Context, req OutcomeRequest) (Delivery
 	}
 	if err != nil {
 		return Delivery{}, fmt.Errorf("delivery: record outcome: %w", err)
+	}
+	if req.State == OutcomeDelivered || (req.State == OutcomeRetry && req.RetryClass == RetryBusy) {
+		if err := qtx.WakeOfflineDeliveriesForHost(ctx, db.WakeOfflineDeliveriesForHostParams{
+			TargetSessionID: row.TargetSessionID, WorkspaceID: workspaceID, DaemonID: req.DaemonID, DeliveryID: deliveryID,
+		}); err != nil {
+			return Delivery{}, fmt.Errorf("delivery: wake offline host deliveries: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Delivery{}, fmt.Errorf("delivery: commit outcome: %w", err)
 	}
 	return deliveryFromRow(row), nil
 }

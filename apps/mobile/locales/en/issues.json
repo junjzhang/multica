@@ -186,7 +186,9 @@
     "search_members_agents": "Search members or agents",
     "search_people_issues": "Search people or issues",
     "reference_issue": "Reference an issue",
-    "clear": "Clear"
+    "clear": "Clear",
+    "external_read_only": "External — read-only here",
+    "external_session_unknown": "Session unknown"
   },
   "comments": {
     "reply": "Reply",
@@ -206,6 +208,8 @@
     "composer_pill": "Add a comment, type @ to mention..."
   },
   "suggestions": {
+    "delegate": "Delegate",
+    "notify": "Notify",
     "everyone": "Everyone",
     "all": "All",
     "member": "Member",

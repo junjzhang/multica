@@ -40,6 +40,25 @@ Squad-routed work runs through the squad's `leader_id` agent. Consequences:
 - squad members are not automatically fanned out;
 - squad `instructions` are leader briefing content, not member prompts.
 
+## Parent contracts
+
+A squad-assigned issue may have a Contract. Keep its executor as the squad;
+`executor_representative` identifies the current active leader who can submit
+using its own authenticated Agent identity. The specified upstream coordinator
+accepts or returns the overall delivery. Squad membership alone grants no
+contract authority. Maintenance follows the existing workspace-member or verified
+original-requester rules, excluding current and versioned representatives.
+A representative cannot accept its own squad's delivery.
+
+Read the current version and capabilities with `multica issue contract get`.
+Leader changes invalidate the basis: an authorized requester must revise before
+the new leader submits. Old versions, real submission authors, evidence and
+accepted return destinations stay unchanged. Archived squads/leaders and leaders
+without squad membership cannot represent the squad. Concurrent representative
+changes may return 409; reload before retrying. Member subcontracts still require
+their own acceptance; parent acceptance cannot bypass them. Run completion,
+`child_done` and Mailbox handled are not acceptance.
+
 ## CLI
 
 Squad commands:

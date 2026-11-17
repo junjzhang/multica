@@ -105,6 +105,8 @@
     "group_users": "Usuarios",
     "group_issues": "Tareas",
     "all_members": "Todos los miembros",
+    "delegate_badge": "Delegar",
+    "notify_badge": "Notificar",
     "agent_badge": "Agente",
     "squad_badge": "Squad",
     "searching": "Buscando...",

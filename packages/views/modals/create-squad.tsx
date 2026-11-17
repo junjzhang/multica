@@ -13,6 +13,7 @@ import {
   workspaceKeys,
 } from "@multica/core/workspace/queries";
 import { AGENT_DESCRIPTION_MAX_LENGTH } from "@multica/core/agents";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { isImeComposing } from "@multica/core/utils";
 import type { Agent, MemberWithUser } from "@multica/core/types";
 import {
@@ -65,9 +66,21 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: wsMembers = [] } = useQuery(memberListOptions(wsId));
 
+  // External templates have no runtime but are still valid squad members;
+  // only the default-leader candidate list excludes them.
   const activeAgents = useMemo(
-    () => agents.filter((a: Agent) => !a.archived_at && a.runtime_id),
+    () =>
+      agents.filter(
+        (a: Agent) =>
+          !a.archived_at && (!!a.runtime_id || agentExecutionKind(a) === "external"),
+      ),
     [agents],
+  );
+  // The default leader must be a managed agent; external templates may still
+  // join as members, so only the leader picker is narrowed.
+  const leaderCandidates = useMemo(
+    () => activeAgents.filter((a) => agentExecutionKind(a) === "managed"),
+    [activeAgents],
   );
 
   const [name, setName] = useState("");
@@ -203,7 +216,7 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
             </div>
 
             <LeaderPicker
-              agents={activeAgents}
+              agents={leaderCandidates}
               currentUserId={currentUserId}
               value={leaderId}
               onChange={handleLeaderChange}

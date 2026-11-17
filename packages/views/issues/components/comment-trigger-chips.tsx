@@ -66,6 +66,8 @@ function sourceLabel(source: string, t: IssuesT): string {
       return t(($) => $.comment.trigger_source_issue_assignee);
     case "mention_agent":
       return t(($) => $.comment.trigger_source_mention_agent);
+    case "mention_notify":
+      return t(($) => $.comment.trigger_source_mention_notify);
     case "mention_squad_leader":
       return t(($) => $.comment.trigger_source_mention_squad_leader);
     default:

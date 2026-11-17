@@ -1,7 +1,17 @@
+import type { BoardData, BoardScope } from "../shared/board";
 import type { StatusView } from "../shared/contracts";
-import { describeError } from "../shared/redaction";
+import { parseForgeUsernames } from "../shared/settings";
+import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
-import { createMulticaApi, type ApiCredential, type MulticaApi, type RegisterExternalAgentInput } from "./api";
+import {
+  createMulticaApi,
+  MulticaApiError,
+  type ApiCredential,
+  type MulticaApi,
+  type ExternalAgentRegistration,
+  type RegisterExternalAgentInput,
+} from "./api";
+import { loadBoard } from "./board";
 import { resolveHostSession, type HostSession, type PaseoHostAdapter } from "./host";
 import { ConfigurationError, loadOwnerProfile, type OwnerProfile } from "./owner-profile";
 import {
@@ -14,6 +24,7 @@ import {
 export interface ConnectionConfig {
   ownerProfile: string;
   daemonId: string;
+  forgeUsernames?: string;
 }
 
 export interface SessionStore {
@@ -36,10 +47,15 @@ export interface SessionService {
   connect(agentId: string): Promise<StatusView>;
   status(agentId: string): Promise<StatusView>;
   disconnect(agentId: string): Promise<StatusView>;
+  board(agentId: string, scope: BoardScope, refresh?: boolean): Promise<BoardData>;
 }
 
 const DEFAULT_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const CONNECT_HINT = "Run multica session connect (or /multica connect in the composer)";
 const locks = new Map<string, Promise<unknown>>();
+/** The pill and the panel read the same board; a short cache keeps them from doubling the fan-out. */
+const BOARD_CACHE_MS = 15_000;
+const boards = new Map<string, { at: number; value: Promise<BoardData> }>();
 
 /**
  * Serializes connect/status/disconnect per session. Concurrent explicit
@@ -68,7 +84,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
   const now = deps.now ?? (() => new Date());
   const tokenTtlMs = deps.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
 
-  async function readConfig(): Promise<Required<ConnectionConfig>> {
+  async function readConfig(): Promise<Pick<ConnectionConfig, "ownerProfile" | "daemonId">> {
     const raw = await deps.readSettings();
     const ownerProfile = raw.ownerProfile.trim();
     const daemonId = raw.daemonId.trim();
@@ -162,7 +178,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         const conflict = conflictFor(existing.context, host, owner, config.daemonId);
         if (conflict) {
           throw new ConfigurationError(
-            `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it, then connect again.`,
+            `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it. ${CONNECT_HINT}.`,
           );
         }
         if (!isExpired(existing.context, now())) {
@@ -182,7 +198,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         );
       }
 
-      const registration = await api.registerExternalAgent(ownerCredential(owner), registrationFor(host, config.daemonId));
+      const registration = await registerSession(api, ownerCredential(owner), host, config.daemonId);
       if (existing.status === "ok" && existing.context.agent_id !== registration.id) {
         throw new ConfigurationError(
           "Multica returned a different agent identity for this session. Refusing to overwrite the existing binding.",
@@ -192,6 +208,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       const issued = await api.createExternalAgentToken(
         ownerCredential(owner),
         registration.id,
+        registration.sessionId,
         new Date(now().getTime() + tokenTtlMs).toISOString(),
       );
       const context: SessionContext = {
@@ -226,7 +243,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         throw new ConfigurationError(
           `The Multica session binding could not be saved (${describeError(
             error,
-          )}). The newly issued credential was revoked; run /multica connect again.`,
+          )}). The newly issued credential was revoked; ${CONNECT_HINT}.`,
         );
       }
       return viewFor(context, "connected");
@@ -248,7 +265,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       if (existing.status === "missing") {
         return hostError
           ? disconnectedView(hostError)
-          : disconnectedView("This Paseo session has no Multica binding. Run /multica connect.");
+          : disconnectedView(`This Paseo session has no Multica binding. ${CONNECT_HINT}.`);
       }
       if (existing.status === "invalid") {
         return invalidView(hostError ? `${existing.reason} ${hostError}` : existing.reason);
@@ -261,7 +278,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         const config = await readConfig();
         const owner = await loadOwnerProfile(deps.home, config.ownerProfile);
         const conflict = conflictFor(context, host, owner, config.daemonId);
-        if (conflict) return viewFor(context, "invalid", `${conflict} Run /multica connect after fixing the configuration.`);
+        if (conflict) return viewFor(context, "invalid", `${conflict} ${CONNECT_HINT} after fixing the configuration.`);
       } catch (error) {
         return viewFor(context, "invalid", describeError(error));
       }
@@ -269,7 +286,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         return viewFor(
           context,
           "invalid",
-          `The Multica credential expired at ${context.expires_at}. Run /multica connect to repair it.`,
+          `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`,
         );
       }
       try {
@@ -278,7 +295,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
           return viewFor(
             context,
             "invalid",
-            "Multica no longer accepts this session's credential (it was revoked, expired, or its external agent is gone). Run /multica connect to repair it.",
+            `Multica no longer accepts this session's credential (it was revoked, expired, or its external agent is gone). ${CONNECT_HINT} to repair it.`,
           );
         }
       } catch (error) {
@@ -345,20 +362,138 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     });
   }
 
-  return { connect, status, disconnect };
+  /**
+   * Reads the session's board. A missing or unusable binding degrades to an
+   * explanatory view instead of an RPC error: the pill and panel are a
+   * convenience surface and must never break the composer.
+   */
+  async function readBoard(agentId: string, scope: BoardScope): Promise<BoardData> {
+    const existing = await store.read(deps.home, agentId);
+    const checkedAt = now().toISOString();
+    if (existing.status === "missing") {
+      return { state: "disconnected", reason: `This Paseo session has no Multica binding. ${CONNECT_HINT}.`, checkedAt };
+    }
+    if (existing.status === "invalid") return { state: "disconnected", reason: existing.reason, checkedAt };
+    const context = existing.context;
+    if (isExpired(context, now())) {
+      return { state: "unavailable", reason: `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`, checkedAt };
+    }
+    const credential = contextCredential(context);
+    let sessionTasks: Awaited<ReturnType<MulticaApi["listSessionTasks"]>>;
+    try {
+      sessionTasks = await api.listSessionTasks(credential, context.agent_id);
+    } catch (error) {
+      return { state: "unavailable", reason: unavailableReason(error), checkedAt };
+    }
+    try {
+      const settings = await deps.readSettings();
+      return await loadBoard(api, {
+        scope,
+        credential,
+        appUrl: context.app_url,
+        agentId: context.agent_id,
+        sessionTasks,
+        forgeUsernames: parseForgeUsernames(settings.forgeUsernames ?? ""),
+        checkedAt,
+      });
+    } catch (error) {
+      return { state: "unavailable", reason: `Could not read this session's Multica tasks: ${describeError(error)}.`, checkedAt };
+    }
+  }
+
+  /** A binding change must not leave the pill or panel on the previous credential's board. */
+  function forgetBoards(agentId: string): void {
+    for (const key of boards.keys()) {
+      const [home, cached] = JSON.parse(key) as [string, string];
+      if (home === deps.home && cached === agentId) boards.delete(key);
+    }
+  }
+
+  return {
+    async connect(agentId) {
+      try {
+        return await connect(agentId);
+      } catch (error) {
+        // The CLI may expose only marked, redacted plugin-authored diagnostics.
+        throw new ConfigurationError(`${SESSION_CONNECT_ERROR_PREFIX}${describeError(error)}`);
+      } finally {
+        forgetBoards(agentId);
+      }
+    },
+    status,
+    async disconnect(agentId) {
+      try {
+        return await disconnect(agentId);
+      } finally {
+        forgetBoards(agentId);
+      }
+    },
+    async board(agentId, scope, refresh = false) {
+      if (!isLocator(agentId)) throw new ConfigurationError("The current Paseo session id is invalid.");
+      const key = JSON.stringify([deps.home, agentId, scope]);
+      const cached = boards.get(key);
+      if (!refresh && cached && now().getTime() - cached.at < BOARD_CACHE_MS) return cached.value;
+      const value = readBoard(agentId, scope);
+      boards.set(key, { at: now().getTime(), value });
+      return value;
+    },
+  };
+}
+
+function unavailableReason(error: unknown): string {
+  if (error instanceof MulticaApiError) {
+    if (error.status === 403) {
+      return "This Multica agent has no registered session, so it has no session task summary. Reconnect this session to issue a session credential.";
+    }
+    if (error.status === 404) return "This Multica server does not expose session task summaries yet. Update the server to use the task panel.";
+    if (error.status === 401) return `Multica no longer accepts this session's credential. ${CONNECT_HINT} to repair it.`;
+  }
+  return `Could not read this session's Multica tasks: ${describeError(error)}.`;
 }
 
 function registrationFor(host: HostSession, daemonId: string): RegisterExternalAgentInput {
   const displayName = truncate(host.title?.trim() || host.sessionId, 200);
+  // name stays the per-session name: a legacy server (or a server with
+  // template writes still closed) ignores template/template_name and would
+  // otherwise collide on the second session of one host.
   const name = truncate(`${host.hostLabel || "Paseo"} · ${displayName}`, 120);
+  const templateName = truncate(`Paseo · ${host.hostLabel || host.hostId}`, 120);
   return {
     name,
+    templateName,
     hostId: host.hostId,
     sessionId: host.sessionId,
     displayName,
     url: returnAddress({ host_id: host.hostId, session_id: host.sessionId }),
     daemonId,
+    template: true,
   };
+}
+
+/**
+ * Registers the session under its host template, falling back to the legacy
+ * one-agent-per-session registration while the server has not opened template
+ * writes. Only the explicit "not enabled" rejection triggers the fallback: any
+ * other failure is reported instead of being retried against a different
+ * identity shape.
+ */
+async function registerSession(
+  api: MulticaApi,
+  credential: ApiCredential,
+  host: HostSession,
+  daemonId: string,
+): Promise<ExternalAgentRegistration> {
+  const input = registrationFor(host, daemonId);
+  try {
+    return await api.registerExternalAgent(credential, input);
+  } catch (error) {
+    // The server tags this rejection with a stable code; prose is not a
+    // contract. Only this documented rollout gate falls back to legacy.
+    if (error instanceof MulticaApiError && error.code === "external_agent_templates_disabled") {
+      return api.registerExternalAgent(credential, { ...input, template: false, templateName: undefined });
+    }
+    throw error;
+  }
 }
 
 function truncate(value: string, max: number): string {

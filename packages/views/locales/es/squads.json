@@ -75,6 +75,7 @@
     "created_by": "Creado por",
     "created": "Creado",
     "updated": "Actualizado",
+    "default_leader_migration": "El líder predeterminado debe ser un agente gestionado; elige uno antes de delegar de nuevo.",
     "visibility": "Visibilidad",
     "visibility_workspace": "Espacio de trabajo"
   },

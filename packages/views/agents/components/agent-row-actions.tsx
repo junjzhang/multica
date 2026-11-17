@@ -10,11 +10,12 @@ import {
   Square,
   Trash2,
 } from "@multica/ui/icons";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { Agent } from "@multica/core/types";
 import type { AgentPresenceDetail } from "@multica/core/agents";
-import { api } from "@multica/core/api";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
+import { api, ApiError } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { workspaceKeys } from "@multica/core/workspace/queries";
@@ -34,6 +35,7 @@ import {
 } from "@multica/ui/components/ui/dropdown-menu";
 import { useT } from "../../i18n";
 import { AppLink, useIntentNavigate } from "../../navigation";
+import { cn } from "@multica/ui/lib/utils";
 import { CollectionRowMenu } from "../../layout/collection-list";
 
 interface AgentRowActionsProps {
@@ -79,6 +81,23 @@ export function AgentRowActions({
   const [confirmCancel, setConfirmCancel] = useState(false);
 
   const isArchived = !!agent.archived_at;
+  const isExternalAgent = agentExecutionKind(agent) === "external";
+  // The archive preview is external-agent-only. A server that predates the
+  // endpoint (404/405) keeps the old confirm flow; any other failure fails
+  // closed, because the server would re-check and refuse anyway.
+  const preflight = useQuery({
+    queryKey: ["agents", wsId, agent.id, "archive-preflight"],
+    queryFn: () => api.getAgentArchivePreflight(agent.id),
+    enabled: confirmArchive && isExternalAgent,
+    retry: false,
+  });
+  const preflightUnsupported =
+    preflight.error instanceof ApiError &&
+    (preflight.error.status === 404 || preflight.error.status === 405);
+  const archiveBlocked =
+    isExternalAgent &&
+    !preflightUnsupported &&
+    (preflight.isPending || preflight.isError || !preflight.data?.archivable);
   const runningCount = presence?.runningCount ?? 0;
   const queuedCount = presence?.queuedCount ?? 0;
   const hasActiveWork = runningCount + queuedCount > 0;
@@ -259,6 +278,50 @@ export function AgentRowActions({
                   <AlertDialogDescription>
                     {t(($) => $.row_actions.archive_dialog_description)}
                   </AlertDialogDescription>
+                  {isExternalAgent && (
+                    <div className="mt-3 space-y-1.5 border-t pt-3">
+                      <p className="text-caption font-medium">
+                        {t(($) => $.row_actions.archive_preflight_title)}
+                      </p>
+                      {preflight.isPending ? (
+                        <p className="text-micro text-muted-foreground">
+                          {t(($) => $.row_actions.archive_preflight_loading)}
+                        </p>
+                      ) : preflight.isError && !preflightUnsupported ? (
+                        <p role="alert" className="text-micro text-destructive">
+                          {t(($) => $.row_actions.archive_preflight_error)}
+                        </p>
+                      ) : preflight.data && preflight.data.blockers.length > 0 ? (
+                        <ul className="space-y-1">
+                          {preflight.data.blockers.map((blocker) => (
+                            <li
+                              key={blocker.code}
+                              className={cn(
+                                "flex items-center gap-2 text-micro",
+                                blocker.blocking
+                                  ? "text-destructive"
+                                  : "text-muted-foreground",
+                              )}
+                            >
+                              <span className="min-w-0 truncate">
+                                {archiveBlockerLabel(blocker.code, t)}
+                              </span>
+                              <span className="ml-auto tabular-nums">{blocker.count}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : !archiveBlocked ? (
+                        <p className="text-micro text-muted-foreground">
+                          {t(($) => $.row_actions.archive_preflight_clear)}
+                        </p>
+                      ) : null}
+                      {archiveBlocked && !preflight.isPending && (
+                        <p className="text-micro text-destructive">
+                          {t(($) => $.row_actions.archive_preflight_blocked)}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </AlertDialogHeader>
@@ -266,6 +329,7 @@ export function AgentRowActions({
               <AlertDialogCancel>{t(($) => $.row_actions.archive_dialog_cancel)}</AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
+                disabled={archiveBlocked}
                 onClick={() => {
                   setConfirmArchive(false);
                   void handleArchive();
@@ -282,6 +346,36 @@ export function AgentRowActions({
 }
 
 type AgentsT = ReturnType<typeof useT<"agents">>["t"];
+
+/** Localize one archive-preflight blocker code; unknown codes stay visible. */
+export function archiveBlockerLabel(code: string, t: AgentsT): string {
+  switch (code) {
+    case "in_flight_tasks":
+      return t(($) => $.row_actions.blocker_in_flight_tasks);
+    case "active_waits":
+      return t(($) => $.row_actions.blocker_active_waits);
+    case "unaccepted_contracts":
+      return t(($) => $.row_actions.blocker_unaccepted_contracts);
+    case "unverified_messages":
+      return t(($) => $.row_actions.blocker_unverified_messages);
+    case "current_returns":
+      return t(($) => $.row_actions.blocker_current_returns);
+    case "assigned_issues":
+      return t(($) => $.row_actions.blocker_assigned_issues);
+    case "task_leaderships":
+      return t(($) => $.row_actions.blocker_task_leaderships);
+    case "coordinated_issues":
+      return t(($) => $.row_actions.blocker_coordinated_issues);
+    case "squad_default_leader":
+      return t(($) => $.row_actions.blocker_squad_default_leader);
+    case "squad_memberships":
+      return t(($) => $.row_actions.blocker_squad_memberships);
+    case "pending_messages":
+      return t(($) => $.row_actions.blocker_pending_messages);
+    default:
+      return t(($) => $.row_actions.blocker_unknown, { code });
+  }
+}
 
 export function describeCancelImpact(running: number, queued: number, t: AgentsT): string {
   if (running === 0 && queued === 0) {

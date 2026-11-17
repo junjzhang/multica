@@ -608,6 +608,39 @@ describe("onIssueUpdated — source deletion detaches sub-issues", () => {
   });
 });
 
+describe("onIssueUpdated — a subtask patch keeps the chain's projected leader", () => {
+  it("keeps the root leader and root revision carried on the subtask event", () => {
+    const qc = new QueryClient();
+    const child: Issue = {
+      ...baseIssue,
+      id: "child-1",
+      revision: 4,
+      parent_issue_id: "root-1",
+      leadership_root_issue_id: "root-1",
+      leadership_squad_id: "squad-1",
+      leader_agent_id: "agent-leader",
+      leader_external_session_id: "session-1",
+      leadership_revision: 3,
+      leadership_root_revision: 7,
+    };
+    const detailKey = issueKeys.detail(WS_ID, "child-1");
+    qc.setQueryData<Issue>(detailKey, child);
+
+    // The server now projects a subtask's issue:updated payload from the
+    // chain root. The patch must keep that leader and the ROOT's revision —
+    // an unprojected row would overwrite the root revision with the child's
+    // own revision and blank the leader.
+    onIssueUpdated(qc, WS_ID, { ...child, title: "Child renamed", revision: 5 });
+
+    expect(qc.getQueryData<Issue>(detailKey)).toMatchObject({
+      title: "Child renamed",
+      leader_agent_id: "agent-leader",
+      leader_external_session_id: "session-1",
+      leadership_root_revision: 7,
+    });
+  });
+});
+
 describe("onIssueUpdated — position move is surgical, not a list refetch", () => {
   let qc: QueryClient;
 

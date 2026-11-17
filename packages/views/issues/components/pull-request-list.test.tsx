@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
@@ -16,7 +16,7 @@ vi.mock("@multica/core/github/queries", async () => {
     ...actual,
     issuePullRequestsOptions: (issueId: string) => ({
       queryKey: ["github", "pull-requests", issueId],
-      queryFn: async () => ({ pull_requests: mockPRs, auto_complete: mockAutoComplete }),
+      queryFn: async () => ({ pull_requests: mockPRs, descendant_pull_requests: mockDescendants, auto_complete: mockAutoComplete }),
       enabled: !!issueId,
     }),
   };
@@ -48,6 +48,7 @@ vi.mock("../../navigation", () => ({
 import { PullRequestList } from "./pull-request-list";
 
 let mockPRs: GitHubPullRequest[] = [];
+let mockDescendants: (GitHubPullRequest & { source_issue_id: string; source_identifier: string })[] = [];
 let mockAutoComplete: PRAutoComplete | null = null;
 
 function makePR(overrides: Partial<GitHubPullRequest> = {}): GitHubPullRequest {
@@ -100,6 +101,21 @@ function renderList() {
 async function waitForRender() {
   return screen.findAllByRole("link");
 }
+
+afterEach(() => { mockDescendants = []; mockAutoComplete = null; });
+
+it("labels descendant PRs and does not offer parent unlink actions", async () => {
+  mockPRs = [makePR()];
+  mockDescendants = [{ ...makePR({ id: "child-pr", number: 2, title: "Child fix" }), source_issue_id: "child", source_identifier: "MUL-2" }];
+  mockAutoComplete = { state: "waiting", pull_request_ids: ["pr-1"], issue_disabled: false, workspace_enabled: true };
+  renderList();
+  await screen.findByText("Child fix");
+  expect(screen.getByText("MUL-2")).toBeInTheDocument();
+  expect(screen.getByText("Subtask pull requests")).toBeInTheDocument();
+  const rows = screen.getAllByTestId("pull-request-row");
+  expect(rows[0]!.parentElement?.querySelector("button")).not.toBeNull();
+  expect(rows[1]!.parentElement?.querySelector("button")).toBeNull();
+});
 
 describe("PullRequestList sidebar rows", () => {
   beforeEach(() => {

@@ -171,8 +171,8 @@ func TestResultTakeoverExternalPreservesUnknownAndReusesTarget(t *testing.T) {
 	if string(resultBefore.Result) != string(resultAfter.Result) || countValue(t, `SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2`, f.result.IssueID, f.result.AgentID) != 1 {
 		t.Fatal("takeover reran executor or changed result")
 	}
-	carried, err := delegation.RunReturnIDs(ctx, testHandler.Queries, f.result.ID)
-	if err != nil || len(carried) != 1 || carried[0] != f.address.ID {
+	carried, err := delegation.RunReturns(ctx, testHandler.Queries, f.result.ID)
+	if err != nil || len(carried) != 1 || carried[0].ID != f.address.ID {
 		t.Fatalf("takeover treated as carried input: %v %v", carried, err)
 	}
 }
@@ -345,7 +345,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := delegation.LinkRun(ctx, testHandler.Queries, f.result.ID, inherited.ID); err != nil {
+	if err := delegation.LinkRun(ctx, testHandler.Queries, f.result.ID, delegation.ReturnIntent{ID: inherited.ID}); err != nil {
 		t.Fatal(err)
 	}
 	bSession := takeoverExternalSession(t, f, "rerun-B")
@@ -384,7 +384,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 		t.Fatal(err)
 	}
 	requireTaskReturns(t, uuidToString(retry.ID), f.address, inherited)
-	bToken := externalTokenFixture(t, uuidToString(f.address.DispatcherAgentID), f.owner, time.Now().Add(time.Hour))
+	bToken := externalSessionTokenFixture(t, uuidToString(f.address.DispatcherAgentID), bSession, f.owner, time.Now().Add(time.Hour))
 	explicit := serveAuthenticated(t, bToken, http.HandlerFunc(testHandler.RerunIssue), "POST", path, body, params, func(r *http.Request) { r.Header.Set(ReturnSessionHeader, bSession) })
 	if explicit.Code != 202 {
 		t.Fatalf("explicit B rerun %d %s", explicit.Code, explicit.Body.String())
@@ -400,7 +400,7 @@ func TestResultTakeoverDoesNotChangeInheritedExecutionResponsibility(t *testing.
 	}
 	// A late accepted input keeps the original address throughout automatic
 	// retries even though this actor now uses B for new explicit dispatches.
-	if err := delegation.LinkRun(ctx, testHandler.Queries, parseUUID(queryString(t, `SELECT retry_of_task_id::text FROM agent_task_queue WHERE id=$1`, retry.ID)), f.address.ID); err != nil {
+	if err := delegation.LinkRun(ctx, testHandler.Queries, parseUUID(queryString(t, `SELECT retry_of_task_id::text FROM agent_task_queue WHERE id=$1`, retry.ID)), delegation.ReturnIntent{ID: f.address.ID}); err != nil {
 		t.Fatal(err)
 	}
 	requireTaskReturns(t, uuidToString(retry.ID), f.address, inherited)
@@ -523,5 +523,42 @@ func TestResultTakeoverExternalUsesExistingDeliveryWorker(t *testing.T) {
 	}
 	if state := queryString(t, `SELECT m.delivery_status FROM agent_mailbox_message m JOIN agent_task_delegation_return l ON l.notification_delivery_id=m.id WHERE l.task_id=$1 AND l.delegation_return_id=$2`, f.result.ID, f.address.ID); state != "unknown" {
 		t.Fatal("new notification rewrote old host uncertainty")
+	}
+}
+
+func TestResultTakeoverAcrossTemplatesKeepsOriginalObligation(t *testing.T) {
+	f := externalTakeoverFixture(t)
+	target, session, _ := externalAgentFixture(t, "Cross-template receipt", "cross-template-daemon")
+	body := takeoverBody(t, f, delegation.KindExternalSession, session)
+	body.Target.AgentID = target
+	body.ExpectedCurrentReturnID = "00000000-0000-0000-0000-000000000000"
+	first := decodeTakeover(t, callTakeover(t, f, body), 201)
+	replay := decodeTakeover(t, callTakeover(t, f, body), 200)
+	if first.ID != replay.ID || first.TargetReturnID == uuidToString(f.address.ID) {
+		t.Fatal("cross-template receipt was not independently idempotent")
+	}
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testHandler.TaskService.ReconcileDelegationResults(t.Context(), 100); err != nil {
+		t.Fatal(err)
+	}
+	var originalDispatcher, originalSession string
+	dbfx.QueryRow(t, "SELECT dispatcher_agent_id,external_session_id FROM issue_delegation_return WHERE id=$1", f.address.ID).Scan(&originalDispatcher, &originalSession)
+	if originalDispatcher != uuidToString(f.address.DispatcherAgentID) || originalSession != uuidToString(f.address.ExternalSessionID) {
+		t.Fatal("cross-template receipt rewrote source")
+	}
+	var actual string
+	dbfx.QueryRow(t, "SELECT dispatcher_agent_id FROM issue_delegation_return WHERE id=$1", first.TargetReturnID).Scan(&actual)
+	if actual != target {
+		t.Fatalf("new dispatcher=%s want=%s", actual, target)
+	}
+	if n := dbfx.Count(t, "SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1 AND recipient_agent_id=$2 AND kind='delegation_result'", f.result.IssueID, target); n != 1 {
+		t.Fatalf("new result notifications=%d", n)
+	}
+	var originalStatus string
+	dbfx.QueryRow(t, "SELECT delivery_status FROM agent_mailbox_message WHERE id=(SELECT notification_delivery_id FROM agent_task_delegation_return WHERE task_id=$1 AND delegation_return_id=$2)", f.result.ID, f.address.ID).Scan(&originalStatus)
+	if originalStatus != "unknown" {
+		t.Fatalf("old receipt changed=%s", originalStatus)
 	}
 }

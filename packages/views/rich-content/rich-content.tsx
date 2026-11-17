@@ -25,6 +25,7 @@
  *             settled-but-malformed fence still renders as source.
  */
 
+import { useT } from "../i18n";
 import { createContext, isValidElement, memo, useContext, useMemo, useRef } from "react";
 import ReactMarkdown, {
   type Components,
@@ -237,6 +238,7 @@ function ownAttachmentDownloadId(
 }
 
 function RichLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const { t } = useT("editor");
   const slug = useWorkspaceSlug();
   const appOrigin = useAppOrigin();
   const attachmentPublicUrl = useConfigStore((s) => s.attachmentPublicUrl);
@@ -269,7 +271,7 @@ function RichLink({ href, children }: { href?: string; children?: ReactNode }) {
     : undefined;
 
   if (isMentionHref(href)) {
-    const match = href.match(/^mention:\/\/(member|agent|issue|project|all)\/(.+)$/);
+    const match = href.match(/^mention:\/\/(member|agent-notify|agent|issue|project|all)\/(.+)$/);
     if (match?.[1] === "issue" && match[2]) {
       // A bare identifier (from the autolink preprocessor) is carried as the id
       // segment; a real mention carries a UUID. Dispatch on the id shape.
@@ -287,7 +289,7 @@ function RichLink({ href, children }: { href?: string; children?: ReactNode }) {
       return <ProjectMentionLink projectId={match[2]} label={childrenToLabel(children)} />;
     }
     // Member / agent / all mentions
-    return <span className="mention">{children}</span>;
+    return <span className="mention">{children}{match?.[1] === "agent-notify" ? ` · ${t(($) => $.mention.notify_badge)}` : ""}</span>;
   }
 
   // Regular link — open directly on click. A URL pointing back at this

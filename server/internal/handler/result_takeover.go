@@ -22,6 +22,7 @@ import (
 )
 
 type resultTakeoverTarget struct {
+	AgentID           string          `json:"agent_id,omitempty"`
 	Kind              delegation.Kind `json:"kind"`
 	ExternalSessionID string          `json:"external_session_id,omitempty"`
 	SourceTaskID      string          `json:"source_task_id,omitempty"`
@@ -49,6 +50,7 @@ type ResultTakeoverResponse struct {
 type takeoverInput struct {
 	workspace, issue, actor, dispatcher       pgtype.UUID
 	request, result, from, expected, selector pgtype.UUID
+	targetDispatcher                          pgtype.UUID
 	kind                                      delegation.Kind
 	selectionVersion                          string
 }
@@ -92,6 +94,16 @@ func (h *Handler) TakeoverDelegationResult(w http.ResponseWriter, r *http.Reques
 		}
 		*field.dest = id
 	}
+	if body.Target.AgentID != "" {
+		input.targetDispatcher, ok = parseUUIDOrBadRequest(w, body.Target.AgentID, "target.agent_id")
+		if !ok {
+			return
+		}
+		if input.kind != delegation.KindExternalSession {
+			writeError(w, 400, "cross-agent receipt requires an external session")
+			return
+		}
+	}
 	selector := ""
 	switch input.kind {
 	case delegation.KindExternalSession:
@@ -124,6 +136,9 @@ func (h *Handler) TakeoverDelegationResult(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	input.dispatcher = prior.DispatcherAgentID
+	if input.targetDispatcher.Valid && input.expected == parseUUID("00000000-0000-0000-0000-000000000000") {
+		input.expected = pgtype.UUID{}
+	}
 	agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{ID: input.dispatcher, WorkspaceID: input.workspace})
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "dispatcher not found")
@@ -208,20 +223,59 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 	if err = validateTakeoverResult(ctx, q, in); err != nil {
 		return empty, pgtype.UUID{}, false, err
 	}
-	target, source, err := delegation.PrepareTakeoverTarget(ctx, q, in.workspace, in.issue, in.dispatcher, in.kind, in.selector)
+	if in.targetDispatcher.Valid && in.targetDispatcher != in.dispatcher {
+		original, err := q.LockAgentForDelegation(ctx, db.LockAgentForDelegationParams{ID: in.dispatcher, WorkspaceID: in.workspace})
+		if err != nil {
+			return empty, pgtype.UUID{}, false, err
+		}
+		member, err := q.LockResultTakeoverMember(ctx, db.LockResultTakeoverMemberParams{WorkspaceID: in.workspace, UserID: in.actor})
+		if err != nil || (!roleAllowed(member.Role, "owner", "admin") && original.OwnerID != in.actor) {
+			return empty, pgtype.UUID{}, false, takeoverError{403, "cannot manage original dispatcher"}
+		}
+	}
+	targetDispatcher := in.dispatcher
+	if in.targetDispatcher.Valid {
+		targetDispatcher = in.targetDispatcher
+	}
+	target, source, err := delegation.PrepareTakeoverTarget(ctx, q, in.workspace, in.issue, targetDispatcher, in.kind, in.selector)
 	if err != nil {
 		return empty, pgtype.UUID{}, false, err
 	}
 	if source.IssueID.Valid && !slices.Contains(owners, source.IssueID) {
 		return empty, pgtype.UUID{}, false, takeoverError{409, "target source scope changed; retry"}
 	}
-	if err = h.authorizeTakeoverTarget(ctx, q, in, target, source); err != nil {
+	targetInput := in
+	targetInput.dispatcher = targetDispatcher
+	if err = h.authorizeTakeoverTarget(ctx, q, targetInput, target, source); err != nil {
 		return empty, pgtype.UUID{}, false, err
 	}
 	if in.kind == delegation.KindManagedTask && in.selectionVersion != delegation.TakeoverSelectionVersion(target, source) {
 		return empty, pgtype.UUID{}, false, takeoverError{409, "selected source session changed; reload before taking over"}
 	}
-	current, err := q.LockIssueDelegationReturnForDispatcher(ctx, db.LockIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: in.dispatcher})
+	if in.kind == delegation.KindExternalSession {
+		issue, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: in.issue, WorkspaceID: in.workspace})
+		if err != nil {
+			return empty, pgtype.UUID{}, false, err
+		}
+		root, err := q.GetIssueLeadershipRoot(ctx, db.GetIssueLeadershipRootParams{ID: in.issue, WorkspaceID: in.workspace})
+		if err != nil {
+			return empty, pgtype.UUID{}, false, err
+		}
+		if root.LeaderAgentID == targetDispatcher && root.LeaderExternalSessionID != target.ExternalSessionID {
+			return empty, pgtype.UUID{}, false, takeoverError{409, "hand off task leadership before changing its executor session"}
+		}
+		if issue.AssigneeType.String == "agent" && issue.AssigneeID == targetDispatcher {
+			binding, err := q.GetActiveAgentSessionBindingView(ctx, db.GetActiveAgentSessionBindingViewParams{WorkspaceID: in.workspace, IssueID: in.issue, AgentID: targetDispatcher})
+			if err != nil || binding.SessionID != target.ExternalSessionID {
+				return empty, pgtype.UUID{}, false, takeoverError{409, "hand off task execution before changing its executor session"}
+			}
+		}
+	}
+	current, err := q.LockIssueDelegationReturnForDispatcher(ctx, db.LockIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: targetDispatcher})
+	if errors.Is(err, pgx.ErrNoRows) && in.targetDispatcher.Valid && !in.expected.Valid {
+		current = db.IssueDelegationReturn{}
+		err = nil
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return empty, pgtype.UUID{}, false, takeoverError{409, "current return is unavailable"}
 	}
@@ -238,7 +292,7 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 		}
 	}
 	if current.ID != target.ID {
-		if err = q.RetireCurrentDelegationReturn(ctx, db.RetireCurrentDelegationReturnParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: in.dispatcher}); err != nil {
+		if err = q.RetireCurrentDelegationReturn(ctx, db.RetireCurrentDelegationReturnParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: targetDispatcher}); err != nil {
 			return empty, pgtype.UUID{}, false, err
 		}
 		if err = q.SetCurrentDelegationReturn(ctx, target.ID); err != nil {
@@ -246,7 +300,7 @@ func (h *Handler) takeoverResult(ctx context.Context, in takeoverInput) (db.Dele
 		}
 	}
 	if in.kind == delegation.KindExternalSession {
-		_, err = sessionroute.Bind(ctx, q, sessionroute.BindRequest{WorkspaceID: uuidToString(in.workspace), AgentID: uuidToString(in.dispatcher), IssueID: uuidToString(in.issue), SessionID: uuidToString(target.ExternalSessionID), CreatedBy: uuidToString(in.actor)})
+		_, err = sessionroute.Bind(ctx, q, sessionroute.BindRequest{WorkspaceID: uuidToString(in.workspace), AgentID: uuidToString(targetDispatcher), IssueID: uuidToString(in.issue), SessionID: uuidToString(target.ExternalSessionID), CreatedBy: uuidToString(in.actor)})
 		if err != nil {
 			return empty, pgtype.UUID{}, false, err
 		}
@@ -275,7 +329,15 @@ func (h *Handler) takeoverReplay(ctx context.Context, q *db.Queries, in takeover
 	if action.CreatedBy != in.actor || action.ResultTaskID != in.result || action.FromReturnID != in.from || action.ExpectedCurrentReturnID != in.expected || action.TargetKind != string(in.kind) || action.TargetSelectorID != in.selector || action.TargetSelectionVersion.String != in.selectionVersion {
 		return action, pgtype.UUID{}, false, takeoverError{409, "client_request_id already identifies a different takeover"}
 	}
-	current, err := q.GetIssueDelegationReturnForDispatcher(ctx, db.GetIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: in.dispatcher})
+	dispatcher := in.dispatcher
+	if in.targetDispatcher.Valid {
+		dispatcher = in.targetDispatcher
+	}
+	target, err := q.GetDelegationReturnByID(ctx, action.TargetReturnID)
+	if err != nil || target.DispatcherAgentID != dispatcher {
+		return action, pgtype.UUID{}, false, takeoverError{409, "takeover target changed"}
+	}
+	current, err := q.GetIssueDelegationReturnForDispatcher(ctx, db.GetIssueDelegationReturnForDispatcherParams{WorkspaceID: in.workspace, IssueID: in.issue, DispatcherAgentID: dispatcher})
 	return action, current.ID, false, err
 }
 
@@ -340,7 +402,7 @@ func (h *Handler) authorizeTakeoverTarget(ctx context.Context, q *db.Queries, in
 		if err != nil {
 			return err
 		}
-		if session.OwnerUserID != actor.OwnerID {
+		if session.RevokedAt.Valid || session.OwnerUserID != actor.OwnerID {
 			return takeoverError{409, "external session ownership changed"}
 		}
 		return nil

@@ -220,6 +220,7 @@ func (d *Daemon) gcWorkspace(ctx context.Context, wsDir string, stats *gcStats) 
 			stats.skipped++
 			continue
 		}
+		d.reconcileRetainedWorktree(ctx, taskDir)
 		meta, metaErr := execenv.ReadGCMeta(taskDir)
 		if metaErr == nil && meta.LocalDirectory {
 			stats.localDirectoriesRetained++
@@ -366,6 +367,12 @@ func (d *Daemon) applyGCActionWithChatMeta(ctx context.Context, taskDir string, 
 			return 0
 		}
 		defer claim.Release()
+		present, err := execenv.HasRetainedRuntimePaths(taskDir)
+		if err != nil || present {
+			d.logger.Warn("gc: retaining task directory with a worktree or an unreadable worktree state", "dir", taskDir, "error", err)
+			stats.skipped++
+			return 0
+		}
 		if _, err := d.gcTaskDirOwner(taskDir); err != nil {
 			stats.skipped++
 			return 0
@@ -996,6 +1003,7 @@ func (d *Daemon) cleanTaskDir(ctx context.Context, taskDir string) (bytes int64,
 					return 0, false
 				}
 				if err := w.Remove(d.logger); err != nil {
+					logRetainedRuntimePaths(d.logger, resource.OwnerTaskID, err)
 					return 0, false
 				}
 				request := resource.Address

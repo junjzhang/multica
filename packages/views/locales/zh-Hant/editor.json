@@ -101,6 +101,8 @@
     "group_users": "使用者",
     "group_issues": "任務",
     "all_members": "所有成員",
+    "delegate_badge": "委派",
+    "notify_badge": "只通知",
     "agent_badge": "AI 代理",
     "squad_badge": "小隊",
     "searching": "搜尋中...",

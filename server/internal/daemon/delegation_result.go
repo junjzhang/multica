@@ -11,6 +11,16 @@ import (
 )
 
 func validateDelegationResultTask(task Task, provider string) error {
+	if wait := task.BackgroundWait; wait != nil {
+		a := wait.Address
+		if _, err := uuid.Parse(task.SessionPinGeneration); err != nil {
+			return errors.New("background wait has no current session generation")
+		}
+		if !task.RequireResume || wait.Result == nil || wait.ID != wait.Result.ID || a.TaskID != task.ID || a.AgentID != task.AgentID || a.WorkspaceID != task.WorkspaceID || a.RuntimeID != task.RuntimeID || a.Provider != provider || a.SessionID != task.PriorSessionID || a.WorkDir != task.PriorWorkDir || a.SessionID == "" || a.WorkDir == "" {
+			return errors.New("background wait claim differs from its original session")
+		}
+		return nil
+	}
 	if task.DelegationResult == nil {
 		if task.RequireResume {
 			return errors.New("strict result return is missing its accepted address")
@@ -42,6 +52,16 @@ func validateDelegationResultTask(task Task, provider string) error {
 		return fmt.Errorf("result return source scope is unavailable: %s", r.SourceTaskID)
 	}
 	return nil
+}
+
+func strictTaskWorkDir(task Task) string {
+	if task.BackgroundWait != nil {
+		return task.BackgroundWait.Address.WorkDir
+	}
+	if task.DelegationResult != nil {
+		return task.DelegationResult.WorkDir
+	}
+	return ""
 }
 
 func managedRootForWorkDir(root, workDir string) string {

@@ -82,7 +82,8 @@ WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
 
 -- name: SetDelegationResultTask :exec
 UPDATE agent_task_delegation_return
-SET notification_task_id = @notification_task_id, materialized_at = now()
+SET notification_task_id = @notification_task_id, notification_delivery_id = @notification_delivery_id,
+    delivery_return_id = sqlc.narg(delivery_return_id), materialized_at = now()
 WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
 
@@ -95,11 +96,13 @@ WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
 INSERT INTO agent_task_queue (
     id, agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, context, session_id, work_dir, max_attempts,
-    originator_user_id, accountable_user_id, originator_source, trigger_summary
+    originator_user_id, accountable_user_id, originator_source, trigger_summary,
+    delegated_from_task_id, trigger_evidence_kind, trigger_evidence_ref_id
 )
 SELECT @id, @agent_id, @runtime_id, sqlc.narg(issue_id), sqlc.narg(chat_session_id), sqlc.narg(autopilot_run_id),
     'queued', 0, @context, @session_id, @work_dir, 1,
-    sqlc.narg(originator_user_id), sqlc.narg(accountable_user_id), 'delegation', @trigger_summary
+    sqlc.narg(originator_user_id), sqlc.narg(accountable_user_id), @originator_source, @trigger_summary,
+    sqlc.narg(delegated_from_task_id), @trigger_evidence_kind, @trigger_evidence_ref_id
 WHERE lock_task_owner_rows(@agent_id, sqlc.narg(issue_id), @runtime_id)
 ON CONFLICT DO NOTHING
 RETURNING *;
@@ -112,11 +115,67 @@ SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE curren
     handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
     handling.error AS handling_error
 FROM agent_task_delegation_return l
-JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN issue_delegation_return r ON r.id = COALESCE(l.delivery_return_id, l.delegation_return_id)
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
 WHERE l.task_id = @task_id AND r.workspace_id = @workspace_id
 ORDER BY r.created_at, r.id;
+
+-- name: PropagateResultSourceReturns :execrows
+-- A result turn continues the accepted callers' work. The frozen address's
+-- source task is only a conversation anchor, never caller provenance. A one-off takeover
+-- carries no continuation, and a return already traversed by this outcome may
+-- not be traversed again.
+WITH RECURSIVE recipients AS (
+ SELECT incoming.*, CASE WHEN handling.status = 'cancelled' AND mailbox.processing_status = 'handled'
+                              AND mailbox.handled_by_task_id IS NOT NULL
+                         THEN mailbox.handled_by_task_id ELSE incoming.notification_task_id END AS consumer_task_id
+ FROM agent_task_delegation_return incoming
+ JOIN agent_task_queue handling ON handling.id = incoming.notification_task_id
+ LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = incoming.notification_delivery_id
+), proposed AS (
+    SELECT incoming.consumer_task_id AS task_id, upstream.delegation_return_id,
+           CASE WHEN bool_or(upstream.caller_task_ids IS NULL) THEN NULL
+                ELSE COALESCE(array_agg(DISTINCT parent_caller) FILTER (WHERE parent_caller IS NOT NULL), '{}') END AS caller_task_ids
+    FROM recipients incoming
+    JOIN LATERAL unnest(incoming.caller_task_ids) caller ON true
+    JOIN agent_task_delegation_return upstream ON upstream.task_id = caller
+    LEFT JOIN LATERAL unnest(upstream.caller_task_ids) parent_caller ON true
+    WHERE incoming.notification_task_id IS NOT NULL
+      AND incoming.takeover_id IS NULL AND upstream.takeover_id IS NULL
+      AND (sqlc.narg(task_id)::uuid IS NULL OR incoming.consumer_task_id = sqlc.narg(task_id))
+    GROUP BY incoming.consumer_task_id, upstream.delegation_return_id
+), candidates AS (
+    SELECT proposed.* FROM proposed
+    WHERE NOT EXISTS (
+          SELECT 1 FROM agent_task_delegation_return present
+          WHERE present.task_id = proposed.task_id
+            AND present.delegation_return_id = proposed.delegation_return_id
+            AND (present.caller_task_ids IS NULL OR (proposed.caller_task_ids IS NOT NULL AND proposed.caller_task_ids <@ present.caller_task_ids))
+      )
+), traversed AS (
+    SELECT candidate.task_id AS continuation_task_id, prior.task_id, prior.delegation_return_id
+    FROM candidates candidate
+    JOIN recipients prior ON prior.consumer_task_id = candidate.task_id
+    UNION
+    SELECT next.continuation_task_id, prior.task_id, prior.delegation_return_id
+    FROM recipients prior
+    JOIN traversed next ON prior.consumer_task_id = next.task_id
+), missing AS (
+    SELECT candidate.* FROM candidates candidate
+    WHERE NOT EXISTS (
+        SELECT 1 FROM traversed
+        WHERE continuation_task_id = candidate.task_id
+          AND delegation_return_id = candidate.delegation_return_id
+    )
+    ORDER BY candidate.task_id, candidate.delegation_return_id
+    LIMIT sqlc.narg(batch_size)
+)
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT task_id, delegation_return_id, caller_task_ids FROM missing
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END;
 
 -- name: ListDaemonResourceTasks :many
 SELECT t.id AS task_id, t.agent_id, t.runtime_id, t.issue_id, t.chat_session_id,
@@ -137,15 +196,22 @@ WHERE r.workspace_id = @workspace_id AND r.return_kind = 'managed_task'
   AND (rt.daemon_id = @daemon_id OR rt.id IS NULL);
 
 -- name: ListReturnResultDependencies :many
+-- Retain the prospective destination even before forwarding materializes.
+-- Traverse the same certified, terminal-source chain as result delivery;
+-- materialized obligations keep only their frozen physical destination.
 SELECT sqlc.embed(l), t.status AS execution_status, t.delegation_outcome_final,
        t.resource_control_required, t.terminal_reported_at,
        handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
        handling.terminal_reported_at AS handling_terminal_reported_at,
-       handling.resource_control_required AS handling_resource_control_required
+       handling.resource_control_required AS handling_resource_control_required,
+       mailbox.processing_status AS mailbox_processing_status
 FROM agent_task_delegation_return l
 LEFT JOIN agent_task_queue t ON t.id = l.task_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id
-WHERE l.delegation_return_id = @return_id;
+LEFT JOIN agent_mailbox_message mailbox ON mailbox.id = l.notification_delivery_id
+WHERE COALESCE(l.delivery_return_id, l.delegation_return_id) = @return_id
+ OR (l.notification_task_id IS NULL AND l.notification_delivery_id IS NULL AND l.notification_error IS NULL
+     AND l.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)));
 
 -- name: ConfirmTaskSessionPin :execrows
 UPDATE agent_task_queue SET session_pin_confirmed = true
@@ -156,7 +222,9 @@ WHERE id = @task_id AND session_id = @session_id AND work_dir = @work_dir
 SELECT EXISTS (
  SELECT 1 FROM comment_dispatch_obligation o
  LEFT JOIN comment_delegation_return c ON c.comment_id = o.comment_id
- WHERE o.status = 'pending' AND (o.delegation_return_id = @return_id OR c.delegation_return_id = @return_id)
+ WHERE o.status = 'pending'
+   AND (o.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id))
+     OR c.delegation_return_id IN (SELECT return_id FROM managed_return_continuation_chain(@return_id)))
 ) AS pending;
 
 -- name: ListIssueResultNotifications :many
@@ -167,7 +235,7 @@ SELECT l.*, (SELECT current.id FROM issue_delegation_return current WHERE curren
     handling.status AS handling_status, handling.started_at AS handling_started_at, handling.failure_reason AS handling_failure_reason,
     handling.error AS handling_error
 FROM agent_task_delegation_return l
-JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+JOIN issue_delegation_return r ON r.id = COALESCE(l.delivery_return_id, l.delegation_return_id)
 JOIN agent_task_queue outcome ON outcome.id = l.task_id
 LEFT JOIN agent_mailbox_message delivery ON delivery.id = l.notification_delivery_id
 LEFT JOIN agent_task_queue handling ON handling.id = l.notification_task_id

@@ -11,6 +11,28 @@ Multica owns the issue, explicit handoffs, and delivery receipts. An external ho
 - The issue coordinator is the original dispatch actor until explicitly changed. Reassignment and mentions do not transfer it. Member coordinator IDs are user IDs, not membership-row IDs.
 - Merge authorization records a human-granted policy, defaulting to disallowed. It is not a merge executor and cannot constrain arbitrary Git credentials held by an external session. Review and current-head CI remain required before an authorized merge.
 
+## Invocation provenance
+
+Explicit dispatch carries its authenticated provenance separately from the
+target issue's history. Members act as themselves; external Agents carry their
+token owner's verified principal; managed Agents carry the current source run's
+principal, accountability and task identity. An explicitly powerless source
+stays powerless, even on another person's issue or when rerunning their work.
+Only derived/background enqueue without current invocation facts uses historical
+issue provenance. Agent actions have delegation provenance and no direct-human
+activity stamp. The target's normal invocation policy still applies at each hop.
+A pending assignment with a different authorization principal cannot absorb the
+dispatch. Quick-create also preserves managed caller lineage and fences source
+completion against enqueue.
+
+External-authored comments store `external_originator_user_id` in the same
+transaction as their content and dispatch obligation. It is server-stamped,
+mutually exclusive with a managed `source_task_id`, and unavailable as request
+input. Recovery revalidates the author identity, membership and target policy.
+An author edit stamps the current authenticated source; another actor's content
+edit clears the old authority. Missing historical provenance stays unknown:
+neither Agent ownership nor a return recipient supplies a substitute principal.
+
 ## Explicit handoff
 
 Comments remain the canonical conversation. A parsed explicit agent mention routes to a managed run or an external mailbox according to the recipient's execution kind and invocation permissions. An agent may mention any permitted collaborator; there is no additional per-issue whitelist. Explicit assignment and rerun remain deliberate launch actions.
@@ -19,7 +41,7 @@ A disagreement is escalated by mentioning the coordinator with the disputed deci
 
 ## Mailbox and delivery
 
-- Each mailbox row indexes an issue comment and recipient. It stores delivery and processing state, not a second mutable conversation.
+- Each mailbox row indexes a source event and recipient. Comment bodies remain in comments; delegated results remain in saved runs. The mailbox owns delivery and processing receipts, not a second mutable conversation.
 - Delivery: `pending -> leased -> delivered`, with retry or terminal failure. Leases and conditional acknowledgements prevent stale delivery workers from committing a newer worker's outcome.
 - Processing: `unread -> read -> handled`. Advancing processing does not imply delivery success or completed implementation.
 - A claim is scoped to the authenticated daemon. Owner PAT/JWT clients also provide `X-Multica-Daemon-ID`; the server verifies the selected registered daemon's ownership. The selector does not confer separate device credentials.
@@ -77,3 +99,9 @@ Validate the deployed server, delivery daemon, CLI and host together with a dedi
 - The provider session ID remains unchanged. Revoking the external token prevents subsequent reads and replies.
 
 These checks passed against the deployed private stack with a Paseo-hosted DeepSeek session. The lost-ack check deliberately withheld the delivery acknowledgement and restarted a dedicated delivery daemon; it does not claim to test a provider crash during an ambiguous dispatch. Deployment evidence and snapshots belong with the deployment Issue, not in the source repository.
+
+Delegation results are listed explicitly with `agent mailbox list <agent-id>
+--kind delegation_result --output json`; the default external list remains the
+comment projection. Managed consumption, cancellation races, caller provenance,
+and coordinated migration are specified in
+[Managed delegation result execution](../engineering/delegation-result-daemon.md#mailbox-consumption-and-wakeups).

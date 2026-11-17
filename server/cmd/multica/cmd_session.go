@@ -16,7 +16,7 @@ import (
 
 var sessionCmd = &cobra.Command{
 	Use:   "session",
-	Short: "Inspect this process's external session identity",
+	Short: "Connect and inspect this process's external session identity",
 }
 
 var sessionStatusCmd = &cobra.Command{
@@ -90,14 +90,28 @@ type sessionRemoteReport struct {
 	HostID        string `json:"host_id,omitempty"`
 	SessionID     string `json:"session_id,omitempty"`
 	DaemonID      string `json:"daemon_id,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// Template is the host identity this session belongs to. Empty for a
+	// legacy per-session agent, which has no template.
+	TemplateID       string `json:"template_id,omitempty"`
+	TemplateName     string `json:"template_name,omitempty"`
+	TemplateProvider string `json:"template_provider,omitempty"`
+	TemplateHostID   string `json:"template_host_id,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 // sessionAgentResponse is the part of GET /api/agents/{id} this command reads.
 type sessionAgentResponse struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	ExecutionKind string `json:"execution_kind"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	ExecutionKind    string                `json:"execution_kind"`
+	ExternalTemplate *sessionAgentTemplate `json:"external_template"`
+}
+
+type sessionAgentTemplate struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	HostID   string `json:"host_id"`
+	Name     string `json:"name"`
 }
 
 type sessionRegisteredAddress struct {
@@ -113,6 +127,14 @@ func runSessionStatus(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--output must be table or json")
 	}
 	report := inspectExternalSession(cmd.Context(), cmd)
+	report.Error = safeSessionDiagnostic(report.Error)
+	if report.Remote != nil {
+		for _, text := range []*string{&report.Remote.Error, &report.Remote.AgentName, &report.Remote.ExecutionKind,
+			&report.Remote.Provider, &report.Remote.HostID, &report.Remote.SessionID, &report.Remote.DaemonID,
+			&report.Remote.TemplateName, &report.Remote.TemplateProvider, &report.Remote.TemplateHostID} {
+			*text = safeSessionDiagnostic(*text)
+		}
+	}
 	if output == "table" {
 		printSessionStatus(report)
 	} else if err := cli.PrintJSON(os.Stdout, report); err != nil {
@@ -137,7 +159,7 @@ func inspectExternalSession(parent context.Context, cmd *cobra.Command) sessionS
 	if !present {
 		return sessionStatusReport{
 			Status: "disconnected",
-			Error:  "no external session context in this process; run `/multica connect` in the Paseo session, or pass " + externalSessionFileEnv,
+			Error:  "no external session context in this process; " + externalSessionConnectHint + ", or pass " + externalSessionFileEnv,
 		}
 	}
 	report := sessionStatusReport{Status: "invalid", ContextFile: path, ExplicitContextFile: explicit}
@@ -214,7 +236,7 @@ func verifySessionBinding(parent context.Context, binding *externalSessionContex
 	// in the same workspace.
 	if err := verifyExternalSessionActor(ctx, client, binding.AgentID); err != nil {
 		if errors.Is(err, errExternalSessionActorMismatch) {
-			report.Error = "the session credential authenticates a different agent than the binding declares; reconnect the session so it issues a credential for this agent"
+			report.Error = "the session credential authenticates a different agent than the binding declares; " + externalSessionConnectHint
 		} else {
 			report.Error = describeSessionRemoteError(err)
 		}
@@ -228,12 +250,18 @@ func verifySessionBinding(parent context.Context, binding *externalSessionContex
 	}
 	report.AgentName = agent.Name
 	report.ExecutionKind = agent.ExecutionKind
+	if agent.ExternalTemplate != nil {
+		report.TemplateID = agent.ExternalTemplate.ID
+		report.TemplateName = agent.ExternalTemplate.Name
+		report.TemplateProvider = agent.ExternalTemplate.Provider
+		report.TemplateHostID = agent.ExternalTemplate.HostID
+	}
 	switch {
 	case agent.ID != binding.AgentID:
 		report.Error = fmt.Sprintf("server returned agent %s, not the recorded %s", agent.ID, binding.AgentID)
 		return report
 	case agent.ExecutionKind != "external":
-		report.Error = fmt.Sprintf("server reports execution_kind %q, not external", agent.ExecutionKind)
+		report.Error = "server reports an execution_kind that is not external"
 		return report
 	}
 	// The agent DTO shows one presentation session. Only the session registry
@@ -272,7 +300,7 @@ func describeSessionRemoteError(err error) string {
 	if errors.As(err, &httpErr) {
 		switch httpErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
-			return "server rejected the session credential; reconnect the session to issue a new one"
+			return "server rejected the session credential; " + externalSessionConnectHint
 		case http.StatusNotFound:
 			return "the recorded agent no longer exists in this workspace"
 		}
@@ -312,6 +340,9 @@ func printSessionStatus(report sessionStatusReport) {
 	}
 	if report.Remote != nil && report.Remote.Checked {
 		fmt.Printf("Remote:       checked (agent %s, %s)\n", report.Remote.AgentName, report.Remote.ExecutionKind)
+		if report.Remote.TemplateID != "" {
+			fmt.Printf("Template:     %s (%s %s)\n", report.Remote.TemplateName, report.Remote.TemplateProvider, report.Remote.TemplateHostID)
+		}
 	}
 	if report.Error != "" {
 		fmt.Printf("Problem:      %s\n", strings.TrimSpace(report.Error))

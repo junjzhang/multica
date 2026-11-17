@@ -246,7 +246,7 @@ type batchIssueWrite struct {
 // writeBatchIssue applies one issue's field update, label operations and
 // property operations in a single transaction, so an issue is either written
 // in full or skipped in full. params is nil when the batch changes no field.
-func (h *Handler) writeBatchIssue(ctx context.Context, workspaceID pgtype.UUID, prev db.Issue, params *db.UpdateIssueParams, statusKey string, labels *batchLabelPlan, properties *batchPropertyPlan, afterWrite func(pgx.Tx, *db.Queries, db.Issue) error) (batchIssueWrite, error) {
+func (h *Handler) writeBatchIssue(ctx context.Context, workspaceID pgtype.UUID, prev db.Issue, params *db.UpdateIssueParams, statusKey string, labels *batchLabelPlan, properties *batchPropertyPlan, afterWrite func(pgx.Tx, *db.Queries, db.Issue, db.Issue) error) (batchIssueWrite, error) {
 	out := batchIssueWrite{issue: prev}
 	tx, err := h.beginWakeupWrite(ctx)
 	if err != nil {
@@ -269,19 +269,20 @@ func (h *Handler) writeBatchIssue(ctx context.Context, workspaceID pgtype.UUID, 
 	}
 
 	var cancelled []db.AgentTaskQueue
+	// locked is the row's committed state under this transaction. afterWrite
+	// judges the assignment change against it, not the batch's unlocked read.
+	var locked db.Issue
 	if params != nil {
-		// Judge the closed-status transition against the row's committed state
-		// under this transaction, not the batch's earlier unlocked read.
+		locked, err = q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
+			ID:          params.ID,
+			WorkspaceID: workspaceID,
+		})
+		if err != nil {
+			return out, fmt.Errorf("lock issue for write: %w", err)
+		}
 		previousStatus := ""
 		if params.Status.Valid {
-			current, err := q.LockIssueForDescriptionUpdate(ctx, db.LockIssueForDescriptionUpdateParams{
-				ID:          params.ID,
-				WorkspaceID: workspaceID,
-			})
-			if err != nil {
-				return out, fmt.Errorf("lock issue for status write: %w", err)
-			}
-			previousStatus = current.Status
+			previousStatus = locked.Status
 		}
 		out.issue, cancelled, err = updateIssueStoppingWakeups(ctx, q, *params, previousStatus)
 		if err != nil {
@@ -304,7 +305,7 @@ func (h *Handler) writeBatchIssue(ctx context.Context, workspaceID pgtype.UUID, 
 		}
 	}
 	if afterWrite != nil {
-		if err := afterWrite(tx, q, out.issue); err != nil {
+		if err := afterWrite(tx, q, locked, out.issue); err != nil {
 			return out, err
 		}
 	}

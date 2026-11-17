@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,9 +16,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/delivery"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/sessionroute"
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -29,6 +33,8 @@ import (
 // never means the external agent started or finished it.
 type MailboxMessageResponse struct {
 	ID               string                   `json:"id"`
+	HandledByTaskID  string                   `json:"handled_by_task_id,omitempty"`
+	Payload          json.RawMessage          `json:"payload,omitempty"`
 	IssueID          string                   `json:"issue_id"`
 	CommentID        string                   `json:"comment_id"`
 	RecipientAgentID string                   `json:"recipient_agent_id"`
@@ -46,6 +52,8 @@ type MailboxMessageResponse struct {
 func mailboxMessageToResponse(m db.AgentMailboxMessage, source, target *ExternalSessionResponse) MailboxMessageResponse {
 	return MailboxMessageResponse{
 		ID:               uuidToString(m.ID),
+		Payload:          m.Payload,
+		HandledByTaskID:  uuidToString(m.HandledByTaskID),
 		IssueID:          uuidToString(m.IssueID),
 		CommentID:        uuidToString(m.CommentID),
 		RecipientAgentID: uuidToString(m.RecipientAgentID),
@@ -95,9 +103,8 @@ func decodeMailboxCursor(cursor string) (pgtype.Timestamptz, pgtype.UUID, error)
 	return pgtype.Timestamptz{Time: createdAt, Valid: true}, id, nil
 }
 
-// loadMailboxAgentForActor resolves {id} to an external agent the caller may
-// inspect: the agent itself presenting its own external credential, or a human
-// owner/admin. Anyone else is refused.
+// loadMailboxAgentForActor resolves the authenticated recipient or human manager.
+// Managed credentials additionally require a live pinned execution.
 func (h *Handler) loadMailboxAgentForActor(w http.ResponseWriter, r *http.Request) (db.Agent, bool) {
 	workspaceID := h.resolveWorkspaceID(r)
 	wsUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
@@ -112,9 +119,20 @@ func (h *Handler) loadMailboxAgentForActor(w http.ResponseWriter, r *http.Reques
 		ID:          agentID,
 		WorkspaceID: wsUUID,
 	})
-	if err != nil || agent.ExecutionKind != "external" {
-		writeError(w, http.StatusNotFound, "external agent not found")
+	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
 		return db.Agent{}, false
+	}
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		if r.Header.Get("X-Agent-ID") != uuidToString(agent.ID) || agent.ExecutionKind != "managed" {
+			writeError(w, http.StatusForbidden, "task credentials may only access their own mailbox")
+			return db.Agent{}, false
+		}
+		if _, err := delegation.ResolveManaged(r.Context(), h.Queries, workspaceID, uuidToString(agent.ID), r.Header.Get("X-Task-ID")); err != nil {
+			writeError(w, http.StatusForbidden, "mailbox requires a live pinned task")
+			return db.Agent{}, false
+		}
+		return agent, true
 	}
 	if r.Header.Get("X-Actor-Source") == "external_agent" {
 		if r.Header.Get("X-Agent-ID") != uuidToString(agent.ID) {
@@ -136,6 +154,35 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var actorSession pgtype.UUID
+	if isExternalAgentActor(r) {
+		id, ok := h.requireExternalActorSession(w, r)
+		if !ok {
+			return
+		}
+		actorSession = id
+	}
+	sourceType := r.URL.Query().Get("kind")
+	if sourceType == "" {
+		sourceType = "comment"
+		if agent.ExecutionKind == "managed" {
+			sourceType = delegation.ResultTaskType
+		}
+	}
+	if sourceType != "comment" && sourceType != delegation.ResultTaskType && (sourceType != "background_wait" || agent.ExecutionKind != "external") {
+		writeError(w, http.StatusBadRequest, "kind must be comment, delegation_result, or background_wait (external only)")
+		return
+	}
+	var caller db.AgentTaskQueue
+	managedActor := r.Header.Get("X-Actor-Source") == "task_token"
+	if managedActor {
+		var err error
+		caller, err = h.Queries.GetAgentTask(r.Context(), parseUUID(r.Header.Get("X-Task-ID")))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to verify mailbox consumer")
+			return
+		}
+	}
 	limit := mailboxLimitDefault
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -155,20 +202,44 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rows, err := h.Queries.ListAgentMailboxMessages(r.Context(), db.ListAgentMailboxMessagesParams{
+	params := db.ListAgentMailboxMessagesParams{
 		RecipientAgentID: agent.ID,
+		SourceType:       sourceType,
 		WorkspaceID:      agent.WorkspaceID,
+		TargetSessionID:  actorSession,
 		AfterCreatedAt:   afterCreated,
 		AfterID:          afterID,
-		PageLimit:        int32(limit),
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list mailbox")
-		return
 	}
-	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(rows))
-	messages := make([]MailboxMessageResponse, 0, len(rows))
-	for _, row := range rows {
+	visibleRows := make([]db.AgentMailboxMessage, 0, limit)
+	for len(visibleRows) < limit {
+		params.PageLimit = int32(limit - len(visibleRows))
+		rows, err := h.Queries.ListAgentMailboxMessages(r.Context(), params)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list mailbox")
+			return
+		}
+		for _, row := range rows {
+			if managedActor {
+				visible, err := service.ManagedMailboxResultVisible(r.Context(), h.Queries, row, caller)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to verify mailbox scope")
+					return
+				}
+				if !visible {
+					continue
+				}
+			}
+			visibleRows = append(visibleRows, row)
+		}
+		if len(rows) < int(params.PageLimit) {
+			break
+		}
+		last := rows[len(rows)-1]
+		params.AfterCreatedAt, params.AfterID = last.CreatedAt, last.ID
+	}
+	sessions := h.externalSessionsByID(r.Context(), mailboxDeliverySessionIDs(visibleRows))
+	messages := make([]MailboxMessageResponse, 0, len(visibleRows))
+	for _, row := range visibleRows {
 		messages = append(messages, mailboxMessageToResponse(
 			row,
 			sessions[uuidToString(row.SourceSessionID)],
@@ -176,8 +247,8 @@ func (h *Handler) ListAgentMailbox(w http.ResponseWriter, r *http.Request) {
 		))
 	}
 	var nextCursor *string
-	if len(rows) == limit {
-		last := rows[len(rows)-1]
+	if len(visibleRows) == limit {
+		last := visibleRows[len(visibleRows)-1]
 		cursor := encodeMailboxCursor(last.CreatedAt, last.ID)
 		nextCursor = &cursor
 	}
@@ -234,6 +305,18 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if agent.ExecutionKind == "managed" && r.Header.Get("X-Actor-Source") != "task_token" {
+		writeError(w, http.StatusForbidden, "managed result consumption requires the receiving task credential")
+		return
+	}
+	var actorSession pgtype.UUID
+	if isExternalAgentActor(r) {
+		id, ok := h.requireExternalActorSession(w, r)
+		if !ok {
+			return
+		}
+		actorSession = id
+	}
 	var req ackMailboxProcessingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -247,12 +330,17 @@ func (h *Handler) AckAgentMailbox(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	updated, err := h.Queries.AckAgentMailboxProcessing(r.Context(), db.AckAgentMailboxProcessingParams{
+	var callerID pgtype.UUID
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		callerID = parseUUID(r.Header.Get("X-Task-ID"))
+	}
+	updated, err := h.TaskService.AckMailbox(r.Context(), db.AckAgentMailboxProcessingParams{
 		ID:               messageID,
 		WorkspaceID:      agent.WorkspaceID,
 		RecipientAgentID: agent.ID,
+		TargetSessionID:  actorSession,
 		State:            req.State,
-	})
+	}, callerID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "mailbox message not found")
@@ -343,16 +431,6 @@ func validRetryClass(class string) bool {
 	}
 }
 
-// commentMentionDeliveryPayload is the immutable snapshot stored with a
-// comment handoff. It deliberately contains stable references only: the
-// discussion body stays in the native comment and is never copied into a
-// second mutable message.
-type commentMentionDeliveryPayload struct {
-	Schema    string `json:"schema"`
-	IssueID   string `json:"issue_id"`
-	CommentID string `json:"comment_id"`
-}
-
 // mailboxDeliveryResults is the per-agent outcome of persisting a comment
 // handoff. A queued entry means the delivery row committed; any other reason
 // means the target was not addressed (for example no active session binding)
@@ -394,20 +472,68 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 		}
 	}
 	store := delivery.NewPostgres(q)
-	payload, err := json.Marshal(commentMentionDeliveryPayload{
-		Schema:    "comment_mention.v1",
-		IssueID:   issueID,
-		CommentID: uuidToString(commentID),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal comment delivery payload: %w", err)
-	}
+	byAgent := make(map[string]commentMentionTarget, len(recipients))
+	var order []string
 	for _, target := range recipients {
+		if target.MailboxAgent == nil {
+			continue
+		}
+		id := uuidToString(target.MailboxAgent.ID)
+		existing, seen := byAgent[id]
+		if !seen {
+			order = append(order, id)
+		}
+		// A squad role takes precedence over a direct mention, just as it
+		// does for managed triggers. Multiple squads retain the first role.
+		if !seen || (existing.TargetType != "squad" && target.TargetType == "squad") {
+			byAgent[id] = target
+		}
+	}
+	for _, id := range order {
+		target := byAgent[id]
 		if target.MailboxAgent == nil {
 			continue
 		}
 		agent := *target.MailboxAgent
 		agentID := uuidToString(agent.ID)
+		notificationKey := "comment:" + uuidToString(commentID) + ":agent:" + agentID
+		existing, loadErr := q.GetAgentMailboxMessageByComment(ctx, db.GetAgentMailboxMessageByCommentParams{RecipientAgentID: agent.ID, CommentID: commentID})
+		if loadErr == nil && len(existing.Payload) > 0 && existing.TargetSessionID.Valid {
+			_, replayErr := store.Enqueue(ctx, delivery.EnqueueRequest{
+				Scope:           delivery.Scope{WorkspaceID: workspaceID},
+				Source:          delivery.Source{Type: "comment", Key: uuidToString(commentID), ActorType: actorType, ActorID: actorID, SessionID: sourceSessionID},
+				Target:          delivery.Target{SessionID: uuidToString(existing.TargetSessionID)},
+				Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
+				NotificationKey: notificationKey, Kind: "comment_mention", Payload: existing.Payload,
+				Refs: delivery.Refs{IssueID: issueID, CommentID: uuidToString(commentID)},
+			})
+			if replayErr != nil {
+				return out, replayErr
+			}
+			out[agentID] = ReasonQueued
+			continue
+		}
+		if loadErr != nil && !errors.Is(loadErr, pgx.ErrNoRows) {
+			return out, loadErr
+		}
+		payload := protocol.ExternalIssueRequest{Schema: "comment_mention.v1", IssueID: issueID, CommentID: uuidToString(commentID), Mode: target.Mode}
+		if display := service.ResolveDeliveryDisplay(ctx, q, issue, h.cfg.AppURL); display.Identifier != "" || display.Title != "" {
+			payload.IssueIdentifier, payload.IssueTitle, payload.IssueURL = display.Identifier, display.Title, display.URL
+		}
+		if target.TargetType == "squad" {
+			squad, err := q.LockSquadForAutopilotAssignment(ctx, db.LockSquadForAutopilotAssignmentParams{ID: parseUUID(target.TargetID), WorkspaceID: issue.WorkspaceID})
+			leader, leaderErr := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+			if err != nil || leaderErr != nil || leader.Agent.ID != agent.ID {
+				out[agentID] = ReasonTargetUnavailable
+				continue
+			}
+			payload.SquadID = uuidToString(squad.ID)
+			payload.Briefing = squadbriefing.BuildForIssue(ctx, q, issue, squad, issue.AssigneeType.String == "squad" && issue.AssigneeID == squad.ID, squadbriefing.Options{})
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return out, err
+		}
 		binding, err := sessionroute.Resolve(ctx, q, workspaceID, agentID, issueID)
 		if errors.Is(err, sessionroute.ErrNotBound) {
 			// The mention names an identity with no explicit target on this
@@ -430,9 +556,9 @@ func (h *Handler) enqueueMailboxDeliveries(ctx context.Context, q *db.Queries, i
 			},
 			Target:          delivery.Target{SessionID: binding.SessionID},
 			Recipient:       delivery.Recipient{Type: "agent", ID: agentID},
-			NotificationKey: "comment:" + uuidToString(commentID) + ":agent:" + agentID,
+			NotificationKey: notificationKey,
 			Kind:            "comment_mention",
-			Payload:         payload,
+			Payload:         body,
 			Refs: delivery.Refs{
 				IssueID:   issueID,
 				CommentID: uuidToString(commentID),

@@ -21,6 +21,20 @@ export function agentSessionsOptions(wsId: string, agentId: string) {
   });
 }
 
+
+/**
+ * One bounded page of an agent's sessions for the agents-list expansion. The
+ * page is replaced as the limit grows; the server's total drives the "more"
+ * affordance so a template with many sessions stays readable.
+ */
+export function agentSessionsPageOptions(wsId: string, agentId: string, limit: number) {
+  return queryOptions({
+    queryKey: [...agentSessionKeys.sessions(wsId, agentId), "page", limit] as const,
+    queryFn: () => api.listAgentSessionsPage(agentId, { limit }),
+    enabled: !!wsId && !!agentId && limit > 0,
+    staleTime: 30_000,
+  });
+}
 /** The exact active target for one issue, or null when none is recorded. */
 export function agentIssueSessionBindingOptions(
   wsId: string,

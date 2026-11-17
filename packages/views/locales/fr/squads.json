@@ -90,6 +90,7 @@
     "created_by": "Créé par",
     "created": "Créé",
     "updated": "Mis à jour",
+    "default_leader_migration": "Le chef par défaut doit être un agent géré ; choisissez-en un avant toute nouvelle délégation.",
     "visibility": "Visibilité",
     "visibility_workspace": "Espace de travail"
   },

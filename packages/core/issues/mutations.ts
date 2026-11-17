@@ -208,6 +208,7 @@ export function useUpdateIssue() {
       // cache so hidden channel-media markers remain available as the base for
       // a rapid follow-up edit. mutationFn still sends the full payload.
       const {
+        recipient_session_id: _recipientSessionId,
         suppress_run: _suppressRun,
         stop_previous_assignee_runs: _stopPreviousAssigneeRuns,
         enter_workflow_step: _enterWorkflowStep,
@@ -322,6 +323,7 @@ export function useUpdateIssue() {
       // out false unless the server coerced a different value, so this pass
       // is the plain surgical patch it always was.
       const {
+        recipient_session_id: _recipientSessionId,
         suppress_run: _suppressRun,
         stop_previous_assignee_runs: _stopPreviousAssigneeRuns,
         enter_workflow_step: _enterWorkflowStep,
@@ -575,6 +577,7 @@ export function useBatchUpdateIssues() {
       // preserve the authoritative raw description (including media markers)
       // until a refetch returns the committed result.
       const {
+        recipient_session_id: _recipientSessionId,
         suppress_run: _suppressRun,
         stop_previous_assignee_runs: _stopPreviousAssigneeRuns,
         enter_workflow_step: _enterWorkflowStep,

@@ -10,7 +10,7 @@ vi.mock("@multica/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
 vi.mock("@multica/core/paths", () => ({
   useWorkspacePaths: () => ({ agentDetail: (id: string) => `/acme/agents/${id}` }),
 }));
-vi.mock("@multica/core/api", () => ({ api: {} }));
+vi.mock("@multica/core/api", () => ({ api: {}, ApiError: class ApiError extends Error {} }));
 vi.mock("../../navigation", () => ({
   AppLink: ({ href, children }: { href: string; children: React.ReactNode }) => (
     <a href={href}>{children}</a>

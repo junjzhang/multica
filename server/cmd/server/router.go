@@ -437,6 +437,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		DisableWorkspaceCreation:       os.Getenv("DISABLE_WORKSPACE_CREATION") == "true",
 		WorkspaceCreationAllowedEmails: splitAndTrim(os.Getenv("WORKSPACE_CREATION_ALLOWED_EMAILS")),
 		VCSIntegrationEnabled:          os.Getenv("MULTICA_VCS_INTEGRATION_ENABLED") == "true",
+		ExternalAgentTemplatesEnabled:  os.Getenv("MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED") == "true",
 		PublicURL:                      strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PUBLIC_URL")), "/"),
 		AppURL:                         appURLFromEnv(),
 		TrustedProxies:                 parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
@@ -1702,6 +1703,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		// that verified daemon/workspace/owner.
 		r.Post("/deliveries/claim", h.ClaimDaemonDeliveries)
 		r.Post("/deliveries/{deliveryId}/outcome", h.RecordDaemonDeliveryOutcome)
+		r.Post("/background-waits/complete", h.CompleteBackgroundWait)
+		r.Post("/background-waits/status", h.BackgroundWaitStatuses)
 
 		r.Post("/workspaces/{workspaceId}/issues/gc-check", h.BatchIssueGCCheck)
 		r.Get("/issues/{issueId}/gc-check", h.GetIssueGCCheck)
@@ -2118,6 +2121,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			r.Use(middleware.RequireWorkspaceMember(queries))
 
 			// Assignee frequency
+			r.Post("/api/background-waits/authorize", h.AuthorizeBackgroundWait)
+			r.Get("/api/background-waits/scope", h.GetBackgroundWaitScope)
+			r.Post("/api/background-waits/status", h.BackgroundWaitStatuses)
+			r.Post("/api/background-waits/{waitId}/read", h.ReadBackgroundWait)
+			r.Post("/api/background-waits/{waitId}/access", h.ReadBackgroundWait)
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
 			// Local search index sync for Web/Desktop (MUL-7754). Human clients
@@ -2159,6 +2167,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetIssue)
 					r.Put("/", h.UpdateIssue)
+					r.Get("/contract", h.GetIssueContract)
+					r.Post("/contract", h.UpdateIssueContract)
 					r.Post("/move", h.MoveIssue)
 					r.Delete("/", h.DeleteIssue)
 					r.Post("/comments/trigger-preview", h.PreviewCommentTriggers)
@@ -2192,6 +2202,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Post("/quick-actions/{quickActionId}/run", h.RunQuickAction)
 					r.Post("/quick-actions/{quickActionId}/render", h.RenderQuickAction)
 					r.Get("/task-runs", h.ListTasksByIssue)
+					r.Post("/leadership/claim", h.ClaimIssueLeadership)
+					r.With(handler.RequireHumanActor).Post("/leadership/handoff", h.LegacyIssueHandoff)
+					r.With(handler.RequireHumanActor).Post("/task-leader/handoff", h.HandoffIssueLeadership)
+					r.With(handler.RequireHumanActor).Post("/executor/handoff", h.HandoffIssueExecutor)
 					r.With(handler.RequireHumanActor).Post("/result-takeovers", h.TakeoverDelegationResult)
 					r.With(handler.RequireHumanActor).Get("/result-takeover-options", h.GetResultTakeoverOptions)
 					r.Get("/usage", h.GetIssueUsage)
@@ -2427,6 +2441,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Route("/{id}", func(r chi.Router) {
 					r.Get("/", h.GetAgent)
 					r.Put("/", h.UpdateAgent)
+					// Read-only archive preview for an external agent: every
+					// in-flight reference that must be resolved first, plus the
+					// notifications the archive itself would withdraw.
+					r.Get("/archive-preflight", h.ArchiveAgentPreflight)
+
 					r.Get("/apps", h.ListAgentApps)
 					r.With(handler.RequireHumanActor).Put("/apps", h.UpdateAgentApps)
 					r.Post("/archive", h.ArchiveAgent)
@@ -2437,6 +2456,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// external agent. Raw token is returned once, hash only.
 					r.With(handler.RequireHumanActor).Post("/tokens", h.CreateExternalAgentToken)
 					r.With(handler.RequireHumanActor).Delete("/tokens/{tokenId}", h.RevokeExternalAgentToken)
+					// Revoke one registered host session. The agent keeps its
+					// other sessions and history; credentials bound to the
+					// revoked session stop authenticating immediately.
+					r.With(handler.RequireHumanActor).Delete("/sessions/{sessionId}", h.RevokeExternalAgentSession)
 					// Explicit (issue -> session) target for this external
 					// agent. Producers resolve it before enqueueing; a
 					// rebind never retargets an existing delivery.
@@ -2447,6 +2470,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// (agent, issue) binding is its own read.
 					r.Get("/sessions", h.ListAgentSessions)
 					r.Get("/session-bindings", h.GetAgentSessionBinding)
+					// The session panel's task summary: the three obligations
+					// of the credential's agent, read-only and scoped to that
+					// agent by loadAgentForSessionRead.
+					r.Get("/session-tasks", h.GetAgentSessionTasks)
+					r.Get("/session-pull-requests", h.GetAgentSessionPullRequests)
 					// Mailbox: the recipient's own external credential or an
 					// authorized human owner/admin.
 					r.Get("/mailbox", h.ListAgentMailbox)

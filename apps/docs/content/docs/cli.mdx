@@ -187,7 +187,7 @@ multica issue comment list MUL-123 --thread <comment-id> --tail 5 --output json 
 
 Lists can be trimmed to the fields you need, too: `multica issue list --output json --fields id,identifier,title,status`. The filtering happens in the CLI, so it shrinks output and context, not the request.
 
-To list issues by their last update time, pass both `--updated-since` and `--updated-until` as RFC3339 timestamps. The server returns issues whose current `updated_at` is at or after `since` and before `until`: `[since, until)`. These flags work with existing filters, sorting, and pagination. Keep the same bounds across pages; concurrent updates can change the result set because pagination does not provide a snapshot.
+To list issues by their last update time, pass `--updated-since` as an RFC3339 timestamp or a duration such as `24h` or `7d`, and optionally `--updated-until` as an RFC3339 timestamp (default: now). The server returns issues whose current `updated_at` is at or after `since` and before `until`: `[since, until)`. When paging, pass both bounds as fixed timestamps. These flags work with existing filters, sorting, and pagination. Keep the same bounds across pages; concurrent updates can change the result set because pagination does not provide a snapshot.
 
 ```bash
 multica issue list --updated-since 2026-11-05T10:00:00Z \
@@ -414,7 +414,7 @@ Migration from CSV parsing: replace `--attachment a,b` with `--attachment a --at
 
 | Command | Subcommand | Purpose | Key flags |
 | --- | --- | --- | --- |
-| `issue` | `list` | List issues | `--status`, `--priority`, `--assignee`, `--project`, `--updated-since` / `--updated-until` (paired RFC3339 bounds), `--metadata` (repeatable), `--property` (repeatable, `"Name=Value"` or a comparison such as `"Score>=3"`, `"Due<2026-01-01"`, `"Notes~=text"`; `__none__` matches unset), `--limit`, `--offset`, `--sort` (incl. `property:<name-or-id>`), `--full-id`, `--fields` (JSON only; comma-separated fields to keep), `--resolve-properties` (JSON only; rows with property, option and member names beside the stored ids) |
+| `issue` | `list` | List issues | `--status`, `--priority`, `--assignee`, `--project`, `--updated-since` (RFC3339 or duration) / `--updated-until`, `--metadata` (repeatable), `--property` (repeatable, `"Name=Value"` or a comparison such as `"Score>=3"`, `"Due<2026-01-01"`, `"Notes~=text"`; `__none__` matches unset), `--limit`, `--offset`, `--sort` (incl. `property:<name-or-id>`), `--full-id`, `--fields` (JSON only; comma-separated fields to keep), `--resolve-properties` (JSON only; rows with property, option and member names beside the stored ids) |
 | | `get <id>` | Show a single issue | `--resolve-properties` (JSON only; rows with property, option and member names beside the stored ids) |
 | | `create` | Create an issue | `--title` (required), `--description` / `--description-stdin` / `--description-file`, `--pr-auto-complete on/off`, `--status`, `--priority`, `--assignee`, `--parent`, `--stage`, `--project`, `--start-date`, `--due-date`, `--attachment` (repeatable), `--property` (repeatable), `--allow-duplicate` (create even when an open issue with the same title exists) |
 | | `update <id>` | Update issue fields | Same fields as `create`, plus `--position`, `--no-start`, `--duplicate-of` |

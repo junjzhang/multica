@@ -74,7 +74,7 @@ func TestBuildWorktreeDeliveryRepairPrompt(t *testing.T) {
 		committedOnly bool
 		want          []string
 	}{
-		{name: "no commits of its own", want: []string{"keeps every file exactly as it is now", "git add -A"}},
+		{name: "no commits of its own", want: []string{"preserves the files and commits the work outside new .multica paths", "git add -A"}},
 		{name: "committed this turn", committedOnly: true, want: []string{"exactly what your commits contain", "stages everything you left uncommitted", "saved aside rather than delivered", "git read-tree fff000", "git read-tree 4b825dc"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -59,6 +59,7 @@ type Row =
   | { kind: "section"; label: string }
   | { kind: "member"; member: MemberWithUser }
   | { kind: "agent"; agent: Agent }
+  | { kind: "agent-notify"; agent: Agent }
   | { kind: "squad"; squad: Squad }
   | { kind: "issue"; issue: Issue }
   | { kind: "empty" };
@@ -207,7 +208,10 @@ export function MentionSuggestionBar({
     }
     if (matchedAgents.length > 0) {
       out.push({ kind: "section", label: t("picker.agents") });
-      for (const a of matchedAgents) out.push({ kind: "agent", agent: a });
+      for (const a of matchedAgents) {
+        out.push({ kind: "agent", agent: a });
+        out.push({ kind: "agent-notify", agent: a });
+      }
     }
     if (matchedSquads.length > 0) {
       out.push({ kind: "section", label: t("picker.squads") });
@@ -240,8 +244,8 @@ export function MentionSuggestionBar({
               ? `row:section:${row.label}`
               : row.kind === "member"
                 ? `row:m:${row.member.user_id}`
-                : row.kind === "agent"
-                  ? `row:a:${row.agent.id}`
+                : row.kind === "agent" || row.kind === "agent-notify"
+                  ? `row:${row.kind}:${row.agent.id}`
                   : row.kind === "issue"
                     ? `row:i:${row.issue.id}`
                     : `row:empty:${i}`
@@ -312,14 +316,14 @@ export function MentionSuggestionBar({
               </Pressable>
             );
           }
-          if (item.kind === "agent") {
+          if (item.kind === "agent" || item.kind === "agent-notify") {
             const runtimeBound = isAgentRuntimeBound(item.agent);
             return (
               <Pressable
                 disabled={!runtimeBound}
                 onPress={() =>
                   onSelect({
-                    type: "agent",
+                    type: item.kind,
                     id: item.agent.id,
                     name: item.agent.name,
                   })
@@ -335,7 +339,7 @@ export function MentionSuggestionBar({
                 </Text>
                 <Badge
                   label={runtimeBound
-                    ? t("picker.agent")
+                    ? item.kind === "agent-notify" ? t("suggestions.notify") : t("suggestions.delegate")
                     : t("picker.needs_runtime")}
                   tone={runtimeBound ? "brand" : "outline"}
                 />

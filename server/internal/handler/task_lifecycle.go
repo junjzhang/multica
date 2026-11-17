@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"io"
 	"log/slog"
 	"net/http"
@@ -32,6 +33,17 @@ import (
 func (h *Handler) RecoverOrphanedTasks(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
+		return
+	}
+	var request struct {
+		WaitIDs []string `json:"background_wait_ids"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536)).Decode(&request); err != nil && err != io.EOF {
+		writeError(w, 400, "invalid recovery request")
+		return
+	}
+	if err := h.TaskService.RecoverBackgroundWaits(r.Context(), parseUUID(runtimeID), request.WaitIDs); err != nil {
+		writeError(w, 500, "background wait recovery failed")
 		return
 	}
 
@@ -146,6 +158,11 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nextGeneration.Valid {
+		wait, waitErr := service.TaskBackgroundWait(task)
+		if waitErr != nil || wait != nil {
+			writeError(w, 409, "background wait must retain the original provider session")
+			return
+		}
 		updated, err := qtx.InvalidateTaskSessionPin(r.Context(), db.InvalidateTaskSessionPinParams{TaskID: task.ID, Generation: generation, NextGeneration: nextGeneration})
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, 409, "session generation changed or strict return cannot start fresh")
@@ -169,6 +186,10 @@ func (h *Handler) PinTaskSession(w http.ResponseWriter, r *http.Request) {
 	turn, err := service.VerifiedDelegationResult(r.Context(), qtx, task)
 	if err != nil || (turn != nil && ((req.SessionID != "" && req.SessionID != turn.SessionID) || (req.WorkDir != "" && req.WorkDir != turn.WorkDir))) {
 		writeError(w, http.StatusConflict, "result task must retain its frozen session and directory")
+		return
+	}
+	if wait, waitErr := service.TaskBackgroundWait(task); waitErr != nil || (wait != nil && ((req.SessionID != "" && req.SessionID != wait.Address.SessionID) || (req.WorkDir != "" && req.WorkDir != wait.Address.WorkDir))) {
+		writeError(w, 409, "background wait session pin cannot change")
 		return
 	}
 	if err := qtx.UpdateAgentTaskSession(r.Context(), params); err != nil {
@@ -334,6 +355,7 @@ func (h *Handler) rerunIssue(w http.ResponseWriter, r *http.Request, issue db.Is
 		inheritTaskID = resolved
 	}
 	task, err := h.TaskService.RerunIssueWithDelegation(r.Context(), issue.ID, sourceTaskID, pgtype.UUID{}, actorUserID, fresh, canInvoke, service.RerunDelegation{
+		Attribution:   h.dispatchAttributionFromRequest(r, actorType, actorID),
 		Address:       dispatchReturn,
 		CreatedBy:     requestUserID(r),
 		InheritTaskID: inheritTaskID,
@@ -402,7 +424,11 @@ func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (p
 	targetAgentID := issue.AssigneeID
 	if issue.AssigneeType.String == "squad" {
 		if squad, squadErr := h.Queries.GetSquad(ctx, issue.AssigneeID); squadErr == nil {
-			targetAgentID = squad.LeaderID
+			leader, err := issueleader.ResolveIssueLeader(ctx, h.Queries, issue, squad)
+			if err != nil {
+				return pgtype.UUID{}, err
+			}
+			targetAgentID = leader.Agent.ID
 		}
 	}
 	latest, err := h.Queries.GetLatestTaskIDForIssueAndAgent(ctx, db.GetLatestTaskIDForIssueAndAgentParams{
@@ -416,7 +442,7 @@ func (h *Handler) defaultRerunSourceTask(ctx context.Context, issue db.Issue) (p
 		}
 		return pgtype.UUID{}, err
 	}
-	inherited, err := delegation.RunReturnIDs(ctx, h.Queries, latest)
+	inherited, err := delegation.RunReturns(ctx, h.Queries, latest)
 	if err != nil {
 		return pgtype.UUID{}, err
 	}

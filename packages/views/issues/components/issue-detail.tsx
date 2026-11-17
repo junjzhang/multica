@@ -17,6 +17,7 @@ import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { AppLink, useBackOrReplace } from "../../navigation";
 import { IssueDuplicateBanner, IssueDuplicatesSection, isDuplicateIssue } from "./issue-duplicates";
 import { IssueExternalCollaboration } from "./issue-external-collaboration";
+import { IssueContract } from "./issue-contract";
 import {
   AlertTriangle,
   Archive,
@@ -103,6 +104,7 @@ import { IssueActionsDropdown, useIssuePageMenu, useIssueActions, useArchivedInb
 import { LabelChip } from "../../labels/label-chip";
 import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
 import { SubIssuesAgentWorkingChip } from "./sub-issues-agent-working-chip";
+import { useIssuePeekClick, type IssuePeekSectionRequest } from "../surface/peek-context";
 import { IssueProjectPicker } from "../../projects/components/issue-project-picker";
 import { IssuePropertyPills } from "./issue-property-pills";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
@@ -372,6 +374,14 @@ function formatActivity(
 ): string {
   const details = (entry.details ?? {}) as Record<string, string>;
   switch (entry.action) {
+    case "issue_contract_revise":
+      return t(($) => $.contract.activity_revise);
+    case "issue_contract_submit":
+      return t(($) => $.contract.activity_submit);
+    case "issue_contract_accept":
+      return t(($) => $.contract.activity_accept);
+    case "issue_contract_return":
+      return t(($) => $.contract.activity_return);
     case "created":
       if (requesterName && entry.actor_type === "agent") {
         return t(($) => $.activity.created_on_behalf_of, { name: requesterName });
@@ -916,6 +926,7 @@ function SubIssueRow({
   childProgress,
   rowProps,
   customProperties,
+  onNavigate,
 }: {
   child: Issue;
   /** The sub-issue's OWN children progress (it can itself be a parent). */
@@ -924,6 +935,7 @@ function SubIssueRow({
   rowProps: SubIssueRowProperties;
   /** Workspace custom properties the user opted into showing on rows. */
   customProperties: IssueProperty[];
+  onNavigate?: (issueId: string, event: React.MouseEvent) => void;
 }) {
   const { t } = useT("issues");
   const locale = useLocale();
@@ -1021,6 +1033,7 @@ function SubIssueRow({
         />
         <AppLink
           href={paths.issueDetail(child.id)}
+          onClick={onNavigate ? (event) => onNavigate(child.id, event) : undefined}
           className="flex min-w-0 flex-1 items-center gap-2.5"
         >
           <span className="text-caption text-muted-foreground tabular-nums shrink-0">
@@ -1254,7 +1267,7 @@ interface IssueDetailProps {
   variant?: "page" | "peek";
   /** Peek only: host controls at the end of the header (open full page, close). */
   trailingActions?: ReactNode;
-  /**
+  sectionRequest?: IssuePeekSectionRequest | null;  /**
    * Read the viewer's inbox notifications on this issue while it is on screen
    * (MUL-8588). The inbox turns this off for the issue it has open: it reads
    * the notification it selected itself, and keeps one marked unread there.
@@ -1473,8 +1486,10 @@ export function IssueDetailSkeleton({
 
 // IssueDetail
 
-export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = true, layoutId = ISSUE_DETAIL_LAYOUT_ID, highlightCommentId: linkedCommentId, highlightRequestToken: linkedRequestToken, highlightAppRequestId, leadingAction, variant = "page", trailingActions, readsInbox = true, skipInitialRefetch = false, openDeliverable, onDeliverableLinkDone }: IssueDetailProps) {
+export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = true, layoutId = ISSUE_DETAIL_LAYOUT_ID, highlightCommentId: linkedCommentId, highlightRequestToken: linkedRequestToken, highlightAppRequestId, leadingAction, variant = "page", trailingActions, readsInbox = true, skipInitialRefetch = false, openDeliverable, onDeliverableLinkDone, sectionRequest }: IssueDetailProps) {
   const isPeek = variant === "peek";
+  const handleRelatedIssueClick = useIssuePeekClick("peek");
+  const landedSectionRef = useRef<IssuePeekSectionRequest | null>(null);
   const { t } = useT("issues");
   const { t: tCommon } = useT("common");
   const locale = useLocale();
@@ -2484,6 +2499,18 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   }, [setSubIssuesCollapsed, scrollContainerEl]);
   const doneChildCount = childIssues.filter((child) => issueBehavesAs(child, "done")).length;
 
+  useEffect(() => {
+    if (!sectionRequest || landedSectionRef.current === sectionRequest ||
+      !childIssuesLoaded || childIssuesFetching) return;
+    if (subIssuesCollapsed) {
+      setSubIssuesCollapsed(false);
+      return;
+    }
+    const section = subIssuesSectionRef.current;
+    if (!section) return;
+    section.scrollIntoView?.({ block: "start" });
+    landedSectionRef.current = sectionRequest;
+  }, [sectionRequest, childIssuesLoaded, childIssuesFetching, subIssuesCollapsed, setSubIssuesCollapsed]);
   // The sub-issue list owns its selection, reset per issue. Rows, select-all
   // and the inline batch toolbar must read the same one: a peek renders this
   // inside a surface whose own selection provider would otherwise win for the
@@ -3274,6 +3301,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <div className="flex items-center gap-0.5 rounded-md px-2 hover:bg-accent/50 transition-colors group">
               <AppLink
                 href={paths.issueDetail(parentIssue.id)}
+                onClick={isPeek ? (event) => handleRelatedIssueClick(parentIssue.id, event) : undefined}
                 className="flex flex-1 min-w-0 items-center gap-1.5 py-2 text-label"
               >
                 <StatusIcon
@@ -3291,12 +3319,13 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           </div>}
         </div>
     ),
-    // External collaboration (coordinator, session bindings, mailbox
-    // deliveries) shares the duplicates slot so it keeps its place without a
+    // The delivery contract and external collaboration (coordinator, session
+    // bindings, mailbox deliveries) share the duplicates slot so it keeps its place without a
     // separate sidebar-settings entry.
     duplicates: (
       <>
         <IssueDuplicatesSection issueId={issue.id} />
+        <IssueContract issueId={issue.id} />
         <IssueExternalCollaboration issue={issue} agents={agents} />
       </>
     ),
@@ -3487,7 +3516,11 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   // panel. The workspace name is intentionally absent — "all issues" is a view,
   // not a container.
   const breadcrumbSegments: BreadcrumbSegment[] = parentIssue
-    ? [{ href: paths.issueDetail(parentIssue.id), label: parentIssue.identifier }]
+    ? [{
+        href: paths.issueDetail(parentIssue.id),
+        label: parentIssue.identifier,
+        onClick: isPeek ? (event) => handleRelatedIssueClick(parentIssue.id, event) : undefined,
+      }]
     : breadcrumbProject
       ? [
           {
@@ -3761,6 +3794,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           {parentIssue && !issue.source_context && (
             <AppLink
               href={paths.issueDetail(parentIssue.id)}
+              onClick={isPeek ? (event) => handleRelatedIssueClick(parentIssue.id, event) : undefined}
               className="mt-2 inline-flex max-w-full items-center gap-1.5 text-label text-muted-foreground hover:text-foreground transition-colors group/parent"
             >
               <span className="shrink-0">{t(($) => $.detail.sub_issue_of)}</span>
@@ -3804,6 +3838,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
             <SourceContextBadge
               context={issue.source_context}
               parentIssue={parentIssue}
+              onParentClick={isPeek && parentIssue ? (event) => handleRelatedIssueClick(parentIssue.id, event) : undefined}
               parentProgress={parentChildIssues.length > 0
                 ? {
                     done: parentChildIssues.filter((child) => issueBehavesAs(child, "done")).length,
@@ -3916,7 +3951,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               // delegate to (one singleton menu, not one per row).
               <IssueContextMenuProvider>
               <IssueSurfaceSelectionProvider selection={subIssueSelection}>
-              <div ref={subIssuesSectionRef} id={subIssuesSectionId} className="mt-10 group/sub-issues">
+              <div ref={subIssuesSectionRef} id={subIssuesSectionId} data-issue-section="sub-issues" className="mt-10 group/sub-issues">
                 {/* Header */}
                 <div className="flex items-center gap-2 mb-2">
                   <button
@@ -4006,6 +4041,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                               childProgress={subIssueProgress?.get(child.id)}
                               rowProps={subIssueRowProps}
                               customProperties={subIssueCustomProps}
+                              onNavigate={isPeek ? handleRelatedIssueClick : undefined}
                             />
                           ))}
                         </Fragment>

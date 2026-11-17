@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { BOARD_SCOPES, boardDataSchema } from "./board";
 
 export const statusViewSchema = z.object({
   state: z.enum(["connected", "invalid", "unverified", "disconnected"]),
@@ -37,4 +38,27 @@ export const disconnectSession = defineRpc({
   name: "session.disconnect",
   input: agentInput,
   output: statusViewSchema,
+});
+
+/**
+ * The session's to-do queue and task trees: a read-only projection for the
+ * composer pill and the Multica panel. It never mutates an obligation.
+ * `refresh` bypasses the short server cache shared by the pill and panel.
+ */
+export const sessionBoard = defineRpc({
+  name: "session.board",
+  input: agentInput.extend({ scope: z.enum(BOARD_SCOPES).default("session"), refresh: z.boolean().optional() }),
+  output: boardDataSchema,
+});
+
+export const taskExpansion = defineRpc({
+  name: "session.task-expansion",
+  input: agentInput.extend({ issueId: z.string().uuid().optional(), expanded: z.boolean().optional() }),
+  output: z.array(z.string().uuid()),
+});
+
+export const backgroundWorkSupport = defineRpc({
+  name: "background.support",
+  input: z.object({}),
+  output: z.object({ supported: z.boolean() }),
 });

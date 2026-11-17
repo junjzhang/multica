@@ -301,6 +301,14 @@ func TestDelegationResourceRetentionAndReleaseReceipt(t *testing.T) {
 		t.Fatal("unknown result delivery released frozen resources")
 	}
 	dbfx.Exec(t, `UPDATE agent_task_queue SET status='completed',completed_at=now(),terminal_reported_at=now() WHERE id=$1`, turnID)
+	if out := check(); out.ReleaseAllowed || out.Reason != "result_consumption_pending" {
+		t.Fatalf("unacknowledged result released: %+v", out)
+	}
+	var messageID string
+	dbfx.QueryRow(t, `SELECT notification_delivery_id FROM agent_task_delegation_return WHERE task_id=$1`, result.ID).Scan(&messageID)
+	if _, err := testHandler.TaskService.AckMailbox(ctx, db.AckAgentMailboxProcessingParams{ID: parseUUID(messageID), WorkspaceID: parseUUID(testWorkspaceID), RecipientAgentID: source.AgentID, State: "handled"}, pgtype.UUID{}); err != nil {
+		t.Fatal(err)
+	}
 	if out := check(); !out.ReleaseAllowed || !out.AdmissionClosed {
 		t.Fatalf("received and accepted still retained: %+v", out)
 	}
@@ -360,6 +368,9 @@ func TestDelegationResultExternalUsesAcceptedSession(t *testing.T) {
 	if testHandler == nil {
 		t.Fatal("PostgreSQL required")
 	}
+	previousAppURL := testHandler.TaskService.AppURL
+	testHandler.TaskService.AppURL = "https://app.example.test"
+	t.Cleanup(func() { testHandler.TaskService.AppURL = previousAppURL })
 	ctx := context.Background()
 	dispatcher, sessionID, _ := externalAgentFixture(t, "result external", "result-external-daemon")
 	var ownerID, hostSession string
@@ -404,7 +415,13 @@ func TestDelegationResultExternalUsesAcceptedSession(t *testing.T) {
 		if delivered.Kind != "delegation_result" || delivered.Refs.IssueID != issueID || payload["result_task_id"] != uuidToString(result.ID) || payload["outcome"] != "completed" {
 			t.Fatalf("host did not receive exact outcome references: %+v", payload)
 		}
-		t.Logf("fake host received kind=%s result_task_id=%s issue_id=%s outcome=%s", delivered.Kind, payload["result_task_id"], payload["issue_id"], payload["outcome"])
+		var number int32
+		dbfx.QueryRow(t, `SELECT number FROM issue WHERE id=$1`, issueID).Scan(&number)
+		identifier := fmt.Sprintf("HAN-%d", number)
+		if payload["issue_identifier"] != identifier || payload["issue_title"] != title || payload["issue_url"] != "https://app.example.test/handler-tests/issues/"+identifier {
+			t.Fatalf("delegation result display context = %+v, want %s / %q / link", payload, identifier, title)
+		}
+		t.Logf("fake host received kind=%s result_task_id=%s issue_id=%s outcome=%s task=%s", delivered.Kind, payload["result_task_id"], payload["issue_id"], payload["outcome"], payload["issue_identifier"])
 	default:
 		t.Fatal("real delivery claim/worker never reached fake host")
 	}
@@ -892,7 +909,7 @@ func TestDelegationResultNotifiesOnlyActualCarriedRecipients(t *testing.T) {
 	if _, err := testHandler.TaskService.CancelTask(ctx, result.ID); err != nil {
 		t.Fatal(err)
 	}
-	firstRun, firstToken := extraManagedRun(t, uuidToString(source.AgentID), first.SessionID.String, first.WorkDir.String)
+	firstRun, firstToken := extraManagedRun(t, uuidToString(source.AgentID), uuidToString(source.IssueID), first.SessionID.String, first.WorkDir.String)
 	rootComment := dbfx.Comment(t, uuidToString(result.IssueID), "One shared dispatch thread")
 	code, _, body := intentComment(t, firstToken, uuidToString(result.IssueID), fmt.Sprintf("[@Executor](mention://agent/%s) first accepted input", uuidToString(result.AgentID)), rootComment)
 	if code != 201 {

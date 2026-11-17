@@ -336,6 +336,22 @@ describe("CreateSquadModal", () => {
     expect(myIdx).toBeLessThan(wsIdx);
   });
 
+  it("keeps external sessions out of the leader picker while allowing them as members", () => {
+    const external = makeAgent({
+      id: "agent-ext-1",
+      name: "PaseoExternal",
+      owner_id: OTHER,
+      runtime_id: "",
+      execution_kind: "external",
+    });
+    mocks.agents = [external, otherAgent, myAgent];
+    renderModal();
+    // A managed agent renders in both pickers; an external session only in
+    // the additional-members picker.
+    expect(screen.getAllByText("MineAgentOne")).toHaveLength(2);
+    expect(screen.getAllByText("PaseoExternal")).toHaveLength(1);
+  });
+
   it("auto-clears an additional-members entry when the same agent is picked as leader", async () => {
     renderModal();
     // Find the "MineAgentTwo" row inside the additional-members picker (the

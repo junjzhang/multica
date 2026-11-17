@@ -164,7 +164,7 @@ func TestPrivateProjectWorkingIssuesHiddenFromAggregates(t *testing.T) {
 
 	squadID := createCommentTriggerPreviewSquad(t, f.marker+" squad", agentID)
 	if _, err := testPool.Exec(context.Background(),
-		`INSERT INTO squad_member (squad_id, member_type, member_id) VALUES ($1, 'agent', $2)`, squadID, agentID,
+		`INSERT INTO squad_member (squad_id, member_type, member_id) VALUES ($1, 'agent', $2) ON CONFLICT (squad_id, member_type, member_id) DO NOTHING`, squadID, agentID,
 	); err != nil {
 		t.Fatalf("insert squad member: %v", err)
 	}

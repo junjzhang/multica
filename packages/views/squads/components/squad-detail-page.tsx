@@ -10,6 +10,7 @@ import { useModalStore } from "@multica/core/modals";
 import { useIssueStatuses } from "@multica/core/issue-statuses/hooks";
 import { resolvePublicFileUrl } from "@multica/core/workspace/avatar-url";
 import { isImeComposing } from "@multica/core/utils";
+import { agentExecutionKind } from "@multica/core/agents/execution-kind";
 import { getShortcut, shortcutMatchesEvent } from "@multica/core/shortcuts";
 import { useLocale, useT, useTimeAgo } from "../../i18n";
 import { agentListOptions, memberListOptions, squadMemberStatusOptions, workspaceKeys } from "@multica/core/workspace/queries";
@@ -293,8 +294,11 @@ export function SquadDetailPage() {
   const availableAgents = agents.filter((a: Agent) => !a.archived_at && !members.some((m) => m.member_type === "agent" && m.member_id === a.id));
   const availableMembers = wsMembers.filter((m) => !members.some((sm) => sm.member_type === "member" && sm.member_id === m.user_id));
   const isLeader = (m: SquadMember) => m.member_type === "agent" && squad.leader_id === m.member_id;
-  const isArchived = (m: SquadMember) =>
-    m.member_type === "agent" && !!agents.find((a: Agent) => a.id === m.member_id)?.archived_at;
+  // Default leaders must be managed agents; external members never qualify.
+  const canLead = (m: SquadMember) => {
+    const agent = m.member_type === "agent" ? agents.find((a: Agent) => a.id === m.member_id) : undefined;
+    return !!agent && !agent.archived_at && agentExecutionKind(agent) === "managed";
+  };
   const archived = !!squad.archived_at;
   const createAgentHref = `${p.newAgent()}?squad=${encodeURIComponent(squadId)}`;
 
@@ -382,7 +386,7 @@ export function SquadDetailPage() {
             squad={squad}
             members={members}
             canManage={canManage && !archived}
-            isArchived={isArchived}
+            canLead={canLead}
             getEntityName={getEntityName}
             onSetLeader={(id) => setLeaderMut.mutate(id)}
             setLeaderPending={setLeaderMut.isPending}
@@ -449,7 +453,7 @@ export function SquadDetailPage() {
           memberStatusById={memberStatusById}
           canManage={canManage && !archived}
           isLeader={isLeader}
-          isArchived={isArchived}
+          canLead={canLead}
           getEntityName={getEntityName}
           onAddMemberClick={() => setShowAddMember(true)}
           onSetLeader={(id) => setLeaderMut.mutate(id)}
@@ -580,7 +584,7 @@ function SquadMembersSection({
   memberStatusById,
   canManage,
   isLeader,
-  isArchived,
+  canLead,
   getEntityName,
   onAddMemberClick,
   onSetLeader,
@@ -595,7 +599,7 @@ function SquadMembersSection({
   // server/internal/handler/squad.go.
   canManage: boolean;
   isLeader: (m: SquadMember) => boolean;
-  isArchived: (m: SquadMember) => boolean;
+  canLead: (m: SquadMember) => boolean;
   getEntityName: (type: string, id: string) => string;
   onAddMemberClick: () => void;
   onSetLeader: (agentId: string) => void;
@@ -634,7 +638,7 @@ function SquadMembersSection({
             const activeIssues = status?.active_issues ?? [];
             const primaryIssue = activeIssues[0];
             const extraIssueCount = Math.max(0, activeIssues.length - 1);
-            const canMakeLeader = canManage && m.member_type === "agent" && !leader && !isArchived(m);
+            const canMakeLeader = canManage && !leader && canLead(m);
             const canRemove = canManage && !leader;
             const hasMenu = m.member_type === "agent" || canMakeLeader || canRemove;
             return (
@@ -914,7 +918,7 @@ function SquadProperties({
   squad,
   members,
   canManage,
-  isArchived,
+  canLead,
   getEntityName,
   onSetLeader,
   setLeaderPending,
@@ -922,7 +926,7 @@ function SquadProperties({
   squad: Squad;
   members: SquadMember[];
   canManage: boolean;
-  isArchived: (m: SquadMember) => boolean;
+  canLead: (m: SquadMember) => boolean;
   getEntityName: (type: string, id: string) => string;
   onSetLeader: (agentId: string) => void;
   setLeaderPending: boolean;
@@ -931,7 +935,7 @@ function SquadProperties({
   const locale = useLocale();
   const timeAgo = useTimeAgo();
   const leaderName = getEntityName("agent", squad.leader_id);
-  const leaderCandidates = members.filter((m) => m.member_type === "agent" && !isArchived(m));
+  const leaderCandidates = members.filter(canLead);
   const leaderValue = (
     <>
       <ActorAvatar actorType="agent" actorId={squad.leader_id} size="xs" />
@@ -975,6 +979,11 @@ function SquadProperties({
           leaderValue
         )}
       </ObjectProperty>
+      {squad.default_leader_unavailable_reason && (
+        <p className="text-micro text-destructive" role="status">
+          {t(($) => $.details.default_leader_migration)}
+        </p>
+      )}
       <ObjectProperty label={t(($) => $.details.members)}>
         {members.length > 0 && (
           <span className="flex shrink-0 items-center -space-x-1">

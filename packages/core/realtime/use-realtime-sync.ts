@@ -1215,6 +1215,10 @@ export function useRealtimeSync(
 
     const unsubAny = ws.onAny((msg) => {
       if (specificEvents.has(msg.type)) return;
+      if (msg.type === "agent:archived" || msg.type === "agent:restored") {
+        const wsId = getCurrentWsId();
+        if (wsId) qc.invalidateQueries({ queryKey: [...issueKeys.all(wsId), "contract"] });
+      }
       const prefix = msg.type.split(":")[0] ?? "";
       if (prefix === "task" && msg.type !== "task:progress") {
         const payload = msg.payload as { issue_id?: unknown };

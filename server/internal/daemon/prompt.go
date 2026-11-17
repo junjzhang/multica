@@ -72,10 +72,36 @@ func perTurnContextBlocks(task Task, opts promptOpts) string {
 	}
 	b.WriteString(execenv.BuildOnBehalfOfBlock(task.InitiatorName, task.InitiatorEmail))
 	b.WriteString(buildCoordinatorBlock(task))
+	b.WriteString(buildAcceptedReturnsBlock(task))
 	b.WriteString(execenv.BuildConnectedAppsBlock(task.ConnectedApps))
 	b.WriteString(buildJoinedWakeupsBlock(task.WakeupJoined))
 	b.WriteString(buildProjectWorkflowBlock(task))
 	b.WriteString(buildParentIssueBlock(task))
+	return b.String()
+}
+
+func buildAcceptedReturnsBlock(task Task) string {
+	const unavailable = "[Automatic result returns]\nThis server supplied no authoritative return context. Do not infer that there is no automatic return from missing or empty result_notifications. Verify the return relationship before sending another handoff.\n\n"
+	if task.AcceptedReturns == nil {
+		return unavailable
+	}
+	for _, accepted := range *task.AcceptedReturns {
+		if accepted.ReturnID == "" || accepted.RecipientAgentID == "" || (accepted.Kind != "managed_task" && accepted.Kind != "external_session") {
+			return unavailable
+		}
+	}
+	var b strings.Builder
+	b.WriteString("[Automatic result returns]\nThese accepted relationships are a snapshot for this run. Saving its result uses their frozen destinations; do not send an extra mention to return that same result. Run completion and result delivery do not establish business acceptance.\n")
+	if len(*task.AcceptedReturns) == 0 {
+		b.WriteString("No automatic return relationship was accepted at this snapshot.\n")
+	}
+	for _, accepted := range *task.AcceptedReturns {
+		fmt.Fprintf(&b, "- Return %s: recipient agent %s, kind %s.\n", accepted.ReturnID, accepted.RecipientAgentID, accepted.Kind)
+	}
+	if task.IssueID != "" {
+		fmt.Fprintf(&b, "Before an explicit final handoff, refresh this run's accepted_returns with `multica issue runs %s --output json`. Missing accepted_returns is unknown, not empty. Notification status is separate.\n", task.IssueID)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -269,12 +295,12 @@ func BuildWorktreeDeliveryRepairPrompt(problem *execenv.DeliveryProblem) string 
 	if problem.CommittedOnly {
 		b.WriteString("Fix it in this worktree. This sequence puts exactly what your commits contain on the branch as one commit, and leaves your files as they are; its last line stages everything you left uncommitted, so none of it is lost. Uncommitted changes still do not reach the branch: like any change left uncommitted after you commit, they are saved aside rather than delivered:\n\n```sh\n")
 	} else {
-		b.WriteString("Fix it in this worktree. This sequence keeps every file exactly as it is now and puts it on the branch as one commit:\n\n```sh\n")
+		b.WriteString("Fix it in this worktree. This sequence preserves the files and commits the work outside new .multica paths; those paths remain in the worktree for manual recovery:\n\n```sh\n")
 	}
 	for _, step := range problem.RepairSteps() {
 		b.WriteString("git")
 		for _, arg := range step {
-			if strings.ContainsAny(arg, " '\"") {
+			if strings.ContainsAny(arg, " '\"()*?[]!$`\\;&|<>") {
 				arg = "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 			}
 			b.WriteString(" " + arg)
@@ -370,6 +396,10 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 		apply(&opts)
 	}
 	body := buildPromptBody(task, provider)
+	if task.AgentID != "" && task.SessionPinGeneration != "" {
+		body += fmt.Sprintf("\nDelegated results use Mailbox processing receipts. Query `multica agent mailbox list %s --kind delegation_result --output json` while waiting or handling results. Follow next_cursor with --after. Reading does not acknowledge processing. After processing a message, run `multica agent mailbox ack %s <message-id> --state handled`; this cancels its unstarted wakeup, not accepted upstream responsibilities or issue acceptance.\n", task.AgentID, task.AgentID)
+	}
+
 	// Run-scoped context is appended, never prepended: everything ahead of it
 	// is stable across runs of a resumed session, and appending keeps it after
 	// the cached prefix (MUL-5377).
@@ -383,8 +413,16 @@ func BuildPrompt(task Task, provider string, options ...PromptOption) string {
 }
 
 func buildPromptBody(task Task, provider string) string {
+	if wait := task.BackgroundWait; wait != nil && wait.Result != nil {
+		result, _ := json.Marshal(wait.Result)
+		return fmt.Sprintf("The background command registered by this original task has finished. Continue this task in its original provider session and worktree. The command was not rerun. Its result was included in this turn and acknowledged at start; do not register it again merely to read it. Original accepted_returns still apply; assess the result before reporting the complete task.\n\nBackground wait result:\n%s\n", result)
+	}
 	if result := task.DelegationResult; result != nil {
-		return fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		body := fmt.Sprintf("A delegated run has returned to this original conversation. Read the saved result of run %s for delegated issue %s (outcome: %s, return: %s). Assess that result in this conversation and continue the original task as appropriate. This is a result-handling turn; do not repeat the delegated executor instructions.\n", result.ResultTaskID, result.DelegatedIssueID, result.Outcome, result.DelegationReturnID)
+		if result.UpstreamReturnsUnknown {
+			body += "The accepted caller provenance is incomplete. This result was delivered to its frozen session, but inherited upstream responsibility is unresolved. An empty accepted_returns snapshot does not resolve that gap; do not guess an ancestor or create a replacement notification.\n"
+		}
+		return body
 	}
 	if task.WakeupID != "" {
 		var b strings.Builder

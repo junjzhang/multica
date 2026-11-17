@@ -27,6 +27,22 @@ At acceptance, freeze the managed runtime, provider, provider session ID, and wo
 
 Reuse the existing managed task queue and provider resume path for a result-handling turn. Bind that turn to the recorded source task/session, rather than looking up the latest session for an Agent and issue. A new queue record or CLI process for a turn in the original provider session does not mean rerunning the delegated implementation.
 
+A result-handling continuation carries the accepted callers' upstream
+relationships. Each intent and covering run records the exact caller task set;
+the frozen address's original source task is only a conversation anchor. Callback
+authority follows the actual callers' consistent originator, while restoration
+keeps the original scope and address. It does not copy the completed downstream executor's recipients or
+collect recipients from other runs on the same issue. Repeated outcomes have
+distinct notification identities. A relationship already traversed by the
+same result-propagation chain is excluded from further automatic forwarding;
+explicit post-result takeovers remain one-off rather than continuing the
+selected recipient's unrelated upstream work. Claims and run reads expose the
+complete `accepted_returns` snapshot separately from outcome notifications.
+Missing or unreadable context is unknown, never a known-empty set. Legacy null
+caller sets permit single-hop frozen-session delivery without inferred authority
+or ancestor inheritance; verified result context explicitly reports unresolved
+upstream provenance independently of the actual `accepted_returns` snapshot.
+
 While the source turn is busy, the result-handling turn waits. If its fixed session or work directory is no longer recoverable, preserve the submitted result and expose delivery failure; do not silently select a newer session or use the normal fresh-session fallback. Other ordinary managed work retains its existing recovery policy.
 
 The first provider session pin can arrive after the Agent starts using tools. Until a reliable return identity is persisted, the delegation gate must return a specific not-ready outcome without creating executable child work. Do not fill that gap with an older session. Exercise this window along with session replacement, busy return, and missing-session failure in integration tests.
@@ -47,7 +63,11 @@ Known busy means no host-side acceptance: retain the message for retry with its 
 
 The existing `agent_task_queue.result` and `error` fields are authoritative for the execution result; issue/comment records present and discuss it. Persist the result and the facts that make its accepted notification obligations due in the same transaction, so a crash between saving a result and notifying cannot lose the notification. Reuse the existing PostgreSQL transaction and delivery infrastructure; do not introduce another message broker or parallel result store.
 
-A submitted result awaiting acceptance and an undeliverable notification can coexist. Show both on the issue. When the original session has been deleted, preserve the result and a visible delivery failure; do not silently redirect or rerun the managed Agent. An explicitly selected takeover session may receive a new notification of the existing result. Original uncertain deliveries remain intact and receipt-only.
+A submitted result awaiting acceptance and an undeliverable notification can coexist. Show both on the issue. When the original session has been deleted, preserve the result and a visible delivery failure. An explicitly selected takeover session may receive a new notification of the existing result. Original uncertain deliveries remain intact and receipt-only.
+
+Managed issue runs can establish a certified continuation after a failed resume creates a new provider session. Admission verifies the same workspace, Agent, runtime, provider and source issue, a terminal old source, a confirmed new session pin and no other nonterminal run occupying that Agent's source issue. The current version rotates transactionally with the dispatch; immutable prior versions and caller provenance remain intact. External sessions, chat/autopilot scopes and repinning the same task require the existing explicit handoff/takeover flow.
+
+Before materialization, an old managed result may follow only these certified continuation edges to the current version. The result obligation retains its original accepted return ID and caller provenance, and freezes a separate delivery return ID in the same transaction as its notification. Reconciliation retries reuse the obligation's identity. Already materialized notifications retain their original physical destination. Without a certified chain, delivery retains the existing frozen address and recovery remains available through explicit takeover. A shared SQL function defines the chain for delivery and resource retention, including pending comment inputs that have not produced a worker run yet. Admission records `delegation_return_continued`; forwarding records `delegation_result_forwarded` with both versions, source tasks, result and reason.
 
 Issue cancellation atomically withdraws notifications that have not been claimed. Cancellation and claim need a defined serialized boundary. An already accepted task requires execution cancellation through the managed runtime; withdrawing a notification cannot undo execution. Archiving or revoking a recipient must not create a window in which otherwise forbidden queued work is sent.
 

@@ -14,6 +14,20 @@ const response = {
 };
 
 afterEach(() => vi.unstubAllGlobals());
+
+it("keeps accepted return knowledge separate from pending notifications and malformed metadata", () => {
+  expect(AgentTaskSchema.parse({ id: "old" }).accepted_returns).toBeUndefined();
+  expect(AgentTaskSchema.parse({ id: "empty", accepted_returns: [] }).accepted_returns).toEqual([]);
+  for (const accepted_returns of [null, {}, [{}], [{ return_id: "return", recipient_agent_id: null }]]) {
+    expect(AgentTaskSchema.parse({ id: "invalid", accepted_returns }).accepted_returns).toBeUndefined();
+  }
+  const accepted = { return_id: "return", recipient_agent_id: "dispatcher", kind: "managed_task", source_task_id: "source" };
+  expect(AgentTaskSchema.parse({ id: "partial", accepted_returns: [accepted, {}] }).accepted_returns).toBeUndefined();
+  const task = AgentTaskSchema.parse({ id: "running", result_notifications: [], accepted_returns: [accepted] });
+  expect(task.accepted_returns).toEqual([accepted]);
+  expect(task.result_notifications).toEqual([]);
+});
+
 function clientReturning(body: unknown) {
   const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
   vi.stubGlobal("fetch", fetch);

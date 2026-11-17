@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 )
 
 // Composition tests for MUL-8145, in the style of
@@ -56,7 +57,7 @@ var builtInParentMoves = []string{
 }
 
 func TestOwningLeaderInWorkflowMovesOnlyByWorkflowCommands(t *testing.T) {
-	protocol := squadOperatingProtocolFor(true, leaderWorkflowCurrentDaemon)
+	protocol := squadbriefing.ProtocolFor(true, squadbriefing.WorkflowCurrentDaemon)
 	for _, provider := range []string{"claude", "codex"} {
 		combined := strings.Join(strings.Fields(protocol+"\n"+leaderRuntimeBriefFor(t, provider, protocol, true)), " ")
 		for _, move := range builtInParentMoves {
@@ -86,7 +87,7 @@ func TestOwningLeaderInWorkflowMovesOnlyByWorkflowCommands(t *testing.T) {
 // Without a workflow the owning leader keeps the built-in arc, so issues
 // outside a handoff workflow see no change.
 func TestOwningLeaderWithoutWorkflowKeepsBuiltInMoves(t *testing.T) {
-	protocol := squadOperatingProtocolFor(true, leaderNoWorkflow)
+	protocol := squadbriefing.ProtocolFor(true, squadbriefing.NoWorkflow)
 	if strings.Contains(protocol, "through its project workflow") {
 		t.Fatalf("owner protocol without a workflow must be the built-in form:\n%s", protocol)
 	}
@@ -101,31 +102,12 @@ func TestOwningLeaderWithoutWorkflowKeepsBuiltInMoves(t *testing.T) {
 // A guest leader gets the prohibition whether or not the issue has a
 // workflow: the workflow never widens status authority.
 func TestGuestLeaderProtocolIgnoresWorkflow(t *testing.T) {
-	for _, workflow := range []leaderWorkflow{leaderWorkflowCurrentDaemon, leaderWorkflowLegacyDaemon, leaderWorkflowStepMoved} {
-		if squadOperatingProtocolFor(false, workflow) != squadOperatingProtocolFor(false, leaderNoWorkflow) {
+	for _, workflow := range []squadbriefing.Workflow{squadbriefing.WorkflowCurrentDaemon, squadbriefing.WorkflowLegacyDaemon, squadbriefing.WorkflowStepMoved} {
+		if squadbriefing.ProtocolFor(false, workflow) != squadbriefing.ProtocolFor(false, squadbriefing.NoWorkflow) {
 			t.Fatal("guest leader protocol must not vary with the project workflow")
 		}
 	}
-	if strings.Contains(squadOperatingProtocolFor(false, leaderWorkflowCurrentDaemon), "Step done") {
+	if strings.Contains(squadbriefing.ProtocolFor(false, squadbriefing.WorkflowCurrentDaemon), "Step done") {
 		t.Fatal("guest leader protocol must not hand out the Step done move")
-	}
-}
-
-// A current daemon's runtime brief states no built-in moves, so the protocol
-// forbids none; only an older daemon's brief, which still states them, gets
-// the override (MUL-8145).
-func TestOwningLeaderInWorkflowOverridesBuiltInMovesOnlyForLegacyDaemons(t *testing.T) {
-	current := strings.Join(strings.Fields(squadOperatingProtocolFor(true, leaderWorkflowCurrentDaemon)), " ")
-	legacy := strings.Join(strings.Fields(squadOperatingProtocolFor(true, leaderWorkflowLegacyDaemon)), " ")
-	for _, word := range []string{"in_progress", "in_review"} {
-		if strings.Contains(current, word) {
-			t.Errorf("current-daemon protocol names %q, which nothing in its brief asks for", word)
-		}
-	}
-	if !strings.Contains(legacy, "This overrides the in_progress / in_review rules in your runtime instructions") {
-		t.Errorf("legacy-daemon protocol must override the built-in moves:\n%s", legacy)
-	}
-	if !strings.Contains(legacy, strings.Join(strings.Fields(squadParentStatusOwnedInWorkflow), " ")) {
-		t.Errorf("legacy-daemon protocol must keep the workflow responsibility it extends")
 	}
 }

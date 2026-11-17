@@ -43,6 +43,7 @@ import { router } from "expo-router";
 import { EnrichedMarkdownText } from "react-native-enriched-markdown";
 import type { Attachment } from "@multica/core/types";
 import { useWorkspaceStore } from "@/data/workspace-store";
+import { useT } from "@/lib/i18n";
 import { preprocessMobileMarkdown } from "./preprocess";
 import { useMarkdownStyle } from "./markdown-style";
 import { splitMarkdown } from "./split-markdown";
@@ -128,10 +129,12 @@ export function Markdown({
     [baseStyle, compact],
   );
 
+  const { t } = useT("issues");
+  const notificationLabel = t("suggestions.notify");
   const segments = useMemo(() => {
     const processed = preprocessMobileMarkdown(content, attachments);
-    return splitMarkdown(processed);
-  }, [content, attachments]);
+    return splitMarkdown(processed, notificationLabel);
+  }, [content, attachments, notificationLabel]);
 
   const onLinkPress = useCallback(
     ({ url }: { url: string }) => {

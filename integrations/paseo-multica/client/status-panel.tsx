@@ -1,62 +1,45 @@
 import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { statusSession, type StatusView } from "../shared/contracts";
+import { BoardSection } from "./board-panel";
 
-const STATE_LABEL: Record<StatusView["state"], string> = {
-  connected: "Connected",
-  invalid: "Needs attention",
-  unverified: "Not verified",
-  disconnected: "Not connected",
-};
+// Connected and disconnected sessions are already explained by the board; only
+// a binding the board cannot judge (revoked or unverifiable) gets a footer.
+const ATTENTION_LABEL: Partial<Record<StatusView["state"], string>> = { invalid: "连接需要处理", unverified: "连接未验证" };
 
-export function StatusPanel({ agentId }: PluginAgentPanelProps) {
+export function StatusPanel(props: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
+  return <StatusPanelContent key={JSON.stringify([props.host.id, props.workspaceId, props.agentId])} {...props} />;
+}
+
+function StatusPanelContent({ agentId, theme, openTask }: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
   const getStatus = useRpc(statusSession);
   const [view, setView] = useState<StatusView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
-
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      setView(await getStatus({ agentId }));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-    }
+    try { setView(await getStatus({ agentId })); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setLoading(false); }
   }, [agentId, getStatus]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  return (
-    <SettingsSection
-      title="Multica connection"
-      info="This session's Multica identity is private to this Paseo host. Use /multica connect, /multica status, or /multica disconnect in the composer."
-    >
-      <SettingsCard>
-        <SettingsRow label="State">{loading ? "Checking…" : view ? STATE_LABEL[view.state] : "Unavailable"}</SettingsRow>
-        <SettingsRow label="External agent">{view?.agentId ?? "—"}</SettingsRow>
-        <SettingsRow label="Workspace">{view?.workspaceId ?? "—"}</SettingsRow>
-        <SettingsRow label="Return address">{view?.returnAddress ?? "—"}</SettingsRow>
-        <SettingsRow label="Delivery daemon">{view?.daemonId ?? "—"}</SettingsRow>
-        <SettingsRow label="Credential expires">{view?.expiresAt ?? "—"}</SettingsRow>
-        <SettingsAction
-          label="Connection details"
-          actionLabel={loading ? "Refreshing…" : "Refresh"}
-          disabled={loading}
-          onPress={() => void load()}
-        />
-      </SettingsCard>
-      {error ? (
-        <SettingsRow label="Could not read status" error={error} />
-      ) : view?.reason ? (
-        <SettingsRow label="Action needed" hint={view.reason} error={view.reason} />
-      ) : null}
-    </SettingsSection>
-  );
+  useEffect(() => { void load(); }, [load]);
+  const colors = theme.colors;
+  const label = error ? "连接状态不可用" : view ? ATTENTION_LABEL[view.state] : undefined;
+  return <ScrollView style={{ backgroundColor: colors.surface0 }} contentContainerStyle={{ gap: 24, padding: 12 }}>
+    <BoardSection agentId={agentId} theme={theme} openTask={openTask} />
+    {label ? <View style={{ gap: 4 }}>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((value) => !value)}>
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12, fontWeight: "500" }}>{label} {expanded ? "▴" : "▾"}</Text>
+      </Pressable>
+      <Text style={{ color: colors.statusDanger, fontSize: 12 }}>{error ?? view?.reason}</Text>
+      {expanded ? <View style={{ gap: 2 }}>
+        {[`External agent: ${view?.agentId ?? "—"}`, `Workspace: ${view?.workspaceId ?? "—"}`, `Return address: ${view?.returnAddress ?? "—"}`, `Delivery daemon: ${view?.daemonId ?? "—"}`, `Credential expires: ${view?.expiresAt ?? "—"}`].map((line) => <Text key={line} selectable style={{ color: colors.foregroundMuted, fontSize: 12 }}>{line}</Text>)}
+        <Pressable accessibilityRole="button" disabled={loading} onPress={() => void load()}><Text style={{ color: colors.accent, fontSize: 12 }}>重新检查</Text></Pressable>
+      </View> : null}
+    </View> : null}
+  </ScrollView>;
 }

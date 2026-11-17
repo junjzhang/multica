@@ -1610,6 +1610,77 @@ describe("useIssueSurfaceController", () => {
     );
   });
 
+  it("finds matching children from a fresh parent-focused board and honors an explicit hide choice", async () => {
+    mockListByStatus({ todo: [
+      makeIssue({ id: "parent", title: "Delivery", status: "todo" }),
+      makeIssue({ id: "child", title: "Review the leaf", status: "todo", parent_issue_id: "parent" }),
+    ] });
+    listIssues.mockImplementation(async (params?: ListIssuesParams & { search?: string }) => {
+      const issues = fixtureRows.filter((issue) => issue.status === params?.status &&
+        (!params.search || issue.title.includes(params.search)));
+      return { issues, total: issues.length };
+    });
+    const store = getIssueSurfaceViewStore("workspace:all");
+    const { result, rerender } = renderHook(
+      ({ search }) => useIssueSurfaceController({ scope: { type: "workspace" }, modes: ["board", "list"], search }),
+      { wrapper: makeWrapper(qc, "workspace:all"), initialProps: { search: "" } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(false);
+    expect(result.current.issues.map((issue) => issue.id)).toEqual(["parent"]);
+
+    rerender({ search: "leaf" });
+    await waitFor(() => expect(result.current.tableQuerySpec.search).toBe("leaf"));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(true);
+    await waitFor(() => expect(result.current.issues.map((issue) => issue.id)).toEqual(["child"]));
+
+    act(() => store.getState().setShowSubIssues(false));
+    await waitFor(() => expect(result.current.issues).toEqual([]));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(false);
+  });
+
+  it("keeps a fresh project board on parent issues and reopens matches on search", async () => {
+    mockListByStatus({ todo: [
+      makeIssue({ id: "parent", title: "Delivery", status: "todo" }),
+      makeIssue({ id: "child", title: "Review the leaf", status: "todo", parent_issue_id: "parent" }),
+    ] });
+    listIssues.mockImplementation(async (params?: ListIssuesParams & { search?: string }) => {
+      const issues = fixtureRows.filter((issue) => issue.status === params?.status &&
+        (!params.search || issue.title.includes(params.search)));
+      return { issues, total: issues.length };
+    });
+    const store = getIssueSurfaceViewStore("project:p1");
+    expect(store.getState().showSubIssuesExplicit).toBe(false);
+    const { result, rerender } = renderHook(
+      ({ search }) => useIssueSurfaceController({ scope: { type: "project", projectId: "p1" }, modes: ["board", "list"], search }),
+      { wrapper: makeWrapper(qc, "project:p1"), initialProps: { search: "" } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(false);
+    expect(result.current.issues.map((issue) => issue.id)).toEqual(["parent"]);
+
+    rerender({ search: "leaf" });
+    await waitFor(() => expect(result.current.tableQuerySpec.search).toBe("leaf"));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(true);
+    await waitFor(() => expect(result.current.issues.map((issue) => issue.id)).toEqual(["child"]));
+  });
+
+  it("includes child work when targeting a worker from a fresh parent-focused board", async () => {
+    mockListByStatus({ todo: [
+      makeIssue({ id: "child", status: "todo", parent_issue_id: "parent", assignee_type: "agent", assignee_id: "worker" }),
+    ] });
+    const store = getIssueSurfaceViewStore("workspace:all");
+    act(() => store.getState().toggleAssigneeFilter({ type: "agent", id: "worker" }));
+    const { result } = renderHook(
+      () => useIssueSurfaceController({ scope: { type: "workspace" }, modes: ["board"] }),
+      { wrapper: makeWrapper(qc, "workspace:all") },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.tableQuerySpec.filters.include_sub_issues).toBe(true);
+    expect(result.current.tableQuerySpec.filters.assignees).toEqual([{ type: "agent", id: "worker" }]);
+    expect(result.current.issues.map((issue) => issue.id)).toEqual(["child"]);
+  });
+
   it("sends the sub-issue display rule to the same server query", async () => {
     mockListByStatus({
       todo: [
@@ -1622,7 +1693,7 @@ describe("useIssueSurfaceController", () => {
     ]);
 
     const store = getIssueSurfaceViewStore("project:p1");
-    act(() => store.getState().toggleShowSubIssues());
+    act(() => store.getState().setShowSubIssues(false));
 
     const { result } = renderHook(
       () =>
@@ -1655,7 +1726,7 @@ describe("useIssueSurfaceController", () => {
     ]);
 
     const store = getIssueSurfaceViewStore("project:p1");
-    act(() => store.getState().toggleShowSubIssues());
+    act(() => store.getState().setShowSubIssues(false));
 
     const { result } = renderHook(
       () =>

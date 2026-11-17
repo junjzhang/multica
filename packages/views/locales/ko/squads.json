@@ -90,6 +90,7 @@
     "created_by": "생성자",
     "created": "생성일",
     "updated": "수정일",
+    "default_leader_migration": "기본 리더는 관리형 에이전트여야 합니다. 새 위임 전에 선택하세요.",
     "visibility": "공개 범위",
     "visibility_workspace": "워크스페이스"
   },

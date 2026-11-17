@@ -20,14 +20,14 @@ const Toaster = ({ ...props }: ToasterProps) => {
   // `prefers-color-scheme` itself, and the Electron renderer's media query
   // can disagree with next-themes' `html.dark` class — that's why the toast
   // sometimes rendered light on a dark UI.
-  const { resolvedTheme = "system" } = useTheme()
+  const { forcedTheme, resolvedTheme = "system" } = useTheme()
 
   // Sonner forwards no data attributes, so the theme anchor sits on a
   // box-less wrapper; the toast list inside stays `position: fixed`.
   return (
     <div data-mc="toaster" className="contents">
       <Sonner
-        theme={resolvedTheme as ToasterProps["theme"]}
+        theme={(forcedTheme ?? resolvedTheme) as ToasterProps["theme"]}
         className="toaster group"
         offset={safeAreaOffset("24px")}
         mobileOffset={safeAreaOffset("16px")}

@@ -24,6 +24,8 @@ import {
   PICKER_TRIGGER_CLASS,
 } from "./property-picker";
 import { useT } from "../../../i18n";
+import { AgentSessionChoices } from "../agent-session-choices";
+import { Button } from "@multica/ui/components/ui/button";
 import { matchesPinyin } from "../../../editor/extensions/pinyin-match";
 
 /**
@@ -113,8 +115,14 @@ function AssigneePickerImpl({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
+  const [recipient, setRecipient] = useState<ExternalRecipient | null>(null);
   const choices = useAssigneeChoices(filter);
   const { getActorName } = useActorName();
+  const pick = (updates: Partial<UpdateIssueRequest>) => {
+    onUpdate(updates);
+    setRecipient(null);
+    setOpen(false);
+  };
 
   const triggerLabel =
     assigneeType && assigneeId
@@ -126,11 +134,11 @@ function AssigneePickerImpl({
       open={open}
       onOpenChange={(v: boolean) => {
         setOpen(v);
-        if (!v) setFilter("");
+        if (!v) { setFilter(""); setRecipient(null); }
       }}
       width="w-64"
       align={align}
-      searchable
+      searchable={!recipient}
       searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
       onSearchChange={setFilter}
       triggerRender={triggerRender}
@@ -146,17 +154,19 @@ function AssigneePickerImpl({
         )
       }
     >
-      <AssigneeOptions
-        choices={choices}
-        filter={filter}
-        assigneeType={assigneeType}
-        assigneeId={assigneeId}
-        mixed={mixed}
-        onPick={(updates) => {
-          onUpdate(updates);
-          setOpen(false);
-        }}
-      />
+      {recipient ? (
+        <ExternalRecipientStep recipient={recipient} onPick={pick} onCancel={() => setRecipient(null)} />
+      ) : (
+        <AssigneeOptions
+          choices={choices}
+          filter={filter}
+          assigneeType={assigneeType}
+          assigneeId={assigneeId}
+          mixed={mixed}
+          onPick={pick}
+          onChooseExternal={setRecipient}
+        />
+      )}
     </PropertyPicker>
   );
 }
@@ -179,25 +189,33 @@ export function AssigneePickerPanel({
 }) {
   const { t } = useT("issues");
   const [filter, setFilter] = useState("");
+  const [recipient, setRecipient] = useState<ExternalRecipient | null>(null);
   const choices = useAssigneeChoices(filter);
+  const pick = (updates: Partial<UpdateIssueRequest>) => {
+    onUpdate(updates);
+    setRecipient(null);
+    onPicked();
+  };
 
   return (
     <PickerPanel
-      searchable
+      searchable={!recipient}
       autoFocusSearch
       searchPlaceholder={t(($) => $.pickers.assignee.search_placeholder)}
       onSearchChange={setFilter}
     >
-      <AssigneeOptions
-        choices={choices}
-        filter={filter}
-        assigneeType={assigneeType}
-        assigneeId={assigneeId}
-        onPick={(updates) => {
-          onUpdate(updates);
-          onPicked();
-        }}
-      />
+      {recipient ? (
+        <ExternalRecipientStep recipient={recipient} onPick={pick} onCancel={() => setRecipient(null)} />
+      ) : (
+        <AssigneeOptions
+          choices={choices}
+          filter={filter}
+          assigneeType={assigneeType}
+          assigneeId={assigneeId}
+          onPick={pick}
+          onChooseExternal={setRecipient}
+        />
+      )}
     </PickerPanel>
   );
 }
@@ -252,6 +270,42 @@ function useAssigneeChoices(filter: string) {
   };
 }
 
+/** An agent or squad whose executor is external: assigning it picks a session first. */
+interface ExternalRecipient {
+  type: "agent" | "squad";
+  id: string;
+  agentId: string;
+}
+
+function ExternalRecipientStep({
+  recipient,
+  onPick,
+  onCancel,
+}: {
+  recipient: ExternalRecipient;
+  onPick: (updates: Partial<UpdateIssueRequest>) => void;
+  onCancel: () => void;
+}) {
+  const { t } = useT("issues");
+  const [sessionId, setSessionId] = useState("");
+  const assignee = { assignee_type: recipient.type, assignee_id: recipient.id };
+  return (
+    <div className="space-y-2 p-2">
+      <p className="text-caption font-medium">{t(($) => $.detail.external_binding_choose_title)}</p>
+      <AgentSessionChoices agentId={recipient.agentId} selected={sessionId} onSelect={setSessionId} />
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={onCancel}>{t(($) => $.detail.external_binding_cancel)}</Button>
+        <Button type="button" size="sm" disabled={!sessionId} onClick={() => onPick({ ...assignee, recipient_session_id: sessionId })}>
+          {t(($) => $.detail.external_binding_save)}
+        </Button>
+        <Button type="button" size="sm" variant="ghost" className="w-full" onClick={() => onPick({ ...assignee, suppress_run: true })}>
+          {t(($) => $.pickers.assignee.assign_without_starting)}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function agentActionState(agent: Agent) {
   const kind = agentExecutionKind(agent);
   if (kind === "unknown") return "unsupported" as const;
@@ -266,6 +320,7 @@ function AssigneeOptions({
   assigneeId,
   mixed = false,
   onPick,
+  onChooseExternal,
 }: {
   choices: ReturnType<typeof useAssigneeChoices>;
   filter: string;
@@ -273,6 +328,7 @@ function AssigneeOptions({
   assigneeId: string | null;
   mixed?: boolean;
   onPick: (updates: Partial<UpdateIssueRequest>) => void;
+  onChooseExternal: (recipient: ExternalRecipient) => void;
 }) {
   const { t } = useT("issues");
   const { userId, memberRole, filteredMembers, filteredAgents, filteredSquads, liveAgentsById } =
@@ -280,6 +336,14 @@ function AssigneeOptions({
 
   const isSelected = (type: string, id: string) =>
     assigneeType === type && assigneeId === id;
+
+  const chooseAssignee = (type: "agent" | "squad", id: string, agent: Agent) => {
+    if (agentExecutionKind(agent) === "external") {
+      onChooseExternal({ type, id, agentId: agent.id });
+      return;
+    }
+    onPick({ assignee_type: type, assignee_id: id });
+  };
 
   return (
     <>
@@ -348,10 +412,7 @@ function AssigneeOptions({
                 }
                 onClick={() => {
                   if (!allowed) return;
-                  onPick({
-                    assignee_type: "agent",
-                    assignee_id: a.id,
-                  });
+                  chooseAssignee("agent", a.id, a);
                 }}
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size="sm" showStatusDot />
@@ -394,10 +455,7 @@ function AssigneeOptions({
                 }
                 onClick={() => {
                   if (!squadAllowed) return;
-                  onPick({
-                    assignee_type: "squad",
-                    assignee_id: s.id,
-                  });
+                  chooseAssignee("squad", s.id, leader!);
                 }}
               >
                 <ActorAvatar actorType="squad" actorId={s.id} size="sm" />

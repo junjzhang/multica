@@ -1,7 +1,9 @@
-package handler
+package squadbriefing
 
 import (
 	"context"
+	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -13,14 +15,13 @@ import (
 // prepended to every squad-leader claim. It explains the leader's coordinator
 // role, the @mention dispatch mechanism, and the stop-after-dispatch contract.
 // Responsibility 6 (parent issue status) is appended separately by
-// squadOperatingProtocolFor — it is the only part that varies by whether this
+// ProtocolFor — it is the only part that varies by whether this
 // squad actually owns the issue.
 //
 // Keep this text English-only (matches existing agent-harness conventions)
 // and keep the mention syntax exactly aligned with util.MentionRe — the
-// "Squad Roster" block below renders copyable examples as inline code so the
-// briefing itself does not trigger, and the pasted syntax round-trips
-// through util.ParseMentions. The protocol text refers to that format.
+// "Squad Roster" block below renders concrete examples that round-trip
+// through util.ParseMentions, and the protocol text refers to that format.
 //
 // Responsibility 5 is the single statement of the no_action rule (MUL-6984).
 // The runtime brief's workflow step 4 and ## Output, and the per-turn reply
@@ -49,9 +50,8 @@ Your responsibilities, in order:
    Roster below — prefer the member whose skills cover the work.
 2. **Delegate by @mention.** Post a single comment on this issue that
    @mentions the chosen member(s) and tells them what to do.
-   - **Be terse.** Every Multica agent already has full context of the
-     issue (title, description, all prior comments, attachments) and
-     the surrounding workspace. Do NOT restate or summarise the
+   - **Be terse.** Recipients can read the issue and relevant comment threads through
+     the CLI using their own connected identity. Do NOT restate or summarise the
      issue body, prior discussion, or known facts in your delegation
      comment — they read it themselves.
    - Say only what cannot be inferred from the issue: who you're
@@ -78,10 +78,11 @@ Your responsibilities, in order:
 4. **Stop after dispatching.** Once your delegation comment is posted
    and evaluation recorded, end your turn. Do not continue working,
    do not write code, do not open files. You will be re-triggered
-   automatically when:
-   - a delegated member posts an update or asks you a question;
-   - a delegated member finishes and the issue moves forward;
-   - someone @mentions you again on this issue.
+   through the fixed return accepted for a delegation, an explicit
+   @mention, or a supported system wakeup. Ordinary replies do not start
+   anyone. Check accepted_returns for this turn: existing fixed returns
+   use platform delivery and need no duplicate @mention. A coordinator
+   field, a delivered receipt, or Mailbox handled is not acceptance.
 5. **Re-evaluate on each trigger.** When you wake up again, read the new
    activity and decide whether to delegate the next step, escalate to
    the human reporter, or close the loop. If no action is needed
@@ -122,23 +123,23 @@ const squadParentStatusOwned = `6. **Own the parent issue status.** This issue i
    when no comment asked you to. Leave ` + "`" + `done` + "`" + ` to a human reviewer or
    existing integrations (for example a PR with close intent that merges).`
 
-// leaderWorkflow says whether an owning leader's issue follows a project
+// Workflow says whether an owning leader's issue follows a project
 // workflow that came with the claim, and whether the daemon's runtime brief
 // still states the built-in in_progress / in_review rules (MUL-8145).
-type leaderWorkflow int
+type Workflow int
 
 const (
-	leaderNoWorkflow leaderWorkflow = iota
-	// leaderWorkflowCurrentDaemon: the runtime brief points at
+	NoWorkflow Workflow = iota
+	// WorkflowCurrentDaemon: the runtime brief points at
 	// [Project workflow] and states no built-in moves.
-	leaderWorkflowCurrentDaemon
-	// leaderWorkflowLegacyDaemon: the runtime brief still says to set
+	WorkflowCurrentDaemon
+	// WorkflowLegacyDaemon: the runtime brief still says to set
 	// in_progress first and in_review on delivery, so responsibility 6 has
 	// to rule those moves out for this issue.
-	leaderWorkflowLegacyDaemon
-	// leaderWorkflowStepMoved: the run's binding no longer matches the issue,
+	WorkflowLegacyDaemon
+	// WorkflowStepMoved: the run's binding no longer matches the issue,
 	// so it must leave status unchanged even when its squad owns the issue.
-	leaderWorkflowStepMoved
+	WorkflowStepMoved
 )
 
 const squadParentStatusStepMoved = `6. **Leave the parent issue's status unchanged for this run.** This issue
@@ -177,6 +178,20 @@ const squadParentStatusWorkflowOverridesRuntime = `
    This overrides the in_progress / in_review rules in your runtime
    instructions: never set either on this issue just to mark progress or
    delivery.`
+
+// squadParentStatusContract follows every responsibility 6 under which the
+// leader moves the parent: the Contract delivery belongs to the same authority.
+const squadParentStatusContract = `
+   If this issue has a Contract, keep the squad as its executor. As the
+   current active leader, submit the overall delivery with your own Agent
+   identity using ` + "`" + `multica issue contract apply` + "`" + `. The specified upstream
+   acceptor decides acceptance; do not accept your own squad's delivery or
+   revise its criteria. Read ` + "`" + `executor_representative` + "`" + ` and the current version
+   first. A leader change makes the agreement stale until an authorized
+   requester revises it; old delivery authors, evidence and accepted return
+   addresses remain historical. Accept each child's independent Contract
+   separately before including its results in the overall delivery. Run
+   completion and Mailbox handled are not contract acceptance.`
 
 // squadParentStatusNotOwned is responsibility 6 for every other leader path:
 // an @squad mention on an issue owned by someone else (MUL-3724), and
@@ -235,25 +250,38 @@ const squadSteerRule = `- A worker already running on this issue gets a new comm
   the command reports per run whether it was. New work is still a normal
   delegation.`
 
-// squadOperatingProtocolFor assembles the protocol, selecting the parent-status
+// ProtocolFor assembles the protocol, selecting the parent-status
 // responsibility that matches this leader's actual authority over the issue
 // and, for an owner, whether the issue's project workflow governs its moves.
-func squadOperatingProtocolFor(ownsIssueStatus bool, workflow leaderWorkflow) string {
+func ProtocolFor(ownsIssueStatus bool, workflow Workflow) string {
 	status := squadParentStatusNotOwned
 	switch {
-	case ownsIssueStatus && workflow == leaderWorkflowStepMoved:
+	case ownsIssueStatus && workflow == WorkflowStepMoved:
 		status = squadParentStatusStepMoved
-	case ownsIssueStatus && workflow == leaderWorkflowCurrentDaemon:
+	case ownsIssueStatus && workflow == WorkflowCurrentDaemon:
 		status = squadParentStatusOwnedInWorkflow
-	case ownsIssueStatus && workflow == leaderWorkflowLegacyDaemon:
+	case ownsIssueStatus && workflow == WorkflowLegacyDaemon:
 		status = squadParentStatusOwnedInWorkflow + squadParentStatusWorkflowOverridesRuntime
 	case ownsIssueStatus:
 		status = squadParentStatusOwned
 	}
+	if ownsIssueStatus && workflow != WorkflowStepMoved {
+		status += squadParentStatusContract
+	}
 	return squadOperatingProtocolHeader + "\n" + status + "\n\n" + squadOperatingProtocolHardRules
 }
 
-// buildSquadLeaderBriefing composes the full system briefing appended to a
+// Options carries what the claiming daemon and issue add to the protocol.
+// Workflow says whether the claim carries a [Project workflow] block for the
+// issue; an owning leader then moves the parent with that block's commands
+// instead of in_progress / in_review (MUL-8145). Steer adds the rule for
+// steering a running worker; see squadSteerRule.
+type Options struct {
+	Workflow Workflow
+	Steer    bool
+}
+
+// Build composes the full system briefing appended to a
 // squad leader's Instructions when it claims a task on a squad-assigned
 // issue. The returned string contains three sections:
 //
@@ -268,24 +296,22 @@ func squadOperatingProtocolFor(ownsIssueStatus bool, workflow leaderWorkflow) st
 // including ones where the squad is a guest on someone else's issue, so this
 // flag is what keeps status authority from leaking along with the roster.
 //
-// workflow says whether the claim carries a [Project workflow] block for the
-// issue; an owning leader then moves the parent with that block's commands
-// instead of in_progress / in_review (MUL-8145).
-//
 // Archived agent members are skipped — there's no point asking the leader
 // to delegate to a retired agent. Members whose underlying record can't be
 // loaded (deleted user/agent races, FK weirdness) are also skipped silently.
-//
-// steer adds the rule for steering a running worker; see squadSteerRule.
-func buildSquadLeaderBriefing(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool, workflow leaderWorkflow, steer bool) string {
+func Build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool, opts Options) string {
+	return build(ctx, q, squad, ownsIssueStatus, opts, squad.LeaderID)
+}
+
+func build(ctx context.Context, q *db.Queries, squad db.Squad, ownsIssueStatus bool, opts Options, leaderID pgtype.UUID) string {
 	var sb strings.Builder
-	sb.WriteString(squadOperatingProtocolFor(ownsIssueStatus, workflow))
-	if steer {
+	sb.WriteString(ProtocolFor(ownsIssueStatus, opts.Workflow))
+	if opts.Steer {
 		sb.WriteString("\n")
 		sb.WriteString(squadSteerRule)
 	}
 	sb.WriteString("\n\n")
-	sb.WriteString(buildSquadRoster(ctx, q, squad))
+	sb.WriteString(buildSquadRoster(ctx, q, squad, leaderID))
 
 	if trimmed := strings.TrimSpace(squad.Instructions); trimmed != "" {
 		sb.WriteString("\n\n## Squad Instructions (")
@@ -296,22 +322,33 @@ func buildSquadLeaderBriefing(ctx context.Context, q *db.Queries, squad db.Squad
 	return sb.String()
 }
 
+// BuildForIssue is Build for the issue's current task leader, which may differ
+// from the squad's default leader.
+func BuildForIssue(ctx context.Context, q *db.Queries, issue db.Issue, squad db.Squad, owns bool, opts Options) string {
+	leader, err := issueleader.ResolveIssueLeader(ctx, q, issue, squad)
+	if err != nil {
+		return "Task leader unavailable: explicit handoff required."
+	}
+	text := build(ctx, q, squad, owns, opts, leader.Agent.ID)
+	return fmt.Sprintf("Task leadership: root %s; revision %d; session %s. Default leader %s applies only to new tasks.\n\n%s", util.UUIDToString(leader.RootID), leader.Revision, util.UUIDToString(leader.SessionID), util.UUIDToString(squad.LeaderID), text)
+}
+
 // buildSquadRoster renders the "## Squad Roster" section: a leader self-row
 // plus one row per non-archived member, with literal mention markdown.
-func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad) string {
+func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad, leaderID pgtype.UUID) string {
 	var sb strings.Builder
 	sb.WriteString("## Squad Roster\n\n")
 
 	// Leader self-row. Leaders are always agents (FK enforced in schema).
 	leaderName := "Leader"
-	if leader, err := q.GetAgent(ctx, squad.LeaderID); err == nil {
+	if leader, err := q.GetAgent(ctx, leaderID); err == nil {
 		leaderName = leader.Name
 	}
 	sb.WriteString("Leader (you):\n")
 	sb.WriteString("- ")
 	sb.WriteString(leaderName)
 	sb.WriteString(" — agent — `")
-	sb.WriteString(formatMention(leaderName, "agent", util.UUIDToString(squad.LeaderID)))
+	sb.WriteString(formatMention(leaderName, "agent", util.UUIDToString(leaderID)))
 	sb.WriteString("`\n")
 
 	members, err := q.ListSquadMembers(ctx, squad.ID)
@@ -319,13 +356,13 @@ func buildSquadRoster(ctx context.Context, q *db.Queries, squad db.Squad) string
 		members = nil
 	}
 
-	skillNamesByAgentID, skillsLoaded := loadSquadMemberSkillNames(ctx, q, members, util.UUIDToString(squad.LeaderID))
+	skillNamesByAgentID, skillsLoaded := loadSquadMemberSkillNames(ctx, q, members, util.UUIDToString(leaderID))
 
 	rows := make([]string, 0, len(members))
 	for _, m := range members {
 		// Skip the leader if they happen to also be in the member list —
 		// they're already shown above and we don't want self-delegation.
-		if m.MemberType == "agent" && util.UUIDToString(m.MemberID) == util.UUIDToString(squad.LeaderID) {
+		if m.MemberType == "agent" && util.UUIDToString(m.MemberID) == util.UUIDToString(leaderID) {
 			continue
 		}
 		row := renderMemberRow(ctx, q, m, skillNamesByAgentID, skillsLoaded)

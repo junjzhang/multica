@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/multica-ai/multica/server/internal/delivery"
 )
 
 // One malformed lease timestamp must not discard the rest of an already-leased
@@ -109,6 +111,7 @@ func TestClaimDeliveriesMapsStoredRowAndRendersCommentEnvelope(t *testing.T) {
 	}
 
 	want := "Multica has a request for this session.\n" +
+		"Kind: comment mention (comment_mention)\n" +
 		"Mailbox ID: delivery-comment-1\n" +
 		"Workspace ID: workspace-row\n" +
 		"Issue ID: issue-1\n" +
@@ -116,7 +119,8 @@ func TestClaimDeliveriesMapsStoredRowAndRendersCommentEnvelope(t *testing.T) {
 		"Recipient agent ID: agent-1\n\n" +
 		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n" +
 		"Read: multica issue get issue-1 --output json\n" +
-		"Read comments: multica issue comment list issue-1 --output json\n" +
+		"Scan threads: multica issue comment list issue-1 --roots-only --summary --compact --output json\n" +
+		"Expand relevant threads: multica issue comment list issue-1 --thread <thread-id> --tail 30 --compact --output json\n" +
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone."
 	if got := renderDeliveryNotification(claim.Delivery); got != want {
 		t.Fatalf("comment envelope changed:\n%s", got)
@@ -171,6 +175,32 @@ func TestClaimDeliveriesRejectsMissingOrForeignWorkspaceEcho(t *testing.T) {
 			}
 			if claim.Scope.WorkspaceID != "workspace-1" {
 				t.Fatalf("claim scope = %q, want the claimed workspace for the outcome ack", claim.Scope.WorkspaceID)
+			}
+		})
+	}
+}
+
+func TestRecordDeliveryOutcomeNextAttemptCompatibility(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{`"2026-01-02T03:04:05.123Z"`, true}, {`null`, false}, {`"invalid"`, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"id":"delivery-1","delivery_status":"pending","next_attempt_at":` + tc.value + `}`))
+			}))
+			defer srv.Close()
+			client := NewClient(srv.URL)
+			client.SetToken("daemon-token")
+			client.mailboxDaemonID = "daemon-1"
+			stored, err := client.RecordDeliveryOutcome(context.Background(), "workspace-1", delivery.OutcomeRequest{DeliveryID: "delivery-1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (stored.NextAttemptAt != nil) != tc.want {
+				t.Fatalf("next attempt = %v, want present %v", stored.NextAttemptAt, tc.want)
 			}
 		})
 	}

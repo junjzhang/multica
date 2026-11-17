@@ -135,7 +135,7 @@ func Ensure(ctx context.Context, q *db.Queries, req BindRequest) (Binding, error
 		// A concurrent Ensure or an explicit Bind won the key between the read
 		// and this insert. The unique active-binding index is the arbiter; the
 		// accepted row is now the one to return.
-		if isUniqueViolation(err) {
+		if errors.Is(err, pgx.ErrNoRows) || isUniqueViolation(err) {
 			return Resolve(ctx, q, util.UUIDToString(ws), util.UUIDToString(agentID), util.UUIDToString(issueID))
 		}
 		return Binding{}, fmt.Errorf("sessionroute: create binding: %w", err)
@@ -221,6 +221,9 @@ func validateTarget(ctx context.Context, q *db.Queries, ws, agentID, issueID, se
 	}
 	if err != nil {
 		return db.ExternalAgentSession{}, fmt.Errorf("sessionroute: load session: %w", err)
+	}
+	if session.RevokedAt.Valid {
+		return db.ExternalAgentSession{}, fmt.Errorf("%w: session is revoked", ErrInvalidBinding)
 	}
 	if util.UUIDToString(session.AgentID) != util.UUIDToString(agentID) {
 		return db.ExternalAgentSession{}, fmt.Errorf("%w: session belongs to another agent", ErrInvalidBinding)

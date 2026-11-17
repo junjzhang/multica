@@ -8,6 +8,12 @@ WITH candidate AS MATERIALIZED (
     JOIN agent_runtime r ON r.id = t.runtime_id
     WHERE t.id = @task_id
       AND t.status IN ('dispatched', 'waiting_local_directory')
+      -- A task-leader run starts only while its leadership revision is current.
+      AND (t.leadership_root_issue_id IS NULL OR EXISTS (
+          SELECT 1 FROM issue l
+          WHERE l.id = t.leadership_root_issue_id
+            AND l.leadership_revision = t.leadership_revision
+            AND l.leader_agent_id = t.agent_id))
     FOR UPDATE OF t
 ), capability AS (
     INSERT INTO task_supplement_capability (task_id, workspace_id, issue_id, capability)

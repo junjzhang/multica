@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/delegation"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -343,9 +342,14 @@ func TestCreateDelegatedIssueByExternalDispatcherWithoutSessionCreatesNothing(t 
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
-	dispatcher, sessionID, _ := externalAgentFixture(t, "Delegation External Missing", "delegation-daemon")
-	ownerID := ""
-	_ = testPool.QueryRow(context.Background(), `SELECT owner_user_id FROM external_agent_session WHERE id = $1`, sessionID).Scan(&ownerID)
+	dispatcher, _, ownerID := externalAgentFixture(t, "Delegation External Missing", "delegation-daemon")
+	// A legacy unbound credential over an agent with several sessions has no
+	// provable address: without an explicit return session it must not guess
+	// one of its siblings.
+	dbfx.Insert(t, "external_agent_session", testutil.Cols{
+		"workspace_id": testWorkspaceID, "agent_id": dispatcher, "owner_user_id": ownerID,
+		"provider": "paseo", "host_id": "delegation-missing-second", "session_id": "delegation-missing-second-session", "daemon_id": "delegation-daemon",
+	})
 	token := externalTokenFixture(t, dispatcher, ownerID, time.Now().Add(time.Hour))
 	target, _ := executableTarget(t, "external-missing")
 	title := fmt.Sprintf("external missing delegation %d", time.Now().UnixNano())
@@ -376,8 +380,10 @@ func TestCreateDelegatedIssueByExternalDispatcherRejectsForeignSession(t *testin
 	w := serveAuthenticated(t, token, http.HandlerFunc(testHandler.CreateIssue), http.MethodPost, "/api/issues", createIssueBody(title, target), nil, func(r *http.Request) {
 		r.Header.Set(ReturnSessionHeader, otherSession)
 	})
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	// The credential is bound to its own session, so naming another session is
+	// refused at the auth boundary before the handler can write anything.
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", w.Code, w.Body.String())
 	}
 	if _, ok := issueIDByTitle(t, title); ok {
 		t.Fatal("foreign-address delegation created an issue")
@@ -700,11 +706,11 @@ func TestReassignmentPreservesAcceptedReturn(t *testing.T) {
 		"issue_id": issueID, "runtime_id": firstRuntime, "status": "completed",
 		"session_id": "first-run-session", "work_dir": "/work/first",
 	})
-	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(firstRun), accepted.ID); err != nil {
+	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(firstRun), delegation.ReturnIntent{ID: accepted.ID}); err != nil {
 		t.Fatalf("link replaced assignment run: %v", err)
 	}
 	if err := delegation.StoreAssignmentIntent(context.Background(), testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(issueID),
-		delegation.Assignee{Type: "agent", ID: firstTarget}, []pgtype.UUID{accepted.ID}, parseUUID(firstRun)); err != nil {
+		delegation.Assignee{Type: "agent", ID: firstTarget}, []delegation.ReturnIntent{{ID: accepted.ID}}, parseUUID(firstRun)); err != nil {
 		t.Fatalf("seed replaced assignment intent: %v", err)
 	}
 	dbfx.Exec(t, `UPDATE issue SET assignee_type = 'agent', assignee_id = $1 WHERE id = $2`, firstTarget, issueID)
@@ -754,13 +760,13 @@ func TestRerunByManagedDispatcherPreservesAcceptedReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed accepted return: %v", err)
 	}
-	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(sourceRun), accepted.ID); err != nil {
+	if err := delegation.LinkRun(context.Background(), testHandler.Queries, parseUUID(sourceRun), delegation.ReturnIntent{ID: accepted.ID}); err != nil {
 		t.Fatalf("link source run return: %v", err)
 	}
 	// The no-task_id rerun follows the current assignment intent, not the
 	// target worker's latest run.
 	if err := delegation.StoreAssignmentIntent(context.Background(), testHandler.Queries, parseUUID(testWorkspaceID), parseUUID(issueID),
-		delegation.Assignee{Type: "agent", ID: target}, []pgtype.UUID{accepted.ID}, parseUUID(sourceRun)); err != nil {
+		delegation.Assignee{Type: "agent", ID: target}, []delegation.ReturnIntent{{ID: accepted.ID}}, parseUUID(sourceRun)); err != nil {
 		t.Fatalf("store assignment intent: %v", err)
 	}
 

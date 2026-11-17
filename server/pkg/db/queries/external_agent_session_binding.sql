@@ -8,6 +8,7 @@ INSERT INTO external_agent_session_binding (
 ) VALUES (
     @workspace_id, @agent_id, @issue_id, @session_id, sqlc.narg('created_by')
 )
+ON CONFLICT (workspace_id, agent_id, issue_id) WHERE revoked_at IS NULL DO NOTHING
 RETURNING *;
 
 -- name: GetActiveAgentSessionBinding :one
@@ -44,6 +45,7 @@ WHERE b.workspace_id = @workspace_id
   AND b.agent_id = @agent_id
   AND b.issue_id = @issue_id
   AND b.revoked_at IS NULL
+  AND s.revoked_at IS NULL
   AND a.execution_kind = 'external'
   AND a.archived_at IS NULL
 FOR SHARE OF b;
@@ -66,6 +68,7 @@ SELECT b.id AS binding_id,
        s.url,
        s.daemon_id,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id
@@ -100,6 +103,7 @@ SELECT b.id AS binding_id,
        s.url,
        s.daemon_id,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = b.workspace_id AND m.user_id = s.owner_user_id

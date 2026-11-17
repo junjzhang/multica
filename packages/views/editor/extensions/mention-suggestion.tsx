@@ -75,7 +75,7 @@ import { blockedReasonLabel } from "../../issues/blocked-trigger-copy";
 export interface MentionItem {
   id: string;
   label: string;
-  type: "member" | "agent" | "squad" | "issue" | "project" | "all";
+  type: "member" | "agent" | "agent-notify" | "squad" | "issue" | "project" | "all";
   /** Optional grouping hint for injected context items. */
   group?: "current" | "recent" | "search";
   /** Secondary text shown beside the label (e.g. issue title) */
@@ -643,7 +643,7 @@ function MentionRow({
       onClick={onSelect}
     >
       <ActorAvatar
-        actorType={item.type === "all" ? "member" : item.type}
+        actorType={item.type === "all" ? "member" : item.type === "agent-notify" ? "agent" : item.type}
         actorId={item.id}
         size="sm"
         showStatusDot
@@ -651,9 +651,9 @@ function MentionRow({
       <span className="truncate font-medium">
         {item.type === "all" ? t(($) => $.mention.all_members) : item.label}
       </span>
-      {item.type === "agent" && (
+      {(item.type === "agent" || item.type === "agent-notify") && (
         <Badge variant="outline" className="ml-auto text-micro h-4 px-1.5">
-          {t(($) => $.mention.agent_badge)}
+          {item.type === "agent-notify" ? t(($) => $.mention.notify_badge) : t(($) => $.mention.delegate_badge)}
         </Badge>
       )}
       {item.type === "squad" && (
@@ -821,6 +821,7 @@ export function createMentionSuggestion(
                 : undefined,
         };
       });
+    const notifyItems: MentionItem[] = agentItems.map((item) => ({ ...item, type: "agent-notify" }));
     const activeAgentMentionState = new Map(
       agents
         .filter((agent) => !agent.archived_at)
@@ -850,7 +851,7 @@ export function createMentionSuggestion(
     // for everyone the user hasn't mentioned yet on this device.
     const recency = getRecencyMap(wsId);
     const userItems = sortUserItemsByRecency(
-      [...memberItems, ...agentItems, ...squadItems],
+      [...memberItems, ...agentItems, ...notifyItems, ...squadItems],
       recency,
     );
 

@@ -21,10 +21,13 @@ import { useT } from "../../i18n";
 export function ExternalSessionLink({
   session,
   detailed = false,
+  templateName,
   className,
 }: {
   session: ExternalSession;
   detailed?: boolean;
+  /** Host template the session belongs to, when the task/agent names it. */
+  templateName?: string | null;
   className?: string;
 }) {
   const { t } = useT("issues");
@@ -33,6 +36,9 @@ export function ExternalSessionLink({
   const canOpen = parsed !== null && isDesktopShell();
   const name = session.display_name || session.session_id;
   const provider = session.provider || "external";
+  // "Template › session title" is the identity the task view names; a legacy
+  // per-session agent has no template and keeps the bare session title.
+  const label = templateName ? `${templateName} › ${name}` : name;
 
   const copySessionId = async () => {
     if (await copyText(session.session_id)) {
@@ -97,7 +103,7 @@ export function ExternalSessionLink({
         })}
       >
         <Link2 className="size-3 shrink-0" />
-        <span className="truncate">{name}</span>
+        <span className="truncate">{label}</span>
         {actions}
       </span>
     );
@@ -108,7 +114,7 @@ export function ExternalSessionLink({
       <div className="flex min-w-0 items-start gap-1.5">
         <Link2 className="mt-0.5 size-3 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-medium text-foreground">{name}</div>
+          <div className="truncate font-medium text-foreground">{label}</div>
           <div className="truncate text-micro text-muted-foreground">
             {t(($) => $.detail.external_session_meta, { provider, host: session.host_id })}
           </div>

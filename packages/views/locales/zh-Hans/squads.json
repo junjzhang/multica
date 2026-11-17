@@ -90,6 +90,7 @@
     "created_by": "创建者",
     "created": "创建时间",
     "updated": "更新时间",
+    "default_leader_migration": "默认队长必须是托管 Agent；请先选择新的托管默认队长再派发。",
     "visibility": "可见范围",
     "visibility_workspace": "工作区"
   },

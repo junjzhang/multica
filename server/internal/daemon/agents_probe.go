@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -470,26 +471,26 @@ func parseDshProbeFrame(output string) (dshProbeFrame, bool) {
 	return dshProbeFrame{}, false
 }
 
-// probeDshMulticaProfile classifies one `--probe` attempt. See dshProbeVerdict
-// for why this is not a bool.
+// probeDshMulticaProfile classifies one `--probe` attempt and returns a redacted
+// diagnostic when no usable frame arrives. See dshProbeVerdict for the classes.
 //
 // Scoped to the caller's context as well as its own timeout: `--probe` boots a
 // whole DSH process, and a round abandoned by a shutting-down daemon should not
 // go on holding one for the rest of the timeout — once per retry, per provider.
-func probeDshMulticaProfile(ctx context.Context, executablePath string) dshProbeVerdict {
+func probeDshMulticaProfile(ctx context.Context, executablePath string) (dshProbeVerdict, string) {
 	// A cancelled round says nothing about the profile, and it must be decided
 	// before the manifest: a shutdown is not evidence the profile is missing.
 	if ctx.Err() != nil {
-		return dshProbeUnavailable
+		return dshProbeUnavailable, ""
 	}
 	if dshMulticaProfileNeedsMigration() {
-		return dshProbeNeedsMigration
+		return dshProbeNeedsMigration, ""
 	}
 	// A manifest that does not name the runtime is missing. Decide that before
 	// starting dsh: on current DSH, --probe against the skeleton a refused
 	// install leaves hangs until this timeout, and the file is already the answer.
 	if !dshMulticaProfilePresent() {
-		return dshProbeMissingProfile
+		return dshProbeMissingProfile, ""
 	}
 
 	parent := ctx
@@ -501,7 +502,9 @@ func probeDshMulticaProfile(ctx context.Context, executablePath string) dshProbe
 	// grandchildren holding the stdout pipe open — which is both a leaked
 	// process and, as this probe's own tests showed, a wait that outlives the
 	// timeout it was supposed to be bounded by.
-	output, _ := processtree.Output(ctx, cmd, time.Second)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := processtree.Run(ctx, cmd, time.Second)
 
 	// The frame decides, not the exit status. A profile that printed a valid
 	// answer has answered, whatever the process did on its way out — and the
@@ -511,18 +514,18 @@ func probeDshMulticaProfile(ctx context.Context, executablePath string) dshProbe
 	// agent.DshProtocolVersion, not a local copy: this decides whether the
 	// daemon may drive the profile, and the code that drives it is the only
 	// honest source for that number.
-	if frame, ok := parseDshProbeFrame(string(output)); ok {
+	if frame, ok := parseDshProbeFrame(stdout.String()); ok {
 		if frame.Version == 1 && frame.Runtime == "dsh" && frame.ProtocolVersion == agent.DshProtocolVersion {
-			return dshProbeOK
+			return dshProbeOK, ""
 		}
-		return dshProbeIncompatible
+		return dshProbeIncompatible, ""
 	}
 
 	// No usable answer. A cancelled ROUND is the one case that says nothing
 	// about the profile: the daemon is shutting down, or this round was
 	// abandoned, and the probe never got to finish on its own terms.
 	if parent.Err() != nil {
-		return dshProbeUnavailable
+		return dshProbeUnavailable, ""
 	}
 
 	// Otherwise the manifest decides, and how the probe failed does not.
@@ -541,7 +544,13 @@ func probeDshMulticaProfile(ctx context.Context, executablePath string) dshProbe
 	// while a manifest that IS present keeps every failure transient, which is
 	// what protects a working install from being overwritten during an upgrade.
 	if !dshMulticaProfilePresent() {
-		return dshProbeMissingProfile
+		return dshProbeMissingProfile, ""
 	}
-	return dshProbeUnavailable
+	// DSH can refuse a bundle on stderr and then wait indefinitely. Keep the
+	// diagnostic even when the process-tree runner returns a timeout.
+	detail := dshProvisionOutput(stderr.Bytes())
+	if detail == "" && err != nil {
+		detail = dshProvisionOutput([]byte(err.Error()))
+	}
+	return dshProbeUnavailable, detail
 }

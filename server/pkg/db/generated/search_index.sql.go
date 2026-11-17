@@ -252,7 +252,7 @@ func (q *Queries) ListSearchIndexCommentsByIssues(ctx context.Context, arg ListS
 }
 
 const listSearchIndexIssuesByIDs = `-- name: ListSearchIndexIssuesByIDs :many
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue
 WHERE workspace_id = $1 AND id = ANY($2::uuid[])
 `
 
@@ -309,6 +309,14 @@ func (q *Queries) ListSearchIndexIssuesByIDs(ctx context.Context, arg ListSearch
 			&i.MergeGrantedBy,
 			&i.MergeGrantedAt,
 			&i.RequesterUserID,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipSquadID,
+			&i.LeaderAgentID,
+			&i.LeaderExternalSessionID,
+			&i.LeadershipRevision,
+			&i.CreatorSessionID,
+			&i.SessionSemantics,
+			&i.RequesterLeadershipRootID,
 		); err != nil {
 			return nil, err
 		}
@@ -321,7 +329,7 @@ func (q *Queries) ListSearchIndexIssuesByIDs(ctx context.Context, arg ListSearch
 }
 
 const listSearchIndexIssuesPage = `-- name: ListSearchIndexIssuesPage :many
-SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id FROM issue
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata, stage, properties, revision, last_activity_at, triage_state, duplicate_of_issue_id, coordinator_type, coordinator_id, merge_allowed, merge_repository_url, merge_target_branch, merge_granted_by, merge_granted_at, requester_user_id, leadership_root_issue_id, leadership_squad_id, leader_agent_id, leader_external_session_id, leadership_revision, creator_session_id, session_semantics, requester_leadership_root_id FROM issue
 WHERE workspace_id = $1 AND number > $2
 ORDER BY number
 LIMIT $3
@@ -382,6 +390,14 @@ func (q *Queries) ListSearchIndexIssuesPage(ctx context.Context, arg ListSearchI
 			&i.MergeGrantedBy,
 			&i.MergeGrantedAt,
 			&i.RequesterUserID,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipSquadID,
+			&i.LeaderAgentID,
+			&i.LeaderExternalSessionID,
+			&i.LeadershipRevision,
+			&i.CreatorSessionID,
+			&i.SessionSemantics,
+			&i.RequesterLeadershipRootID,
 		); err != nil {
 			return nil, err
 		}

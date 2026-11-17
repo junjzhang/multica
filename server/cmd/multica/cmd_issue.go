@@ -345,7 +345,9 @@ var issueCommentListCmd = &cobra.Command{
 var issueCommentAddCmd = &cobra.Command{
 	Use:   "add <issue-id>",
 	Short: "Add a comment to an issue",
-	Long: "Add a comment to an issue.\n\n" +
+	Long: "Add a comment to an issue. Use [@Name](mention://agent/<uuid>) to delegate or " +
+		"[@Name](mention://agent-notify/<uuid>) to wake an agent without adding a result return; " +
+		"if both target the same agent, delegation wins.\n\n" +
 		"A plain comment reaches a busy agent only after its current run ends. To add the message to a run " +
 		"that is in progress instead, pass --steer <run-id> (repeatable; from `multica issue runs <issue-id> --active`) " +
 		"or --steer-active for every running agent on the issue you may steer. You may steer an agent's run " +
@@ -532,7 +534,7 @@ const issueListMaxPageSize = 100
 // always sorted ascending (the board's manual drag order), so --direction is
 // only meaningful for the other columns.
 var validIssueSortColumns = []string{
-	"position", "title", "created_at", "start_date", "due_date", "priority",
+	"position", "title", "created_at", "updated_at", "last_activity", "status", "start_date", "due_date", "priority",
 }
 
 // validIssueFields are the top-level keys /api/issues actually emits for
@@ -564,6 +566,51 @@ var directionalIssueSortColumns = func() []string {
 	}
 	return cols
 }()
+
+// parseIssueUpdatedRange returns the [start, end) query bounds. since is an
+// RFC3339 timestamp or a positive duration before now (24h, 7d); until, when
+// set, is an RFC3339 timestamp, otherwise the range ends now. Explicit
+// timestamps are passed through unchanged so paged reads keep stable bounds.
+func parseIssueUpdatedRange(since, until string, hasUntil bool, now time.Time) (string, string, error) {
+	startText := since
+	start, err := time.Parse(time.RFC3339Nano, since)
+	if err != nil {
+		duration, ok := parseIssueAge(since)
+		if !ok {
+			return "", "", fmt.Errorf("invalid --updated-since %q: use an RFC3339 timestamp or positive duration (e.g. 24h, 7d)", since)
+		}
+		start = now.Add(-duration)
+		startText = start.Format(time.RFC3339Nano)
+	}
+	end, endText := now, now.Format(time.RFC3339Nano)
+	if hasUntil {
+		end, err = time.Parse(time.RFC3339Nano, until)
+		if err != nil {
+			return "", "", fmt.Errorf("invalid --updated-until; expected an RFC3339 timestamp: %w", err)
+		}
+		endText = until
+	}
+	if !start.Before(end) {
+		if hasUntil {
+			return "", "", fmt.Errorf("--updated-since must be before --updated-until")
+		}
+		return "", "", fmt.Errorf("invalid --updated-since %q: timestamp must be before now", since)
+	}
+	return startText, endText, nil
+}
+
+func parseIssueAge(value string) (time.Duration, bool) {
+	durationValue := value
+	if strings.HasSuffix(value, "d") {
+		days, err := strconv.ParseUint(strings.TrimSuffix(value, "d"), 10, 64)
+		if err != nil || days > uint64((1<<63-1)/int64(24*time.Hour)) {
+			return 0, false
+		}
+		durationValue = strconv.FormatUint(days*24, 10) + "h"
+	}
+	duration, err := time.ParseDuration(durationValue)
+	return duration, err == nil && duration > 0
+}
 
 // validateIssueStatus checks the shape of a status key, not its membership.
 //
@@ -643,13 +690,13 @@ func init() {
 	issueListCmd.Flags().String("assignee", "", "Filter by assignee name (member, agent, or squad; fuzzy match)")
 	issueListCmd.Flags().String("assignee-id", "", "Filter by assignee UUID — member, agent, or squad (mutually exclusive with --assignee)")
 	issueListCmd.Flags().String("project", "", "Filter by project ID")
-	issueListCmd.Flags().String("updated-since", "", "Include issues updated at or after this RFC3339 timestamp; requires --updated-until (keep both bounds fixed across pages)")
-	issueListCmd.Flags().String("updated-until", "", "Include issues updated before this RFC3339 timestamp; requires --updated-since")
+	issueListCmd.Flags().String("updated-since", "", "Include issues updated at or after an RFC3339 timestamp or a positive duration ago (e.g. 24h, 7d)")
+	issueListCmd.Flags().String("updated-until", "", "Include issues updated before this RFC3339 timestamp (default: now); requires --updated-since. Set both to fixed timestamps when paging")
 	issueListCmd.Flags().StringSlice("metadata", nil, "Filter by metadata key=value (repeatable; combined with AND). Value is JSON-parsed: 'true'/'false' → bool, numbers → number, otherwise string. Wrap as '\"42\"' to force a string when the value would otherwise sniff as a number.")
 	issueListCmd.Flags().StringArray("property", nil, `Filter by custom property, written as "Name=Value" or as a comparison such as "Score>=3", "Ship Date<2026-01-01" or "Notes~=review" (repeatable, one member per flag; quote it so the shell does not read < and > as redirection). Name is a property name (case-insensitive) or its UUID; a name containing =, <, >, ! or ~ has to be given by UUID. Use __none__ to match issues where the property is unset; it works for every type, so an option or member actually named __none__ has to be given by id. Repeating a property matches ANY of its members; different properties must ALL match. The per-type value forms and comparisons are in the command description above.`)
 	issueListCmd.Flags().Int("limit", 50, fmt.Sprintf("Page size, 1 to %d (the server returns at most %d issues per request; use --offset to page through more)", issueListMaxPageSize, issueListMaxPageSize))
 	issueListCmd.Flags().Int("offset", 0, "Number of issues to skip (for pagination; while --output json reports has_more, advance it by the number of issues in that same response)")
-	issueListCmd.Flags().String("sort", "", "Sort column: position (default, manual board order), title, created_at, start_date, due_date, priority, or property:<name-or-id> to sort by a custom property (select properties sort by option order)")
+	issueListCmd.Flags().String("sort", "", "Sort column: "+strings.Join(validIssueSortColumns, ", ")+", or property:<name-or-id> to sort by a custom property (position is the default manual order; select properties sort by option order)")
 	issueListCmd.Flags().String("direction", "", "Sort direction (asc or desc); requires --sort to be a non-position column or a property sort (position is always ascending)")
 	issueListCmd.Flags().String("fields", "", "JSON output only: comma-separated list of issue fields to include (e.g. id,title,status,priority). Filtering happens client-side after the full response is fetched, so this shrinks CLI output size and agent context cost, not network/server-side cost. Omit for the full issue object (default, unchanged). Valid fields: "+strings.Join(validIssueFields, ", "))
 	issueListCmd.Flags().Bool("resolve-properties", false, resolvePropertiesHelp)
@@ -684,6 +731,7 @@ func init() {
 	issueCreateCmd.Flags().String("start-date", "", "Start date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().String("due-date", "", "Due date (calendar day, YYYY-MM-DD)")
 	issueCreateCmd.Flags().Bool("allow-duplicate", false, "Allow creating an issue even when an active duplicate exists")
+	issueCreateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueCreateCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCreateCmd.Flags().StringArray("attachment", nil, "File path to attach (one literal path per flag; repeat --attachment for multiple files). Each file is uploaded and its markdown reference is appended to the description, which is what makes it render on the issue page. To place it inline instead, reference the same path in the description (e.g. ![shot](./a.png)); that link is rewritten to the uploaded file")
 	issueCreateCmd.Flags().StringSlice("attachment-id", nil, "Existing attachment UUID(s) to bind to the created issue (can be specified multiple times)")
@@ -714,6 +762,7 @@ func init() {
 	issueUpdateCmd.Flags().Float64("position", 0, "Ordering position within the board column (lower sorts first); prefer `issue reorder` for relative moves")
 	issueUpdateCmd.Flags().Bool("no-start", false, "Apply the update without starting an agent run (only an assignee change in the update would start one)")
 	issueUpdateCmd.Flags().String("duplicate-of", "", "Mark the issue as a duplicate of this original issue (key like MUL-123, or full UUID) and cancel it; --status, if given, must be cancelled, and description/attachment changes must go in a separate update")
+	issueUpdateCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue status
@@ -734,6 +783,7 @@ func init() {
 	issueAssignCmd.Flags().String("to-id", "", "Assignee UUID — member, agent, or squad (mutually exclusive with --to)")
 	issueAssignCmd.Flags().Bool("unassign", false, "Remove current assignee")
 	issueAssignCmd.Flags().Bool("no-start", false, "Assign ownership without starting an agent run")
+	issueAssignCmd.Flags().String("recipient-session-id", "", "Registered external recipient session UUID; required when no issue binding exists")
 	issueAssignCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// issue comment list
@@ -847,26 +897,19 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 
 	params := url.Values{}
 	params.Set("workspace_id", client.WorkspaceID)
-	since, _ := cmd.Flags().GetString("updated-since")
-	until, _ := cmd.Flags().GetString("updated-until")
-	if cmd.Flags().Changed("updated-since") != cmd.Flags().Changed("updated-until") {
-		return fmt.Errorf("--updated-since and --updated-until must be set together")
+	if cmd.Flags().Changed("updated-until") && !cmd.Flags().Changed("updated-since") {
+		return fmt.Errorf("--updated-until requires --updated-since")
 	}
 	if cmd.Flags().Changed("updated-since") {
-		start, err := time.Parse(time.RFC3339Nano, since)
+		since, _ := cmd.Flags().GetString("updated-since")
+		until, _ := cmd.Flags().GetString("updated-until")
+		start, end, err := parseIssueUpdatedRange(since, until, cmd.Flags().Changed("updated-until"), time.Now().UTC())
 		if err != nil {
-			return fmt.Errorf("invalid --updated-since; expected an RFC3339 timestamp: %w", err)
-		}
-		end, err := time.Parse(time.RFC3339Nano, until)
-		if err != nil {
-			return fmt.Errorf("invalid --updated-until; expected an RFC3339 timestamp: %w", err)
-		}
-		if !start.Before(end) {
-			return fmt.Errorf("--updated-since must be before --updated-until")
+			return err
 		}
 		params.Set("date_field", "updated_at")
-		params.Set("date_start", since)
-		params.Set("date_end", until)
+		params.Set("date_start", start)
+		params.Set("date_end", end)
 	}
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
 		params.Set("status", v)
@@ -1663,6 +1706,10 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		body["assignee_type"] = aType
 		body["assignee_id"] = aID
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
 		return err
 	}
@@ -1905,6 +1952,10 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 			body["assignee_id"] = aID
 		}
 	}
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	if err := addCoordinatorFromFlags(ctx, client, cmd, body); err != nil {
 		return err
 	}
@@ -2082,6 +2133,10 @@ func runIssueAssign(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if cmd.Flags().Changed("recipient-session-id") {
+		sessionID, _ := cmd.Flags().GetString("recipient-session-id")
+		body["recipient_session_id"] = sessionID
+	}
 	var result map[string]any
 	if err := client.PutJSON(ctx, "/api/issues/"+issueRef.ID, body, &result); err != nil {
 		return fmt.Errorf("assign issue: %w", err)
@@ -3646,7 +3701,7 @@ func normalizeAssigneeLookupInput(raw string) string {
 	input := strings.TrimSpace(raw)
 	if m := util.MentionRe.FindStringSubmatch(input); len(m) == 4 && m[0] == input {
 		switch m[2] {
-		case "member", "agent", "squad":
+		case "member", "agent", "agent-notify", "squad":
 			return m[3]
 		}
 	}

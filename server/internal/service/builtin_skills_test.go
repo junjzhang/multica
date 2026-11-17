@@ -362,6 +362,7 @@ func TestPlatformSkillDescriptionNamesEveryDomain(t *testing.T) {
 		"references/projects.md":      "project",
 		"references/runtimes.md":      "runtime",
 		"references/environments.md":  "local environment",
+		"references/waits.md":         "wait",
 		"references/skill-import.md":  "skill import",
 		"references/themes.md":        "theme",
 	}
@@ -531,7 +532,8 @@ func TestPlatformSkillCoversPlatformContracts(t *testing.T) {
 				"the task explicitly authorizes verifies the evidence",
 				"merging needs its own grant",
 				"it closes no stage barrier and wakes no parent",
-				"the explicit `@` mention in the delivery comment",
+				"Saved outcomes use this run's `accepted_returns`",
+				"Do not add a mention to duplicate that return",
 			},
 			notWant: []string{
 				"--no-start",

@@ -2,6 +2,7 @@ import { createStore } from "zustand/vanilla";
 import type { IssueView } from "../api/schemas";
 import {
   effectiveNegatedFilters,
+  effectiveShowSubIssues,
   filterDimensionHasSelection,
   mergeViewStatePersisted,
   NEGATABLE_FILTER_DIMENSIONS,
@@ -23,6 +24,8 @@ export interface IssueViewDefinition {
   display: Record<string, unknown>;
 }
 
+/** A view saves the child visibility the board applies, not an inactive
+ * automatic default. */
 export function issueViewDefinitionFromState(state: IssueViewState): IssueViewDefinition {
   return {
     query: {
@@ -45,7 +48,7 @@ export function issueViewDefinitionFromState(state: IssueViewState): IssueViewDe
       unreadFilter: state.unreadFilter,
     },
     display: {
-      showSubIssues: state.showSubIssues,
+      showSubIssues: effectiveShowSubIssues(state),
       viewMode: state.viewMode,
       grouping: state.grouping,
       sortBy: state.sortBy,

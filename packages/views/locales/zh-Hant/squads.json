@@ -90,6 +90,7 @@
     "created_by": "建立者",
     "created": "建立時間",
     "updated": "更新時間",
+    "default_leader_migration": "預設隊長必須是託管 AI 代理；請先選擇新的預設隊長再派發。",
     "visibility": "可見範圍",
     "visibility_workspace": "工作區"
   },

@@ -19,7 +19,7 @@ INSERT INTO issue_delegation_return (
  $1, $2, $3, $4, $5,
  $6, $7, $8,
  $9, $10, $11, $12, false
-) RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current
+) RETURNING id, workspace_id, issue_id, dispatcher_agent_id, return_kind, external_session_id, source_task_id, runtime_id, provider, session_id, work_dir, created_at, scope_task_id, is_current, continued_from_return_id
 `
 
 type CreateDelegationReturnVersionParams struct {
@@ -68,6 +68,7 @@ func (q *Queries) CreateDelegationReturnVersion(ctx context.Context, arg CreateD
 		&i.CreatedAt,
 		&i.ScopeTaskID,
 		&i.IsCurrent,
+		&i.ContinuedFromReturnID,
 	)
 	return i, err
 }
@@ -145,7 +146,7 @@ func (q *Queries) CreateTakeoverResultObligation(ctx context.Context, arg Create
 }
 
 const getResultReturnObligation = `-- name: GetResultReturnObligation :one
-SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id FROM agent_task_delegation_return
+SELECT task_id, delegation_return_id, created_at, notification_delivery_id, notification_task_id, notification_error, materialized_at, last_attempt_at, takeover_id, caller_task_ids, delivery_return_id FROM agent_task_delegation_return
 WHERE task_id = $1 AND delegation_return_id = $2
 `
 
@@ -167,6 +168,8 @@ func (q *Queries) GetResultReturnObligation(ctx context.Context, arg GetResultRe
 		&i.MaterializedAt,
 		&i.LastAttemptAt,
 		&i.TakeoverID,
+		&i.CallerTaskIds,
+		&i.DeliveryReturnID,
 	)
 	return i, err
 }
@@ -202,7 +205,7 @@ func (q *Queries) GetResultTakeoverByRequest(ctx context.Context, arg GetResultT
 }
 
 const listResultTakeoverManagedSources = `-- name: ListResultTakeoverManagedSources :many
-SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation FROM agent_task_queue t
+SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.started_at, t.completed_at, t.result, t.error, t.created_at, t.context, t.runtime_id, t.session_id, t.work_dir, t.trigger_comment_id, t.chat_session_id, t.autopilot_run_id, t.attempt, t.max_attempts, t.parent_task_id, t.failure_reason, t.trigger_summary, t.force_fresh_session, t.is_leader_task, t.wait_reason, t.initiator_user_id, t.handoff_note, t.prepare_lease_expires_at, t.squad_id, t.runtime_mcp_overlay, t.escalation_for_task_id, t.fire_at, t.originator_user_id, t.runtime_connected_apps, t.coalesced_comment_ids, t.delivered_comment_ids, t.chat_input_task_id, t.chat_finalize_deferred_at, t.originator_source, t.delegated_from_task_id, t.retry_of_task_id, t.rerun_of_task_id, t.rule_version_id, t.trigger_evidence_kind, t.trigger_evidence_ref_id, t.accountable_user_id, t.session_rollout_missing, t.retired_session_id, t.quick_actions_disabled, t.regenerate_quick_actions_for, t.branch_name, t.durable_work_dir, t.channel_context_revision, t.comment_thread_id, t.cancelled_by_type, t.cancelled_by_id, t.cancelled_by_name, t.issue_snapshot, t.workflow_step, t.delegation_outcome_final, t.resource_control_required, t.terminal_reported_at, t.session_pin_confirmed, t.session_pin_generation, t.leadership_root_issue_id, t.leadership_revision FROM agent_task_queue t
 JOIN agent a ON a.id = t.agent_id
 WHERE a.workspace_id = $1 AND a.id = $2
   AND t.runtime_id = a.runtime_id
@@ -294,6 +297,8 @@ func (q *Queries) ListResultTakeoverManagedSources(ctx context.Context, arg List
 			&i.TerminalReportedAt,
 			&i.SessionPinConfirmed,
 			&i.SessionPinGeneration,
+			&i.LeadershipRootIssueID,
+			&i.LeadershipRevision,
 		); err != nil {
 			return nil, err
 		}

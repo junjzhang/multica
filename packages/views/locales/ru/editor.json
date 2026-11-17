@@ -113,6 +113,8 @@
     "group_users": "Пользователи",
     "group_issues": "Задачи",
     "all_members": "Все участники",
+    "delegate_badge": "Делегировать",
+    "notify_badge": "Уведомить",
     "agent_badge": "Агент",
     "squad_badge": "Команда",
     "searching": "Поиск...",

@@ -69,6 +69,7 @@ func gitEnv() []string {
 }
 
 var agentGitExcludePatterns = []string{
+	".multica/",
 	".agent_context",
 	"CLAUDE.md",
 	"AGENTS.md",
@@ -2282,17 +2283,23 @@ func removeCoAuthoredByHookContext(ctx context.Context, worktreePath string) err
 }
 
 func excludeFromGitContext(ctx context.Context, worktreePath, pattern string) error {
-	out, err := runGitOutputContext(ctx, "-C", worktreePath, "rev-parse", "--git-dir")
+	gitPath := "--git-dir"
+	args := []string{"-C", worktreePath, "rev-parse", gitPath}
+	if pattern == ".multica/" {
+		args = []string{"-C", worktreePath, "rev-parse", "--git-path", "info/exclude"}
+	}
+	out, err := runGitOutputContext(ctx, args...)
 	if err != nil {
 		return fmt.Errorf("resolve git dir: %w", err)
 	}
 
-	gitDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(worktreePath, gitDir)
+	excludePath := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(worktreePath, excludePath)
 	}
-
-	excludePath := filepath.Join(gitDir, "info", "exclude")
+	if pattern != ".multica/" {
+		excludePath = filepath.Join(excludePath, "info", "exclude")
+	}
 
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
 		return fmt.Errorf("create info dir: %w", err)

@@ -11,8 +11,15 @@ export const connectionSettings = defineSettings({
   version: 1,
   schema: z.object({
     ownerProfile: z.string().trim().max(100).default(""),
+    daemonProfile: z.string().trim().max(64).default(""),
     daemonId: z.string().trim().max(200).default(""),
+    /** The operator's own forge usernames (e.g. TGit), comma separated, for MR approval to-dos. */
+    forgeUsernames: z.string().trim().max(200).default(""),
   }),
 });
 
 export type ConnectionSettings = z.infer<typeof connectionSettings.schema>;
+
+export function parseForgeUsernames(value: string): string[] {
+  return [...new Set(value.split(/[\s,]+/).filter(Boolean))];
+}

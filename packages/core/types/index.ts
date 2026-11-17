@@ -1,6 +1,9 @@
 export type { Issue, IssueStatus, BuiltInIssueStatus, IssuePriority, IssueAssigneeType, IssueMetadata, IssueMetadataValue, IssueReaction, SourceContextAttachment, SourceContextAuthor, SourceContextIssueSnapshot, SourceContextCommentSnapshot, SourceContextSnapshot, SourceContextLimitUsage, SourceContextPreview, SourceContextAuthorState, IssueSourceContext,
   IssueDuplicateOf, IssueCoordinator, IssueMergeAuthorization, MailboxMessage, MailboxDeliveryStatus, MailboxProcessingStatus,
   IssueSessionBinding,
+  IssueLeadershipHandoffRequest,
+  IssueLeadershipHandoffResponse,
+  IssueLeadershipAdvancedReturn,
   IssueUnread,
 } from "./issue";
 export type {
@@ -38,7 +41,11 @@ export type {
   AgentPermissionMode,
   AgentExecutionKind,
   ExternalSession,
+  ExternalAgentTemplate,
   AgentSessionSummary,
+  AgentSessionPage,
+  AgentArchiveBlocker,
+  AgentArchivePreflight,
   AgentSessionBinding,
   AgentInvocationTarget,
   AgentInvocationTargetInput,

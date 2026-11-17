@@ -121,6 +121,50 @@ describe("AgentSchema WORK-9 fields", () => {
     expect(malformed.external_session?.id).toBeUndefined();
     expect(malformed.external_session?.session_id).toBe("agent-1");
   });
+
+  it("carries the host template while an older response without it keeps legacy rendering", () => {
+    const templated = AgentSchema.parse({
+      ...externalAgent,
+      external_template: {
+        id: "agent-1",
+        provider: "paseo",
+        host_id: "server-1",
+        name: "Paseo · VM-29-118",
+      },
+      external_session_count: 3,
+    });
+    expect(templated.external_template?.name).toBe("Paseo · VM-29-118");
+    expect(templated.external_session_count).toBe(3);
+
+    // The template switch off / an older backend: absent fields stay absent
+    // instead of synthesizing a template or a zero count.
+    const legacy = AgentSchema.parse(externalAgent);
+    expect(legacy.external_template).toBeUndefined();
+    expect(legacy.external_session_count).toBeUndefined();
+
+    // A malformed additive value must not hide the agent.
+    const malformed = AgentSchema.parse({
+      ...externalAgent,
+      external_template: "paseo",
+      external_session_count: -1,
+    });
+    expect(malformed.id).toBe("agent-1");
+    expect(malformed.external_template).toBeUndefined();
+    expect(malformed.external_session_count).toBeUndefined();
+  });
+
+  it("keeps the server session total and tolerates older pages without one", () => {
+    const page = AgentSessionListResponseSchema.parse({
+      sessions: [{ id: "session-1", ...externalSession }],
+      total: 7,
+    });
+    expect(page.total).toBe(7);
+
+    const legacy = AgentSessionListResponseSchema.parse({
+      sessions: [{ id: "session-1", ...externalSession }],
+    });
+    expect(legacy.total).toBeUndefined();
+  });
 });
 
 describe("IssueSchema external collaboration projection", () => {
@@ -175,11 +219,15 @@ describe("IssueSchema external collaboration projection", () => {
 
   it("keeps a delivered-but-unread message distinct, including unknown states", () => {
     const parsed = MailboxMessageListSchema.parse([
-      { id: "msg-1", delivery_status: "delivered", processing_status: "unread" },
-      { id: "msg-2", delivery_status: "future_delivery", processing_status: "future_processing" },
+      { id: "msg-1", delivery_status: "delivered", processing_status: "unread", payload: { result_task_id: "result-1" }, handled_by_task_id: "consumer-1" },
+      { id: "msg-2", delivery_status: "future_delivery", processing_status: "future_processing", payload: 42, handled_by_task_id: [] },
       { id: "msg-3", delivery_status: "failed", processing_status: "handled", last_error: "host offline" },
       { delivery_status: "delivered" },
     ]);
+    expect(parsed[0]?.payload).toEqual({ result_task_id: "result-1" });
+    expect(parsed[0]?.handled_by_task_id).toBe("consumer-1");
+    expect(parsed[1]?.payload).toBeUndefined();
+    expect(parsed[1]?.handled_by_task_id).toBeUndefined();
     expect(parsed.map((message) => [message.id, message.delivery_status, message.processing_status])).toEqual([
       ["msg-1", "delivered", "unread"],
       ["msg-2", "unknown", "unknown"],

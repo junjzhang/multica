@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/squadbriefing"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -284,8 +285,8 @@ func TestSquadSteerRuleFollowsTheDaemonsCLI(t *testing.T) {
 		t.Skip("database not available")
 	}
 	squad := db.Squad{Name: "Steer rule"}
-	with := buildSquadLeaderBriefing(t.Context(), testHandler.Queries, squad, false, leaderNoWorkflow, true)
-	without := buildSquadLeaderBriefing(t.Context(), testHandler.Queries, squad, false, leaderNoWorkflow, false)
+	with := squadbriefing.Build(t.Context(), testHandler.Queries, squad, false, squadbriefing.Options{Steer: true})
+	without := squadbriefing.Build(t.Context(), testHandler.Queries, squad, false, squadbriefing.Options{Steer: false})
 	if !strings.Contains(with, "--steer-active") || strings.Contains(without, "--steer") {
 		t.Fatalf("steer rule: with=%v without=%v", strings.Contains(with, "--steer-active"), strings.Contains(without, "--steer"))
 	}

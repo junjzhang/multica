@@ -4,16 +4,17 @@ package protocol
 // original session. The task's ordinary scope fields still name that source's
 // issue/chat/autopilot; DelegatedIssueID names the work whose outcome is ready.
 type DelegationResultTurn struct {
-	ResultTaskID       string `json:"result_task_id"`
-	DelegationReturnID string `json:"delegation_return_id"`
-	SourceTaskID       string `json:"source_task_id"`
-	ScopeTaskID        string `json:"scope_task_id,omitempty"`
-	DelegatedIssueID   string `json:"delegated_issue_id"`
-	Outcome            string `json:"outcome"`
-	RuntimeID          string `json:"runtime_id"`
-	Provider           string `json:"provider"`
-	SessionID          string `json:"session_id"`
-	WorkDir            string `json:"work_dir"`
+	UpstreamReturnsUnknown bool   `json:"upstream_returns_unknown,omitempty"`
+	ResultTaskID           string `json:"result_task_id"`
+	DelegationReturnID     string `json:"delegation_return_id"`
+	SourceTaskID           string `json:"source_task_id"`
+	ScopeTaskID            string `json:"scope_task_id,omitempty"`
+	DelegatedIssueID       string `json:"delegated_issue_id"`
+	Outcome                string `json:"outcome"`
+	RuntimeID              string `json:"runtime_id"`
+	Provider               string `json:"provider"`
+	SessionID              string `json:"session_id"`
+	WorkDir                string `json:"work_dir"`
 }
 
 type ManagedResourceAddress struct {

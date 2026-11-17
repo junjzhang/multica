@@ -1,3 +1,27 @@
+-- name: CreateExternalAgentTemplate :one
+-- A template is the stable host identity: sessions of this host attach to it
+-- instead of minting one agent each. The key columns are part of the unique
+-- template index; callers that lose a concurrent insert re-read by key.
+INSERT INTO agent (
+    workspace_id, name, description, runtime_mode, runtime_config, visibility,
+    permission_mode, max_concurrent_tasks, owner_id, instructions, custom_env,
+    custom_args, mcp_config, execution_kind, kind,
+    external_provider, external_host_id
+) VALUES (
+    @workspace_id, @name, '', 'local', '{}'::jsonb, @visibility,
+    @permission_mode, 1, @owner_id, '', '{}'::jsonb,
+    '[]'::jsonb, NULL, 'external', 'user',
+    @external_provider, @external_host_id
+)
+RETURNING *;
+
+-- name: GetExternalAgentTemplateByKey :one
+SELECT * FROM agent
+WHERE workspace_id = @workspace_id
+  AND owner_id = @owner_id
+  AND external_provider = @external_provider
+  AND external_host_id = @external_host_id;
+
 -- name: CreateExternalAgent :one
 -- An external agent has no Multica runtime: execution_kind marks the host
 -- session as the executor, and runtime_id stays NULL so no managed claim can
@@ -63,6 +87,7 @@ SELECT * FROM external_agent_session WHERE id = ANY(@ids::uuid[]);
 -- an error; the UI shows the agent's sessions without a current target.
 SELECT s.*,
        (a.archived_at IS NOT NULL)::boolean AS agent_archived,
+(s.revoked_at IS NOT NULL)::boolean AS session_revoked,
        EXISTS (
            SELECT 1 FROM member m
            WHERE m.workspace_id = s.workspace_id AND m.user_id = s.owner_user_id
@@ -85,6 +110,18 @@ SET display_name = @display_name,
 WHERE id = @id AND workspace_id = @workspace_id
 RETURNING *;
 
+-- name: RevokeExternalAgentSession :one
+-- Revocation is idempotent and scoped to one session: siblings and the agent
+-- identity keep working. Auth re-reads this column on every request.
+UPDATE external_agent_session
+SET revoked_at = COALESCE(revoked_at, now()),
+    updated_at = now()
+WHERE id = @id
+  AND agent_id = @agent_id
+  AND workspace_id = @workspace_id
+
+RETURNING *;
+
 -- name: WorkspaceDaemonOwnedByUser :one
 SELECT EXISTS (
     SELECT 1 FROM agent_runtime
@@ -92,11 +129,15 @@ SELECT EXISTS (
 ) AS exists;
 
 -- name: CreateExternalAgentToken :one
+-- external_session_id is the exact registered session the credential acts for.
+-- Legacy tokens keep NULL; the auth path re-checks the session on every use.
 INSERT INTO external_agent_token (
-    id, agent_id, workspace_id, owner_user_id, token_hash, expires_at
+    id, agent_id, workspace_id, owner_user_id, token_hash, expires_at,
+    external_session_id
 ) VALUES (
     COALESCE(sqlc.narg('id')::uuid, gen_random_uuid()), @agent_id, @workspace_id,
-    @owner_user_id, @token_hash, @expires_at
+    @owner_user_id, @token_hash, @expires_at,
+    sqlc.narg('external_session_id')
 )
 RETURNING *;
 

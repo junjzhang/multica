@@ -72,6 +72,7 @@ import {
 } from "../../layout/collection-list";
 import { availabilityConfig } from "../presence";
 import { AgentRowActions } from "./agent-row-actions";
+import { AgentSessionsPopover } from "./agent-sessions-popover";
 import { AgentSetupChecklist } from "./agent-setup-checklist";
 import {
   AgentListFilterMenu,
@@ -252,6 +253,12 @@ function NameCell({ row }: { row: AgentListRow }) {
             </Tooltip>
           )}
           {isOwnedByMe && <CollectionTag>{t(($) => $.row.you)}</CollectionTag>}
+          {!isArchived &&
+            (agent.external_template ||
+              (agentExecutionKind(agent) === "external" &&
+                (agent.external_session_count ?? 0) > 1)) && (
+              <AgentSessionsPopover agent={agent} />
+            )}
         </>
       }
       description={agent.description || undefined}

@@ -271,6 +271,16 @@ describe("ApiClient pull-request response schema", () => {
     });
   });
 
+  it("defaults missing or malformed descendant PRs while preserving direct PRs", async () => {
+    stubPullRequests({ pull_requests: [validPR], descendant_pull_requests: [{ ...validPR, source_issue_id: 42 }] });
+    const malformed = await new ApiClient("https://api.example.test").listIssuePullRequests("issue-1");
+    expect(malformed.pull_requests).toHaveLength(1);
+    expect(malformed.descendant_pull_requests).toEqual([]);
+    stubPullRequests({ pull_requests: [validPR], descendant_pull_requests: [{ ...validPR, source_issue_id: "child", source_identifier: "MUL-2" }] });
+    const valid = await new ApiClient("https://api.example.test").listIssuePullRequests("issue-1");
+    expect(valid.descendant_pull_requests?.[0]?.source_identifier).toBe("MUL-2");
+  });
+
   it("treats a missing auto-complete block (older backend) as null", async () => {
     stubPullRequests({ pull_requests: [validPR] });
     const result = await new ApiClient("https://api.example.test").listIssuePullRequests("issue-1");

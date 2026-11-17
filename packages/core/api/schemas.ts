@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ContractViewSchema } from "./issue-contract-schema";
 import { normalizeIssueStatusCategory } from "../issues/config/status";
 import type {
   BatchIssueOutcome,
@@ -479,6 +480,7 @@ export const PRAutoCompleteSchema = z.object({
 
 export const IssuePullRequestsResponseSchema = z.object({
   pull_requests: z.array(GitHubPullRequestSchema).default([]),
+  descendant_pull_requests: z.array(GitHubPullRequestSchema.extend({ source_issue_id: z.string(), source_identifier: z.string() })).catch([]).default([]),
   auto_complete: PRAutoCompleteSchema.nullable().optional().default(null).catch(null),
 }).loose();
 
@@ -1548,6 +1550,19 @@ const ExecutionKindSchema = z.unknown().transform((value): string | undefined =>
  * managed behavior: a missing execution_kind means managed, and a present but
  * unrecognized one stays non-executable.
  */
+/**
+ * The host identity an external session belongs to. A template is one Agent
+ * row; its sessions are registered addresses. Absent for legacy per-session
+ * external agents and for managed agents, so clients keep the old rendering
+ * until a template actually exists.
+ */
+export const ExternalAgentTemplateSchema = z.object({
+  id: z.string().default(""),
+  provider: z.string().default(""),
+  host_id: z.string().default(""),
+  name: z.string().default(""),
+}).loose();
+
 export const AgentSchema = z.object({
   id: z.string(),
   workspace_id: z.string().default(""),
@@ -1556,6 +1571,8 @@ export const AgentSchema = z.object({
   runtime_availability: z.enum(["online", "unstable", "offline"]).optional().catch(undefined),
   execution_kind: ExecutionKindSchema,
   external_session: ExternalSessionSchema.nullable().optional().catch(undefined),
+  external_template: ExternalAgentTemplateSchema.nullable().optional().catch(undefined),
+  external_session_count: z.number().int().nonnegative().optional().catch(undefined),
   name: z.string().default(""),
   description: z.string().default(""),
   instructions: z.string().default(""),
@@ -1601,6 +1618,8 @@ const IssueMergeAuthorizationSchema = z.object({
 }).loose();
 
 export const MailboxMessageSchema = z.object({
+  payload: z.record(z.string(), z.unknown()).optional().catch(undefined),
+  handled_by_task_id: z.string().min(1).optional().catch(undefined),
   id: z.string(),
   issue_id: z.string().default(""),
   comment_id: z.string().nullish().transform((value) => value ?? "").catch(""),
@@ -1634,7 +1653,10 @@ export const AgentSessionSummarySchema = ExternalSessionSchema.extend({
 
 /** Drop one malformed session without hiding the agent's other sessions. */
 export const AgentSessionListResponseSchema = z
-  .object({ sessions: z.array(z.unknown()) })
+  .object({
+    sessions: z.array(z.unknown()),
+    total: z.number().int().nonnegative().optional().catch(undefined),
+  })
   .loose()
   .transform((value, ctx) => {
     const sessions = value.sessions.flatMap((item) => {
@@ -1645,8 +1667,30 @@ export const AgentSessionListResponseSchema = z
       ctx.addIssue({ code: "custom", message: "No valid registered sessions in response", path: ["sessions"] });
       return z.NEVER;
     }
-    return { sessions };
+    return { sessions, total: value.total };
   });
+
+export const AgentArchiveBlockerSchema = z.object({
+  code: z.string(),
+  blocking: z.boolean().default(false).catch(false),
+  count: z.number().int().nonnegative().default(0).catch(0),
+  sample_ids: z.array(z.string()).default([]).catch([]),
+}).loose();
+
+/**
+ * The external-agent archive preview. A malformed response must fail closed:
+ * the UI withholds confirmation and the server re-checks anyway.
+ */
+export const AgentArchivePreflightSchema = z.object({
+  agent_id: z.string().default(""),
+  archivable: z.boolean().default(false).catch(false),
+  blockers: z.array(z.unknown()).transform((items) =>
+    items.flatMap((item) => {
+      const parsed = AgentArchiveBlockerSchema.safeParse(item);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  ),
+}).loose();
 
 export const AgentSessionBindingSchema = z.object({
   id: z.string(),
@@ -1685,6 +1729,7 @@ export const AgentSessionBindingResponseSchema = z
   .loose();
 
 export const CommentSchema = z.object({
+  actor_session_id: z.string().optional().catch(undefined),
   id: z.string(),
   issue_id: z.string(),
   author_type: z.string(),
@@ -1738,12 +1783,14 @@ const CommentTriggerPreviewAgentSchema = z.object({
   source: z.string().default(""),
   reason: z.string().default(""),
   dispatch_kind: DispatchKindSchema,
+  mode: z.string().optional(),
 }).loose();
 
 // Per-target outcome of an explicit @agent / @squad mention (MUL-4525 §2).
 // target_id is required to correlate with the client's rendered mention; a
 // malformed entry (missing id) is dropped rather than failing the whole payload.
 export const CommentTriggerOutcomeSchema = z.object({
+  mode: z.string().optional(),
   target_type: z.string().default(""),
   target_id: z.string(),
   status: z.string().default(""),
@@ -1894,6 +1941,12 @@ export const CommentSubIssueTaskResponseSchema = z.object({
 }).loose();
 
 export const IssueSchema = z.object({
+  leadership_root_issue_id: z.string().optional().catch(undefined),
+  leadership_squad_id: z.string().optional().catch(undefined),
+  leader_agent_id: z.string().optional().catch(undefined),
+  leader_external_session_id: z.string().optional().catch(undefined),
+  leadership_revision: z.number().int().nonnegative().optional().catch(undefined),
+  leadership_root_revision: z.number().int().nonnegative().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),
@@ -1955,6 +2008,7 @@ export const IssueSchema = z.object({
   // Detail-only and potentially large. A malformed additive field must not
   // erase an otherwise usable issue returned by a mixed-version server.
   source_context: IssueSourceContextSchema.optional().catch(undefined),
+  contract: ContractViewSchema.optional().catch(undefined),
   // WORK-9 additive collaboration fields. Each degrades independently so one
   // malformed projection never blanks the issue/list.
   coordinator: IssueCoordinatorSchema.nullable().optional().catch(undefined),
@@ -1970,6 +2024,34 @@ export const IssueSchema = z.object({
     .optional().catch(undefined),
   mailbox_deliveries: z.array(z.unknown()).pipe(MailboxMessageListSchema).optional().catch(undefined),
   external_session_bindings: z.array(z.unknown()).pipe(IssueSessionBindingListSchema).optional().catch(undefined),
+}).loose();
+
+/**
+ * Result of an explicit task-leader handoff. Additive projections (stale
+ * contracts, advanced returns) degrade independently: a malformed list must
+ * not hide a handoff the server already committed.
+ */
+export const IssueLeadershipHandoffResponseSchema = z.object({
+  root_issue_id: z.string(),
+  revision: z.number().int().nonnegative().default(0),
+  issue_revision: z.number().int().nonnegative().default(0),
+  stale_contract_ids: z.array(z.string()).optional().catch(undefined),
+  advanced_returns: z
+    .array(
+      z.object({
+        issue_id: z.string(),
+        previous_return_id: z.string().optional().catch(undefined),
+        current_return_id: z.string().optional().catch(undefined),
+      }).loose(),
+    )
+    .optional()
+    .catch(undefined),
+  historical_results: z.string().optional().catch(undefined),
+}).loose();
+
+export const IssueExecutorHandoffResponseSchema = z.object({
+  issue_id: z.string().min(1),
+  issue_revision: z.number().int().nonnegative(),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({
@@ -2591,6 +2673,13 @@ export const ResultNotificationSchema = z.object({
 }));
 
 export const AgentTaskSchema = z.object({
+  accepted_returns: z.array(z.object({
+    return_id: z.string().min(1),
+    recipient_agent_id: z.string().min(1),
+    kind: z.enum(["external_session", "managed_task"]),
+    source_task_id: z.string().min(1).optional(),
+    external_session_id: z.string().min(1).optional(),
+  })).optional().catch(undefined),
   wakeup_id: z.string().optional().catch(undefined),
   cancelled_by_comment_change: z.boolean().optional().catch(undefined),
   cancelled_by: TaskCancellationActorSchema.optional().catch(undefined),
@@ -2991,6 +3080,7 @@ const SquadMemberPreviewSchema = z.object({
 }).loose();
 
 export const SquadSchema = z.object({
+  default_leader_unavailable_reason: z.string().optional().catch(undefined),
   id: z.string(),
   workspace_id: z.string(),
   name: z.string(),

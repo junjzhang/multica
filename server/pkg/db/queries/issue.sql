@@ -46,7 +46,7 @@ WHERE i.workspace_id = $1
           -- best-effort (see squad.go AddSquadMember error handling).
           SELECT s.id
             FROM squad s
-            JOIN agent a ON a.id = s.leader_id
+            JOIN agent a ON a.id = issue_leader_id(i,s.id)
            WHERE s.workspace_id = $1
              AND a.workspace_id = $1
              AND a.owner_id     = sqlc.narg('involves_user_id')::uuid
@@ -211,6 +211,7 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
         COALESCE(sqlc.narg('description')::text, i.description) AS next_description,
         COALESCE(sqlc.narg('status')::text, i.status) AS next_status,
         COALESCE(sqlc.narg('priority')::text, i.priority) AS next_priority,
+        COALESCE(sqlc.narg('acceptance_criteria')::jsonb, i.acceptance_criteria) AS next_acceptance_criteria,
         sqlc.narg('assignee_type')::text AS next_assignee_type,
         sqlc.narg('assignee_id')::uuid AS next_assignee_id,
         CASE
@@ -293,33 +294,33 @@ WITH wakeup_source AS MATERIALIZED (SELECT set_config('multica.source_task_id', 
     SELECT
         candidate.*,
         ROW(
-            title, description, status, priority, assignee_type, assignee_id,
+            title, description, status, priority, acceptance_criteria, assignee_type, assignee_id,
             position, start_date, due_date, parent_issue_id, project_id, stage,
             duplicate_of_issue_id, coordinator_type, coordinator_id,
             merge_allowed, merge_repository_url, merge_target_branch,
             merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
-            next_title, next_description, next_status, next_priority,
+            next_title, next_description, next_status, next_priority, next_acceptance_criteria,
             next_assignee_type, next_assignee_id, next_position, next_start_date,
             next_due_date, next_parent_issue_id, next_project_id, next_stage,
             next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
             next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
             next_merge_granted_by, next_merge_granted_at
-        ) AS did_change,
+        ) OR sqlc.arg('contract_changed')::boolean AS did_change,
         ROW(
-            title, description, status, priority, assignee_type, assignee_id,
+            title, description, status, priority, acceptance_criteria, assignee_type, assignee_id,
             start_date, due_date, parent_issue_id, project_id, stage,
             duplicate_of_issue_id, coordinator_type, coordinator_id,
             merge_allowed, merge_repository_url, merge_target_branch,
             merge_granted_by, merge_granted_at
         ) IS DISTINCT FROM ROW(
-            next_title, next_description, next_status, next_priority,
+            next_title, next_description, next_status, next_priority, next_acceptance_criteria,
             next_assignee_type, next_assignee_id, next_start_date, next_due_date,
             next_parent_issue_id, next_project_id, next_stage,
             next_duplicate_of_issue_id, next_coordinator_type, next_coordinator_id,
             next_merge_allowed, next_merge_repository_url, next_merge_target_branch,
             next_merge_granted_by, next_merge_granted_at
-        ) AS did_activity
+        ) OR sqlc.arg('contract_changed')::boolean AS did_activity
     FROM candidate
 )
 UPDATE issue AS i SET
@@ -327,6 +328,7 @@ UPDATE issue AS i SET
     description = changed.next_description,
     status = changed.next_status,
     priority = changed.next_priority,
+    acceptance_criteria = changed.next_acceptance_criteria,
     assignee_type = changed.next_assignee_type,
     assignee_id = changed.next_assignee_id,
     position = changed.next_position,
@@ -526,6 +528,9 @@ LIMIT 1;
 WITH target AS (
     SELECT issue.id FROM issue WHERE issue.id = $1 AND issue.workspace_id = $2
 ),
+cleared_contract AS (
+ DELETE FROM issue_contract WHERE issue_id IN (SELECT target.id FROM target)
+),
 cleared_wakeup_receipts AS (
  DELETE FROM issue_wakeup_receipt WHERE wakeup_id IN (SELECT id FROM issue_wakeup WHERE issue_id IN (SELECT target.id FROM target))
 ),
@@ -663,7 +668,7 @@ WHERE i.workspace_id = $1
           UNION
           SELECT s.id
             FROM squad s
-            JOIN agent a ON a.id = s.leader_id
+            JOIN agent a ON a.id = issue_leader_id(i,s.id)
            WHERE s.workspace_id = $1
              AND a.workspace_id = $1
              AND a.owner_id     = sqlc.narg('involves_user_id')::uuid
@@ -712,7 +717,7 @@ WHERE i.workspace_id = $1
           UNION
           SELECT s.id
             FROM squad s
-            JOIN agent a ON a.id = s.leader_id
+            JOIN agent a ON a.id = issue_leader_id(i,s.id)
            WHERE s.workspace_id = $1
              AND a.workspace_id = $1
              AND a.owner_id     = sqlc.narg('involves_user_id')::uuid
@@ -839,6 +844,19 @@ FROM (
     WHERE workspace_id = $1
     LIMIT sqlc.arg('limit')::bigint
 ) bounded_issues;
+
+-- name: ListDescendantIssues :many
+-- UNION terminates even if legacy data contains a cycle.
+WITH RECURSIVE tree(id) AS (
+    SELECT unnest(sqlc.arg('root_ids')::uuid[])
+    UNION
+    SELECT i.id FROM issue i JOIN tree t ON i.parent_issue_id = t.id
+    WHERE i.workspace_id = sqlc.arg('workspace_id')
+)
+SELECT i.* FROM issue i JOIN tree t ON t.id = i.id
+WHERE i.workspace_id = sqlc.arg('workspace_id')
+  AND NOT (i.id = ANY(sqlc.arg('root_ids')::uuid[]))
+ORDER BY i.number, i.id;
 
 -- name: ResolveIssueRequester :one
 SELECT t.originator_user_id FROM agent_task_queue t

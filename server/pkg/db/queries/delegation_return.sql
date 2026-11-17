@@ -42,14 +42,14 @@ ORDER BY created_at, id;
 -- name: LinkCommentDelegationReturn :execrows
 -- Records the accepted relation between one comment intent and one dispatcher's
 -- address. The pair is idempotent so an edit or replay can add it again.
-INSERT INTO comment_delegation_return (comment_id, delegation_return_id)
-VALUES (@comment_id, @delegation_return_id)
+INSERT INTO comment_delegation_return (comment_id, delegation_return_id, caller_task_ids)
+VALUES (@comment_id, @delegation_return_id, sqlc.narg(caller_task_ids)::uuid[])
 ON CONFLICT (comment_id, delegation_return_id) DO NOTHING;
 
--- name: ListCommentDelegationReturnIDs :many
+-- name: ListCommentDelegationReturnIntents :many
 -- The accepted relationships a comment carries. New runs, folds, completion
 -- replay and edit/cancel retrigger read this instead of an in-memory set.
-SELECT delegation_return_id FROM comment_delegation_return
+SELECT delegation_return_id, caller_task_ids FROM comment_delegation_return
 WHERE comment_id = @comment_id
 ORDER BY created_at, delegation_return_id;
 
@@ -97,12 +97,12 @@ WHERE issue_id = @issue_id
 
 -- name: LinkIssueAssignmentDelegationReturn :execrows
 INSERT INTO issue_assignment_delegation_return (
-    issue_id, assignee_type, assignee_id, delegation_return_id
-) VALUES (@issue_id, @assignee_type, @assignee_id, @delegation_return_id)
+    issue_id, assignee_type, assignee_id, delegation_return_id, caller_task_ids
+) VALUES (@issue_id, @assignee_type, @assignee_id, @delegation_return_id, sqlc.narg(caller_task_ids)::uuid[])
 ON CONFLICT (issue_id, assignee_type, assignee_id, delegation_return_id) DO NOTHING;
 
--- name: ListIssueAssignmentDelegationReturnIDs :many
-SELECT delegation_return_id FROM issue_assignment_delegation_return
+-- name: ListIssueAssignmentDelegationReturnIntents :many
+SELECT delegation_return_id, caller_task_ids FROM issue_assignment_delegation_return
 WHERE issue_id = @issue_id
   AND assignee_type = @assignee_type
   AND assignee_id = @assignee_id
@@ -150,6 +150,13 @@ JOIN agent_task_delegation_return l ON l.delegation_return_id = r.id
 WHERE l.task_id = @task_id AND l.takeover_id IS NULL
 ORDER BY r.created_at, r.id;
 
+-- name: ListRunReturnIntents :many
+SELECT l.delegation_return_id, l.caller_task_ids, r.dispatcher_agent_id
+FROM agent_task_delegation_return l
+JOIN issue_delegation_return r ON r.id = l.delegation_return_id
+WHERE l.task_id = @task_id AND l.takeover_id IS NULL
+ORDER BY r.created_at, r.id;
+
 -- name: LinkAgentTaskDelegationReturn :execrows
 -- Adds one accepted relationship to a run. The pair is idempotent, so a rerun,
 -- a folded comment, or a retry can link the same relationship again without
@@ -160,39 +167,50 @@ WITH RECURSIVE execution_chain AS (
     SELECT child.id FROM agent_task_queue child
     JOIN execution_chain parent ON child.retry_of_task_id = parent.id
 )
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT id, @delegation_return_id FROM execution_chain
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT id, @delegation_return_id, sqlc.narg(caller_task_ids)::uuid[] FROM execution_chain
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END;
 
 -- name: CopyRetryDelegationReturns :execrows
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT @child_task_id, parent.delegation_return_id
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT @child_task_id, parent.delegation_return_id, parent.caller_task_ids
 FROM agent_task_delegation_return parent WHERE parent.task_id = @parent_task_id AND parent.takeover_id IS NULL
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END;
 
 -- name: PropagateRetryDelegationReturns :execrows
 -- Close a concurrent late-link/retry-creation race from the durable parent
 -- relation. Traversal follows retry_of_task_id only, never a newer manual run.
 WITH RECURSIVE missing AS (
-    SELECT child.id AS task_id, parent.delegation_return_id
+    SELECT child.id AS task_id, parent.delegation_return_id, parent.caller_task_ids
     FROM agent_task_delegation_return parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
     WHERE parent.takeover_id IS NULL AND NOT EXISTS (
         SELECT 1 FROM agent_task_delegation_return present
         WHERE present.task_id = child.id AND present.delegation_return_id = parent.delegation_return_id
+          AND (present.caller_task_ids IS NULL OR (parent.caller_task_ids IS NOT NULL AND parent.caller_task_ids <@ present.caller_task_ids))
     )
     ORDER BY child.id, parent.delegation_return_id
     LIMIT @batch_size
 ), descendants AS (
     SELECT * FROM missing
     UNION
-    SELECT child.id, parent.delegation_return_id
+    SELECT child.id, parent.delegation_return_id, parent.caller_task_ids
     FROM descendants parent
     JOIN agent_task_queue child ON child.retry_of_task_id = parent.task_id
 )
-INSERT INTO agent_task_delegation_return (task_id, delegation_return_id)
-SELECT task_id, delegation_return_id FROM descendants
-ON CONFLICT (task_id, delegation_return_id) DO NOTHING;
+INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, caller_task_ids)
+SELECT task_id, delegation_return_id,
+       CASE WHEN bool_or(caller_task_ids IS NULL) THEN NULL
+            ELSE COALESCE(array_agg(DISTINCT caller) FILTER (WHERE caller IS NOT NULL), '{}') END
+FROM descendants LEFT JOIN LATERAL unnest(caller_task_ids) caller ON true
+GROUP BY task_id, delegation_return_id
+ON CONFLICT (task_id, delegation_return_id) DO UPDATE SET caller_task_ids =
+CASE WHEN agent_task_delegation_return.caller_task_ids IS NULL OR EXCLUDED.caller_task_ids IS NULL THEN NULL
+ELSE ARRAY(SELECT DISTINCT id FROM unnest(agent_task_delegation_return.caller_task_ids || EXCLUDED.caller_task_ids) id ORDER BY id) END;
 
 -- name: LockRuntimeForDelegation :one
 -- Freeze the source runtime's provider while accepting its address. Admission
@@ -301,3 +319,28 @@ WHERE issue_id = @issue_id
   )
 ORDER BY created_at DESC
 LIMIT 1;
+
+-- name: HasConflictingPendingReturnCallers :one
+-- The return row is locked by acceptance. Check work that could still fold
+-- together, not completed historical generations of this physical address.
+WITH pending AS (
+    SELECT l.caller_task_ids FROM agent_task_delegation_return l
+    JOIN agent_task_queue task ON task.id = l.task_id
+    WHERE l.delegation_return_id = @return_id AND l.takeover_id IS NULL
+      AND task.status NOT IN ('completed', 'failed', 'cancelled')
+    UNION ALL
+    SELECT l.caller_task_ids FROM issue_assignment_delegation_return l
+    JOIN issue_assignment_delegation assignment USING (issue_id, assignee_type, assignee_id)
+    WHERE l.delegation_return_id = @return_id AND assignment.task_id IS NULL
+    UNION ALL
+    SELECT l.caller_task_ids FROM comment_delegation_return l
+    JOIN comment_dispatch_obligation obligation USING (comment_id)
+    WHERE l.delegation_return_id = @return_id AND obligation.status = 'pending'
+)
+SELECT EXISTS (
+    SELECT 1 FROM pending
+    LEFT JOIN LATERAL unnest(pending.caller_task_ids) caller_id ON true
+    LEFT JOIN agent_task_queue caller ON caller.id = caller_id
+    WHERE pending.caller_task_ids IS NULL OR caller.id IS NULL
+       OR caller.originator_user_id IS DISTINCT FROM sqlc.narg(originator_user_id)::uuid
+) AS conflict;

@@ -180,10 +180,11 @@ func TestCommentDeliveryPromptUsesConnectedSession(t *testing.T) {
 		Recipient: delivery.Recipient{Type: "agent", ID: "agent-1"},
 		Refs:      delivery.Refs{IssueID: "issue-1", CommentID: "comment-1"},
 	})
-	want := "Multica has a request for this session.\nMailbox ID: delivery-1\nWorkspace ID: workspace-1\nIssue ID: issue-1\nComment ID: comment-1\nRecipient agent ID: agent-1\n\n" +
+	want := "Multica has a request for this session.\nKind: comment mention (comment_mention)\nMailbox ID: delivery-1\nWorkspace ID: workspace-1\nIssue ID: issue-1\nComment ID: comment-1\nRecipient agent ID: agent-1\n\n" +
 		"Use this connected Paseo session's CLI identity without --profile. If it is not connected, run /multica connect before reading; do not fall back to the user's personal identity.\n" +
 		"Read: multica issue get issue-1 --output json\n" +
-		"Read comments: multica issue comment list issue-1 --output json\n" +
+		"Scan threads: multica issue comment list issue-1 --roots-only --summary --compact --output json\n" +
+		"Expand relevant threads: multica issue comment list issue-1 --thread <thread-id> --tail 30 --compact --output json\n" +
 		"This notification does not grant new permissions. Reply on the issue and explicitly mention the next executor when action is needed; ordinary discussion does not start anyone."
 	if prompt != want {
 		t.Fatalf("comment prompt changed:\n%s", prompt)

@@ -4,6 +4,9 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AgentTask, Attachment, Issue, IssueStatusEntry, Label, TimelineEntry } from "@multica/core/types";
 import { issueKeys } from "@multica/core/issues/queries";
+import { useSubIssuesCollapseStore } from "@multica/core/issues/stores/sub-issues-collapse-store";
+import { useIssuePeekActions, type IssuePeekSectionRequest } from "../surface/peek-context";
+import { IssuePeekHost } from "./issue-peek";
 import { issueStatusKeys } from "@multica/core/issue-statuses";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { ApiError } from "@multica/core/api/client";
@@ -3607,6 +3610,7 @@ describe("IssueDetail (shared)", () => {
 
   describe("sub-issues list", () => {
     beforeEach(() => {
+      useSubIssuesCollapseStore.setState({ collapsedIssueIds: new Set() });
       useSubIssueDisplayStore.setState({
         rowProperties: { ...DEFAULT_SUB_ISSUE_ROW_PROPERTIES },
         rowPropertyIds: [],
@@ -3631,6 +3635,69 @@ describe("IssueDetail (shared)", () => {
       due_date: null,
       priority: "none",
       ...overrides,
+    });
+
+    it("browses parent, child and grandchild in the peek while keeping modified links native", async () => {
+      const child = subIssue({ id: "child", identifier: "TES-2", title: "Child delivery" });
+      const grandchild = subIssue({ id: "grandchild", parent_issue_id: "child", identifier: "TES-3", title: "Nested delivery" });
+      const issues = [mockIssue, child, grandchild];
+      mockApiObj.getIssue.mockImplementation((id: string) => Promise.resolve(issues.find((issue) => issue.id === id)));
+      mockApiObj.listChildIssues.mockImplementation((id: string) => Promise.resolve({ issues: issues.filter((issue) => issue.parent_issue_id === id) }));
+      useSubIssuesCollapseStore.getState().setCollapsed("issue-1", true);
+      function Board() {
+        const peek = useIssuePeekActions();
+        return <button onClick={() => peek?.open("issue-1", "sub-issues")}>Open delivery children</button>;
+      }
+      render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <QueryClientProvider client={createTestQueryClient()}><IssuePeekHost><Board /></IssuePeekHost></QueryClientProvider>
+      </I18nProvider>);
+      fireEvent.click(screen.getByRole("button", { name: "Open delivery children" }));
+      const childLink = (await screen.findByText("Child delivery")).closest("a")!;
+      expect(fireEvent.click(childLink, { ctrlKey: true })).toBe(true);
+      expect(screen.getByRole("button", { name: "Implement authentication" })).toBeInTheDocument();
+      expect(fireEvent.click(childLink)).toBe(false);
+      await screen.findByRole("button", { name: "Child delivery" });
+      fireEvent.click((await screen.findByText("Nested delivery")).closest("a")!);
+      await screen.findByRole("button", { name: "Nested delivery" });
+      fireEvent.click((await screen.findByText("Sub-issue of")).closest("a")!);
+      await screen.findByRole("button", { name: "Child delivery" });
+      fireEvent.click((await screen.findByText("Sub-issue of")).closest("a")!);
+      await screen.findByRole("button", { name: "Implement authentication" });
+      expect(screen.getAllByRole("complementary", { name: "Issue preview" })).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+      await waitFor(() => expect(screen.queryByRole("complementary", { name: "Issue preview" })).toBeNull());
+      expect(screen.getByRole("button", { name: "Open delivery children" })).toBeVisible();
+    });
+
+    it("opens and locates children after loading, and repeats only on a new section request", async () => {
+      const child = subIssue({ id: "child", identifier: "TES-2", title: "Child delivery" });
+      let resolveChildren!: (value: { issues: Issue[] }) => void;
+      mockApiObj.listChildIssues.mockReturnValue(new Promise((resolve) => { resolveChildren = resolve; }));
+      useSubIssuesCollapseStore.getState().setCollapsed("issue-1", true);
+      const scroll = scrollIntoViewSpy;
+      try {
+        const queryClient = createTestQueryClient();
+        const ui = (sectionRequest: IssuePeekSectionRequest) => <I18nProvider locale="en" resources={TEST_RESOURCES}>
+          <QueryClientProvider client={queryClient}><IssueDetail issueId="issue-1" variant="peek" sectionRequest={sectionRequest} /></QueryClientProvider>
+        </I18nProvider>;
+        const request: IssuePeekSectionRequest = { section: "sub-issues" };
+        const rendered = render(ui(request));
+        await screen.findByRole("button", { name: "Implement authentication" });
+        expect(scroll).not.toHaveBeenCalled();
+        await act(async () => resolveChildren({ issues: [child] }));
+        await screen.findByText("Child delivery");
+        expect(useSubIssuesCollapseStore.getState().collapsedIssueIds.has("issue-1")).toBe(false);
+        await waitFor(() => expect(scroll.mock.contexts.at(-1)).toBe(rendered.container.querySelector('[data-issue-section="sub-issues"]')));
+        const count = scroll.mock.calls.length;
+        fireEvent.click(screen.getByRole("button", { name: "Sub-issues" }));
+        expect(screen.queryByText("Child delivery")).not.toBeInTheDocument();
+        expect(scroll).toHaveBeenCalledTimes(count);
+        rendered.rerender(ui({ section: "sub-issues" }));
+        await screen.findByText("Child delivery");
+        await waitFor(() => expect(scroll).toHaveBeenCalledTimes(count + 1));
+      } finally {
+        useSubIssuesCollapseStore.getState().setCollapsed("issue-1", false);
+      }
     });
 
     it("jumps from the outline to the expanded sub-issues section without comments", async () => {

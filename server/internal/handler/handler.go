@@ -85,6 +85,13 @@ type Config struct {
 	// decides who may create a workspace; it grants no cross-workspace
 	// visibility or admin rights (#9400).
 	WorkspaceCreationAllowedEmails []string
+	// ExternalAgentTemplatesEnabled opens template-mode external registration:
+	// new host sessions attach to one template keyed by (workspace, owner,
+	// provider, host instance). Off by default so merging a host identity is a
+	// deliberate rollout step, not a side effect of deploying. Legacy
+	// per-session registration keeps its existing behavior either way.
+	// Populated from MULTICA_EXTERNAL_AGENT_TEMPLATES_ENABLED.
+	ExternalAgentTemplatesEnabled bool
 	// VCSIntegrationEnabled gates the self-hosted Git provider integration
 	// (Forgejo / Gitea / GitLab) at the deployment level, independent of whether
 	// MULTICA_VCS_SECRET_KEY is set. It is the product boundary: the feature is
@@ -511,6 +518,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 
 	taskSvc := service.NewTaskService(queries, txStarter, hub, bus, daemonHub)
 	taskSvc.Analytics = analyticsClient
+	taskSvc.AppURL = cfg.AppURL
 	taskSvc.SourceContextStorage = store
 	// Chat follow-up suggestions run through the same internal LLM layer that
 	// backs auto-titling. A deployment with no MULTICA_LLM_* configuration gets
@@ -1109,7 +1117,7 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 		if !h.requireProjectVisible(w, r, workspaceID, issue.ProjectID, http.StatusNotFound, "issue not found") {
 			return db.Issue{}, false
 		}
-		return issue, true
+		return issue, h.checkIssueSessionWrite(w, r, issue)
 	}
 
 	issueUUID, err := util.ParseUUID(issueID)
@@ -1140,7 +1148,7 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 	if !h.requireProjectVisible(w, r, workspaceID, issue.ProjectID, http.StatusNotFound, "issue not found") {
 		return db.Issue{}, false
 	}
-	return issue, true
+	return issue, h.checkIssueSessionWrite(w, r, issue)
 }
 
 // resolveIssueByIdentifier tries to look up an issue by "PREFIX-NUMBER" format.

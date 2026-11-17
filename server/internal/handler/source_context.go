@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/multica-ai/multica/server/internal/issueleader"
 	"io"
 	"log/slog"
 	"net/http"
@@ -781,12 +782,15 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 	prefix := h.getIssuePrefix(r.Context(), workspaceID)
 	result, err := h.IssueService.Create(r.Context(), service.IssueCreateParams{
 		WorkspaceID: workspaceID, Title: title, Description: ptrToText(input.Description), Status: status, Priority: priority,
-		AssigneeType: assigneeType, AssigneeID: assigneeID, CreatorType: "member", CreatorID: userID,
+		AssigneeType: assigneeType, AssigneeID: assigneeID, RecipientSessionID: input.RecipientSessionID, DelegationCreatedBy: util.UUIDToString(userID), CreatorType: "member", CreatorID: userID,
 		ParentIssueID: capture.SourceIssueID, ProjectID: projectID, StartDate: startDate, DueDate: dueDate,
 		AttachmentIDs: attachmentIDs, LabelIDs: labelIDs, Properties: properties, Stage: stage,
-		AllowDuplicate: input.AllowDuplicate, SourceContext: &capture,
+		AllowDuplicate: input.AllowDuplicate, SourceContext: &capture, DeliveryAppURL: h.cfg.AppURL,
 		PRAutoCompleteDisabled: input.PRAutoCompleteDisabled,
 	}, service.IssueCreateOpts{
+		CanInvokeTarget: func(ctx context.Context, agent db.Agent) bool {
+			return h.canInvokeAgent(ctx, agent, "member", util.UUIDToString(userID), util.UUIDToString(userID), util.UUIDToString(workspaceID))
+		},
 		ActorID: util.UUIDToString(userID),
 		BroadcastPayload: func(issue db.Issue, _ []db.Attachment, labels []db.IssueLabel) map[string]any {
 			response := issueToResponse(issue, prefix)
@@ -796,6 +800,9 @@ func (h *Handler) createManualCommentSubIssue(w http.ResponseWriter, r *http.Req
 		},
 	})
 	if err != nil {
+		if writeRecipientSessionError(w, err) {
+			return errSourceContextResponseWritten
+		}
 		return err
 	}
 	response := issueToResponse(result.Issue, prefix)
@@ -842,7 +849,11 @@ func (h *Handler) prepareAgentCommentSubIssue(w http.ResponseWriter, r *http.Req
 		if err != nil || squad.ArchivedAt.Valid {
 			return nil, sourceContextBadRequest("squad not found or archived")
 		}
-		agentID = squad.LeaderID
+		leader, err := issueleader.ResolveIssueLeader(r.Context(), h.Queries, db.Issue{WorkspaceID: workspaceID}, squad)
+		if err != nil {
+			return nil, sourceContextBadRequest(err.Error())
+		}
+		agentID = leader.Agent.ID
 	} else {
 		parsed, err := util.ParseUUID(strings.TrimSpace(input.AgentID))
 		if err != nil {

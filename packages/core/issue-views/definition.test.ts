@@ -60,6 +60,18 @@ describe("isIssueViewModified", () => {
   });
 });
 
+describe("issueViewDefinitionFromState child visibility", () => {
+  it("saves the visibility the user saw rather than an inactive automatic default", () => {
+    const store = createStore<IssueViewState>()(viewStoreSlice);
+    store.setState({ viewMode: "board", showSubIssues: false, showSubIssuesExplicit: false });
+    expect(issueViewDefinitionFromState(store.getState()).display.showSubIssues).toBe(false);
+
+    store.setState({ priorityFilters: ["high"] });
+    expect(issueViewDefinitionFromState(store.getState()).display.showSubIssues).toBe(true);
+    expect(store.getState().showSubIssuesExplicit).toBe(false);
+  });
+});
+
 describe("isIssueViewUndefined", () => {
   const created = { ...issueViewSeedDefinition({ query: {}, display: {} }), scope_variant: null };
 

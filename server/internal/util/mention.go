@@ -18,7 +18,7 @@ import (
 
 // Mention represents a parsed @mention from markdown content.
 type Mention struct {
-	Type string // "member", "agent", "squad", "issue", or "all"
+	Type string // "member", "agent", "agent-notify", "squad", "issue", or "all"
 	ID   string // user_id, agent_id, issue_id, or "all"
 }
 
@@ -27,7 +27,7 @@ type Mention struct {
 // Uses .+? (non-greedy) instead of [^\]]* so labels containing square brackets
 // (e.g. "David[TF]") are matched correctly — the ](mention:// anchor is specific
 // enough to prevent over-matching.
-var MentionRe = regexp.MustCompile(`\[@?(.+?)\]\(mention://(member|agent|squad|issue|all)/([0-9a-fA-F-]+|all)\)`)
+var MentionRe = regexp.MustCompile(`\[@?(.+?)\]\(mention://(member|agent-notify|agent|squad|issue|all)/([0-9a-fA-F-]+|all)\)`)
 
 var canonicalMentionRe = regexp.MustCompile("^" + MentionRe.String() + "$")
 
@@ -47,6 +47,8 @@ func (m Mention) IsMentionAll() bool {
 // hand-rolled scanner.
 // Each link must also use MentionRe's canonical inline source form and have
 // visible label text. Reference links and other Markdown link forms are inert.
+// A notify-only mention of an agent the same content also delegates to is
+// dropped: delegation subsumes it.
 func ParseMentions(content string) []Mention {
 	source := []byte(content)
 	links := &mentionLinkParser{InlineParser: parser.NewLinkParser(), spans: make(map[*ast.Link]text.Segment)}
@@ -79,7 +81,7 @@ func ParseMentions(content string) []Mention {
 		if !ok {
 			return ast.WalkContinue, nil
 		}
-		key := mention.Type + ":" + mention.ID
+		key := mention.Type + ":" + strings.ToLower(mention.ID)
 		if seen[key] {
 			return ast.WalkContinue, nil
 		}
@@ -87,7 +89,14 @@ func ParseMentions(content string) []Mention {
 		result = append(result, mention)
 		return ast.WalkContinue, nil
 	})
-	return result
+	out := result[:0]
+	for _, m := range result {
+		if m.Type == "agent-notify" && seen["agent:"+strings.ToLower(m.ID)] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // Goldmark links expose their start, but not their end. Record the span while

@@ -1329,6 +1329,15 @@ func (env *Environment) Cleanup(removeAll bool) error {
 	// rerun fail closed. The daemon also defers ReleaseLock for the task run;
 	// both paths are idempotent.
 	env.ReleaseLock()
+	if env.RootDir != "" {
+		present, err := HasRetainedRuntimePaths(env.RootDir)
+		if err != nil {
+			return err
+		}
+		if present {
+			return fmt.Errorf("execenv: refusing to clean a retained worktree in %s", env.RootDir)
+		}
+	}
 
 	if env.LocalDirectory {
 		// Never touch the user's directory. RootDir is the daemon's own
@@ -1487,6 +1496,13 @@ func LockEnvRootForReuse(wsRoot *os.Root, rel, envRoot string) (*EnvRootClaim, o
 	if !locked {
 		lock.Close()
 		return nil, nil, fmt.Errorf("execenv: reuse %s: %w", envRoot, ErrEnvRootBusy)
+	}
+	if _, err := envRootHandle.Lstat(retainedRuntimeMarker); err == nil {
+		releaseLockFile(lock)
+		return nil, nil, fmt.Errorf("execenv: worktree at %s is retained for manual recovery", envRoot)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		releaseLockFile(lock)
+		return nil, nil, fmt.Errorf("execenv: inspect retained worktree at %s: %w", envRoot, err)
 	}
 	return &EnvRootClaim{rootDir: envRoot, lock: lock}, info, nil
 }
@@ -1723,6 +1739,11 @@ func ReadEnvRootOwner(envRoot string) (*EnvRootOwner, error) {
 // directory instead would drop both the claim and the lock for as long as the
 // recreate takes, which is exactly the window claimEnvRoot exists to close.
 func resetEnvRootContents(envRoot string) error {
+	if present, err := HasRetainedRuntimePaths(envRoot); err != nil {
+		return err
+	} else if present {
+		return fmt.Errorf("execenv: refusing to reset %s: a task worktree remains for recovery", envRoot)
+	}
 	entries, err := os.ReadDir(envRoot)
 	if err != nil {
 		return err

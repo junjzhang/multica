@@ -688,6 +688,131 @@ func (q *Queries) ListVCSPullRequestsByIssue(ctx context.Context, issueID pgtype
 	return items, nil
 }
 
+const listVCSPullRequestsByIssues = `-- name: ListVCSPullRequestsByIssues :many
+WITH checks AS (
+    SELECT
+        pr.id AS pr_id,
+        COUNT(*)::bigint AS total,
+        SUM(CASE WHEN cs.state = 'failed'  THEN 1 ELSE 0 END)::bigint AS failed,
+        SUM(CASE WHEN cs.state = 'passed'  THEN 1 ELSE 0 END)::bigint AS passed,
+        SUM(CASE WHEN cs.state = 'pending' THEN 1 ELSE 0 END)::bigint AS pending
+    FROM vcs_pull_request pr
+    JOIN vcs_commit_status cs
+        ON cs.connection_id = pr.connection_id
+       AND cs.sha = pr.head_sha
+       AND pr.head_sha <> ''
+    WHERE EXISTS (SELECT 1 FROM issue_vcs_pull_request ipr WHERE ipr.pull_request_id = pr.id AND ipr.issue_id = ANY($2::uuid[]))
+    GROUP BY pr.id
+)
+SELECT
+    ipr.issue_id, pr.id, pr.workspace_id, pr.connection_id, pr.provider, pr.repo_owner, pr.repo_name, pr.pr_number, pr.title, pr.state, pr.html_url, pr.branch, pr.head_sha, pr.author_login, pr.author_avatar_url, pr.merged_at, pr.closed_at, pr.pr_created_at, pr.pr_updated_at, pr.additions, pr.deletions, pr.changed_files, pr.created_at, pr.updated_at, pr.api_snapshot, pr.snapshot_fetched_at, pr.snapshot_refresh_after, pr.snapshot_error,
+    COALESCE(ipr.linked_by_type, 'system')::text AS linked_by_type,
+    COALESCE(c.total, 0)::bigint   AS checks_total,
+    COALESCE(c.passed, 0)::bigint  AS checks_passed,
+    COALESCE(c.failed, 0)::bigint  AS checks_failed,
+    COALESCE(c.pending, 0)::bigint AS checks_pending
+FROM vcs_pull_request pr
+JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id = pr.id
+LEFT JOIN checks c ON c.pr_id = pr.id
+WHERE pr.workspace_id = $1 AND ipr.issue_id = ANY($2::uuid[])
+ORDER BY pr.pr_created_at DESC
+`
+
+type ListVCSPullRequestsByIssuesParams struct {
+	WorkspaceID pgtype.UUID   `json:"workspace_id"`
+	IssueIds    []pgtype.UUID `json:"issue_ids"`
+}
+
+type ListVCSPullRequestsByIssuesRow struct {
+	IssueID              pgtype.UUID        `json:"issue_id"`
+	ID                   pgtype.UUID        `json:"id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	ConnectionID         pgtype.UUID        `json:"connection_id"`
+	Provider             string             `json:"provider"`
+	RepoOwner            string             `json:"repo_owner"`
+	RepoName             string             `json:"repo_name"`
+	PrNumber             int32              `json:"pr_number"`
+	Title                string             `json:"title"`
+	State                string             `json:"state"`
+	HtmlUrl              string             `json:"html_url"`
+	Branch               pgtype.Text        `json:"branch"`
+	HeadSha              string             `json:"head_sha"`
+	AuthorLogin          pgtype.Text        `json:"author_login"`
+	AuthorAvatarUrl      pgtype.Text        `json:"author_avatar_url"`
+	MergedAt             pgtype.Timestamptz `json:"merged_at"`
+	ClosedAt             pgtype.Timestamptz `json:"closed_at"`
+	PrCreatedAt          pgtype.Timestamptz `json:"pr_created_at"`
+	PrUpdatedAt          pgtype.Timestamptz `json:"pr_updated_at"`
+	Additions            int32              `json:"additions"`
+	Deletions            int32              `json:"deletions"`
+	ChangedFiles         int32              `json:"changed_files"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	ApiSnapshot          []byte             `json:"api_snapshot"`
+	SnapshotFetchedAt    pgtype.Timestamptz `json:"snapshot_fetched_at"`
+	SnapshotRefreshAfter pgtype.Timestamptz `json:"snapshot_refresh_after"`
+	SnapshotError        bool               `json:"snapshot_error"`
+	LinkedByType         string             `json:"linked_by_type"`
+	ChecksTotal          int64              `json:"checks_total"`
+	ChecksPassed         int64              `json:"checks_passed"`
+	ChecksFailed         int64              `json:"checks_failed"`
+	ChecksPending        int64              `json:"checks_pending"`
+}
+
+func (q *Queries) ListVCSPullRequestsByIssues(ctx context.Context, arg ListVCSPullRequestsByIssuesParams) ([]ListVCSPullRequestsByIssuesRow, error) {
+	rows, err := q.db.Query(ctx, listVCSPullRequestsByIssues, arg.WorkspaceID, arg.IssueIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListVCSPullRequestsByIssuesRow{}
+	for rows.Next() {
+		var i ListVCSPullRequestsByIssuesRow
+		if err := rows.Scan(
+			&i.IssueID,
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ConnectionID,
+			&i.Provider,
+			&i.RepoOwner,
+			&i.RepoName,
+			&i.PrNumber,
+			&i.Title,
+			&i.State,
+			&i.HtmlUrl,
+			&i.Branch,
+			&i.HeadSha,
+			&i.AuthorLogin,
+			&i.AuthorAvatarUrl,
+			&i.MergedAt,
+			&i.ClosedAt,
+			&i.PrCreatedAt,
+			&i.PrUpdatedAt,
+			&i.Additions,
+			&i.Deletions,
+			&i.ChangedFiles,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ApiSnapshot,
+			&i.SnapshotFetchedAt,
+			&i.SnapshotRefreshAfter,
+			&i.SnapshotError,
+			&i.LinkedByType,
+			&i.ChecksTotal,
+			&i.ChecksPassed,
+			&i.ChecksFailed,
+			&i.ChecksPending,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const resetVCSRefresh = `-- name: ResetVCSRefresh :exec
 UPDATE vcs_pull_request SET snapshot_refresh_after = NULL
 WHERE connection_id = $1 AND provider = 'tgit'

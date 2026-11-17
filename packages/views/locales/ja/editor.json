@@ -101,6 +101,8 @@
     "group_users": "ユーザー",
     "group_issues": "タスク",
     "all_members": "すべてのメンバー",
+    "delegate_badge": "委任",
+    "notify_badge": "通知のみ",
     "agent_badge": "エージェント",
     "squad_badge": "スクワッド",
     "searching": "検索中...",

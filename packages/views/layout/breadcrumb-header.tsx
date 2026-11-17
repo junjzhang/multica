@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type MouseEventHandler, type ReactNode } from "react";
 import { ChevronRight } from "@multica/ui/icons";
 import { cn } from "@multica/ui/lib/utils";
 import { PageHeader } from "./page-header";
@@ -21,6 +21,7 @@ export interface BreadcrumbSegment {
    * max-w-72` for a truncating segment (e.g. a long project title).
    */
   className?: string;
+  onClick?: MouseEventHandler<HTMLAnchorElement>;
 }
 
 interface BreadcrumbHeaderProps {
@@ -51,6 +52,7 @@ export function BreadcrumbHeader({ segments, leaf, actions, leading, className }
           <Fragment key={segment.href}>
             <AppLink
               href={segment.href}
+              onClick={segment.onClick}
               newTabTitle={
                 typeof segment.label === "string" ? segment.label : undefined
               }

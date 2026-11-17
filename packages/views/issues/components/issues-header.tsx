@@ -81,7 +81,7 @@ import { projectListOptions } from "@multica/core/projects/queries";
 import { PROJECT_STATUS_CONFIG, PROJECT_STATUS_ORDER } from "@multica/core/projects/config";
 import { labelListOptions } from "@multica/core/labels/queries";
 import { propertyListOptions } from "@multica/core/properties";
-import { propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
+import { effectiveShowSubIssues, propertyIdFromViewKey } from "@multica/core/issues/stores/view-store";
 import type {
   Issue,
   IssueTableFacetSpec,
@@ -1840,6 +1840,7 @@ const LAYOUTS: { mode: ViewMode; Icon: typeof List }[] = [
 
 export function IssueDisplayControls({
   scopedIssues,
+  showSubIssues: showSubIssuesOverride,
   hideViewToggle = false,
   allowGantt = false,
   dateFilter = null,
@@ -1852,6 +1853,8 @@ export function IssueDisplayControls({
   iconOnly = false,
 }: {
   scopedIssues: Issue[];
+  /** Child visibility the surface actually applies (search can open an automatic default). */
+  showSubIssues?: boolean;
   hideViewToggle?: boolean;
   /** The host renders its own filter trigger (the view header's chip row). */
   hideFilter?: boolean;
@@ -1904,7 +1907,8 @@ export function IssueDisplayControls({
   const tableGrouping = useViewStore((s) => s.tableGrouping ?? "none");
   const tableHierarchy = useViewStore((s) => s.tableHierarchy ?? true);
   const tableColumnCount = useViewStore((s) => s.tableColumns.length);
-  const showSubIssues = useViewStore((s) => s.showSubIssues);
+  const defaultShowSubIssues = useViewStore(effectiveShowSubIssues);
+  const showSubIssues = showSubIssuesOverride ?? defaultShowSubIssues;
   const hiddenStatuses = useViewStore((s) => s.hiddenStatuses);
   const act = useViewStoreApi().getState();
   const headerWsId = useWorkspaceId();
@@ -2316,7 +2320,7 @@ export function IssueDisplayControls({
                 <Switch
                   size="sm"
                   checked={showSubIssues}
-                  onCheckedChange={() => act.toggleShowSubIssues()}
+                  onCheckedChange={(checked) => act.setShowSubIssues(checked)}
                 />
               </label>
             </div>

@@ -11,6 +11,10 @@ function request(overrides: Partial<Parameters<typeof sessionOpenEnv>[1]> = {}) 
     cwd: "/tmp/project",
     reason: "resume" as const,
     purpose: "interactive" as const,
+    title: null,
+    labels: {},
+    tools: [],
+    mcpServers: {},
     env: { EXISTING: "1" },
     ...overrides,
   };

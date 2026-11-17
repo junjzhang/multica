@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, memo } from "react";
-import { AppLink } from "../../navigation";
+import { AppLink, useRowLink } from "../../navigation";
+import { Button } from "@multica/ui/components/ui/button";
 import { useSortable, defaultAnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -12,7 +13,7 @@ import { propertyListOptions } from "@multica/core/properties";
 import { CustomPropertyValueDisplay } from "./pickers/custom-property-picker";
 import { descriptionPreview } from "./description-preview";
 import { formatDateOnly, isPastDateOnly } from "@multica/core/issues/date";
-import { CalendarClock, CalendarDays } from "@multica/ui/icons";
+import { CalendarClock, CalendarDays, ListTree } from "@multica/ui/icons";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PropertyIcon } from "../../common/property-icon";
 import { useWorkspacePaths } from "@multica/core/paths";
@@ -36,17 +37,17 @@ import {
   PEEK_TARGET_ATTR,
   useIsIssuePeeked,
   useIssuePeekActions,
+  useIssuePeekClick,
   useIssuePeekLinkProps,
 } from "../surface/peek-context";
 function formatDate(date: string, locale: string): string {
   return formatDateOnly(date, { month: "short", day: "numeric" }, locale);
 }
 
-/** Stops event from bubbling to Link/drag handlers */
+/** Keeps controls out of card navigation and dragging. */
 function PickerWrapper({ children, className }: { children: React.ReactNode; className?: string }) {
   const stop = (e: React.SyntheticEvent) => {
     e.stopPropagation();
-    e.preventDefault();
   };
   return (
     <div onClick={stop} onMouseDown={stop} onPointerDown={stop} className={className}>
@@ -60,11 +61,15 @@ export const BoardCardContent = memo(function BoardCardContent({
   editable = false,
   childProgress,
   project,
+  issueLink,
+  onOpenChildren,
 }: {
   issue: Issue;
   editable?: boolean;
   childProgress?: ChildProgress;
   project?: Project;
+  issueLink?: React.ComponentProps<typeof AppLink>;
+  onOpenChildren?: () => void;
 }) {
   const { t } = useT("issues");
   const locale = useLocale();
@@ -212,15 +217,19 @@ export const BoardCardContent = memo(function BoardCardContent({
         <div className="flex items-center gap-1.5 min-w-0">
           {priorityIconNode}
           <p className="text-caption text-muted-foreground truncate">{issue.identifier}</p>
-          <IssueDuplicateOfMarker issue={issue} insideLink />
+          <IssueDuplicateOfMarker issue={issue} />
         </div>
         <IssueAgentActivityIndicator issueId={issue.id} />
       </div>
 
       {/* Row 2: Title */}
-      <p className="mt-1 text-body font-medium leading-snug cjk:leading-normal line-clamp-2">
-        {issue.title}
-      </p>
+      {issueLink ? (
+        <AppLink {...issueLink} className="mt-1 block text-body font-medium leading-snug cjk:leading-normal line-clamp-2">
+          {issue.title}
+        </AppLink>
+      ) : (
+        <p className="mt-1 text-body font-medium leading-snug cjk:leading-normal line-clamp-2">{issue.title}</p>
+      )}
 
       {showDescription && (() => {
         const preview = descriptionPreview(issue.description!);
@@ -333,7 +342,19 @@ export const BoardCardContent = memo(function BoardCardContent({
                   </span>
                 )
               )}
-              {showChildProgress && (
+              {showChildProgress && onOpenChildren ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  className="shrink-0 text-muted-foreground"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => { event.stopPropagation(); onOpenChildren(); }}
+                >
+                  <ListTree className="size-3.5" />
+                  {t(($) => $.detail.sub_issues_label)} {childProgress!.total}
+                </Button>
+              ) : showChildProgress && (
                 <div className="inline-flex shrink-0 items-center gap-1">
                   <ProgressRing done={childProgress!.done} total={childProgress!.total} size={14} />
                   <span className="text-micro text-muted-foreground tabular-nums font-medium">
@@ -375,6 +396,9 @@ export const DraggableBoardCard = memo(function DraggableBoardCard({
   const peek = useIssuePeekActions();
   const peeked = useIsIssuePeeked(issue.id);
   const peekLinkProps = useIssuePeekLinkProps(issue.id);
+  const handlePeekClick = useIssuePeekClick();
+  const getRowLink = useRowLink();
+  const rowLink = getRowLink(p.issueDetail(issue.id), issue.identifier);
   const {
     attributes,
     listeners,
@@ -404,7 +428,17 @@ export const DraggableBoardCard = memo(function DraggableBoardCard({
         data-peeked={peeked ? "" : undefined}
         {...attributes}
         {...listeners}
-        className={`group/card ${isDragging ? "opacity-30" : ""}`}
+        className={`group/card ${isDragging ? "opacity-30 pointer-events-none" : ""}`}
+        onMouseEnter={rowLink.onMouseEnter}
+        onClick={(event) => {
+          const control = (event.target as Element).closest("a,button,input,[role='button']");
+          if (control && control !== event.currentTarget) return;
+          if (!handlePeekClick(issue.id, event)) rowLink.onClick(event);
+        }}
+        onAuxClick={(event) => {
+          if ((event.target as Element).closest("a,button,input")) return;
+          rowLink.onAuxClick(event);
+        }}
         onKeyDown={
           peek
             ? (e) => {
@@ -419,19 +453,19 @@ export const DraggableBoardCard = memo(function DraggableBoardCard({
             : undefined
         }
       >
-        <AppLink
-          href={p.issueDetail(issue.id)}
-          newTabTitle={issue.identifier}
-          className={`group block transition-colors ${isDragging ? "pointer-events-none" : ""}`}
-          {...peekLinkProps}
-        >
-          <BoardCardContent
-            issue={issue}
-            editable
-            childProgress={childProgress}
-            project={project}
-          />
-        </AppLink>
+        <BoardCardContent
+          issue={issue}
+          editable
+          childProgress={childProgress}
+          project={project}
+          issueLink={{
+            href: p.issueDetail(issue.id),
+            newTabTitle: issue.identifier,
+            "aria-label": `${issue.identifier} ${issue.title}`,
+            ...peekLinkProps,
+          }}
+          onOpenChildren={peek ? () => peek.open(issue.id, "sub-issues") : undefined}
+        />
       </div>
     </IssueActionsContextMenu>
   );

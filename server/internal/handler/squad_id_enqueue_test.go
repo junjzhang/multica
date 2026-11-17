@@ -37,6 +37,7 @@ func TestCreateComment_SquadMentionStampsSquadIDOnLeaderTask(t *testing.T) {
 	`, testWorkspaceID, leaderID, testUserID).Scan(&squadID); err != nil {
 		t.Fatalf("create squad: %v", err)
 	}
+	dbfx.Exec(t, "INSERT INTO squad_member (squad_id,member_type,member_id,role) SELECT id,'agent',leader_id,'leader' FROM squad WHERE id=$1 ON CONFLICT (squad_id,member_type,member_id) DO NOTHING", squadID)
 	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM squad WHERE id = $1`, squadID) })
 
 	// Issue assigned to nobody (definitely not the squad) — the leader task is

@@ -41,6 +41,13 @@ Which dispatch an accepted relationship belongs to is recorded separately:
 - `agent_task_delegation_return(task_id, delegation_return_id)` is the set of
   accepted relationships a run actually carries.
 
+Each return join also stores `caller_task_ids`: the server-validated managed
+callers for that accepted intent, a known empty array for external callers, or
+NULL for historical unknown provenance. Coalescing unions exact caller sets;
+retries and replay copy them. A comment edit replaces the current intent while
+past runs retain their own copied sets. The immutable address source is never
+used to reconstruct a later caller's upstream responsibility or authority.
+
 A run links only the intents it covers:
 
 - a new comment run links that comment's relationships;
@@ -165,8 +172,10 @@ A managed run's source scope is its original issue, chat, or autopilot; the
 delegated issue is not a substitute scope. A run with no business scope (for
 example a quick create) is still an exact runtime/provider session/work
 directory, and the task token's workspace binding proves tenancy. A continuation
-turn may reuse the binding only when all four frozen address values match,
-even if its task ID differs. The original `source_task_id` stays unchanged.
+turn may reuse the binding only when all four frozen address values and the
+original source scope match, even if its task ID differs. Pending callers must
+also have compatible originator authority before new work is accepted. The
+original `source_task_id` stays unchanged.
 Reusing the same task ID does not bypass this comparison: a re-pin, different
 runtime/provider or changed directory is a conflict requiring explicit takeover.
 A missing snapshot fails closed; mutable task history is never a substitute.

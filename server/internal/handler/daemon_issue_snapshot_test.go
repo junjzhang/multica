@@ -48,6 +48,7 @@ func issueSnapshotJSON(t *testing.T, version int, title, description string) str
 		"v":                  version,
 		"title_sha256":       sha256Hex(title),
 		"description_sha256": sha256Hex(description),
+		"criteria_sha256":    sha256Hex("[]"),
 	})
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
@@ -623,19 +624,9 @@ func TestClaimTaskByRuntime_StartedRetryWithoutProviderMustNotWaiveReads(t *test
 	}
 }
 
-// TestClaimTaskByRuntime_LegacySnapshotWithStatusStillCompares pins the reason
-// dropping status did NOT bump issueSnapshotVersion.
-//
-// Rows written before the narrowing carry an extra "status" key. Removing a
-// field from the compared set is backward compatible: the fields that remain
-// are still present in those rows and still mean the same thing, so the
-// comparison stays correct and the stale key is simply ignored. Only ADDING a
-// field, or changing how a value is derived, leaves an old row unable to answer
-// the current question — and only that earns a bump.
-//
-// Without this test the compatibility claim is an assertion in a comment, and
-// the cost of it being wrong is a silent false "unchanged" on every dev row.
-func TestClaimTaskByRuntime_LegacySnapshotWithStatusStillCompares(t *testing.T) {
+// Extra fields from a previous producer are ignored within the current shape.
+// Older shape versions still require a fresh read when new fields are compared.
+func TestClaimTaskByRuntime_SnapshotWithExtraStatusStillCompares(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -653,12 +644,13 @@ func TestClaimTaskByRuntime_LegacySnapshotWithStatusStillCompares(t *testing.T) 
 			name := "legacy snapshot agent " + tc.name
 			agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, name)
 
-			// A snapshot in the PREVIOUS shape: same version, extra status key.
+			// A current-shape snapshot carrying an extra un-compared status key.
 			legacy, err := json.Marshal(map[string]any{
 				"v":                  issueSnapshotVersion,
 				"status":             "todo", // the issue is in_progress now
 				"title_sha256":       sha256Hex(name + " issue"),
 				"description_sha256": sha256Hex(tc.description),
+				"criteria_sha256":    sha256Hex("[]"),
 			})
 			if err != nil {
 				t.Fatalf("marshal legacy snapshot: %v", err)
