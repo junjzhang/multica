@@ -13,7 +13,7 @@ import { StatusPanel } from "../client/status-panel";
 for (const mode of ["light", "dark"]) {
   it(`collapses connection details using ${mode} colors`, async () => {
     const colors = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "accent", "accentForeground", "statusSuccess", "statusWarning", "statusDanger"].map((key) => [key, `${mode}-${key}`]));
-    const props = { agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
+    const props = { host: { id: "host" }, workspaceId: "workspace", agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
     let renderer: ReactTestRenderer;
     await act(async () => { renderer = create(<StatusPanel {...props} openTask={vi.fn()} />); });
     const before = JSON.stringify(renderer!.toJSON());
@@ -29,7 +29,7 @@ for (const mode of ["light", "dark"]) {
 it("keeps connection errors visible while details are collapsed", async () => {
   getStatus.mockRejectedValueOnce(new Error("Reconnect this session"));
   const colors = Object.fromEntries(["surface0", "foregroundMuted", "statusDanger"].map((key) => [key, key]));
-  const props = { agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
+  const props = { host: { id: "host" }, workspaceId: "workspace", agentId: "agent", theme: { colors } } as PluginAgentPanelProps;
   let renderer: ReactTestRenderer;
   await act(async () => { renderer = create(<StatusPanel {...props} openTask={vi.fn()} />); });
   expect(JSON.stringify(renderer!.toJSON())).toContain("Reconnect this session");

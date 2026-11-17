@@ -126,3 +126,18 @@ it("labels stale contracts without misidentifying the pending actor", async () =
   expect(output).not.toContain("Pending acceptor");
   await act(async () => { renderer!.unmount(); });
 });
+
+it("clears previous session immediately and ignores its late response", async () => {
+  const theme = { colors: { surface0: "white", foreground: "black", foregroundMuted: "gray", accent: "blue", statusDanger: "red" } } as PluginAgentPanelProps["theme"];
+  let resolveOld!: (value: ReturnType<typeof toTasksView>) => void;
+  const old = toTasksView(makeTasksWire(), "old");
+  old.owned[0]!.title = "Only session A";
+  getTasks.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<SessionTasksSection openTask={openTask} agentId="session-a" theme={theme} />); });
+  getTasks.mockResolvedValueOnce(toTasksView(makeTasksWire({ owned: [], accepting: [], returning: [] }), "new"));
+  await act(async () => { renderer!.update(<SessionTasksSection openTask={openTask} agentId="session-b" theme={theme} />); });
+  await act(async () => { resolveOld(old); });
+  expect(JSON.stringify(renderer!.toJSON())).not.toContain("Only session A");
+  await act(async () => { renderer!.unmount(); });
+});

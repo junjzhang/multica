@@ -65,9 +65,8 @@ type SessionTasksResponse struct {
 // read projection only: no obligation changes, and the caller must present the
 // agent's own session-bound external credential.
 //
-// Owned and accepting items are agent-scoped: an external agent registers one
-// session per conversation, so its work is this session's work. A multi-session
-// agent would need a session-scoped projection instead.
+// Each group uses an authoritative session relationship; agent identity alone
+// does not associate historical work with a conversation.
 func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 	// The projection is the session's own view: a human manager, a task token
 	// or a sibling agent credential has no session to summarize for.
@@ -96,12 +95,12 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		statuses:  map[string]sessionTaskStatus{},
 	}
 
-	owned, ownedCut, err := h.sessionOwnedItems(r, projection, agent)
+	owned, ownedCut, err := h.sessionOwnedItems(r, projection, agent, sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load owned tasks")
 		return
 	}
-	accepting, acceptingCut, err := h.sessionAcceptingItems(r, projection, agent)
+	accepting, acceptingCut, err := h.sessionAcceptingItems(r, projection, agent, sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load acceptance work")
 		return
@@ -116,7 +115,7 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load delegated tasks")
 		return
 	}
-	requests, requestsCut, err := h.sessionRequests(r, projection, agent)
+	requests, requestsCut, err := h.sessionRequests(r, projection, agent, sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load requests")
 		return
@@ -136,9 +135,9 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
+func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
 	rows, err := h.Queries.ListSessionUnansweredRequests(r.Context(), db.ListSessionUnansweredRequestsParams{
-		WorkspaceID: agent.WorkspaceID, AgentID: uuidToString(agent.ID), RowLimit: sessionTaskLimit,
+		WorkspaceID: agent.WorkspaceID, AgentID: agent.ID, ExternalSessionID: sessionID, RowLimit: sessionTaskLimit,
 	})
 	if err != nil {
 		return nil, false, err
@@ -239,11 +238,12 @@ func (p *sessionTaskProjection) item(issueID string, number int32, title, status
 	}
 }
 
-func (h *Handler) sessionOwnedItems(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
+func (h *Handler) sessionOwnedItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
 	rows, err := h.Queries.ListSessionOwnedIssues(r.Context(), db.ListSessionOwnedIssuesParams{
-		WorkspaceID: agent.WorkspaceID,
-		AgentID:     agent.ID,
-		RowLimit:    sessionTaskLimit,
+		WorkspaceID:       agent.WorkspaceID,
+		AgentID:           agent.ID,
+		ExternalSessionID: sessionID,
+		RowLimit:          sessionTaskLimit,
 	})
 	if err != nil {
 		return nil, false, err
@@ -263,11 +263,12 @@ func (h *Handler) sessionOwnedItems(r *http.Request, p *sessionTaskProjection, a
 	return items, len(rows) == sessionTaskLimit, nil
 }
 
-func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjection, agent db.Agent) ([]SessionTaskItem, bool, error) {
+func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {
 	rows, err := h.Queries.ListSessionAcceptingContractIssues(r.Context(), db.ListSessionAcceptingContractIssuesParams{
-		WorkspaceID: agent.WorkspaceID,
-		AgentID:     uuidToString(agent.ID),
-		RowLimit:    sessionTaskLimit,
+		WorkspaceID:       agent.WorkspaceID,
+		AgentID:           uuidToString(agent.ID),
+		ExternalSessionID: uuidToString(sessionID),
+		RowLimit:          sessionTaskLimit,
 	})
 	if err != nil {
 		return nil, false, err
@@ -279,7 +280,7 @@ func (h *Handler) sessionAcceptingItems(r *http.Request, p *sessionTaskProjectio
 			continue
 		}
 		current := state.Current()
-		if current == nil || current.Acceptor.ID != uuidToString(agent.ID) || state.Pending() == nil {
+		if current == nil || current.Acceptor.ID != uuidToString(agent.ID) || current.Acceptor.SessionID != uuidToString(sessionID) || state.Pending() == nil {
 			continue
 		}
 		item := p.item(uuidToString(row.ID), row.Number, row.Title, row.Status)
