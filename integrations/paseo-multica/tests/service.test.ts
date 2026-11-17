@@ -434,7 +434,10 @@ describe("session board service", () => {
       status: "in_progress", status_category: "started", project_id: "project-1",
       contract: { pending_actor: session, acceptor: session, executor: { type: "agent", id: AGENT_B }, accepted: [0], stale: false, contract: { versions: [{ criteria: ["works"] }] } },
     }));
-    api.routes.set(`/api/issues/${ACCEPTING}`, wireIssue(ACCEPTING, "WORK-2", { status: "in_review", status_category: "started" }));
+    api.routes.set(`/api/issues/${ACCEPTING}`, wireIssue(ACCEPTING, "WORK-2", {
+      status: "in_review", status_category: "started", coordinator: { type: "agent", id: AGENT_A },
+      external_session_bindings: [{ agent_id: AGENT_B, session: { id: "other" } }, { agent_id: AGENT_A, session: { id: sessionId } }],
+    }));
     api.routes.set(`/api/issues/${RETURNING}`, wireIssue(RETURNING, "WORK-3"));
     api.routes.set(`/api/issues/children?parent_ids=${OWNED},${ACCEPTING},${RETURNING}`, { issues: [
       wireIssue(DONE_CHILD, "WORK-4", { parent_issue_id: OWNED, stage: 1, status: "done", status_category: "completed" }),
@@ -442,7 +445,7 @@ describe("session board service", () => {
     ] });
     api.routes.set(`/api/issues/children?parent_ids=${DONE_CHILD},${OPEN_CHILD}`, { issues: [] });
     api.routes.set(`/api/issues/${OPEN_CHILD}`, wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED, stage: 2 }));
-    api.routes.set("/api/issues/pull-requests", { pull_requests: [{ issue_id: OWNED }] });
+    api.routes.set("/api/issues/pull-requests", { pull_requests: [{ issue_id: OWNED, state: "open" }, { issue_id: DONE_CHILD, state: "merged" }] });
     api.routes.set(`/api/issues/${OWNED}/pull-requests`, { pull_requests: [{
       id: "pr-1", number: 813, title: "MR", state: "open", repo_name: "slime", html_url: "https://git.woa.com/o/slime/merge_requests/813",
       checks_conclusion: "failed", mergeable: "mergeable",
@@ -451,7 +454,8 @@ describe("session board service", () => {
     for (const id of [OWNED, ACCEPTING, RETURNING]) api.routes.set(`/api/issues/${id}/task-runs`, []);
     api.routes.set(`/api/issues/${OWNED}/task-runs`, [{ status: "running" }, { status: "failed" }]);
     api.routes.set(`/api/issues/${RETURNING}/task-runs`, [{ status: "failed" }, { status: "completed" }]);
-    api.routes.set(`/api/issues/${OPEN_CHILD}/task-runs`, []);
+    api.routes.set(`/api/issues/${OPEN_CHILD}/task-runs`, [{ status: "deferred" }]);
+    api.routes.set(`/api/issues/${DONE_CHILD}/pull-requests`, { pull_requests: [] });
   }
 
   it("loads the session's task trees from existing Multica reads", async () => {
@@ -471,8 +475,9 @@ describe("session board service", () => {
       pullRequests: [{ number: 813, repo: "slime", ci: "failed", review: "approving", myReview: "approving", mergeable: "mergeable" }],
     });
     expect(byId.get(ACCEPTING)?.contract).toBeUndefined();
+    expect(byId.get(ACCEPTING)?.coordinator).toEqual({ type: "agent", id: AGENT_A, session_id: api.tasksResult instanceof Error ? "" : api.tasksResult.session_id });
     expect(byId.get(RETURNING)).toMatchObject({ activeRun: false, lastRunFailed: true });
-    expect(byId.get(OPEN_CHILD)).toMatchObject({ parentId: OWNED, stage: 2 });
+    expect(byId.get(OPEN_CHILD)).toMatchObject({ parentId: OWNED, stage: 2, activeRun: true });
     expect(byId.get(DONE_CHILD)).toMatchObject({ stage: 1, statusCategory: "completed" });
     expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}`);
     expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}/task-runs`);
@@ -484,6 +489,36 @@ describe("session board service", () => {
     expect(api.gets).toHaveLength(reads);
     await service.board(SESSION_A, "session", true);
     expect(api.gets.length).toBeGreaterThan(reads);
+  });
+
+  it("adds this session's closed tasks that still have an open MR as roots", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    const sessionId = api.tasksResult instanceof Error ? "" : api.tasksResult.session_id!;
+    routes(api, sessionId);
+    const mine = "0199a0b1-9999-7999-8999-999999999991";
+    const theirs = "0199a0b1-9999-7999-8999-999999999992";
+    const accepted = (acceptor: Record<string, string>) => ({ pending_actor: null, acceptor, executor: { type: "agent", id: AGENT_B }, accepted: [0], stale: false, contract: { versions: [{ criteria: ["works"] }] } });
+    api.routes.set("/api/issues/pull-requests", { pull_requests: [{ issue_id: OWNED, state: "open" }, { issue_id: mine, state: "open" }, { issue_id: theirs, state: "open" }] });
+    api.routes.set(`/api/issues/${mine}`, wireIssue(mine, "WORK-8", { status: "done", status_category: "completed", contract: accepted({ type: "agent", id: AGENT_A, session_id: sessionId }) }));
+    api.routes.set(`/api/issues/${theirs}`, wireIssue(theirs, "WORK-9", { status: "done", status_category: "completed", contract: accepted({ type: "agent", id: AGENT_A, session_id: "another-session" }) }));
+    api.routes.set(`/api/issues/${mine}/pull-requests`, { pull_requests: [] });
+
+    const view = await service.board(SESSION_A, "session");
+    expect(view.state).toBe("ready");
+    if (view.state !== "ready") return;
+    expect(view.rootIds).toContain(mine);
+    expect(view.rootIds).not.toContain(theirs);
+    expect(view.issues.find((issue) => issue.id === mine)?.contract?.accepted).toBe(true);
+  });
+
+  it("drops the cached board when the session disconnects", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    routes(api, "session");
+    expect((await service.board(SESSION_A, "session")).state).toBe("ready");
+    await service.disconnect(SESSION_A);
+    expect((await service.board(SESSION_A, "session")).state).toBe("disconnected");
   });
 
   it("roots the all view at open tasks whose parent is not open and names projects", async () => {

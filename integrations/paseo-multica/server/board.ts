@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isTerminal, type BoardIssue, type BoardPullRequest, type BoardScope, type ReadyBoardData, type Viewer } from "../shared/board";
+import { isCoordinatingSession, isSession, isTerminal, type Actor, type BoardIssue, type BoardPullRequest, type BoardScope, type ReadyBoardData, type Viewer } from "../shared/board";
 import type { SessionTasksWire } from "../shared/tasks";
 import type { ApiCredential, MulticaApi } from "./api";
 
@@ -7,7 +7,9 @@ import type { ApiCredential, MulticaApi } from "./api";
 export const MAX_BOARD_ISSUES = 300;
 const CONCURRENCY = 8;
 const CHILDREN_BATCH = 200;
-const ACTIVE_RUN_STATES = new Set(["queued", "dispatched", "running", "waiting_local_directory"]);
+// The same unfinished states the server's session-task projection uses.
+const ACTIVE_RUN_STATES = new Set(["queued", "dispatched", "running", "waiting_local_directory", "deferred"]);
+const OPEN_PR_STATES = new Set(["open", "draft"]);
 
 const actor = z.object({ type: z.string(), id: z.string(), session_id: z.string().optional() });
 const issueWire = z.object({
@@ -21,6 +23,8 @@ const issueWire = z.object({
   project_id: z.string().nullish(),
   stage: z.number().nullish(),
   last_activity_at: z.string().nullish(),
+  coordinator: actor.nullish(),
+  external_session_bindings: z.array(z.object({ agent_id: z.string(), session: z.object({ id: z.string() }).nullish() })).nullish(),
   contract: z
     .object({
       pending_actor: actor.nullish(),
@@ -48,7 +52,7 @@ const pullRequestWire = z.object({
   review: z.object({ state: z.string().nullish(), reviewers: z.array(reviewer).nullish() }).nullish(),
 });
 const pullRequestList = z.object({ pull_requests: z.array(pullRequestWire) });
-const pullRequestSummaries = z.object({ pull_requests: z.array(z.object({ issue_id: z.string() })) });
+const pullRequestSummaries = z.object({ pull_requests: z.array(z.object({ issue_id: z.string(), state: z.string() })) });
 const projectList = z.object({ projects: z.array(z.object({ id: z.string(), title: z.string() })) });
 
 export interface BoardRequest {
@@ -112,18 +116,33 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
     level = [...next];
   }
 
-  const linked = new Set((await read("/api/issues/pull-requests", pullRequestSummaries)).pull_requests.map((pr) => pr.issue_id));
+  const summaries = (await read("/api/issues/pull-requests", pullRequestSummaries)).pull_requests;
+  const linked = new Set(summaries.map((pr) => pr.issue_id));
+  const linkedOpen = new Set(summaries.filter((pr) => OPEN_PR_STATES.has(pr.state)).map((pr) => pr.issue_id));
   const viewer: Viewer = {
     agentId: request.agentId,
     ...(request.sessionTasks.session_id ? { sessionId: request.sessionTasks.session_id } : {}),
     ...(owner.owner_id ? { userId: owner.owner_id } : {}),
     forgeUsernames: request.forgeUsernames,
   };
+
+  // Neither root source lists closed tasks, but a closed task can still have an MR waiting for
+  // approval. Add those as roots: all of them for 全部, this session's own for 本会话.
+  const closedWithOpenMr = [...linkedOpen].filter((id) => !issues.has(id));
+  for (const issue of await mapLimit(closedWithOpenMr, (id) => read(`/api/issues/${encodeURIComponent(id)}`, issueWire))) {
+    const mine = isSession(issue.contract?.acceptor ?? undefined, viewer) || isSession(issue.contract?.executor ?? undefined, viewer) || isCoordinatingSession(coordinatorOf(issue), viewer);
+    if (!isTerminal({ status: issue.status, statusCategory: issue.status_category ?? "" }) || (request.scope === "session" && !mine)) continue;
+    if (add(issue)) {
+      detailed.add(issue.id);
+      rootIds.push(issue.id);
+    }
+  }
+
   const board = await mapLimit([...issues.values()], async (base): Promise<BoardIssue> => {
     const open = !isTerminal({ status: base.status, statusCategory: base.status_category ?? "" });
     const path = `/api/issues/${encodeURIComponent(base.id)}`;
     const [full, runs, prs] = await Promise.all([
-      open && !detailed.has(base.id) ? read(path, issueWire) : base,
+      (open || linkedOpen.has(base.id)) && !detailed.has(base.id) ? read(path, issueWire) : base,
       open ? read(`${path}/task-runs`, runList) : [],
       linked.has(base.id) ? read(`${path}/pull-requests`, pullRequestList).then((list) => list.pull_requests) : [],
     ]);
@@ -149,6 +168,7 @@ function toBoardIssue(issue: IssueWire, runs: z.infer<typeof runList>, prs: z.in
     ...(typeof issue.stage === "number" ? { stage: issue.stage } : {}),
     ...(issue.project_id ? { projectId: issue.project_id } : {}),
     ...(issue.last_activity_at ? { lastActivityAt: issue.last_activity_at } : {}),
+    ...(coordinatorOf(issue) ? { coordinator: coordinatorOf(issue) } : {}),
     ...(contract?.contract?.versions.length
       ? {
           contract: {
@@ -163,6 +183,13 @@ function toBoardIssue(issue: IssueWire, runs: z.infer<typeof runList>, prs: z.in
     lastRunFailed: runs[0]?.status === "failed",
     pullRequests: prs.filter((pr) => httpURL(pr.html_url)).map((pr) => toPullRequest(pr, viewer)),
   };
+}
+
+function coordinatorOf(issue: IssueWire): Actor | undefined {
+  const coordinator = issue.coordinator;
+  if (!coordinator) return undefined;
+  const session = issue.external_session_bindings?.find((binding) => binding.agent_id === coordinator.id)?.session?.id;
+  return { type: coordinator.type, id: coordinator.id, ...(coordinator.type === "agent" && session ? { session_id: session } : {}) };
 }
 
 function toPullRequest(pr: z.infer<typeof pullRequestWire>, viewer: Viewer): BoardPullRequest {

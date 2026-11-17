@@ -88,7 +88,8 @@ or `不可用` when there is nothing to do, no task, no binding, or no answer.
 The panel has two parts:
 
 - **待办** (to-do queue): MRs waiting for your approval, tasks whose turn is
-  yours or this session's (usually an acceptance), and anomalies. Each row shows
+  yours or this session's (usually an acceptance), and anomalies. The scope
+  switch changes only the tree roots, never what counts as a to-do. Each row shows
   its MRs' CI, review and mergeability and opens the MR or the task.
 - **Task trees**, split into 需要处理 / 进行中 / 搁置, with 已完成 and 搁置 folded.
   A tree's rows show their own status, linked MRs and child progress; children
@@ -97,7 +98,9 @@ The panel has two parts:
 
 **本会话** roots the trees at tasks this session executes, leads, accepts or
 delegated. **全部** roots them at every open task whose parent is not open, and
-groups them by Multica Project.
+groups them by Multica Project. Both add closed tasks that still have an open MR
+(for 本会话, those the session executes, accepts or coordinates), because
+acceptance usually closes the task while its MR still waits for approval.
 
 Classification lives in `shared/board.ts` as a pure function of issue facts and
 the clock. It is display-only: it never writes a task or changes a status.
@@ -105,11 +108,13 @@ the clock. It is display-only: it never writes a task or changes a status.
 ```text
 需要处理: contract.pending_actor is this session or the user
           or an MR waits for the user: contract accepted, MR open, user is a reviewer and has not approved
+             (this also holds for a done task; a cancelled one is always 已完成)
           or an anomaly: blocked, failed CI on an open MR, or a failed latest run, with no active run
-进行中:   an active run (queued, dispatched, running, waiting_local_directory)
+进行中:   an active run (queued, dispatched, running, waiting_local_directory, deferred)
           or the executor's turn, not backlog, last_activity_at within STALE_AFTER_DAYS
-搁置:     every other open task
-no contract: in_review counts as the acceptor's turn, anything else as the executor's
+搁置:     every other open task, counted as Backlog, 7 天无动静, or 其他 when still fresh
+no contract: in_review is this session's acceptance only when its coordinator is bound
+             to this session; every other task counts as the executor's turn
 STALE_AFTER_DAYS = 7
 ```
 
@@ -123,8 +128,9 @@ approved as `review_state: "approving"` and one who has as `"approved"`.
 The server builds the board from existing reads with the session credential:
 `GET /api/agents/{id}/session-tasks` for this session's roots, `open_only`
 issues for 全部, batched `children` for the subtrees, and per open task its
-issue (contract and `last_activity_at`), `task-runs` and, when linked,
-`pull-requests`. A board stops at 300 tasks and says so. The pill and panel
+issue (contract, coordinator session binding and `last_activity_at`),
+`task-runs` and, when linked, `pull-requests`. The workspace MR summary finds
+closed tasks with open MRs. A reconnect or disconnect drops the cached board. A board stops at 300 tasks and says so. The pill and panel
 share a 15-second cache; the panel's ⟳ bypasses it.
 
 Everything outside the happy path degrades to an explanation instead of an

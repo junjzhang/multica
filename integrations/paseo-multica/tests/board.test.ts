@@ -101,15 +101,34 @@ describe("classification rules", () => {
     expect(classify(issue({ status: "backlog", statusCategory: "backlog", contract: contract(EXECUTOR) }), viewer, NOW)).toMatchObject({ section: "parked", parkedReason: "backlog" });
   });
 
-  it("parks a turn owned by anyone else", () => {
-    expect(classify(issue({ contract: contract({ type: "agent", id: "someone" }) }), viewer, NOW).section).toBe("parked");
-    expect(classify(issue({ contract: contract(undefined, true) }), viewer, NOW).section).toBe("parked");
+  it("parks a turn owned by anyone else without calling it stale while it is fresh", () => {
+    expect(classify(issue({ contract: contract({ type: "agent", id: "someone" }) }), viewer, NOW)).toMatchObject({ section: "parked", parkedReason: "other" });
+    expect(classify(issue({ contract: contract(undefined, true) }), viewer, NOW)).toMatchObject({ section: "parked", parkedReason: "other" });
+    expect(classify(issue({ contract: contract({ type: "agent", id: "someone" }), lastActivityAt: ago(8) }), viewer, NOW).parkedReason).toBe("stale");
   });
 
   it("falls back for legacy tasks without a contract", () => {
-    expect(classify(issue({ status: "in_review" }), viewer, NOW)).toMatchObject({ section: "attention", todos: ["acceptance"] });
+    const coordinated = { status: "in_review", coordinator: SESSION };
+    expect(classify(issue(coordinated), viewer, NOW)).toMatchObject({ section: "attention", todos: ["acceptance"], marker: "leader" });
+    expect(classify(issue({ ...coordinated, coordinator: OTHER_SESSION }), viewer, NOW)).toMatchObject({ section: "active", todos: [] });
+    expect(classify(issue({ ...coordinated, coordinator: { type: "agent", id: "leader" } }), viewer, NOW).todos).toEqual([]);
+    expect(classify(issue({ status: "in_review" }), viewer, NOW).section).toBe("active");
+    expect(classify(issue({ status: "in_review", lastActivityAt: ago(8) }), viewer, NOW)).toMatchObject({ section: "parked", parkedReason: "stale" });
     expect(classify(issue({ status: "todo" }), viewer, NOW).section).toBe("active");
     expect(classify(issue({ status: "todo", lastActivityAt: ago(8) }), viewer, NOW).section).toBe("parked");
+  });
+
+  it("keeps a done task with an MR waiting for the user's approval in needs-attention", () => {
+    const waiting = pr({ myReview: "approving" });
+    const done = { status: "done", statusCategory: "completed", contract: contract(undefined, true), pullRequests: [waiting] };
+    expect(classify(issue(done), viewer, NOW)).toMatchObject({ section: "attention", todos: ["approval"], marker: "you" });
+    expect(classify(issue({ ...done, pullRequests: [{ ...waiting, myReview: "approved" }] }), viewer, NOW).section).toBe("done");
+    expect(classify(issue({ ...done, status: "cancelled", statusCategory: "cancelled" }), viewer, NOW).section).toBe("done");
+    const root = issue({ status: "done", statusCategory: "completed" });
+    const child = issue({ ...done, parentId: root.id });
+    const board = buildBoard(data([root, child], [root.id]), NOW);
+    expect(board.sections.attention.map((tree) => tree.issue.id)).toEqual([root.id]);
+    expect(board.todos.map((todo) => [todo.kind, todo.issue.id])).toEqual([["approval", child.id]]);
   });
 
   it("files done and cancelled tasks under completed", () => {
@@ -192,8 +211,13 @@ describe("task trees", () => {
   });
 
   it("counts parked trees by backlog and staleness", () => {
-    const roots = [issue({ status: "backlog" }), issue({ status: "todo", lastActivityAt: ago(10) }), issue({ status: "todo", lastActivityAt: ago(12) })];
-    expect(buildBoard(data(roots, roots.map((root) => root.id)), NOW).parkedReasons).toEqual({ backlog: 1, stale: 2 });
+    const roots = [
+      issue({ status: "backlog" }),
+      issue({ status: "todo", lastActivityAt: ago(10) }),
+      issue({ status: "todo", lastActivityAt: ago(12) }),
+      issue({ contract: contract({ type: "agent", id: "someone" }) }),
+    ];
+    expect(buildBoard(data(roots, roots.map((root) => root.id)), NOW).parkedReasons).toEqual({ backlog: 1, stale: 2, other: 1 });
   });
 
   it("survives a parent cycle", () => {

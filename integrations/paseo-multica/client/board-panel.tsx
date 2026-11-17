@@ -94,7 +94,7 @@ function BoardContent({ agentId, theme, openTask }: Props) {
         {(["attention", "active"] as const).map((section) => <TreeSection key={section} title={`${SECTION_LABEL[section]} ${board.sections[section].length}`} nodes={board.sections[section]} data={ready} row={row} />)}
         <TreeSection
           title={`${SECTION_LABEL.parked} ${board.sections.parked.length}`}
-          note={board.sections.parked.length ? `（Backlog ${board.parkedReasons.backlog} · ${STALE_AFTER_DAYS} 天无动静 ${board.parkedReasons.stale}）` : ""}
+          note={board.sections.parked.length ? `（Backlog ${board.parkedReasons.backlog} · ${STALE_AFTER_DAYS} 天无动静 ${board.parkedReasons.stale}${board.parkedReasons.other ? ` · 其他 ${board.parkedReasons.other}` : ""}）` : ""}
           nodes={board.sections.parked} data={ready} row={row}
           open={open.parked} onToggle={() => setOpen((value) => ({ ...value, parked: !value.parked }))}
         />

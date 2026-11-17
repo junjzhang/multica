@@ -401,6 +401,14 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     }
   }
 
+  /** A binding change must not leave the pill or panel on the previous credential's board. */
+  function forgetBoards(agentId: string): void {
+    for (const key of boards.keys()) {
+      const [home, cached] = JSON.parse(key) as [string, string];
+      if (home === deps.home && cached === agentId) boards.delete(key);
+    }
+  }
+
   return {
     async connect(agentId) {
       try {
@@ -408,10 +416,18 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       } catch (error) {
         // The CLI may expose only marked, redacted plugin-authored diagnostics.
         throw new ConfigurationError(`${SESSION_CONNECT_ERROR_PREFIX}${describeError(error)}`);
+      } finally {
+        forgetBoards(agentId);
       }
     },
     status,
-    disconnect,
+    async disconnect(agentId) {
+      try {
+        return await disconnect(agentId);
+      } finally {
+        forgetBoards(agentId);
+      }
+    },
     async board(agentId, scope, refresh = false) {
       if (!isLocator(agentId)) throw new ConfigurationError("The current Paseo session id is invalid.");
       const key = JSON.stringify([deps.home, agentId, scope]);

@@ -50,6 +50,8 @@ const issueSchema = z.object({
       accepted: z.boolean(),
     })
     .optional(),
+  /** The issue coordinator; `session_id` is set only from its active session binding on this issue. */
+  coordinator: actorSchema.optional(),
   activeRun: z.boolean(),
   lastRunFailed: z.boolean(),
   pullRequests: z.array(pullRequestSchema),
@@ -94,8 +96,10 @@ export interface Classification {
   section: Section;
   todos: TodoKind[];
   marker: Marker;
-  parkedReason?: "backlog" | "stale";
+  parkedReason?: ParkedReason;
 }
+
+export type ParkedReason = "backlog" | "stale" | "other";
 
 const OPEN_PR_STATES = new Set(["open", "draft"]);
 const TERMINAL_CATEGORIES = new Set(["completed", "cancelled", "canceled"]);
@@ -104,13 +108,22 @@ export function isTerminal(issue: Pick<BoardIssue, "status" | "statusCategory">)
   return TERMINAL_CATEGORIES.has(issue.statusCategory) || issue.status === "done" || issue.status === "cancelled";
 }
 
+function isCancelled(issue: Pick<BoardIssue, "status" | "statusCategory">): boolean {
+  return issue.statusCategory === "cancelled" || issue.statusCategory === "canceled" || issue.status === "cancelled";
+}
+
 function sameActor(a: Actor | undefined, b: Actor | undefined): boolean {
   return !!a && !!b && a.type === b.type && a.id === b.id && (!a.session_id || !b.session_id || a.session_id === b.session_id);
 }
 
-function isSession(actor: Actor | undefined, viewer: Viewer): boolean {
+export function isSession(actor: Actor | undefined, viewer: Viewer): boolean {
   if (!actor || actor.type !== "agent" || actor.id !== viewer.agentId) return false;
   return !actor.session_id || !viewer.sessionId || actor.session_id === viewer.sessionId;
+}
+
+/** Unlike a contract actor, a coordinator counts as this session only through an explicit session binding. */
+export function isCoordinatingSession(coordinator: Actor | undefined, viewer: Viewer): boolean {
+  return !!coordinator && !!viewer.sessionId && coordinator.type === "agent" && coordinator.id === viewer.agentId && coordinator.session_id === viewer.sessionId;
 }
 
 function isUser(actor: Actor | undefined, viewer: Viewer): boolean {
@@ -134,14 +147,17 @@ export function isFresh(lastActivityAt: string | undefined, now: number): boolea
 }
 
 export function classify(issue: BoardIssue, viewer: Viewer, now: number): Classification {
-  if (isTerminal(issue)) return { section: "done", todos: [], marker: "done" };
+  const approval = awaitingApproval(issue).length > 0;
+  // Acceptance and closing are usually one step, so a done task can still wait for MR approval.
+  if (isTerminal(issue)) {
+    return approval && !isCancelled(issue) ? { section: "attention", todos: ["approval"], marker: "you" } : { section: "done", todos: [], marker: "done" };
+  }
   const contract = issue.contract;
-  const todos: TodoKind[] = [];
-  if (awaitingApproval(issue).length > 0) todos.push("approval");
+  const todos: TodoKind[] = approval ? ["approval"] : [];
   if (contract) {
     if (isUser(contract.pendingActor, viewer)) todos.push("user");
     if (isSession(contract.pendingActor, viewer)) todos.push(sameActor(contract.pendingActor, contract.acceptor) ? "acceptance" : "session");
-  } else if (issue.status === "in_review") {
+  } else if (issue.status === "in_review" && isCoordinatingSession(issue.coordinator, viewer)) {
     todos.push("acceptance");
   }
   const failedCi = issue.pullRequests.some((pr) => isOpenPullRequest(pr) && pr.ci === "failed");
@@ -150,11 +166,12 @@ export function classify(issue: BoardIssue, viewer: Viewer, now: number): Classi
     const marker: Marker = todos.includes("anomaly") ? "anomaly" : todos.some((kind) => kind === "approval" || kind === "user") ? "you" : "leader";
     return { section: "attention", todos, marker };
   }
-  const executorTurn = contract ? sameActor(contract.pendingActor, contract.executor) : issue.status !== "in_review";
-  if (issue.activeRun || (executorTurn && issue.status !== "backlog" && isFresh(issue.lastActivityAt, now))) {
+  const fresh = isFresh(issue.lastActivityAt, now);
+  const executorTurn = contract ? sameActor(contract.pendingActor, contract.executor) : true;
+  if (issue.activeRun || (executorTurn && issue.status !== "backlog" && fresh)) {
     return { section: "active", todos, marker: "running" };
   }
-  return { section: "parked", todos, marker: "idle", parkedReason: issue.status === "backlog" ? "backlog" : "stale" };
+  return { section: "parked", todos, marker: "idle", parkedReason: issue.status === "backlog" ? "backlog" : fresh ? "other" : "stale" };
 }
 
 export interface StageGroup {
@@ -184,7 +201,7 @@ export interface Todo {
 export interface Board {
   todos: Todo[];
   sections: Record<Section, TreeNode[]>;
-  parkedReasons: { backlog: number; stale: number };
+  parkedReasons: Record<ParkedReason, number>;
 }
 
 const SECTION_ORDER: Section[] = ["attention", "active", "parked", "done"];
@@ -240,7 +257,7 @@ export function buildBoard(data: Pick<ReadyBoardData, "issues" | "rootIds" | "vi
   for (const list of Object.values(sections)) list.sort(compareNodes);
 
   const todos: Todo[] = [];
-  const parkedReasons = { backlog: 0, stale: 0 };
+  const parkedReasons: Record<ParkedReason, number> = { backlog: 0, stale: 0, other: 0 };
   const visit = (tree: TreeNode) => {
     const { issue, classification } = tree;
     for (const kind of classification.todos) {
@@ -249,9 +266,20 @@ export function buildBoard(data: Pick<ReadyBoardData, "issues" | "rootIds" | "vi
     for (const stage of tree.stages) stage.nodes.forEach(visit);
   };
   roots.forEach(visit);
-  for (const root of sections.parked) parkedReasons[root.classification.parkedReason ?? "stale"] += 1;
+  for (const root of sections.parked) parkedReasons[parkedReasonOf(root) ?? "other"] += 1;
   todos.sort((a, b) => TODO_ORDER.indexOf(a.kind) - TODO_ORDER.indexOf(b.kind) || (Date.parse(b.issue.lastActivityAt ?? "") || 0) - (Date.parse(a.issue.lastActivityAt ?? "") || 0));
   return { todos, sections, parkedReasons };
+}
+
+function parkedReasonOf(tree: TreeNode): ParkedReason | undefined {
+  if (tree.classification.parkedReason) return tree.classification.parkedReason;
+  for (const group of tree.stages) {
+    for (const child of group.nodes) {
+      const reason = parkedReasonOf(child);
+      if (reason) return reason;
+    }
+  }
+  return undefined;
 }
 
 function groupStages(nodes: TreeNode[]): StageGroup[] {
