@@ -311,7 +311,14 @@ export function groupByProject(nodes: TreeNode[], projects: ReadyBoardData["proj
 }
 
 /** The composer pill: one line, e.g. "WORK-494 · 待办 3". */
-export function pillLabel(data: BoardData, now: number): { label: string; title: string } {
+export interface PillSummary {
+  label: string;
+  title: string;
+  /** Child completion of the named tree; absent when it has no children. */
+  progress?: { done: number; total: number };
+}
+
+export function pillLabel(data: BoardData, now: number): PillSummary {
   if (data.state === "disconnected") return { label: "Multica · 未连接", title: data.reason };
   if (data.state === "unavailable") return { label: "Multica · 不可用", title: data.reason };
   const board = buildBoard(data, now);
@@ -319,5 +326,6 @@ export function pillLabel(data: BoardData, now: number): { label: string; title:
   if (!focus) return { label: "Multica · 无任务", title: "本会话没有 Multica 任务" };
   const count = new Set(board.todos.map((todo) => `${todo.kind}:${todo.issue.id}`)).size;
   const label = `${focus.issue.identifier} · ${count > 0 ? `待办 ${count}` : "无待办"}`;
-  return { label, title: `${focus.issue.identifier} ${focus.issue.title}` };
+  const title = `${focus.issue.identifier} ${focus.issue.title}`;
+  return focus.total > 0 ? { label, title, progress: { done: focus.done, total: focus.total } } : { label, title };
 }

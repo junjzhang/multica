@@ -84,6 +84,9 @@ Every Paseo agent on the host gets one Multica composer pill. It names the
 session's most urgent task tree and counts its to-dos on one line, for example
 `WORK-494 · 待办 3`, and opens the panel. It reads `无待办`, `无任务`, `未连接`
 or `不可用` when there is nothing to do, no task, no binding, or no answer.
+When that tree has subtasks, the pill's icon becomes a static ring of its
+closed/total children and the tooltip adds `已完成 2/5 个子任务` under the task
+name, which is clipped to one line.
 
 The panel has two parts:
 
