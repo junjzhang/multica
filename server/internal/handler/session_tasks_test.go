@@ -134,9 +134,10 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 		"assignee_id":   agentID,
 		"status":        "in_progress",
 	})
+	dbfx.Insert(t, "external_agent_session_binding", testutil.Cols{"workspace_id": testWorkspaceID, "issue_id": executorIssue, "agent_id": agentID, "session_id": sessionID})
 	// Owned as task leader of a root and its child.
 	rootIssue := dbfx.Issue(t, "session tasks root "+suffix)
-	dbfx.Exec(t, "UPDATE issue SET leadership_root_issue_id = id, leader_agent_id = $1 WHERE id = $2", agentID, rootIssue)
+	dbfx.Exec(t, "UPDATE issue SET leadership_root_issue_id = id, leader_agent_id = $1, leader_external_session_id = $3 WHERE id = $2", agentID, rootIssue, sessionID)
 	childIssue := dbfx.Issue(t, "session tasks child "+suffix, testutil.Cols{"parent_issue_id": rootIssue})
 	dbfx.Exec(t, "UPDATE issue SET leadership_root_issue_id = $1 WHERE id = $2", rootIssue, childIssue)
 	// Excluded: finished work and another agent's issue.
@@ -153,6 +154,7 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	// Waiting for this agent's acceptance.
 	acceptingIssue := dbfx.Issue(t, "session tasks accepting "+suffix)
 	versions := []map[string]any{contractVersion(1, agentID, dispatcherID)}
+	versions[0]["acceptor"].(map[string]any)["session_id"] = sessionID
 	insertIssueContract(t, acceptingIssue, versions, []map[string]any{pendingDelivery(1, dispatcherID)}, nil)
 	// Decided: no pending delivery left.
 	decidedIssue := dbfx.Issue(t, "session tasks decided "+suffix)
@@ -192,7 +194,9 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	returnedReturn := dispatchReturn(returnedIssue, agentID, sessionID)
 	returnedTask := dbfx.Task(t, workerAgent, testutil.Cols{"issue_id": returnedIssue, "status": "completed", "runtime_id": testRuntimeID})
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id, materialized_at) VALUES ($1, $2, now())", returnedTask, returnedReturn)
-	insertIssueContract(t, returnedIssue, []map[string]any{contractVersion(1, agentID, workerAgent)}, []map[string]any{pendingDelivery(1, workerAgent)}, nil)
+	returnedVersion := contractVersion(1, agentID, workerAgent)
+	returnedVersion["acceptor"].(map[string]any)["session_id"] = sessionID
+	insertIssueContract(t, returnedIssue, []map[string]any{returnedVersion}, []map[string]any{pendingDelivery(1, workerAgent)}, nil)
 	// A follow-up dispatch on the same accepted address makes it pending
 	// again: the latest run has not returned its result.
 	reopenedIssue := dbfx.Issue(t, "session tasks reopened "+suffix)
@@ -453,11 +457,13 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	dbfx.Exec(t, "INSERT INTO agent_task_delegation_return (task_id, delegation_return_id) VALUES ($1, $2)", task, address)
 	at := time.Now().UTC().Add(-time.Hour)
 	comment := func(issueID, author, content string, when time.Time, parent string) string {
-		cols := testutil.Cols{"author_type": "agent", "author_id": author, "created_at": when}
+		cols := testutil.Cols{"author_type": "agent", "author_id": author, "actor_session_id": session, "created_at": when}
 		if parent != "" {
 			cols["parent_id"] = parent
 		}
-		return dbfx.Comment(t, issueID, content, cols)
+		id := dbfx.Comment(t, issueID, content, cols)
+		dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{"workspace_id": testWorkspaceID, "issue_id": issueID, "comment_id": id, "recipient_agent_id": agent, "target_session_id": session, "sender_type": "agent", "sender_id": author})
+		return id
 	}
 	mention := fmt.Sprintf("[@Recipient](mention://agent/%s)", agent)
 	pending := comment(issue, worker, fmt.Sprintf("[@Recipient](mention://agent/%s) please decide", strings.ToUpper(agent)), at, "")
@@ -480,6 +486,7 @@ func TestSessionTasksAttentionEvidence(t *testing.T) {
 	foreignIssue := dbfx.Issue(t, "Foreign request", testutil.Cols{"workspace_id": foreignWorkspace, "assignee_type": "agent", "assignee_id": worker})
 	dbfx.Comment(t, foreignIssue, mention+" foreign", testutil.Cols{"workspace_id": foreignWorkspace, "author_type": "agent", "author_id": worker})
 	owned := dbfx.Issue(t, "Production-shaped parent", testutil.Cols{"assignee_type": "agent", "assignee_id": agent, "status": "in_progress"})
+	dbfx.Insert(t, "external_agent_session_binding", testutil.Cols{"workspace_id": testWorkspaceID, "issue_id": owned, "agent_id": agent, "session_id": session})
 	for i := 0; i < 8; i++ {
 		status := "done"
 		if i < 2 {

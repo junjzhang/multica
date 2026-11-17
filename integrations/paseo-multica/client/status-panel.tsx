@@ -10,7 +10,11 @@ const STATE_LABEL: Record<StatusView["state"], string> = {
   connected: "Connected", invalid: "Needs attention", unverified: "Not verified", disconnected: "Not connected",
 };
 
-export function StatusPanel({ agentId, theme, openTask }: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
+export function StatusPanel(props: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
+  return <StatusPanelContent key={JSON.stringify([props.host.id, props.workspaceId, props.agentId])} {...props} />;
+}
+
+function StatusPanelContent({ agentId, theme, openTask }: PluginAgentPanelProps & { openTask(url: string, identifier?: string): void }) {
   const getStatus = useRpc(statusSession);
   const [view, setView] = useState<StatusView | null>(null);
   const [error, setError] = useState<string | null>(null);

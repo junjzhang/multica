@@ -17,16 +17,18 @@ FROM issue i
 JOIN issue_contract c ON c.issue_id = i.id AND c.workspace_id = i.workspace_id
 WHERE i.workspace_id = $1
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
-  AND c.data->'versions' @> jsonb_build_array(
-        jsonb_build_object('acceptor', jsonb_build_object('id', $2::text)))
+  AND c.data->'versions'->-1->'acceptor' @> jsonb_build_object(
+        'type', 'agent', 'id', $2::text,
+        'session_id', $3::text)
 ORDER BY i.updated_at DESC, i.id
-LIMIT $3::int
+LIMIT $4::int
 `
 
 type ListSessionAcceptingContractIssuesParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	AgentID     string      `json:"agent_id"`
-	RowLimit    int32       `json:"row_limit"`
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	AgentID           string      `json:"agent_id"`
+	ExternalSessionID string      `json:"external_session_id"`
+	RowLimit          int32       `json:"row_limit"`
 }
 
 type ListSessionAcceptingContractIssuesRow struct {
@@ -38,12 +40,15 @@ type ListSessionAcceptingContractIssuesRow struct {
 	Data      []byte             `json:"data"`
 }
 
-// Contracts whose current acceptor may be this agent. The JSON filter is a
-// superset check (any version names the agent); the handler keeps only the
-// current version and only while a delivery is pending, so a finished
-// acceptance drops out without a second query shape.
+// Only the current version's exact acceptor session can see acceptance work.
+// The handler additionally verifies the pending delivery.
 func (q *Queries) ListSessionAcceptingContractIssues(ctx context.Context, arg ListSessionAcceptingContractIssuesParams) ([]ListSessionAcceptingContractIssuesRow, error) {
-	rows, err := q.db.Query(ctx, listSessionAcceptingContractIssues, arg.WorkspaceID, arg.AgentID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listSessionAcceptingContractIssues,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.ExternalSessionID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -163,23 +168,26 @@ const listSessionOwnedIssues = `-- name: ListSessionOwnedIssues :many
 SELECT i.id, i.number, i.title, i.status, i.updated_at,
        (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id) AS child_count,
        (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id AND issue_effective_status(child.workspace_id, child.status) IN ('done', 'cancelled')) AS closed_child_count,
-       COALESCE(i.assignee_type = 'agent' AND i.assignee_id = $1, false)::boolean AS is_executor
+       COALESCE(i.assignee_type = 'agent' AND i.assignee_id = $1 AND b.id IS NOT NULL, false)::boolean AS is_executor
 FROM issue i
+LEFT JOIN external_agent_session_binding b ON b.workspace_id = i.workspace_id AND b.issue_id = i.id
+  AND b.agent_id = $1 AND b.session_id = $2 AND b.revoked_at IS NULL
 LEFT JOIN issue r ON r.id = COALESCE(i.leadership_root_issue_id, i.id) AND r.workspace_id = i.workspace_id
-WHERE i.workspace_id = $2
+WHERE i.workspace_id = $3
   AND (
-    (i.assignee_type = 'agent' AND i.assignee_id = $1)
-    OR r.leader_agent_id = $1
+    (i.assignee_type = 'agent' AND i.assignee_id = $1 AND b.id IS NOT NULL)
+    OR (r.leader_agent_id = $1 AND r.leader_external_session_id = $2)
   )
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 ORDER BY i.updated_at DESC, i.id
-LIMIT $3::int
+LIMIT $4::int
 `
 
 type ListSessionOwnedIssuesParams struct {
-	AgentID     pgtype.UUID `json:"agent_id"`
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	RowLimit    int32       `json:"row_limit"`
+	AgentID           pgtype.UUID `json:"agent_id"`
+	ExternalSessionID pgtype.UUID `json:"external_session_id"`
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	RowLimit          int32       `json:"row_limit"`
 }
 
 type ListSessionOwnedIssuesRow struct {
@@ -200,7 +208,12 @@ type ListSessionOwnedIssuesRow struct {
 // leadership root. Custom statuses are filtered by their effective behavior so
 // a workspace-defined done status does not leave finished work on the panel.
 func (q *Queries) ListSessionOwnedIssues(ctx context.Context, arg ListSessionOwnedIssuesParams) ([]ListSessionOwnedIssuesRow, error) {
-	rows, err := q.db.Query(ctx, listSessionOwnedIssues, arg.AgentID, arg.WorkspaceID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listSessionOwnedIssues,
+		arg.AgentID,
+		arg.ExternalSessionID,
+		arg.WorkspaceID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -328,6 +341,11 @@ FROM comment c
 JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
 WHERE i.workspace_id = $1
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+  AND EXISTS (SELECT 1 FROM agent_mailbox_message m
+    WHERE m.workspace_id = c.workspace_id AND m.issue_id = c.issue_id
+      AND m.comment_id = c.id AND m.recipient_agent_id = $2::uuid
+      AND m.target_session_id = $3::uuid
+      AND m.source_type = 'comment')
   AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
   AND c.type IN ('comment', 'progress_update') AND c.deleted_at IS NULL
   AND lower(c.content) LIKE ('%mention://agent/' || lower($2::text) || ')%')
@@ -337,18 +355,20 @@ WHERE i.workspace_id = $1
     SELECT 1 FROM comment reply
     WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
       AND reply.author_type = 'agent' AND reply.author_id = $2::uuid
+      AND reply.actor_session_id = $3::uuid
       AND reply.type IN ('comment', 'progress_update') AND reply.deleted_at IS NULL
       AND (reply.created_at, reply.id) > (c.created_at, c.id)
       AND comment_thread_root_id(reply.id) = comment_thread_root_id(c.id)
   )
 ORDER BY c.created_at DESC, c.id DESC
-LIMIT $3::int
+LIMIT $4::int
 `
 
 type ListSessionUnansweredRequestsParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	AgentID     string      `json:"agent_id"`
-	RowLimit    int32       `json:"row_limit"`
+	WorkspaceID       pgtype.UUID `json:"workspace_id"`
+	AgentID           pgtype.UUID `json:"agent_id"`
+	ExternalSessionID pgtype.UUID `json:"external_session_id"`
+	RowLimit          int32       `json:"row_limit"`
 }
 
 type ListSessionUnansweredRequestsRow struct {
@@ -365,7 +385,12 @@ type ListSessionUnansweredRequestsRow struct {
 // A request is a current executor's explicit mention, with no later comment
 // from the recipient in the same thread. Mailbox receipts do not imply reply.
 func (q *Queries) ListSessionUnansweredRequests(ctx context.Context, arg ListSessionUnansweredRequestsParams) ([]ListSessionUnansweredRequestsRow, error) {
-	rows, err := q.db.Query(ctx, listSessionUnansweredRequests, arg.WorkspaceID, arg.AgentID, arg.RowLimit)
+	rows, err := q.db.Query(ctx, listSessionUnansweredRequests,
+		arg.WorkspaceID,
+		arg.AgentID,
+		arg.ExternalSessionID,
+		arg.RowLimit,
+	)
 	if err != nil {
 		return nil, err
 	}

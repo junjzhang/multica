@@ -5,7 +5,11 @@ import { Linking, Pressable, Text, View } from "react-native";
 import { sessionPullRequests } from "../shared/contracts";
 import { needsAttention, type PullRequest } from "../shared/pull-requests";
 
-export function SessionPullRequests({ agentId, theme, openTask }: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
+export function SessionPullRequests(props: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
+  return <SessionPullRequestsContent key={props.agentId} {...props} />;
+}
+
+function SessionPullRequestsContent({ agentId, theme, openTask }: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
   const fetch = useRpc(sessionPullRequests);
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<PullRequest[] | null>(null);

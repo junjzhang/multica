@@ -8,7 +8,11 @@ import { taskStatusLabel, type SessionTaskItem, type SessionTasksView } from "..
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
 
-export function SessionTasksSection({ agentId, theme, openTask }: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
+export function SessionTasksSection(props: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
+  return <SessionTasksContent key={props.agentId} {...props} />;
+}
+
+function SessionTasksContent({ agentId, theme, openTask }: Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask(url: string, identifier?: string): void }) {
   const getTasks = useRpc(tasksSummary);
   const expansion = useRpc(taskExpansion);
   const [expandedIds, setExpandedIds] = useState<string[]>([]);

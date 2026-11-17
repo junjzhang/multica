@@ -9,30 +9,31 @@
 SELECT i.id, i.number, i.title, i.status, i.updated_at,
        (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id) AS child_count,
        (SELECT count(*)::int FROM issue child WHERE child.workspace_id = i.workspace_id AND child.parent_issue_id = i.id AND issue_effective_status(child.workspace_id, child.status) IN ('done', 'cancelled')) AS closed_child_count,
-       COALESCE(i.assignee_type = 'agent' AND i.assignee_id = @agent_id, false)::boolean AS is_executor
+       COALESCE(i.assignee_type = 'agent' AND i.assignee_id = @agent_id AND b.id IS NOT NULL, false)::boolean AS is_executor
 FROM issue i
+LEFT JOIN external_agent_session_binding b ON b.workspace_id = i.workspace_id AND b.issue_id = i.id
+  AND b.agent_id = @agent_id AND b.session_id = @external_session_id AND b.revoked_at IS NULL
 LEFT JOIN issue r ON r.id = COALESCE(i.leadership_root_issue_id, i.id) AND r.workspace_id = i.workspace_id
 WHERE i.workspace_id = @workspace_id
   AND (
-    (i.assignee_type = 'agent' AND i.assignee_id = @agent_id)
-    OR r.leader_agent_id = @agent_id
+    (i.assignee_type = 'agent' AND i.assignee_id = @agent_id AND b.id IS NOT NULL)
+    OR (r.leader_agent_id = @agent_id AND r.leader_external_session_id = @external_session_id)
   )
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
 ORDER BY i.updated_at DESC, i.id
 LIMIT sqlc.arg('row_limit')::int;
 
 -- name: ListSessionAcceptingContractIssues :many
--- Contracts whose current acceptor may be this agent. The JSON filter is a
--- superset check (any version names the agent); the handler keeps only the
--- current version and only while a delivery is pending, so a finished
--- acceptance drops out without a second query shape.
+-- Only the current version's exact acceptor session can see acceptance work.
+-- The handler additionally verifies the pending delivery.
 SELECT i.id, i.number, i.title, i.status, i.updated_at, c.data
 FROM issue i
 JOIN issue_contract c ON c.issue_id = i.id AND c.workspace_id = i.workspace_id
 WHERE i.workspace_id = @workspace_id
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
-  AND c.data->'versions' @> jsonb_build_array(
-        jsonb_build_object('acceptor', jsonb_build_object('id', sqlc.arg('agent_id')::text)))
+  AND c.data->'versions'->-1->'acceptor' @> jsonb_build_object(
+        'type', 'agent', 'id', sqlc.arg('agent_id')::text,
+        'session_id', sqlc.arg('external_session_id')::text)
 ORDER BY i.updated_at DESC, i.id
 LIMIT sqlc.arg('row_limit')::int;
 
@@ -113,6 +114,11 @@ FROM comment c
 JOIN issue i ON i.id = c.issue_id AND i.workspace_id = c.workspace_id
 WHERE i.workspace_id = @workspace_id
   AND issue_effective_status(i.workspace_id, i.status) NOT IN ('done', 'cancelled')
+  AND EXISTS (SELECT 1 FROM agent_mailbox_message m
+    WHERE m.workspace_id = c.workspace_id AND m.issue_id = c.issue_id
+      AND m.comment_id = c.id AND m.recipient_agent_id = sqlc.arg('agent_id')::uuid
+      AND m.target_session_id = sqlc.arg('external_session_id')::uuid
+      AND m.source_type = 'comment')
   AND c.author_type = i.assignee_type AND c.author_id = i.assignee_id
   AND c.type IN ('comment', 'progress_update') AND c.deleted_at IS NULL
   AND lower(c.content) LIKE ('%mention://agent/' || lower(sqlc.arg('agent_id')::text) || ')%')
@@ -122,6 +128,7 @@ WHERE i.workspace_id = @workspace_id
     SELECT 1 FROM comment reply
     WHERE reply.workspace_id = c.workspace_id AND reply.issue_id = c.issue_id
       AND reply.author_type = 'agent' AND reply.author_id = sqlc.arg('agent_id')::uuid
+      AND reply.actor_session_id = sqlc.arg('external_session_id')::uuid
       AND reply.type IN ('comment', 'progress_update') AND reply.deleted_at IS NULL
       AND (reply.created_at, reply.id) > (c.created_at, c.id)
       AND comment_thread_root_id(reply.id) = comment_thread_root_id(c.id)

@@ -31,14 +31,14 @@ function MulticaSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProp
 export default function contribute(client: PluginClientContext) {
   const taskPanels = createTaskPanels(client);
   const agentWorkspaces = new Map<string, string>();
-  client.addScreen({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSurface });
-  client.addSidebarHeaderItem({ id: WEB_SCREEN_ID, title: "Multica", Component: MulticaSidebarItem });
+  client.addScreen({ id: WEB_SCREEN_ID, title: "Multica board", Component: MulticaSurface });
+  client.addSidebarHeaderItem({ id: WEB_SCREEN_ID, title: "Multica board", Component: MulticaSidebarItem });
   client.addWorkspacePanel({
-    id: WEB_PANEL_ID, title: "Multica", icon: "ListTodo", context: "workspace",
-    locations: ["workspace", "explorer"], Component: MulticaSurface,
+    id: WEB_PANEL_ID, title: "This session’s tasks", icon: "ListTodo", context: "agent",
+    locations: ["workspace", "explorer"], Component: (props) => <StatusPanel {...props} openTask={(url) => taskPanels.open(props, url)} />,
   });
   client.addCommandCenterItem({
-    id: "open-multica", title: "Open Multica", icon: "ListTodo",
+    id: "open-multica", title: "Open Multica board", icon: "ListTodo",
     keywords: ["multica", "issues", "board", "任务"], context: "global",
     onSelect: ({ openScreen }) => openScreen({ screenId: WEB_SCREEN_ID }),
   });
@@ -63,11 +63,11 @@ export default function contribute(client: PluginClientContext) {
 
   client.addWorkspacePanel({
     id: STATUS_PANEL_ID,
-    title: "Multica",
+    title: "This session’s tasks",
     icon: "Plug",
     context: "agent",
     locations: ["workspace", "explorer"],
-    Component: (props) => <StatusPanel {...props} openTask={(url, identifier) => taskPanels.open(props.workspaceId, url)} />,
+    Component: (props) => <StatusPanel {...props} openTask={(url) => taskPanels.open(props, url)} />,
   });
 
   client.addSettingsScreen({
@@ -83,16 +83,22 @@ export default function contribute(client: PluginClientContext) {
   // from the agent directory because a pill belongs to one agent's composer.
   const pills = new Map<string, PluginButtonRegistration>();
   const lifetime = new AbortController();
+  const refreshes = new Map<string, number>();
   let stopped = false;
 
   const refreshPill = async (agentId: string): Promise<void> => {
     const pill = pills.get(agentId);
     if (!pill || stopped) return;
+    const revision = (refreshes.get(agentId) ?? 0) + 1;
+    refreshes.set(agentId, revision);
+    const current = () => !stopped && pills.get(agentId) === pill && refreshes.get(agentId) === revision;
     try {
       const view = await client.rpc(tasksSummary, { agentId });
+      if (!current()) return;
       const summary = taskSummaryLabel(view);
       pill.update({ title: summary.title, label: summary.label });
     } catch {
+      if (!current()) return;
       // The panel owns the explanation; the pill only avoids a stale count.
       pill.update({ title: "Multica tasks unavailable", label: "Multica" });
     }
@@ -168,7 +174,7 @@ export default function contribute(client: PluginClientContext) {
       kind: DELIVERY_ITEM_KIND,
       version: DELIVERY_ITEM_VERSION,
       schema: deliveryDataSchema,
-      Component: (props) => <DeliveryCard {...props} openTask={(url, identifier) => { const workspaceId = agentWorkspaces.get(props.agentId); if (workspaceId) taskPanels.open(workspaceId, url); }} />,
+      Component: (props) => <DeliveryCard {...props} openTask={(url) => { const workspaceId = agentWorkspaces.get(props.agentId); if (workspaceId) taskPanels.open({ host: props.host, workspaceId, agentId: props.agentId }, url); }} />,
     }),
   ];
 

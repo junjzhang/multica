@@ -1,7 +1,8 @@
 # Paseo Multica
 
 A private Paseo directory plugin that binds the current Paseo conversation to
-Multica as its own external agent. It embeds the Multica web app and provides three composer commands, a task
+a Multica external Agent with a session credential. Conversations on one host can
+share that Agent. It embeds the Multica web app and provides three composer commands, a task
 summary pill, a connection panel, a delivery card, and an operator settings
 screen.
 
@@ -13,12 +14,14 @@ screen.
 
 ## Multica web page
 
-Open it from the **Multica** sidebar entry, the Command Center ("Open
-Multica"), or as a **Multica** panel in a workspace or the Explorer. Every
-entry shows the same page; the plugin does not reimplement Multica's UI.
-Task and delivery cards open task details in one Explorer panel. The panel follows
-the selected task and offers a back action for recently opened tasks. Its state
-is restored by Paseo. The browser action remains available on each card. Task
+The **Multica board** sidebar entry and **Open Multica board** command open the
+global web app. The right-side **This session’s tasks** panel shows the current
+conversation’s task summary and connection. Task and delivery cards open issue
+details in an Explorer panel with Back history scoped to the host, workspace
+and conversation. Paseo restores that scoped history. After upgrading from the
+workspace-context panels, close old Multica/detail tabs and reopen them from
+the conversation; their unscoped history is discarded.
+The browser action remains available on each card. Task
 links must point to an issue in the configured workspace.
 
 - **Desktop** uses Paseo's sandboxed browser profile (`persist:paseo-browser`)
@@ -28,8 +31,8 @@ links must point to an issue in the configured workspace.
   `url`) without the sign-in key; the browser signs in with the proxy
   password. Use it when the embedded origin is unreachable from a phone.
 
-After the first open, the main page stays resident for the renderer's lifetime.
-Closing the panel or leaving the screen only parks it off screen; reopening
+After the first open, the global board stays resident for the renderer's lifetime.
+Leaving its screen only parks it off screen; reopening
 reuses the same page, navigation, and form state. An explicit retry replaces
 only a failed page. Task pages are released when their panels unmount.
 
@@ -291,3 +294,29 @@ the last snapshot as stale and disables cancellation. **Cancel local wait** stop
 the local monitor only; remote CI/GPU jobs continue. Plugin unload removes the
 projection without stopping waits. Reload and daemon restart reconstruct it from
 Multica; a wait that Multica marks lost after restart is shown as lost.
+
+## Session task scope
+
+The right-side Multica panel shows **This session’s tasks**. **Multica board** in
+the sidebar and command center opens the global board. Task details and their
+Back history belong to one host, workspace and Paseo session (`agentId` in the
+Paseo SDK), even when sessions share a workspace and Multica external Agent.
+Saved history without that identity is discarded; production tasks are unchanged.
+
+The server uses active issue/session bindings for executors, the root's leader
+session for leadership, the current contract acceptor session for acceptance,
+and frozen Mailbox targets for requests. Delegation lists retain their accepted
+return sessions. Agent-only historical work is visible on the global board and
+is not guessed into a session. A reply resolves a request in this projection
+only when its actor session matches the request target; Mailbox ACK is unchanged.
+
+Run `pnpm test:browser` for the Chromium regression. It mounts production task,
+connection and detail components with a small DOM adapter and fixed RPC data;
+it checks same-host/workspace switching, independent detail history, empty and
+disconnected states. Screenshots go to `tests/browser/artifacts` (override with
+`BROWSER_EVIDENCE_DIR`); `PLAYWRIGHT_BROWSER_EXECUTABLE` selects an installed
+Chromium. Install Chromium with `pnpm exec playwright install chromium` if needed.
+This is a component integration fixture, not an installed Paseo/Electron,
+production login, native mobile, or end-to-end API test. Existing resident-page
+security/theme tests and DB-backed handler regressions cover those respective
+boundaries without changing delivery routes or credentials.

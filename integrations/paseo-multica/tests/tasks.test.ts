@@ -149,3 +149,9 @@ function taskSummaryZero() {
     CHECKED_AT,
   );
 }
+
+
+it("counts an issue only once when this session both owns and delegated it", () => {
+  const ready = toTasksView(makeTasksWire(), CHECKED_AT);
+  expect(taskSummaryLabel({ ...ready, accepting: [], requests: [], owned: [ready.owned[0]!], delegated: [ready.owned[0]!], returning: [ready.owned[0]!] }).label).toBe("1 in progress");
+});
