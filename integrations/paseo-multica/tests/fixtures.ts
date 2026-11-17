@@ -42,8 +42,17 @@ export async function makeHome(): Promise<string> {
 }
 
 export class FakeApi implements MulticaApi {
-  async listSessionPullRequests() { return []; }
-  async taskDetail(): Promise<unknown> { return {}; }
+  /** Read-only GET responses keyed by request path; a missing path is a 404. */
+  readonly routes = new Map<string, unknown>();
+  readonly gets: string[] = [];
+  async get(credential: ApiCredential, path: string): Promise<unknown> {
+    this.credentialCalls.push(credential);
+    this.gets.push(path);
+    if (!this.routes.has(path)) throw new MulticaApiError(404, `Multica API GET ${path} returned 404`);
+    const value = this.routes.get(path);
+    if (value instanceof Error) throw value;
+    return value;
+  }
   readonly registrations: RegisterExternalAgentInput[] = [];
   readonly credentialCalls: ApiCredential[] = [];
   readonly tokensRequested: { agentId: string; sessionId: string; expiresAt: string }[] = [];

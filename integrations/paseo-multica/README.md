@@ -80,37 +80,64 @@ streaming, a prompt missing one of its stable IDs, and ordinary conversation.
 
 ## Session tasks
 
-Every Paseo agent on the host gets one Multica composer pill. For a connected
-session the pill prioritizes deliveries awaiting acceptance and blocked owned
-work, then shows the number of tasks in progress. The panel lists:
+Every Paseo agent on the host gets one Multica composer pill. It names the
+session's most urgent task tree and counts its to-dos on one line, for example
+`WORK-494 · 待办 3`, and opens the panel. It reads `无待办`, `无任务`, `未连接`
+or `不可用` when there is nothing to do, no task, no binding, or no answer.
 
-- needs attention: undecided deliveries, unanswered executor mentions, and
-  blocked owned tasks;
-- delegated: open issues dispatched through this session's accepted return
-  address, including those whose result has already returned;
-- owned: issues the session's agent executes or leads as task leader.
+The panel has two parts:
 
-Connection details are collapsed below the task lists. Older servers that do
-not supply delegated items fall back to pending returns.
+- **待办** (to-do queue): MRs waiting for your approval, tasks whose turn is
+  yours or this session's (usually an acceptance), and anomalies. The scope
+  switch changes only the tree roots, never what counts as a to-do. Each row shows
+  its MRs' CI, review and mergeability and opens the MR or the task.
+- **Task trees**, split into 需要处理 / 进行中 / 搁置, with 已完成 and 搁置 folded.
+  A tree's rows show their own status, linked MRs and child progress; children
+  are grouped by `stage` into batches. A folded row shows the most urgent marker
+  in its subtree (▲ > ● > ◐ > ⋯).
 
-A notification-only `mention://agent-notify/<uuid>` wakes the agent without adding a result return and is not listed as an unanswered request.
+**本会话** roots the trees at tasks this session executes, leads, accepts or
+delegated. **全部** roots them at every open task whose parent is not open, and
+groups them by Multica Project. Both add closed tasks that still have an open MR
+(for 本会话, those the session executes, accepts or coordinates), because
+acceptance usually closes the task while its MR still waits for approval.
 
-An unanswered executor mention is an explicit agent mention link in a comment
-by the issue's current executor on an open issue, with no later comment by this
-agent in the same unresolved thread. Mailbox receipts are not used as replies. For a
-blocked delegated issue, the panel labels the first line of the current
-executor's latest ordinary comment as its source; no reason is inferred when
-there is no comment.
+Classification lives in `shared/board.ts` as a pure function of issue facts and
+the clock. It is display-only: it never writes a task or changes a status.
 
-The data comes from the read-only `GET /api/agents/{id}/session-tasks`
-projection, scoped to the credential's own agent and requiring a session-bound
-`mea_` credential. Owned and acceptance lists are agent-scoped because an
-external agent registers one session per conversation; a multi-session agent
-would need a session-scoped projection. Everything outside that happy path degrades to an
-explanation instead of an error: a session with no local binding, an unreadable
-context, an expired or revoked credential, a legacy token whose agent has no
-registered session, a server that does not expose the projection, and a
-network failure all keep the composer usable and leave the counts off.
+```text
+需要处理: contract.pending_actor is this session or the user
+          or an MR waits for the user: contract accepted, MR open, user is a reviewer and has not approved
+             (this also holds for a done task; a cancelled one is always 已完成)
+          or an anomaly: blocked, failed CI on an open MR, or a failed latest run, with no active run
+进行中:   an active run (queued, dispatched, running, waiting_local_directory, deferred)
+          or the executor's turn, not backlog, last_activity_at within STALE_AFTER_DAYS
+搁置:     every other open task, counted as Backlog, 7 天无动静, or 其他 when still fresh
+no contract: in_review is this session's acceptance only when its coordinator is bound
+             to this session; every other task counts as the executor's turn
+STALE_AFTER_DAYS = 7
+```
+
+A tree goes to the section of its most urgent task, and to 已完成 only when
+every task in it is done.
+
+"The user" is the bound external agent's owner. MR approval needs the user's
+forge usernames in the plugin settings; TGit reports a reviewer who has not
+approved as `review_state: "approving"` and one who has as `"approved"`.
+
+The server builds the board from existing reads with the session credential:
+`GET /api/agents/{id}/session-tasks` for this session's roots, `open_only`
+issues for 全部, batched `children` for the subtrees, and per open task its
+issue (contract, coordinator session binding and `last_activity_at`),
+`task-runs` and, when linked, `pull-requests`. The workspace MR summary finds
+closed tasks with open MRs. A reconnect or disconnect drops the cached board. A board stops at 300 tasks and says so. The pill and panel
+share a 15-second cache; the panel's ⟳ bypasses it.
+
+Everything outside the happy path degrades to an explanation instead of an
+error: a session with no local binding, an unreadable context, an expired or
+revoked credential, a legacy token whose agent has no registered session, a
+server that does not expose the projection, and a network failure all keep the
+composer usable.
 
 ## What it reuses
 
@@ -151,6 +178,7 @@ Settings → Plugins → Paseo Multica:
 | --- | --- |
 | Owner profile | Multica CLI profile name on the daemon host. Empty means the default profile (`~/.multica/config.json`); a named profile reads `~/.multica/profiles/<name>/config.json`. |
 | Delivery daemon | Multica daemon id that is allowed to deliver results to this host. |
+| Your forge usernames | Your own GitHub or TGit usernames, comma separated. An open MR of an accepted task that still waits for one of them becomes a to-do. |
 
 The backend reads the owner profile only to register the external agent, mint
 its `mea_` credential, and revoke it on disconnect. The owner credential is

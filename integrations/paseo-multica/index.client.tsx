@@ -5,9 +5,9 @@ import type {
 } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { STATUS_PANEL_ID, runMulticaCommand, type SessionContract } from "./shared/commands";
-import { connectSession, tasksSummary, type StatusView } from "./shared/contracts";
+import { connectSession, sessionBoard, type StatusView } from "./shared/contracts";
 import { DELIVERY_ITEM_KIND, DELIVERY_ITEM_VERSION, deliveryDataSchema } from "./shared/delivery";
-import { taskSummaryLabel } from "./shared/tasks";
+import { pillLabel } from "./shared/board";
 import { ConnectionSettingsScreen } from "./client/settings-screen";
 import { DeliveryCard } from "./client/delivery-card";
 import { deliveryTransformer } from "./client/timeline";
@@ -93,14 +93,14 @@ export default function contribute(client: PluginClientContext) {
     refreshes.set(agentId, revision);
     const current = () => !stopped && pills.get(agentId) === pill && refreshes.get(agentId) === revision;
     try {
-      const view = await client.rpc(tasksSummary, { agentId });
+      const view = await client.rpc(sessionBoard, { agentId, scope: "session" });
       if (!current()) return;
-      const summary = taskSummaryLabel(view);
+      const summary = pillLabel(view, Date.now());
       pill.update({ title: summary.title, label: summary.label });
     } catch {
       if (!current()) return;
       // The panel owns the explanation; the pill only avoids a stale count.
-      pill.update({ title: "Multica tasks unavailable", label: "Multica" });
+      pill.update({ title: "Multica tasks unavailable", label: "Multica · 不可用" });
     }
   };
 

@@ -27,8 +27,7 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   async function openTask(name) {
-    await page.getByRole("button", { name: new RegExp(`Only ${name}`) }).click();
-    await page.getByRole("link", { name: "Open task", exact: true }).click();
+    await page.getByRole("link", { name: new RegExp(`Only ${name}`) }).click();
   }
   await expect(page.getByText("Only session-a", { exact: false })).toBeVisible();
   await openTask("session-a");
@@ -46,11 +45,11 @@ try {
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "empty", exact: true }).click();
-  await expect(page.getByText("Your tasks · 0", { exact: true })).toBeVisible();
+  await expect(page.getByText("待办 0", { exact: true })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.screenshot({ path: join(output, "empty-session.png") });
   await page.getByRole("button", { name: "disconnected", exact: true }).click();
-  await expect(page.getByText("This Paseo session has no Multica binding.")).toBeVisible();
+  await expect(page.getByText("This Paseo session has no Multica binding.", { exact: false })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
   expect(errors).toEqual([]);
   console.log("PASS: Chromium same-host/workspace session tasks, detail history, empty and disconnected states");

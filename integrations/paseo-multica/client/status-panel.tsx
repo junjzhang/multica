@@ -3,8 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { statusSession, type StatusView } from "../shared/contracts";
-import { SessionPullRequests } from "./session-pull-requests";
-import { SessionTasksSection } from "./session-tasks";
+import { BoardSection } from "./board-panel";
 
 const STATE_LABEL: Record<StatusView["state"], string> = {
   connected: "Connected", invalid: "Needs attention", unverified: "Not verified", disconnected: "Not connected",
@@ -30,8 +29,7 @@ function StatusPanelContent({ agentId, theme, openTask }: PluginAgentPanelProps 
   useEffect(() => { void load(); }, [load]);
   const colors = theme.colors;
   return <ScrollView style={{ backgroundColor: colors.surface0 }} contentContainerStyle={{ gap: 16, padding: 12 }}>
-    <SessionTasksSection agentId={agentId} theme={theme} openTask={openTask} />
-    <SessionPullRequests agentId={agentId} theme={theme} openTask={openTask} />
+    <BoardSection agentId={agentId} theme={theme} openTask={openTask} />
     <View style={{ gap: 6 }}>
       <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded((value) => !value)}>
         <Text style={{ color: colors.foregroundMuted }}>{loading ? "Checking connection…" : view ? STATE_LABEL[view.state] : "Connection unavailable"}{view?.expiresAt ? ` · Credential expires ${view.expiresAt.slice(0, 7)}` : ""} {expanded ? "▴" : "▾"}</Text>
