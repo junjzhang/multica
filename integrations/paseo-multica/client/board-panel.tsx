@@ -15,6 +15,7 @@ import {
   type BoardIssue,
   type BoardPullRequest,
   type BoardScope,
+  type StageGroup,
   type Todo,
   type TodoKind,
   type TreeNode,
@@ -31,6 +32,9 @@ const SPACE = { xs: 4, sm: 6, md: 8, lg: 12, xl: 16, xxl: 24 } as const;
 const RADIUS = 6;
 const GUTTER = 16;
 const INDENT = 16;
+// Every row is at least this tall, so a rail can place its node or tick at the row's middle.
+const ROW_H = 32;
+const NODE = 8;
 
 const SCOPES: { value: BoardScope; label: string }[] = [{ value: "session", label: "本会话" }, { value: "all", label: "全部" }];
 
@@ -288,7 +292,7 @@ function Row({ issue, phrase, depth, row, running, muted, signal, onPress, discl
       accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${title}${prs ? ` ${prs.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
       disabled={!onPress} onPress={onPress}
       onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
-      style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
+      style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
     >
       <Text numberOfLines={1} style={{ flex: 1, color: muted ? colors.foregroundMuted : colors.foreground, fontSize: FONT.base }}>{title}</Text>
       {running ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
@@ -341,7 +345,6 @@ function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: Row
   const openPrs = issue.pullRequests.filter(isOpenPullRequest);
   const expandable = tree.total > 0 || openPrs.length > 0;
   const expanded = expandable && expandedIds.includes(issue.id);
-  const children = tree.stages.flatMap((group) => group.nodes);
   return <View>
     <Row
       issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} muted={tree.section === "done"} signal
@@ -349,7 +352,80 @@ function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: Row
       disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
     />
     {expanded ? openPrs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
-    {expanded ? children.map((child) => <TreeRow key={child.issue.id} tree={child} depth={depth + 1} row={row} />) : null}
+    {expanded && tree.total > 0 ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
+  </View>;
+}
+
+type RailState = "done" | "current" | "pending";
+
+/**
+ * One cell of the rail left of a graph row: a line through the row, broken
+ * above or below at the ends, carrying a stage node or a branch tick at the
+ * row's middle.
+ */
+function Rail({ colors, top, bottom, node, tick }: { colors: Colors; top: boolean; bottom: boolean; node?: RailState; tick?: boolean }) {
+  const line = { position: "absolute" as const, left: GUTTER / 2, width: 1, backgroundColor: colors.foregroundMuted, opacity: 0.35 };
+  const size = node === "current" ? NODE + 2 : NODE;
+  return <View style={{ width: GUTTER, alignSelf: "stretch" }}>
+    {top ? <View style={{ ...line, top: 0, height: ROW_H / 2 }} /> : null}
+    {bottom ? <View style={{ ...line, top: ROW_H / 2, bottom: 0 }} /> : null}
+    {tick ? <View style={{ position: "absolute", left: GUTTER / 2, top: ROW_H / 2, width: GUTTER / 2, height: 1, backgroundColor: colors.foregroundMuted, opacity: 0.35 }} /> : null}
+    {node === "current" ? <View style={{ position: "absolute", left: GUTTER / 2 - size + 0.5, top: ROW_H / 2 - size, width: size * 2, height: size * 2, borderRadius: size, backgroundColor: colors.foreground, opacity: 0.12 }} /> : null}
+    {node ? <View style={{
+      position: "absolute", left: (GUTTER - size) / 2 + 0.5, top: ROW_H / 2 - size / 2, width: size, height: size, borderRadius: size / 2,
+      backgroundColor: node === "pending" ? colors.surface0 : node === "current" ? colors.foreground : colors.foregroundMuted,
+      borderWidth: node === "pending" ? 1.5 : 0, borderColor: colors.foregroundMuted,
+    }} /> : null}
+  </View>;
+}
+
+function ProgressBar({ done, total, colors, current }: { done: number; total: number; colors: Colors; current: boolean }) {
+  return <View style={{ width: 36, height: 3, borderRadius: 2, backgroundColor: colors.surface2, overflow: "hidden" }}>
+    <View style={{ width: `${Math.round((done / Math.max(total, 1)) * 100)}%`, height: 3, backgroundColor: current ? colors.foreground : colors.foregroundMuted }} />
+  </View>;
+}
+
+/**
+ * A parent's children as a pipeline: each batch is a node on the rail and its
+ * children branch off it. Only the current batch opens by default; a parent
+ * without batches is one open group of branches with no node.
+ */
+function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: RowContext }) {
+  const { colors } = row;
+  const current = currentStage(tree);
+  const staged = tree.stages.some((group) => group.stage !== undefined);
+  const [openStages, setOpenStages] = useState<Set<StageGroup["stage"]>>(() => new Set([current?.stage]));
+  const stateOf = (group: StageGroup): RailState => group === current ? "current" : group.done === group.total ? "done" : "pending";
+  return <View style={{ marginLeft: INDENT * depth }}>
+    {tree.stages.map((group, index) => {
+      const last = index === tree.stages.length - 1;
+      const open = !staged || openStages.has(group.stage);
+      const state = stateOf(group);
+      const toggle = () => setOpenStages((value) => {
+        const next = new Set(value);
+        if (next.has(group.stage)) next.delete(group.stage); else next.add(group.stage);
+        return next;
+      });
+      return <View key={group.stage ?? "unstaged"}>
+        {staged ? <View style={{ flexDirection: "row" }}>
+          <Rail colors={colors} top bottom={!last || open} node={state} />
+          <Pressable
+            accessibilityRole="button" accessibilityLabel={group.stage === undefined ? "未分批" : `第 ${group.stage} 批`} accessibilityState={{ expanded: open }} onPress={toggle}
+            style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingHorizontal: SPACE.sm }}
+          >
+            <Text style={{ flex: 1, color: state === "current" ? colors.foreground : colors.foregroundMuted, fontSize: FONT.sm, fontWeight: state === "current" ? "600" : "400" }}>
+              {group.stage === undefined ? "未分批" : `第 ${group.stage} 批`}
+            </Text>
+            <ProgressBar done={group.done} total={group.total} colors={colors} current={state === "current"} />
+            <Text style={{ minWidth: 28, textAlign: "right", color: colors.foregroundMuted, fontSize: FONT.sm }}>{group.done}/{group.total}</Text>
+          </Pressable>
+        </View> : null}
+        {open ? group.nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
+          <Rail colors={colors} top bottom={!(last && childIndex === group.nodes.length - 1)} tick />
+          <View style={{ flex: 1 }}><TreeRow tree={child} depth={0} row={row} /></View>
+        </View>) : null}
+      </View>;
+    })}
   </View>;
 }
 
