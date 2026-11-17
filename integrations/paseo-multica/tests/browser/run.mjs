@@ -8,7 +8,7 @@ const output = resolve(process.env.BROWSER_EVIDENCE_DIR ?? "tests/browser/artifa
 await mkdir(output, { recursive: true });
 const bundle = await build({
   entryPoints: ["tests/browser/fixture.tsx"], bundle: true, write: false, jsx: "automatic", platform: "browser",
-  alias: { "react-native": resolve("tests/browser/native.tsx"), "@getpaseo/plugin/client/ui": resolve("tests/browser/rpc.ts"), "@getpaseo/plugin/client": resolve("tests/browser/rpc.ts") },
+  alias: { "react-native": resolve("tests/browser/native.tsx"), "@getpaseo/plugin/client/ui": resolve("tests/browser/rpc.tsx"), "@getpaseo/plugin/client": resolve("tests/browser/rpc.tsx") },
 });
 const server = createServer((req, res) => {
   res.setHeader("Content-Type", "text/html");
@@ -45,7 +45,7 @@ try {
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-1" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "empty", exact: true }).click();
-  await expect(page.getByText("待办 0", { exact: true })).toBeVisible();
+  await expect(page.getByText("暂无任务", { exact: true })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.screenshot({ path: join(output, "empty-session.png") });
   await page.getByRole("button", { name: "disconnected", exact: true }).click();

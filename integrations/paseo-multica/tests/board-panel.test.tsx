@@ -7,6 +7,7 @@ import type { BoardIssue, ReadyBoardData } from "../shared/board";
 const { openURL } = vi.hoisted(() => ({ openURL: vi.fn() }));
 vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable", Linking: { openURL } }));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: (contract: { name: string }) => (contract.name === "session.board" ? getBoard : setExpansion) }));
+vi.mock("@getpaseo/plugin/client/ui", () => ({ Icon: "Icon", Loading: "Loading" }));
 const setExpansion = vi.fn(async () => [] as string[]);
 const recent = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const base = { statusCategory: "started", lastActivityAt: recent, activeRun: false, lastRunFailed: false, pullRequests: [] };
@@ -31,43 +32,38 @@ const press = async (renderer: ReactTestRenderer, name: string) => {
   await act(async () => { target.props.onPress(); });
 };
 
-it("renders the to-do queue, sections, scope switch and stage expansion", async () => {
+it("renders the to-do card, sections, scope switch and stage expansion", async () => {
   const openTask = vi.fn();
   const colors = Object.fromEntries(["surface0", "border", "foreground", "foregroundMuted", "accent", "statusDanger"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
   await act(async () => { renderer = create(<BoardSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
   const first = text(renderer!);
   expect(getBoard).toHaveBeenCalledWith({ agentId: "agent", scope: "session", refresh: false });
-  expect(first).toContain("待办 ");
-  expect(first).toContain("等你审批");
-  expect(first).toContain("slime !813");
-  expect(first).toContain("CI ✓ 审 ⋯ 合 ✓");
-  expect(first).toContain("去验收");
-  expect(first.indexOf("等你审批")).toBeLessThan(first.indexOf("等验收"));
-  expect(first).toContain("需要处理 ");
-  expect(first).toContain("搁置 ");
-  expect(first).toContain("（Backlog 1 · 7 天无动静 0）");
-  expect(first).not.toContain("WORK-100 旧任务");
-  expect(first).toContain("◐ WORK-494");
-  expect(first).toContain("第1批 0/1");
-  expect(first).not.toContain("第 1 批");
+  expect(first).toContain("slime 修复");
+  expect(first).toContain("slime!813");
+  expect(first.indexOf("slime 修复")).toBeLessThan(first.indexOf("删除会话 MR"));
+  expect(first).toContain("需要处理");
+  expect(first).toContain("搁置");
+  expect(first).not.toContain("Backlog");
+  expect(first).not.toContain("旧任务");
+  expect(first).toContain("统一 Leader 视图");
+  expect(first).toContain("第 1 批 0/1");
+  expect(first).not.toMatch(/[●◐▲○⋯]/);
 
   await press(renderer!, "展开 WORK-494");
   expect(setExpansion).toHaveBeenCalledWith({ agentId: "agent", issueId: "root", expanded: true });
-  expect(text(renderer!)).toContain("第 1 批 ── 0/1");
-  expect(text(renderer!)).toContain("WORK-496 删除会话 MR");
+  expect(text(renderer!)).toContain("第 1 批\n0/1");
 
-  await press(renderer!, "[展开]");
-  expect(text(renderer!)).toContain("WORK-100 旧任务");
+  await press(renderer!, "搁置");
+  expect(text(renderer!)).toContain("旧任务");
 
-  await press(renderer!, "去验收");
+  await press(renderer!, "等验收 WORK-496");
   expect(openTask).toHaveBeenCalledWith("https://app.example/acme/issues/WORK-496", "WORK-496");
-  await press(renderer!, "打开");
+  await press(renderer!, "等你审批 WORK-470");
   expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
 
-  await press(renderer!, "切换范围");
+  await press(renderer!, "全部");
   expect(getBoard).toHaveBeenLastCalledWith({ agentId: "agent", scope: "all", refresh: false });
-  expect(text(renderer!)).toContain("全部");
   expect(text(renderer!)).toContain("Paseo");
   expect(text(renderer!)).toContain("无项目");
 
@@ -80,6 +76,7 @@ it("explains a disconnected session instead of an empty board", async () => {
   getBoard.mockResolvedValueOnce({ state: "disconnected", reason: "Run multica session connect.", checkedAt: "x" } as never);
   let renderer: ReactTestRenderer;
   await act(async () => { renderer = create(<BoardSection agentId="agent" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
-  expect(text(renderer!)).toContain("未连接 Multica。Run multica session connect.");
+  expect(text(renderer!)).toContain("未连接 Multica");
+  expect(text(renderer!)).toContain("Run multica session connect.");
   await act(async () => { renderer!.unmount(); });
 });
