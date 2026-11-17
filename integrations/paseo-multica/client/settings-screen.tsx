@@ -16,10 +16,10 @@ type ReadySettings = Extract<SettingsState<typeof connectionSettings.schema>, { 
 export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
   const settings = useSettings(connectionSettings);
   const ready: ReadySettings | null = settings.status === "ready" ? settings : null;
-  const [draft, setDraft] = useState({ ownerProfile: "", daemonId: "", daemonProfile: "" });
+  const [draft, setDraft] = useState({ ownerProfile: "", daemonId: "", daemonProfile: "", forgeUsernames: "" });
 
   useEffect(() => {
-    if (ready) setDraft({ ownerProfile: ready.values.ownerProfile, daemonId: ready.values.daemonId, daemonProfile: ready.values.daemonProfile });
+    if (ready) setDraft({ ownerProfile: ready.values.ownerProfile, daemonId: ready.values.daemonId, daemonProfile: ready.values.daemonProfile, forgeUsernames: ready.values.forgeUsernames });
   }, [ready?.revision]);
 
   if (settings.status === "loading") {
@@ -43,7 +43,7 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
 
   const save = () =>
     void settings.save(
-      { ownerProfile: draft.ownerProfile.trim(), daemonId: draft.daemonId.trim(), daemonProfile: draft.daemonProfile.trim() },
+      { ownerProfile: draft.ownerProfile.trim(), daemonId: draft.daemonId.trim(), daemonProfile: draft.daemonProfile.trim(), forgeUsernames: draft.forgeUsernames.trim() },
       settings.revision,
     );
 
@@ -76,6 +76,14 @@ export function ConnectionSettingsScreen(_props: PluginSurfaceProps) {
           initialValue={settings.values.daemonId}
           placeholder="daemon id"
           onChangeText={(daemonId) => setDraft((current) => ({ ...current, daemonId }))}
+          disabled={settings.saving}
+        />
+        <SettingsInput
+          label="Your forge usernames"
+          hint="Your own usernames on GitHub or TGit, comma separated. An open MR of an accepted task that still waits for one of them shows as a to-do."
+          initialValue={settings.values.forgeUsernames}
+          placeholder="username"
+          onChangeText={(forgeUsernames) => setDraft((current) => ({ ...current, forgeUsernames }))}
           disabled={settings.saving}
         />
         <SettingsAction

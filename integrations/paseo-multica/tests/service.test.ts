@@ -35,7 +35,7 @@ const TTL = 90 * 24 * 60 * 60 * 1000;
 async function setup(options: {
   api?: FakeApi;
   host?: PaseoHostAdapter;
-  settings?: { ownerProfile: string; daemonId: string };
+  settings?: { ownerProfile: string; daemonId: string; forgeUsernames?: string };
   home?: string;
 } = {}) {
   const home = options.home ?? (await makeHome());
@@ -52,16 +52,6 @@ async function setup(options: {
 }
 
 describe("session service", () => {
-  it("uses the bound session credential for task detail and contains errors", async () => {
-    const { home, api, service } = await setup();
-    await writeSessionContext(home, makeContext({ expires_at: "2027-01-01T00:00:00Z" }));
-    const read = vi.spyOn(api, "taskDetail").mockResolvedValueOnce({ issues: [] }).mockRejectedValueOnce(new Error("unavailable"));
-    const issueId = "0199a0b1-4444-7444-8444-444444444444";
-    expect(await service.taskDetail(SESSION_A, issueId, "children")).toEqual({ ok: true, data: { issues: [] } });
-    expect(read).toHaveBeenCalledWith(expect.objectContaining({ token: EXTERNAL_TOKEN, workspaceId: WORKSPACE_ID }), issueId, "children");
-    expect(await service.taskDetail(SESSION_A, issueId, "runs")).toEqual({ ok: false, error: "unavailable" });
-    expect((await service.taskDetail(SESSION_B, issueId, "runs")).ok).toBe(false);
-  });
   it("registers the current session once and writes its v1 binding", async () => {
     const { home, api, service } = await setup();
     const view = await service.connect(SESSION_A);
@@ -428,55 +418,109 @@ describe("session service", () => {
     expect(malformed.state).toBe("invalid");
   });
 });
-describe("session tasks service", () => {
-  it("returns the parsed server projection for the bound session", async () => {
-    const { home, api, service } = await setup();
-    await writeSessionContext(home, makeContext());
-    api.tasksResult = makeTasksWire({
-      owned: [
-        {
-          issue_id: "0199a0b1-4444-7444-8444-444444444444",
-          identifier: "WORK-1",
-          title: "Owned task",
-          status: "in_progress",
-          status_category: "started",
-          url: "https://app.multica.example/acme/issues/WORK-1",
-          role: "executor",
-          updated_at: "2026-10-26T11:00:00Z",
-        },
-        {
-          issue_id: "0199a0b1-7777-7777-8777-777777777777",
-          title: "Unsafe link",
-          status: "todo",
-          status_category: "unstarted",
-          url: "javascript:alert(1)",
-          role: "leader",
-        },
-      ],
-    });
+describe("session board service", () => {
+  const OWNED = "0199a0b1-4444-7444-8444-444444444444";
+  const ACCEPTING = "0199a0b1-5555-7555-8555-555555555555";
+  const RETURNING = "0199a0b1-6666-7666-8666-666666666666";
+  const DONE_CHILD = "0199a0b1-7777-7777-8777-777777777777";
+  const OPEN_CHILD = "0199a0b1-8888-7888-8888-888888888888";
+  const wireIssue = (id: string, identifier: string, extra: Record<string, unknown> = {}) => ({ id, identifier, title: identifier, status: "todo", status_category: "unstarted", last_activity_at: "2026-10-25T12:00:00Z", ...extra });
 
-    const view = await service.tasks(SESSION_A);
+  function routes(api: FakeApi, sessionId: string) {
+    const session = { type: "agent", id: AGENT_A, session_id: sessionId };
+    api.routes.set(`/api/workspaces/${WORKSPACE_ID}`, { slug: "acme" });
+    api.routes.set(`/api/agents/${AGENT_A}`, { owner_id: "user-1" });
+    api.routes.set(`/api/issues/${OWNED}`, wireIssue(OWNED, "WORK-1", {
+      status: "in_progress", status_category: "started", project_id: "project-1",
+      contract: { pending_actor: session, acceptor: session, executor: { type: "agent", id: AGENT_B }, accepted: [0], stale: false, contract: { versions: [{ criteria: ["works"] }] } },
+    }));
+    api.routes.set(`/api/issues/${ACCEPTING}`, wireIssue(ACCEPTING, "WORK-2", { status: "in_review", status_category: "started" }));
+    api.routes.set(`/api/issues/${RETURNING}`, wireIssue(RETURNING, "WORK-3"));
+    api.routes.set(`/api/issues/children?parent_ids=${OWNED},${ACCEPTING},${RETURNING}`, { issues: [
+      wireIssue(DONE_CHILD, "WORK-4", { parent_issue_id: OWNED, stage: 1, status: "done", status_category: "completed" }),
+      wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED, stage: 2 }),
+    ] });
+    api.routes.set(`/api/issues/children?parent_ids=${DONE_CHILD},${OPEN_CHILD}`, { issues: [] });
+    api.routes.set(`/api/issues/${OPEN_CHILD}`, wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED, stage: 2 }));
+    api.routes.set("/api/issues/pull-requests", { pull_requests: [{ issue_id: OWNED }] });
+    api.routes.set(`/api/issues/${OWNED}/pull-requests`, { pull_requests: [{
+      id: "pr-1", number: 813, title: "MR", state: "open", repo_name: "slime", html_url: "https://git.woa.com/o/slime/merge_requests/813",
+      checks_conclusion: "failed", mergeable: "mergeable",
+      review: { state: "approving", reviewers: [{ username: "someone", review_state: "approved" }, { username: "jayjayzhang", review_state: "approving" }] },
+    }] });
+    for (const id of [OWNED, ACCEPTING, RETURNING]) api.routes.set(`/api/issues/${id}/task-runs`, []);
+    api.routes.set(`/api/issues/${OWNED}/task-runs`, [{ status: "running" }, { status: "failed" }]);
+    api.routes.set(`/api/issues/${RETURNING}/task-runs`, [{ status: "failed" }, { status: "completed" }]);
+    api.routes.set(`/api/issues/${OPEN_CHILD}/task-runs`, []);
+  }
+
+  it("loads the session's task trees from existing Multica reads", async () => {
+    const { home, api, service } = await setup({ settings: { ownerProfile: "", daemonId: DAEMON_ID, forgeUsernames: "jayjayzhang, other" } });
+    await writeSessionContext(home, makeContext());
+    routes(api, api.tasksResult instanceof Error ? "" : api.tasksResult.session_id!);
+
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("ready");
     if (view.state !== "ready") return;
-    expect(view.agentId).toBe(AGENT_A);
-    expect(view.sessionId).toBe(api.tasksResult.session_id);
-    expect(view.checkedAt).toBe(NOW.toISOString());
-    expect(view.owned[0]).toMatchObject({
-      issueId: "0199a0b1-4444-7444-8444-444444444444",
-      identifier: "WORK-1",
-      role: "executor",
-      url: "https://app.multica.example/acme/issues/WORK-1",
+    expect(view.viewer).toMatchObject({ agentId: AGENT_A, userId: "user-1", forgeUsernames: ["jayjayzhang", "other"] });
+    expect(view.rootIds).toEqual([OWNED, ACCEPTING, RETURNING]);
+    const byId = new Map(view.issues.map((issue) => [issue.id, issue]));
+    expect(byId.get(OWNED)).toMatchObject({
+      url: "https://app.multica.example/acme/issues/WORK-1", projectId: "project-1", activeRun: true, lastRunFailed: false,
+      contract: { accepted: true, pendingActor: { id: AGENT_A } },
+      pullRequests: [{ number: 813, repo: "slime", ci: "failed", review: "approving", myReview: "approving", mergeable: "mergeable" }],
     });
-    expect(view.owned[1]?.url).toBeUndefined();
-    expect(view.accepting[0]?.role).toBe("acceptor");
-    expect(view.returning[0]).toMatchObject({ role: "return", taskStatus: "running" });
-    expect(api.tasksCalls).toEqual([{ agentId: AGENT_A, token: EXTERNAL_TOKEN }]);
+    expect(byId.get(ACCEPTING)?.contract).toBeUndefined();
+    expect(byId.get(RETURNING)).toMatchObject({ activeRun: false, lastRunFailed: true });
+    expect(byId.get(OPEN_CHILD)).toMatchObject({ parentId: OWNED, stage: 2 });
+    expect(byId.get(DONE_CHILD)).toMatchObject({ stage: 1, statusCategory: "completed" });
+    expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}`);
+    expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}/task-runs`);
+    expect(api.gets.filter((path) => path === `/api/issues/${OWNED}`)).toHaveLength(1);
+    expect(api.credentialCalls.every((credential) => credential.token === EXTERNAL_TOKEN)).toBe(true);
+
+    const reads = api.gets.length;
+    await service.board(SESSION_A, "session");
+    expect(api.gets).toHaveLength(reads);
+    await service.board(SESSION_A, "session", true);
+    expect(api.gets.length).toBeGreaterThan(reads);
+  });
+
+  it("roots the all view at open tasks whose parent is not open and names projects", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    routes(api, "session");
+    api.routes.set("/api/issues?open_only=true", { issues: [
+      wireIssue(OWNED, "WORK-1", { project_id: "project-1" }),
+      wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED }),
+      wireIssue(ACCEPTING, "WORK-2", { parent_issue_id: DONE_CHILD }),
+    ] });
+    api.routes.set(`/api/issues/children?parent_ids=${OWNED},${ACCEPTING}`, { issues: [wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED })] });
+    api.routes.set(`/api/issues/children?parent_ids=${OPEN_CHILD}`, { issues: [] });
+    api.routes.set(`/api/issues/${ACCEPTING}/task-runs`, []);
+    api.routes.set("/api/projects?limit=200", { projects: [{ id: "project-1", title: "Paseo" }] });
+
+    const view = await service.board(SESSION_A, "all");
+    expect(view.state).toBe("ready");
+    if (view.state !== "ready") return;
+    expect(view.rootIds).toEqual([OWNED, ACCEPTING]);
+    expect(view.issues.map((issue) => issue.id).sort()).toEqual([OWNED, ACCEPTING, OPEN_CHILD].sort());
+    expect(view.projects).toEqual([{ id: "project-1", name: "Paseo" }]);
+  });
+
+  it("reports a failed board read as unavailable without leaking the credential", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    routes(api, "session");
+    api.routes.set(`/api/issues/${OWNED}`, new Error(`socket closed for ${EXTERNAL_TOKEN}`));
+    const view = await service.board(SESSION_A, "session");
+    expect(view).toMatchObject({ state: "unavailable", reason: expect.stringMatching(/Could not read this session's Multica tasks/) });
     expect(JSON.stringify(view)).not.toContain(EXTERNAL_TOKEN);
   });
 
   it("explains a missing binding and never calls the server", async () => {
     const { api, service } = await setup();
-    const view = await service.tasks(SESSION_A);
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("disconnected");
     if (view.state !== "disconnected") return;
     expect(view.reason).toMatch(/no Multica binding/);
@@ -489,7 +533,7 @@ describe("session tasks service", () => {
     await mkdir(join(home, ".multica", "external-sessions", "paseo"), { recursive: true });
     await writeFile(contextPath(home, SESSION_A), "{broken");
     const { service } = await setup({ home });
-    const view = await service.tasks(SESSION_A);
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("disconnected");
     if (view.state !== "disconnected") return;
     expect(view.reason).toMatch(/not valid JSON/);
@@ -498,7 +542,7 @@ describe("session tasks service", () => {
   it("does not send an expired credential and says how to repair it", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext({ expires_at: new Date(NOW.getTime() - 1_000).toISOString() }));
-    const view = await service.tasks(SESSION_A);
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
     if (view.state !== "unavailable") return;
     expect(view.reason).toMatch(/expired/);
@@ -514,7 +558,7 @@ describe("session tasks service", () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
     api.tasksResult = new MulticaApiError(status, "rejected");
-    const view = await service.tasks(SESSION_A);
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
     if (view.state !== "unavailable") return;
     expect(view.reason).toMatch(reason);
@@ -524,7 +568,7 @@ describe("session tasks service", () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
     api.tasksResult = new Error(`socket closed for ${EXTERNAL_TOKEN}`);
-    const view = await service.tasks(SESSION_A);
+    const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
     if (view.state !== "unavailable") return;
     expect(view.reason).toMatch(/Could not read this session's Multica tasks/);
@@ -565,7 +609,7 @@ describe("background wait source", () => {
     // The real SDK object supplies the registration context; only its host read is stubbed.
     const paseo = createPaseoApi(new DaemonClient({url: "ws://127.0.0.1:1/ws", clientId: "test"}));
     vi.spyOn(paseo.hosts, "list").mockResolvedValue({self: {serverId: HOST_ID, label: "Test"}, hosts: []});
-    const source = backgroundWorkSource({home, fetchImpl, readSettings: async () => ({ownerProfile: "", daemonId: currentDaemon, daemonProfile: "default"})});
+    const source = backgroundWorkSource({home, fetchImpl, readSettings: async () => ({ownerProfile: "", daemonId: currentDaemon, daemonProfile: "default", forgeUsernames: ""})});
     const first = await source.fetch({paseo});
     expect(first.status).toBe("ready");
     if (first.status !== "ready") throw new Error("Expected snapshot");
@@ -600,11 +644,11 @@ describe("background wait source", () => {
     const { DaemonClient } = await import("@getpaseo/client/internal/daemon-client");
     const home = await makeHome();
     const paseo = createPaseoApi(new DaemonClient({url: "ws://127.0.0.1:1/ws", clientId: "test"}));
-    const source = backgroundWorkSource({home, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: ""})});
+    const source = backgroundWorkSource({home, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: "", forgeUsernames: ""})});
     expect(await source.fetch({paseo})).toMatchObject({status: "unavailable", message: expect.stringContaining("local wait daemon profile")});
     await writeFile(join(home, ".multica", "wait.endpoint.json"), JSON.stringify({url: "http://127.0.0.1:31555", secret: "private-endpoint", daemon_id: DAEMON_ID}));
     vi.spyOn(paseo.hosts, "list").mockResolvedValue({self: {serverId: HOST_ID, label: "Test"}, hosts: []});
-    const offline = backgroundWorkSource({home, fetchImpl: async () => { throw new Error(OWNER_TOKEN); }, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: "default"})});
+    const offline = backgroundWorkSource({home, fetchImpl: async () => { throw new Error(OWNER_TOKEN); }, readSettings: async () => ({ownerProfile: "", daemonId: DAEMON_ID, daemonProfile: "default", forgeUsernames: ""})});
     expect(await offline.fetch({paseo})).toMatchObject({status: "unavailable", message: expect.stringContaining("offline")});
     expect(JSON.stringify(await offline.fetch({paseo}))).not.toContain(OWNER_TOKEN);
     await paseo.dispose();

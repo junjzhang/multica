@@ -5,8 +5,7 @@ import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 
 vi.mock("react-native", () => ({ View: "View", ScrollView: "ScrollView", Text: "Text", Pressable: "Pressable" }));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: () => getStatus }));
-vi.mock("../client/session-pull-requests", () => ({ SessionPullRequests: () => null }));
-vi.mock("../client/session-tasks", () => ({ SessionTasksSection: () => null }));
+vi.mock("../client/board-panel", () => ({ BoardSection: () => null }));
 const getStatus = vi.fn(async () => ({ state: "connected", agentId: "agent-id", workspaceId: "workspace-id", expiresAt: "2027-02-01T00:00:00Z" }));
 import { StatusPanel } from "../client/status-panel";
 
