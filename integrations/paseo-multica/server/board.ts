@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isCoordinatingSession, isSession, isTerminal, type Actor, type BoardIssue, type BoardPullRequest, type BoardScope, type ReadyBoardData, type Viewer } from "../shared/board";
 import type { SessionTasksWire } from "../shared/tasks";
+import { isLocator, returnAddress } from "../shared/session";
 import type { ApiCredential, MulticaApi } from "./api";
 
 /** Upper bound on issues per board; a larger tree is cut and marked truncated. */
@@ -54,13 +55,21 @@ const pullRequestWire = z.object({
 const pullRequestList = z.object({ pull_requests: z.array(pullRequestWire) });
 const pullRequestSummaries = z.object({ pull_requests: z.array(z.object({ issue_id: z.string(), state: z.string() })) });
 const projectList = z.object({ projects: z.array(z.object({ id: z.string(), title: z.string() })) });
+const archivedDeliveriesWire = z.array(z.object({
+  id: z.uuid(),
+  issue_identifier: z.string(),
+  issue_title: z.string(),
+  host_id: z.string().refine(isLocator),
+  session_id: z.string().refine(isLocator),
+}));
 
 export interface BoardRequest {
   scope: BoardScope;
   credential: ApiCredential;
   appUrl: string;
   agentId: string;
-  sessionTasks: SessionTasksWire;
+  sessionId?: string;
+  sessionTasks?: SessionTasksWire;
   forgeUsernames: string[];
   checkedAt: string;
 }
@@ -72,9 +81,12 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
     if (!parsed.success) throw new Error(`Multica returned an unexpected response for ${path.split("?")[0]}.`);
     return parsed.data;
   };
-  const [slug, owner] = await Promise.all([
+  const sessionId = request.sessionId ?? request.sessionTasks?.session_id;
+  const deliveryQuery = request.scope === "session" && sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  const [slug, owner, deliveries] = await Promise.all([
     read(`/api/workspaces/${encodeURIComponent(credential.workspaceId)}`, z.object({ slug: z.string() })).then((workspace) => workspace.slug),
-    read(`/api/agents/${encodeURIComponent(request.agentId)}`, z.object({ owner_id: z.string().nullish() })),
+    read("/api/me", z.object({ id: z.string() })),
+    read(`/api/agents/external/archived-deliveries${deliveryQuery}`, archivedDeliveriesWire),
   ]);
 
   const issues = new Map<string, IssueWire>();
@@ -90,7 +102,7 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
   let rootIds: string[];
   if (request.scope === "session") {
     const wire = request.sessionTasks;
-    rootIds = [...new Set([...wire.owned, ...wire.accepting, ...(wire.delegated ?? wire.returning)].map((item) => item.issue_id))];
+    rootIds = wire ? [...new Set([...wire.owned, ...wire.accepting, ...(wire.delegated ?? wire.returning)].map((item) => item.issue_id))] : [];
     for (const issue of await mapLimit(rootIds, (id) => read(`/api/issues/${encodeURIComponent(id)}`, issueWire))) {
       if (add(issue)) detailed.add(issue.id);
     }
@@ -121,8 +133,8 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
   const linkedOpen = new Set(summaries.filter((pr) => OPEN_PR_STATES.has(pr.state)).map((pr) => pr.issue_id));
   const viewer: Viewer = {
     agentId: request.agentId,
-    ...(request.sessionTasks.session_id ? { sessionId: request.sessionTasks.session_id } : {}),
-    ...(owner.owner_id ? { userId: owner.owner_id } : {}),
+    sessionId,
+    userId: owner.id,
     forgeUsernames: request.forgeUsernames,
   };
 
@@ -150,7 +162,13 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
   });
 
   const projects = request.scope === "all" ? (await read("/api/projects?limit=200", projectList)).projects.map((project) => ({ id: project.id, name: project.title })) : [];
-  return { state: "ready", scope: request.scope, viewer, issues: board, rootIds, projects, truncated, checkedAt: request.checkedAt };
+  const archivedDeliveries = deliveries.map((delivery) => ({
+    id: delivery.id,
+    issueIdentifier: delivery.issue_identifier,
+    issueTitle: delivery.issue_title,
+    sessionUrl: returnAddress(delivery),
+  }));
+  return { state: "ready", scope: request.scope, viewer, issues: board, rootIds, projects, archivedDeliveries, truncated, checkedAt: request.checkedAt };
 }
 
 function toBoardIssue(issue: IssueWire, runs: z.infer<typeof runList>, prs: z.infer<typeof pullRequestWire>[], viewer: Viewer, issueBase: string): BoardIssue {

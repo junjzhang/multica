@@ -135,19 +135,18 @@ forge usernames in the plugin settings (`forgeUsernames`, e.g. `name, github-nam
 without them no MR counts as waiting for the user; TGit reports a reviewer who has not
 approved as `review_state: "approving"` and one who has as `"approved"`.
 
-The server builds the board from existing reads with the session credential:
-`GET /api/agents/{id}/session-tasks` for this session's roots, `open_only`
+The plugin uses its configured owner profile to build the board:
+`GET /api/agents/{id}/session-tasks?session_id=…` for this session's roots, `open_only`
 issues for 全部, batched `children` for the subtrees, and per open task its
 issue (contract, coordinator session binding and `last_activity_at`),
 `task-runs` and, when linked, `pull-requests`. The workspace MR summary finds
 closed tasks with open MRs. A reconnect or disconnect drops the cached board. A board stops at 300 tasks and says so. The pill and panel
 share a 15-second cache; the panel's ⟳ bypasses it.
 
-Everything outside the happy path degrades to an explanation instead of an
-error: a session with no local binding, an unreadable context, an expired or
-revoked credential, a legacy token whose agent has no registered session, a
-server that does not expose the projection, and a network failure all keep the
-composer usable.
+A session without an identity on Multica has an empty session board. The
+workspace board remains available. Owner authorization and network failures
+show an explanation in the panel. Failed deliveries to archived sessions show
+under **需要你** and link to the target Paseo session.
 
 ## What it reuses
 
@@ -203,13 +202,12 @@ rename. `MULTICA_EXTERNAL_SESSION_FILE` is a CLI-side override; the plugin
 always writes this default path so an already-running conversation can find it
 through its existing `PASEO_AGENT_ID` without a provider reload.
 
-The file is a private credential cache, not task/queue authority. A repeat
-connect reuses a locally valid, host-compatible binding; it verifies that
-credential against the bound agent's own mailbox endpoint before trusting it.
-That endpoint authorizes the credential's subject rather than a merely visible
-agent, so another agent's credential cannot validate this binding. Expired or
-revoked credentials are repaired only by explicit `multica session connect`
-(or `/multica connect` in the composer). A binding
+The file is a private credential cache. The CLI asks the plugin to issue a
+one-hour credential on first use and to renew it once five minutes or less
+remain. A cached credential with more time left skips the RPC. The plugin
+refuses issuance while the conversation is archived or missing. Run
+`multica session connect` or `/multica connect` to repair a revoked credential
+before its scheduled renewal. A binding
 for another server, workspace, host, or daemon is reported and left untouched
 rather than silently rebound.
 

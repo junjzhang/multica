@@ -986,6 +986,62 @@ func (q *Queries) ListAgentMailboxMessages(ctx context.Context, arg ListAgentMai
 	return items, nil
 }
 
+const listArchivedPaseoDeliveries = `-- name: ListArchivedPaseoDeliveries :many
+SELECT m.id, i.number AS issue_number, i.title AS issue_title, target.host_id, target.session_id
+FROM agent_mailbox_message m
+JOIN issue i ON i.workspace_id = m.workspace_id AND i.id = m.issue_id
+JOIN external_agent_session target ON target.workspace_id = m.workspace_id AND target.id = m.target_session_id
+WHERE m.workspace_id = $1
+  AND target.provider = 'paseo'
+  AND m.delivery_status = 'failed'
+  AND m.last_error LIKE 'agent\_archived:%'
+  AND m.withdrawn_at IS NULL
+  AND m.processing_status <> 'handled'
+  AND ($2::uuid IS NULL OR
+       m.target_session_id = $2 OR m.source_session_id = $2)
+ORDER BY m.updated_at DESC, m.id DESC
+LIMIT 50
+`
+
+type ListArchivedPaseoDeliveriesParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	SessionID   pgtype.UUID `json:"session_id"`
+}
+
+type ListArchivedPaseoDeliveriesRow struct {
+	ID          pgtype.UUID `json:"id"`
+	IssueNumber int32       `json:"issue_number"`
+	IssueTitle  string      `json:"issue_title"`
+	HostID      string      `json:"host_id"`
+	SessionID   string      `json:"session_id"`
+}
+
+func (q *Queries) ListArchivedPaseoDeliveries(ctx context.Context, arg ListArchivedPaseoDeliveriesParams) ([]ListArchivedPaseoDeliveriesRow, error) {
+	rows, err := q.db.Query(ctx, listArchivedPaseoDeliveries, arg.WorkspaceID, arg.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListArchivedPaseoDeliveriesRow{}
+	for rows.Next() {
+		var i ListArchivedPaseoDeliveriesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.IssueNumber,
+			&i.IssueTitle,
+			&i.HostID,
+			&i.SessionID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listClaimableDeliveryIDs = `-- name: ListClaimableDeliveryIDs :many
 WITH ranked AS (
     SELECT m.id,

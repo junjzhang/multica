@@ -68,6 +68,14 @@ export class FakeApi implements MulticaApi {
   private tokenSequence = 0;
   private readonly tokenSubjects = new Map<string, string>();
   private readonly registeredSessions = new Map<string, string>();
+  boardSessionId?: string;
+
+  async findPaseoSession(credential: ApiCredential, hostId: string, sessionId: string) {
+    this.credentialCalls.push(credential);
+    const registered = this.registrations.find((input) => input.hostId === hostId && input.sessionId === sessionId);
+    const id = this.registeredSessions.get(sessionId) ?? this.boardSessionId;
+    return id ? { agent_id: sessionId === SESSION_B ? AGENT_B : AGENT_A, session_id: id, daemon_id: registered?.daemonId ?? DAEMON_ID } : null;
+  }
 
   async registerExternalAgent(
     credential: ApiCredential,
@@ -117,12 +125,12 @@ export class FakeApi implements MulticaApi {
     this.revoked.push({ agentId, tokenId });
   }
 
-  readonly tasksCalls: { agentId: string; token: string }[] = [];
+  readonly tasksCalls: { agentId: string; sessionId?: string; token: string }[] = [];
   tasksResult: SessionTasksWire | Error = makeTasksWire();
 
-  async listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire> {
+  async listSessionTasks(credential: ApiCredential, agentId: string, sessionId?: string): Promise<SessionTasksWire> {
     this.credentialCalls.push(credential);
-    this.tasksCalls.push({ agentId, token: credential.token });
+    this.tasksCalls.push({ agentId, sessionId, token: credential.token });
     if (this.tasksResult instanceof Error) throw this.tasksResult;
     return this.tasksResult;
   }

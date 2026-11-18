@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -67,6 +68,45 @@ func TestSessionConnectVerifiesActor(t *testing.T) {
 			for _, request := range api.recorded() {
 				if request.Authorization != "Bearer mea_session_token" {
 					t.Fatalf("wrong credential: %s", request.Authorization)
+				}
+			}
+		})
+	}
+}
+
+func TestBusinessCommandRenewsPaseoCredentialOnlyWhenNeeded(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		ttl    time.Duration
+		cached bool
+		renew  bool
+	}{
+		{name: "fresh cache", ttl: time.Hour, cached: true},
+		{name: "nearly expired", ttl: 2 * time.Minute, cached: true, renew: true},
+		{name: "expired", ttl: -time.Minute, cached: true, renew: true},
+		{name: "first use", renew: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api := newFakeAPI(t)
+			api.mailboxAgentID = "agent-1"
+			home := t.TempDir()
+			env := connectProcessEnv(t, home, api.server.URL)
+			if test.cached {
+				writeSessionBinding(t, defaultSessionPath(home, "paseo-agent-1"), sessionBinding("paseo-agent-1", api.server.URL, map[string]any{
+					"expires_at": time.Now().Add(test.ttl).UTC().Format(time.RFC3339),
+				}))
+			}
+			stdout, stderr, code := api.runCLI(t, home, env, "issue", "list", "--output", "json")
+			if code != 0 {
+				t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+			}
+			_, err := os.Stat(env["CONNECT_ARGS"])
+			if (err == nil) != test.renew {
+				t.Fatalf("renew=%v, RPC marker error=%v", test.renew, err)
+			}
+			for _, request := range api.recorded() {
+				if request.Authorization != "Bearer mea_session_token" {
+					t.Fatalf("unexpected credential on %s", request.Path)
 				}
 			}
 		})

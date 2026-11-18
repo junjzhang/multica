@@ -378,6 +378,22 @@ LIMIT 50;
 -- name: DeleteAgentMailboxMessagesForIssue :exec
 DELETE FROM agent_mailbox_message WHERE issue_id = $1;
 
+-- name: ListArchivedPaseoDeliveries :many
+SELECT m.id, i.number AS issue_number, i.title AS issue_title, target.host_id, target.session_id
+FROM agent_mailbox_message m
+JOIN issue i ON i.workspace_id = m.workspace_id AND i.id = m.issue_id
+JOIN external_agent_session target ON target.workspace_id = m.workspace_id AND target.id = m.target_session_id
+WHERE m.workspace_id = @workspace_id
+  AND target.provider = 'paseo'
+  AND m.delivery_status = 'failed'
+  AND m.last_error LIKE 'agent\_archived:%'
+  AND m.withdrawn_at IS NULL
+  AND m.processing_status <> 'handled'
+  AND (sqlc.narg('session_id')::uuid IS NULL OR
+       m.target_session_id = sqlc.narg('session_id') OR m.source_session_id = sqlc.narg('session_id'))
+ORDER BY m.updated_at DESC, m.id DESC
+LIMIT 50;
+
 -- name: DeleteAgentMailboxMessagesForComment :exec
 DELETE FROM agent_mailbox_message WHERE comment_id = $1;
 

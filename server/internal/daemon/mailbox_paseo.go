@@ -218,6 +218,12 @@ func classifyPaseoRunError(ctx context.Context, stderr []byte, runErr error) err
 				Code:    code,
 				Message: "paseo host requires an upgrade before it can accept atomic if-idle delivery",
 			}
+		case "agent_archived", "AGENT_ARCHIVED":
+			return &delivery.HostError{
+				Kind:    delivery.HostSessionArchived,
+				Code:    "agent_archived",
+				Message: "the Paseo session is archived; open the session and retry manually",
+			}
 		case "AGENT_NOT_FOUND":
 			return &delivery.HostError{
 				Kind:    delivery.HostRejected,

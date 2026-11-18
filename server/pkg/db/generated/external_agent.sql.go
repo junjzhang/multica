@@ -269,6 +269,25 @@ func (q *Queries) CreateExternalAgentToken(ctx context.Context, arg CreateExtern
 	return i, err
 }
 
+const deleteExpiredExternalAgentTokens = `-- name: DeleteExpiredExternalAgentTokens :execrows
+DELETE FROM external_agent_token
+WHERE id IN (
+    SELECT id FROM external_agent_token
+    WHERE expires_at <= now()
+    ORDER BY expires_at, id
+    LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+)
+`
+
+func (q *Queries) DeleteExpiredExternalAgentTokens(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredExternalAgentTokens)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getExternalAgentSessionByAgentID = `-- name: GetExternalAgentSessionByAgentID :one
 SELECT id, workspace_id, owner_user_id, agent_id, provider, host_id, session_id, display_name, url, daemon_id, created_at, updated_at, revoked_at FROM external_agent_session
 WHERE agent_id = $1

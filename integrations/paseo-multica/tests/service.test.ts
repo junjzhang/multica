@@ -30,7 +30,7 @@ import {
 } from "./fixtures";
 
 const NOW = new Date("2026-10-26T12:00:00.000Z");
-const TTL = 90 * 24 * 60 * 60 * 1000;
+const TTL = 60 * 60 * 1000;
 
 async function setup(options: {
   api?: FakeApi;
@@ -46,7 +46,6 @@ async function setup(options: {
     api,
     readSettings: async () => options.settings ?? { ownerProfile: "", daemonId: DAEMON_ID },
     now: () => NOW,
-    tokenTtlMs: TTL,
   });
   return { home, api, service };
 }
@@ -102,6 +101,33 @@ describe("session service", () => {
     // The credential is checked against the Multica agent it was minted for,
     // never against the composer's Paseo session id.
     expect(api.verified).toEqual([{ agentId: AGENT_A, token: EXTERNAL_TOKEN }]);
+  });
+
+  it("refuses renewal while archived or missing, then renews the same identity after restore", async () => {
+    const home = await makeHome();
+    const api = new FakeApi();
+    let now = NOW;
+    const host = fakeHost();
+    let current = host;
+    const service = createSessionService({
+      home, api, now: () => now, readSettings: async () => ({ ownerProfile: "", daemonId: DAEMON_ID }),
+      paseo: { listHosts: host.listHosts, refreshAgent: (agentId) => current.refreshAgent(agentId) },
+    });
+    const first = await service.connect(SESSION_A);
+    now = new Date(NOW.getTime() + TTL - 60_000);
+    current = fakeHost({ archivedAt: now.toISOString() });
+    await expect(service.connect(SESSION_A)).rejects.toThrow(/archived/);
+    current = fakeHost({ exists: false });
+    await expect(service.connect(SESSION_A)).rejects.toThrow(/no longer exists/);
+    expect(api.tokensRequested).toHaveLength(1);
+    current = host;
+    const restored = await service.connect(SESSION_A);
+    expect(restored.agentId).toBe(first.agentId);
+    expect(restored.expiresAt).toBe(new Date(now.getTime() + TTL).toISOString());
+    expect(api.registrations).toHaveLength(1);
+    expect(api.tokensRequested.map((token) => token.sessionId)).toEqual([api.tokensRequested[0].sessionId, api.tokensRequested[0].sessionId]);
+    expect(JSON.stringify(restored)).not.toContain(OWNER_TOKEN);
+    expect(JSON.stringify(await readSessionContext(home, SESSION_A))).not.toContain(OWNER_TOKEN);
   });
 
   it("reports a remotely revoked credential from status without repairing it", async () => {
@@ -213,7 +239,7 @@ describe("session service", () => {
 
   it("repairs a revoked credential with a fresh token for the same agent", async () => {
     const { home, api, service } = await setup();
-    const existing = makeContext({ expires_at: new Date(NOW.getTime() + 60_000).toISOString() });
+    const existing = makeContext({ expires_at: new Date(NOW.getTime() + TTL).toISOString() });
     await writeSessionContext(home, existing);
     api.verifyResult = "invalid";
 
@@ -232,7 +258,7 @@ describe("session service", () => {
 
   it("does not mint a replacement when credential verification is inconclusive", async () => {
     const { home, api, service } = await setup();
-    const existing = makeContext({ expires_at: new Date(NOW.getTime() + 60_000).toISOString() });
+    const existing = makeContext({ expires_at: new Date(NOW.getTime() + TTL).toISOString() });
     await writeSessionContext(home, existing);
     api.verifyResult = "throw";
 
@@ -427,9 +453,12 @@ describe("session board service", () => {
   const wireIssue = (id: string, identifier: string, extra: Record<string, unknown> = {}) => ({ id, identifier, title: identifier, status: "todo", status_category: "unstarted", last_activity_at: "2026-10-25T12:00:00Z", ...extra });
 
   function routes(api: FakeApi, sessionId: string) {
+    api.boardSessionId = sessionId;
     const session = { type: "agent", id: AGENT_A, session_id: sessionId };
     api.routes.set(`/api/workspaces/${WORKSPACE_ID}`, { slug: "acme" });
-    api.routes.set(`/api/agents/${AGENT_A}`, { owner_id: "user-1" });
+    api.routes.set("/api/me", { id: "user-1" });
+    api.routes.set("/api/agents/external/archived-deliveries", []);
+    api.routes.set(`/api/agents/external/archived-deliveries?session_id=${sessionId}`, []);
     api.routes.set(`/api/issues/${OWNED}`, wireIssue(OWNED, "WORK-1", {
       status: "in_progress", status_category: "started", project_id: "project-1",
       contract: { pending_actor: session, acceptor: session, executor: { type: "agent", id: AGENT_B }, accepted: [0], stale: false, contract: { versions: [{ criteria: ["works"] }] } },
@@ -460,7 +489,6 @@ describe("session board service", () => {
 
   it("loads the session's task trees from existing Multica reads", async () => {
     const { home, api, service } = await setup({ settings: { ownerProfile: "", daemonId: DAEMON_ID, forgeUsernames: "jayjayzhang, other" } });
-    await writeSessionContext(home, makeContext());
     routes(api, api.tasksResult instanceof Error ? "" : api.tasksResult.session_id!);
 
     const view = await service.board(SESSION_A, "session");
@@ -482,7 +510,11 @@ describe("session board service", () => {
     expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}`);
     expect(api.gets).not.toContain(`/api/issues/${DONE_CHILD}/task-runs`);
     expect(api.gets.filter((path) => path === `/api/issues/${OWNED}`)).toHaveLength(1);
-    expect(api.credentialCalls.every((credential) => credential.token === EXTERNAL_TOKEN)).toBe(true);
+    expect(api.tasksCalls).toEqual([{ agentId: AGENT_A, sessionId: api.boardSessionId, token: OWNER_TOKEN }]);
+    expect(api.credentialCalls.every((credential) => credential.token === OWNER_TOKEN)).toBe(true);
+    expect(JSON.stringify(view)).not.toContain(OWNER_TOKEN);
+    expect(api.tokensRequested).toHaveLength(0);
+    expect((await readSessionContext(home, SESSION_A)).status).toBe("missing");
 
     const reads = api.gets.length;
     await service.board(SESSION_A, "session");
@@ -512,19 +544,19 @@ describe("session board service", () => {
     expect(view.issues.find((issue) => issue.id === mine)?.contract?.accepted).toBe(true);
   });
 
-  it("drops the cached board when the session disconnects", async () => {
+  it("keeps the registered session's board when its local credential is removed", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
     routes(api, "session");
     expect((await service.board(SESSION_A, "session")).state).toBe("ready");
     await service.disconnect(SESSION_A);
-    expect((await service.board(SESSION_A, "session")).state).toBe("disconnected");
+    expect((await service.board(SESSION_A, "session", true)).state).toBe("ready");
   });
 
   it("roots the all view at open tasks whose parent is not open and names projects", async () => {
-    const { home, api, service } = await setup();
-    await writeSessionContext(home, makeContext());
+    const { api, service } = await setup();
     routes(api, "session");
+    api.boardSessionId = undefined;
     api.routes.set("/api/issues?open_only=true", { issues: [
       wireIssue(OWNED, "WORK-1", { project_id: "project-1" }),
       wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED }),
@@ -541,6 +573,8 @@ describe("session board service", () => {
     expect(view.rootIds).toEqual([OWNED, ACCEPTING]);
     expect(view.issues.map((issue) => issue.id).sort()).toEqual([OWNED, ACCEPTING, OPEN_CHILD].sort());
     expect(view.projects).toEqual([{ id: "project-1", name: "Paseo" }]);
+    expect(api.tasksCalls).toHaveLength(0);
+    expect(api.registrations).toHaveLength(0);
   });
 
   it("reports a failed board read as unavailable without leaking the credential", async () => {
@@ -553,45 +587,38 @@ describe("session board service", () => {
     expect(JSON.stringify(view)).not.toContain(EXTERNAL_TOKEN);
   });
 
-  it("explains a missing binding and never calls the server", async () => {
+  it("returns an empty session board when no identity has been registered", async () => {
     const { api, service } = await setup();
     const view = await service.board(SESSION_A, "session");
-    expect(view.state).toBe("disconnected");
-    if (view.state !== "disconnected") return;
-    expect(view.reason).toMatch(/no Multica binding/);
-    expect(view.reason).toMatch(/\/multica connect/);
+    expect(view).toMatchObject({ state: "ready", issues: [] });
     expect(api.tasksCalls).toHaveLength(0);
   });
 
-  it("explains a malformed local context instead of guessing", async () => {
+  it("ignores a malformed local credential when reading the board", async () => {
     const home = await makeHome();
     await mkdir(join(home, ".multica", "external-sessions", "paseo"), { recursive: true });
     await writeFile(contextPath(home, SESSION_A), "{broken");
     const { service } = await setup({ home });
     const view = await service.board(SESSION_A, "session");
-    expect(view.state).toBe("disconnected");
-    if (view.state !== "disconnected") return;
-    expect(view.reason).toMatch(/not valid JSON/);
+    expect(view).toMatchObject({ state: "ready", issues: [] });
   });
 
-  it("does not send an expired credential and says how to repair it", async () => {
+  it("uses the owner for a registered session even with an expired cached credential", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext({ expires_at: new Date(NOW.getTime() - 1_000).toISOString() }));
-    const view = await service.board(SESSION_A, "session");
-    expect(view.state).toBe("unavailable");
-    if (view.state !== "unavailable") return;
-    expect(view.reason).toMatch(/expired/);
-    expect(view.reason).toMatch(/\/multica connect/);
-    expect(api.tasksCalls).toHaveLength(0);
+    routes(api, "session");
+    expect((await service.board(SESSION_A, "session")).state).toBe("ready");
+    expect(api.tasksCalls).toEqual([{ agentId: AGENT_A, sessionId: "session", token: OWNER_TOKEN }]);
   });
 
   it.each([
-    [403, /no registered session/],
+    [403, /cannot read this board/],
     [404, /does not expose session task summaries/],
-    [401, /no longer accepts/],
+    [401, /Sign in again/],
   ] as const)("degrades a %d response to an explanatory view", async (status, reason) => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
+    api.boardSessionId = "session";
     api.tasksResult = new MulticaApiError(status, "rejected");
     const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
@@ -602,6 +629,7 @@ describe("session board service", () => {
   it("degrades a transport failure without leaking the credential", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
+    api.boardSessionId = "session";
     api.tasksResult = new Error(`socket closed for ${EXTERNAL_TOKEN}`);
     const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
