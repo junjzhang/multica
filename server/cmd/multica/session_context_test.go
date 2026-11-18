@@ -431,12 +431,12 @@ func TestCLIProcessFailsClosedWithoutBinding(t *testing.T) {
 	home := t.TempDir()
 	writeHumanProfile(t, home, humanAPI.server.URL)
 
-	_, stderr, exitCode := humanAPI.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}, "issue", "list")
+	_, stderr, exitCode := humanAPI.runCLI(t, home, map[string]string{"PASEO_AGENT_ID": "paseo-agent-1", "PATH": t.TempDir()}, "issue", "list")
 	if exitCode == 0 {
 		t.Fatalf("exit code = 0, want a failure; stderr:\n%s", stderr)
 	}
 	assertSessionConnectHint(t, stderr)
-	for _, want := range []string{"no Multica binding", "multica session connect"} {
+	for _, want := range []string{"could not obtain a Multica credential", "Paseo CLI was not found"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
@@ -510,7 +510,7 @@ func TestCLIProcessRejectsConflictingOrInvalidBindings(t *testing.T) {
 				}))
 			},
 			args: []string{"issue", "list"},
-			want: "expired",
+			want: "could not obtain a Multica credential",
 		},
 		{
 			name: "wrong provider",
@@ -565,7 +565,7 @@ func TestCLIProcessRejectsConflictingOrInvalidBindings(t *testing.T) {
 				t.Fatalf("reset session dir: %v", err)
 			}
 			tc.prepare(t)
-			env := map[string]string{"PASEO_AGENT_ID": "paseo-agent-1"}
+			env := map[string]string{"PASEO_AGENT_ID": "paseo-agent-1", "PATH": t.TempDir()}
 			for key, value := range tc.env {
 				env[key] = value
 			}

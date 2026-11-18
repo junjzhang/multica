@@ -66,6 +66,13 @@ const viewerSchema = z.object({
 });
 export type Viewer = z.infer<typeof viewerSchema>;
 
+const archivedDeliverySchema = z.object({
+  id: z.string(),
+  issueIdentifier: z.string(),
+  issueTitle: z.string(),
+  sessionUrl: z.string(),
+});
+
 const readyBoardSchema = z.object({
   state: z.literal("ready"),
   scope: z.enum(BOARD_SCOPES),
@@ -73,6 +80,7 @@ const readyBoardSchema = z.object({
   issues: z.array(issueSchema),
   rootIds: z.array(z.string()),
   projects: z.array(z.object({ id: z.string(), name: z.string() })),
+  archivedDeliveries: z.array(archivedDeliverySchema).optional(),
   truncated: z.boolean(),
   checkedAt: z.string(),
 });
@@ -325,8 +333,11 @@ export function pillLabel(data: BoardData, now: number): PillSummary {
   if (data.state === "unavailable") return { label: "Multica · 不可用", title: data.reason };
   const board = buildBoard(data, now);
   const focus = [...board.sections.attention, ...board.sections.active, ...board.sections.parked][0];
-  if (!focus) return { label: "Multica · 无任务", title: "本会话没有 Multica 任务" };
-  const count = new Set(board.todos.map((todo) => `${todo.kind}:${todo.issue.id}`)).size;
+  const archivedCount = data.archivedDeliveries?.length ?? 0;
+  if (!focus) {
+    return archivedCount ? { label: `Multica · 待办 ${archivedCount}`, title: "投递失败：会话已归档" } : { label: "Multica · 无任务", title: "本会话没有 Multica 任务" };
+  }
+  const count = new Set(board.todos.map((todo) => `${todo.kind}:${todo.issue.id}`)).size + archivedCount;
   const label = `${focus.issue.identifier} · ${count > 0 ? `待办 ${count}` : "无待办"}`;
   const title = `${focus.issue.identifier} ${focus.issue.title}`;
   return focus.total > 0 ? { label, title, progress: { done: focus.done, total: focus.total } } : { label, title };

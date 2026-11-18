@@ -3,10 +3,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
@@ -61,24 +63,16 @@ type SessionTasksResponse struct {
 	Truncated bool `json:"truncated"`
 }
 
-// GetAgentSessionTasks reads the task summary for one agent's session. It is a
-// read projection only: no obligation changes, and the caller must present the
-// agent's own session-bound external credential.
-//
-// Each group uses an authoritative session relationship; agent identity alone
-// does not associate historical work with a conversation.
 func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
-	// The projection is the session's own view: a human manager, a task token
-	// or a sibling agent credential has no session to summarize for.
-	if !isExternalAgentActor(r) {
-		writeError(w, http.StatusForbidden, "this read is only available to a session credential")
+	if isMachineCredentialActor(r) && !isExternalAgentActor(r) {
+		writeError(w, http.StatusForbidden, "this read requires a session credential or an authorized human")
 		return
 	}
 	agent, ok := h.loadAgentForSessionRead(w, r)
 	if !ok {
 		return
 	}
-	sessionID, ok := h.requireExternalActorSession(w, r)
+	sessionID, ok := h.selectSessionForTaskRead(w, r, agent)
 	if !ok {
 		return
 	}
@@ -133,6 +127,95 @@ func (h *Handler) GetAgentSessionTasks(w http.ResponseWriter, r *http.Request) {
 		Truncated:   ownedCut || acceptingCut || returningCut || delegatedCut || requestsCut,
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) selectSessionForTaskRead(w http.ResponseWriter, r *http.Request, agent db.Agent) (pgtype.UUID, bool) {
+	raw := r.URL.Query().Get("session_id")
+	if isExternalAgentActor(r) {
+		if raw != "" {
+			writeError(w, http.StatusForbidden, "session credentials cannot select another session")
+			return pgtype.UUID{}, false
+		}
+		return h.requireExternalActorSession(w, r)
+	}
+	sessionID, ok := parseUUIDOrBadRequest(w, raw, "session_id")
+	if !ok {
+		return pgtype.UUID{}, false
+	}
+	session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
+		ID: sessionID, WorkspaceID: agent.WorkspaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && session.AgentID != agent.ID) {
+		writeError(w, http.StatusNotFound, "session not found for this agent")
+		return pgtype.UUID{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load session")
+		return pgtype.UUID{}, false
+	}
+	return sessionID, true
+}
+
+type archivedPaseoDelivery struct {
+	ID              string `json:"id"`
+	IssueIdentifier string `json:"issue_identifier"`
+	IssueTitle      string `json:"issue_title"`
+	HostID          string `json:"host_id"`
+	SessionID       string `json:"session_id"`
+}
+
+func (h *Handler) ListArchivedPaseoDeliveries(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+	if !ok {
+		return
+	}
+	member, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin", "member")
+	if !ok {
+		return
+	}
+	var ownerUserID pgtype.UUID
+	if !roleAllowed(member.Role, "owner", "admin") {
+		ownerUserID = member.UserID
+	}
+	var sessionID pgtype.UUID
+	if raw := r.URL.Query().Get("session_id"); raw != "" {
+		sessionID, ok = parseUUIDOrBadRequest(w, raw, "session_id")
+		if !ok {
+			return
+		}
+		session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
+			ID: sessionID, WorkspaceID: workspaceUUID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && ownerUserID.Valid && session.OwnerUserID != ownerUserID) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load session")
+			return
+		}
+	}
+	workspace, err := h.Queries.GetWorkspace(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load workspace")
+		return
+	}
+	rows, err := h.Queries.ListArchivedPaseoDeliveries(r.Context(), db.ListArchivedPaseoDeliveriesParams{
+		WorkspaceID: workspaceUUID, SessionID: sessionID, OwnerUserID: ownerUserID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load archived deliveries")
+		return
+	}
+	deliveries := make([]archivedPaseoDelivery, 0, len(rows))
+	for _, row := range rows {
+		deliveries = append(deliveries, archivedPaseoDelivery{
+			ID: uuidToString(row.ID), IssueIdentifier: fmt.Sprintf("%s-%d", issuePrefixForWorkspace(workspace), row.IssueNumber),
+			IssueTitle: row.IssueTitle, HostID: row.HostID, SessionID: row.SessionID,
+		})
+	}
+	writeJSON(w, http.StatusOK, deliveries)
 }
 
 func (h *Handler) sessionRequests(r *http.Request, p *sessionTaskProjection, agent db.Agent, sessionID pgtype.UUID) ([]SessionTaskItem, bool, error) {

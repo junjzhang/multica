@@ -154,6 +154,40 @@ func validatePaseoSessionURL(raw string) (*string, string) {
 	return &raw, ""
 }
 
+func (h *Handler) GetOwnPaseoSession(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+	if !ok {
+		return
+	}
+	ownerID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := h.requireWorkspaceRole(w, r, workspaceID, "workspace not found", "owner", "admin", "member"); !ok {
+		return
+	}
+	hostID, sessionID := r.URL.Query().Get("host_id"), r.URL.Query().Get("session_id")
+	if !externalSessionIDPattern.MatchString(hostID) || !externalSessionIDPattern.MatchString(sessionID) {
+		writeError(w, http.StatusBadRequest, "host_id and session_id must be Paseo locators")
+		return
+	}
+	session, err := h.Queries.GetExternalAgentSessionByIdentity(r.Context(), db.GetExternalAgentSessionByIdentityParams{
+		WorkspaceID: workspaceUUID, OwnerUserID: parseUUID(ownerID), Provider: "paseo", HostID: hostID, SessionID: sessionID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusOK, nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to look up external session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"agent_id": uuidToString(session.AgentID), "session_id": uuidToString(session.ID), "daemon_id": session.DaemonID,
+	})
+}
+
 // sanitizeExternalDisplayName strips control characters and bounds the rune
 // count. The value is presentation only; identity never depends on it.
 func sanitizeExternalDisplayName(raw, fallback string) string {

@@ -37,7 +37,14 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+	if err := issuePaseoSessionCredential(cmd.Context(), agentID); err != nil {
+		return err
+	}
+	return runSessionStatus(cmd, nil)
+}
+
+func issuePaseoSessionCredential(parent context.Context, agentID string) error {
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	input, _ := json.Marshal(map[string]string{"agentId": agentID})
 	process := exec.CommandContext(ctx, "paseo", "plugin", "rpc", "paseo-multica", "session.connect", "--input-json", string(input), "--json")
@@ -66,7 +73,7 @@ func runSessionConnect(cmd *cobra.Command, _ []string) error {
 	if json.Unmarshal(stdout.Bytes(), &connected) != nil || connected.State != "connected" || connected.SessionID != agentID {
 		return fmt.Errorf("Paseo plugin did not confirm a connection for the current session; inspect `multica session status`")
 	}
-	return runSessionStatus(cmd, nil)
+	return nil
 }
 
 func sessionConnectRPCError(data []byte) error {

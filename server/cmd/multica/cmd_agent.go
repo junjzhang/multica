@@ -279,12 +279,9 @@ func newAPIClientWithIdentity(cmd *cobra.Command, requireAgentIdentity bool) (*c
 		// commands that act on its behalf. It is resolved before any human-profile
 		// lookup so a missing or broken file fails closed instead of quietly
 		// falling through to the person who owns the machine.
-		if session, err := externalSessionForCommand(); err != nil {
+		if session, err := externalSessionForCommand(cmd); err != nil {
 			return nil, err
 		} else if session != nil {
-			if err := sessionContextConflicts(cmd, session); err != nil {
-				return nil, err
-			}
 			client := cli.NewAPIClient(session.ServerURL, session.WorkspaceID, session.Token)
 			client.ReturnSession = session.SessionID
 			// A file that names agent B does not prove the token belongs to B.
