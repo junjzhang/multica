@@ -20,7 +20,7 @@ The server sweeps up to 1,000 expired external token rows every minute in a boun
 
 The plugin uses its owner profile to read both board views. The session view resolves an exact registry record and passes its record ID to `session-tasks`. An authorized human can select a session belonging to the readable agent in the same workspace. A session credential continues to use the session from authentication. An unregistered conversation has an empty session view and can still open the workspace view.
 
-Atomic if-idle delivery treats `agent_archived` as a terminal failure and stores the reason on the delivery. The board shows recent archived failures under **需要你**, including deliveries attached to completed issues. The session view filters by the registered source or target. **在 Paseo 中打开** navigates to the frozen target. Restore the conversation in Paseo and initiate a new delivery manually.
+Atomic if-idle delivery treats `agent_archived` as a terminal failure and stores the reason on the delivery. The board shows recent archived failures under **需要你**, including deliveries attached to completed issues. Workspace owners and admins can see these failures across the workspace. Other members can see them when they own the source or target session. The session view filters by the registered source or target. **在 Paseo 中打开** navigates to the frozen target. Restore the conversation in Paseo and initiate a new delivery manually. The original failure stays visible until it is handled or withdrawn, or falls outside the recent results.
 
 ## Rollout and migration
 

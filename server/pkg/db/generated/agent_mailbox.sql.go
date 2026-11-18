@@ -991,6 +991,7 @@ SELECT m.id, i.number AS issue_number, i.title AS issue_title, target.host_id, t
 FROM agent_mailbox_message m
 JOIN issue i ON i.workspace_id = m.workspace_id AND i.id = m.issue_id
 JOIN external_agent_session target ON target.workspace_id = m.workspace_id AND target.id = m.target_session_id
+LEFT JOIN external_agent_session source ON source.workspace_id = m.workspace_id AND source.id = m.source_session_id
 WHERE m.workspace_id = $1
   AND target.provider = 'paseo'
   AND m.delivery_status = 'failed'
@@ -998,13 +999,16 @@ WHERE m.workspace_id = $1
   AND m.withdrawn_at IS NULL
   AND m.processing_status <> 'handled'
   AND ($2::uuid IS NULL OR
-       m.target_session_id = $2 OR m.source_session_id = $2)
+       target.owner_user_id = $2 OR source.owner_user_id = $2)
+  AND ($3::uuid IS NULL OR
+       m.target_session_id = $3 OR m.source_session_id = $3)
 ORDER BY m.updated_at DESC, m.id DESC
 LIMIT 50
 `
 
 type ListArchivedPaseoDeliveriesParams struct {
 	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	OwnerUserID pgtype.UUID `json:"owner_user_id"`
 	SessionID   pgtype.UUID `json:"session_id"`
 }
 
@@ -1017,7 +1021,7 @@ type ListArchivedPaseoDeliveriesRow struct {
 }
 
 func (q *Queries) ListArchivedPaseoDeliveries(ctx context.Context, arg ListArchivedPaseoDeliveriesParams) ([]ListArchivedPaseoDeliveriesRow, error) {
-	rows, err := q.db.Query(ctx, listArchivedPaseoDeliveries, arg.WorkspaceID, arg.SessionID)
+	rows, err := q.db.Query(ctx, listArchivedPaseoDeliveries, arg.WorkspaceID, arg.OwnerUserID, arg.SessionID)
 	if err != nil {
 		return nil, err
 	}

@@ -630,12 +630,12 @@ describe("session board service", () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
     api.boardSessionId = "session";
-    api.tasksResult = new Error(`socket closed for ${EXTERNAL_TOKEN}`);
+    api.tasksResult = new Error(`socket closed for ${OWNER_TOKEN}`);
     const view = await service.board(SESSION_A, "session");
     expect(view.state).toBe("unavailable");
     if (view.state !== "unavailable") return;
     expect(view.reason).toMatch(/Could not read this session's Multica tasks/);
-    expect(view.reason).not.toContain(EXTERNAL_TOKEN);
+    expect(view.reason).not.toContain(OWNER_TOKEN);
   });
 });
 

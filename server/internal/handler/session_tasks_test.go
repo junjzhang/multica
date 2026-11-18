@@ -445,6 +445,16 @@ func TestPaseoOwnerReadsArchiveFailuresForExactSession(t *testing.T) {
 		}
 	}
 	testutil.Call(t, testHandler.ListArchivedPaseoDeliveries, newRequestAs(sourceOwner, http.MethodGet, path+"?session_id="+targetID, nil)).Want(http.StatusNotFound)
+
+	unrelatedOwner := dbfx.User(t, "Unrelated member", "unrelated-archived-"+target.SessionID+"@test.local")
+	dbfx.Member(t, testWorkspaceID, unrelatedOwner, "member")
+	var rows []archivedPaseoDelivery
+	testutil.Call(t, testHandler.ListArchivedPaseoDeliveries, newRequestAs(unrelatedOwner, http.MethodGet, path, nil)).Want(http.StatusOK).JSON(&rows)
+	for _, row := range rows {
+		if row.ID == failed {
+			t.Fatalf("ordinary member received another member's archived delivery: %+v", row)
+		}
+	}
 }
 
 func TestExpiredExternalTokenCleanupKeepsSessionAndLiveToken(t *testing.T) {

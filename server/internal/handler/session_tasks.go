@@ -174,6 +174,10 @@ func (h *Handler) ListArchivedPaseoDeliveries(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	var ownerUserID pgtype.UUID
+	if !roleAllowed(member.Role, "owner", "admin") {
+		ownerUserID = member.UserID
+	}
 	var sessionID pgtype.UUID
 	if raw := r.URL.Query().Get("session_id"); raw != "" {
 		sessionID, ok = parseUUIDOrBadRequest(w, raw, "session_id")
@@ -183,7 +187,7 @@ func (h *Handler) ListArchivedPaseoDeliveries(w http.ResponseWriter, r *http.Req
 		session, err := h.Queries.GetExternalAgentSessionByID(r.Context(), db.GetExternalAgentSessionByIDParams{
 			ID: sessionID, WorkspaceID: workspaceUUID,
 		})
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && session.OwnerUserID != member.UserID && !roleAllowed(member.Role, "owner", "admin")) {
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && ownerUserID.Valid && session.OwnerUserID != ownerUserID) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
@@ -198,7 +202,7 @@ func (h *Handler) ListArchivedPaseoDeliveries(w http.ResponseWriter, r *http.Req
 		return
 	}
 	rows, err := h.Queries.ListArchivedPaseoDeliveries(r.Context(), db.ListArchivedPaseoDeliveriesParams{
-		WorkspaceID: workspaceUUID, SessionID: sessionID,
+		WorkspaceID: workspaceUUID, SessionID: sessionID, OwnerUserID: ownerUserID,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load archived deliveries")

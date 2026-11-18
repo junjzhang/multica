@@ -383,12 +383,15 @@ SELECT m.id, i.number AS issue_number, i.title AS issue_title, target.host_id, t
 FROM agent_mailbox_message m
 JOIN issue i ON i.workspace_id = m.workspace_id AND i.id = m.issue_id
 JOIN external_agent_session target ON target.workspace_id = m.workspace_id AND target.id = m.target_session_id
+LEFT JOIN external_agent_session source ON source.workspace_id = m.workspace_id AND source.id = m.source_session_id
 WHERE m.workspace_id = @workspace_id
   AND target.provider = 'paseo'
   AND m.delivery_status = 'failed'
   AND m.last_error LIKE 'agent\_archived:%'
   AND m.withdrawn_at IS NULL
   AND m.processing_status <> 'handled'
+  AND (sqlc.narg('owner_user_id')::uuid IS NULL OR
+       target.owner_user_id = sqlc.narg('owner_user_id') OR source.owner_user_id = sqlc.narg('owner_user_id'))
   AND (sqlc.narg('session_id')::uuid IS NULL OR
        m.target_session_id = sqlc.narg('session_id') OR m.source_session_id = sqlc.narg('session_id'))
 ORDER BY m.updated_at DESC, m.id DESC
