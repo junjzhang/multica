@@ -45,7 +45,8 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   expect(first).toContain("slime 修复\n!813 待你审批");
   expect(first).toContain("删除会话 MR\n待验收");
   expect(first.split("slime 修复").length).toBe(2);
-  expect(first).toContain("统一 Leader 视图\n0/1");
+  expect(first).toContain("统一 Leader 视图");
+  expect(first).not.toContain("0/1");
   expect(first).not.toContain("feat(ui)");
   expect(first).not.toContain("WORK-");
   expect(first).toContain("搁置\n1");
@@ -67,7 +68,7 @@ it("lists what needs you once, then the trees, on single lines", async () => {
 
   await press(renderer!, "展开 WORK-497");
   expect(text(renderer!)).toContain("mimikyu!818 清理分支\nCI 运行中");
-  expect(text(renderer!)).not.toContain("mimikyu!700");
+  expect(text(renderer!)).toMatch(/mimikyu!818 清理分支[\s\S]*mimikyu!700 旧\n已合并/);
   await press(renderer!, "mimikyu!818 清理分支 CI 运行中");
   expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/mimikyu/merge_requests/818");
 
@@ -116,7 +117,9 @@ it("folds a task's MRs into one signal", () => {
   const pr = (id: string, state: string, extra = {}) => ({ id, number: 1, repo: "r", title: "t", state, url: "https://git.woa.com/o/r/merge_requests/1", ...extra });
   const task = (pullRequests: ReturnType<typeof pr>[], extra = {}) => ({ ...base, id: "t", identifier: "T", title: "T", status: "in_progress", pullRequests, ...extra });
   expect(prSignal(task([]))).toBeUndefined();
-  expect(prSignal(task([pr("a", "merged"), pr("b", "closed")]))).toBeUndefined();
+  expect(prSignal(task([pr("b", "closed")]))).toBeUndefined();
+  expect(prSignal(task([pr("a", "merged"), pr("b", "closed")]))).toMatchObject({ icon: "GitMerge", text: "!1" });
+  expect(prSignal(task([pr("a", "merged"), pr("b", "open")]))).toMatchObject({ icon: "GitPullRequest", text: "!1" });
   expect(prSignal(task([pr("a", "open")]))).toMatchObject({ icon: "GitPullRequest", text: "!1" });
   expect(prSignal(task([pr("a", "open"), pr("b", "draft", { ci: "failed" })]))).toMatchObject({ icon: "GitPullRequest", text: "2", tone: "danger" });
   expect(prSignal(task([pr("a", "open", { myReview: "approving" })], { contract: { accepted: true } }))).toMatchObject({ tone: "action" });
@@ -124,7 +127,8 @@ it("folds a task's MRs into one signal", () => {
 });
 
 it("draws a staged parent as a pipeline with only the current batch open", async () => {
-  const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage });
+  const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage,
+    pullRequests: done ? [{ id: `mr-${id}`, number: 813, repo: "slime", title: "t", state: "merged", url: "https://git.woa.com/o/slime/merge_requests/813" }] : [] });
   const parent = { ...base, id: "p", identifier: "P", title: "流水线", status: "in_progress", activeRun: true };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid("a", 1, true), kid("b", 2, false), kid("c", 2, false), kid("d", 3, false)], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
@@ -132,7 +136,12 @@ it("draws a staged parent as a pipeline with only the current batch open", async
   expect(text(renderer!)).toMatch(/流水线\s+第 2\/3 批/);
   await press(renderer!, "展开 P");
   const graph = text(renderer!);
-  expect(graph).toMatch(/第 1 批[\s\S]*1\/1[\s\S]*第 2 批[\s\S]*0\/2[\s\S]*子任务 b[\s\S]*子任务 c[\s\S]*第 3 批/);
+  expect(graph).toMatch(/第 1 批[\s\S]*slime!813[\s\S]*第 2 批[\s\S]*0\/2[\s\S]*子任务 b[\s\S]*子任务 c[\s\S]*第 3 批/);
+  expect(graph).not.toContain("1/1");
+  expect(graph).not.toContain("0/1");
+  openURL.mockClear();
+  await press(renderer!, "slime!813 已合并");
+  expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
   expect(graph).not.toContain("子任务 a");
   expect(graph).not.toContain("子任务 d");
   await press(renderer!, "第 1 批");

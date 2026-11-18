@@ -100,7 +100,9 @@ The panel has two parts:
   status glyph (dotted backlog, ring todo, half in progress, three quarters in
   review, slash blocked), colored amber, green or red for in progress, in review
   and blocked. A row shows its open MRs by number (`!821`, or a count for
-  several); merged and closed MRs are not shown. Children are grouped by
+  several). Merged MRs appear on the rows that delivered them: an open task's
+  merged MRs, and a finished batch, which lists up to three with a count for the
+  rest instead of a `done/total` count. A single-child parent shows no count. Children are grouped by
   `stage` into batches.
 
 **本会话** roots the trees at tasks this session executes, leads, accepts or

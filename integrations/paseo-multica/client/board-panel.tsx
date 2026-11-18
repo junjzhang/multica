@@ -103,23 +103,41 @@ export function treePhrase(tree: TreeNode): Phrase | undefined {
     const staged = tree.stages.filter((group) => group.stage !== undefined);
     const stage = currentStage(tree);
     if (stage && staged.length > 1) return { text: `第 ${staged.indexOf(stage) + 1}/${staged.length} 批` };
-    return { text: `${tree.done}/${tree.total}` };
+    // A single child says nothing a count can add; its own row is the progress.
+    return tree.total > 1 ? { text: `${tree.done}/${tree.total}` } : undefined;
   }
   return undefined;
 }
 
 type Tone = Phrase["tone"];
 
-/** A task's open MRs as one mark: the number of a single MR or the count of several; red for failed CI, amber when it waits for you. Merged and closed MRs are history. */
+/** One mark for a task's MRs: the number of a single MR or the count of several. Open MRs win, red for failed CI and amber when one waits for you; otherwise merged ones in muted. */
 export function prSignal(issue: BoardIssue): { icon: string; text: string; tone?: Tone; label: string } | undefined {
   const open = issue.pullRequests.filter(isOpenPullRequest);
-  if (open.length === 0) return undefined;
+  if (open.length === 0) {
+    const merged = issue.pullRequests.filter(isMerged);
+    return merged.length > 0 ? { icon: "GitMerge", text: countOrNumber(merged), label: `已合并 ${merged.map(prRef).join(" ")}` } : undefined;
+  }
   const tone: Tone = open.some((pr) => pr.ci === "failed") ? "danger" : awaitingApproval(issue).length > 0 ? "action" : undefined;
   const icon = open.every((pr) => pr.state === "draft") ? "GitPullRequestDraft" : "GitPullRequest";
-  return { icon, text: open.length === 1 ? prNumber(open[0]!) : `${open.length}`, ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
+  return { icon, text: countOrNumber(open), ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
+}
+
+function countOrNumber(prs: BoardPullRequest[]): string {
+  return prs.length === 1 ? prNumber(prs[0]!) : `${prs.length}`;
+}
+
+function isMerged(pr: BoardPullRequest): boolean {
+  return pr.state === "merged";
+}
+
+/** What a finished part of a tree delivered: the merged MRs anywhere in it. */
+export function mergedIn(trees: TreeNode[]): BoardPullRequest[] {
+  return trees.flatMap((tree) => [...tree.issue.pullRequests.filter(isMerged), ...mergedIn(tree.stages.flatMap((group) => group.nodes))]);
 }
 
 function prDetail(pr: BoardPullRequest, issue: BoardIssue): Phrase | undefined {
+  if (isMerged(pr)) return { text: "已合并" };
   if (pr.ci === "failed") return { text: "CI 失败", tone: "danger" };
   if (awaitingApproval(issue).includes(pr)) return { text: "待你审批", tone: "action" };
   if (pr.mergeable?.toLowerCase() === "conflicting") return { text: "有冲突", tone: "danger" };
@@ -350,9 +368,9 @@ function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: Ro
 function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: RowContext }) {
   const { expandedIds, toggle, openTask } = row;
   const { issue } = tree;
-  const openPrs = issue.pullRequests.filter(isOpenPullRequest);
+  const prs = [...issue.pullRequests.filter(isOpenPullRequest), ...issue.pullRequests.filter(isMerged)];
   const hasOpenChildren = tree.stages.some((group) => group.nodes.some(isOpen));
-  const expandable = hasOpenChildren || openPrs.length > 0;
+  const expandable = hasOpenChildren || prs.length > 0;
   const expanded = expandable && expandedIds.includes(issue.id);
   return <View>
     <Row
@@ -360,7 +378,7 @@ function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: Row
       onPress={issue.url ? () => openTask(issue.url!, issue.identifier) : undefined}
       disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
     />
-    {expanded ? openPrs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
+    {expanded ? prs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
     {expanded && hasOpenChildren ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
   </View>;
 }
@@ -414,7 +432,8 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
     {tree.stages.map((group, index) => {
       const last = index === tree.stages.length - 1;
       const nodes = group.nodes.filter(isOpen);
-      if (!staged && nodes.length === 0) return null;
+      const delivered = mergedIn(group.nodes.filter((child) => !isOpen(child)));
+      if (!staged && nodes.length === 0 && delivered.length === 0) return null;
       const open = nodes.length > 0 && (!staged || openStages.has(group.stage));
       const state = stateOf(group);
       const toggle = () => setOpenStages((value) => {
@@ -432,9 +451,18 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
             <Text style={{ flex: 1, color: state === "current" ? colors.foreground : colors.foregroundMuted, fontSize: FONT.sm, fontWeight: state === "current" ? "600" : "400" }}>
               {group.stage === undefined ? "未分批" : `第 ${group.stage} 批`}
             </Text>
-            <ProgressBar done={group.done} total={group.total} colors={colors} current={state === "current"} />
-            <Text style={{ minWidth: 28, textAlign: "right", color: colors.foregroundMuted, fontSize: FONT.sm }}>{group.done}/{group.total}</Text>
+            {state === "done" ? <PullRequestLinks prs={delivered} colors={colors} />
+              : group.total > 1 ? <>
+                <ProgressBar done={group.done} total={group.total} colors={colors} current={state === "current"} />
+                <Text style={{ minWidth: 28, textAlign: "right", color: colors.foregroundMuted, fontSize: FONT.sm }}>{group.done}/{group.total}</Text>
+              </> : null}
           </Pressable>
+        </View> : delivered.length > 0 ? <View style={{ flexDirection: "row" }}>
+          <Rail colors={colors} top bottom={!last || open} tick />
+          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingHorizontal: SPACE.sm }}>
+            <Text style={{ flex: 1, color: colors.foregroundMuted, fontSize: FONT.sm }}>已完成 {group.nodes.length - nodes.length} 项</Text>
+            <PullRequestLinks prs={delivered} colors={colors} />
+          </View>
         </View> : null}
         {open ? nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
           <Rail colors={colors} top bottom={!(last && childIndex === nodes.length - 1)} tick />
@@ -445,7 +473,19 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
   </View>;
 }
 
-/** An open MR under its task: number and title, then its one state that matters; opens the MR. */
+/** Merged MR references at a row's end, each opening its MR; a long list ends in a count. */
+function PullRequestLinks({ prs, colors }: { prs: BoardPullRequest[]; colors: Colors }) {
+  const shown = prs.slice(0, 3);
+  return <View style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm }}>
+    {shown.length > 0 ? <Icon name="GitMerge" size={12} color={colors.foregroundMuted} /> : null}
+    {shown.map((pr) => <Pressable key={pr.id} accessibilityRole="link" accessibilityLabel={`${prRef(pr)} 已合并`} onPress={() => void Linking.openURL(pr.url)}>
+      <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, textDecorationLine: "underline" }}>{prRef(pr)}</Text>
+    </Pressable>)}
+    {prs.length > shown.length ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>+{prs.length - shown.length}</Text> : null}
+  </View>;
+}
+
+/** An MR under its task: number and title, then its one state that matters; opens the MR. */
 function PullRequestRow({ pr, issue, depth, row }: { pr: BoardPullRequest; issue: BoardIssue; depth: number; row: RowContext }) {
   const { colors } = row;
   const hover = useHover();
@@ -455,7 +495,7 @@ function PullRequestRow({ pr, issue, depth, row }: { pr: BoardPullRequest; issue
     onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
     style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingLeft: INDENT * depth + GUTTER + SPACE.sm, paddingRight: SPACE.sm, paddingVertical: SPACE.sm, borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface1 : "transparent" }}
   >
-    <Icon name={pr.state === "draft" ? "GitPullRequestDraft" : "GitPullRequest"} size={13} color={colors.foregroundMuted} />
+    <Icon name={isMerged(pr) ? "GitMerge" : pr.state === "draft" ? "GitPullRequestDraft" : "GitPullRequest"} size={13} color={colors.foregroundMuted} />
     <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: FONT.sm }}>{prRef(pr)} {displayTitle(pr.title)}</Text>
     {detail ? <Text numberOfLines={1} style={{ color: toneColor(detail.tone, colors), fontSize: FONT.sm, fontWeight: detail.tone ? "500" : "400" }}>{detail.text}</Text> : null}
   </Pressable>;
