@@ -45,7 +45,8 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   expect(first).toContain("slime 修复\n!813 待你审批");
   expect(first).toContain("删除会话 MR\n待验收");
   expect(first.split("slime 修复").length).toBe(2);
-  expect(first).toContain("统一 Leader 视图\n0/1");
+  expect(first).toContain("统一 Leader 视图");
+  expect(first).not.toContain("0/1");
   expect(first).not.toContain("feat(ui)");
   expect(first).not.toContain("WORK-");
   expect(first).toContain("搁置\n1");
@@ -58,16 +59,16 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   expect(text(renderer!).split("删除会话 MR").length).toBe(3);
 
   await press(renderer!, "搁置");
-  expect(text(renderer!)).toContain("旧任务\n未开始");
+  expect(text(renderer!)).toContain("旧任务");
 
-  await press(renderer!, "WORK-496 删除会话 MR 待验收");
+  await press(renderer!, "WORK-496 评审中 删除会话 MR 待验收");
   expect(openTask).toHaveBeenCalledWith("https://app.example/acme/issues/WORK-496", "WORK-496");
-  await press(renderer!, "WORK-470 slime 修复 !813 待你审批");
+  await press(renderer!, "WORK-470 评审中 slime 修复 !813 待你审批");
   expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
 
   await press(renderer!, "展开 WORK-497");
   expect(text(renderer!)).toContain("mimikyu!818 清理分支\nCI 运行中");
-  expect(text(renderer!)).not.toContain("mimikyu!700");
+  expect(text(renderer!)).toMatch(/mimikyu!818 清理分支[\s\S]*mimikyu!700 旧\n已合并/);
   await press(renderer!, "mimikyu!818 清理分支 CI 运行中");
   expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/mimikyu/merge_requests/818");
 
@@ -94,7 +95,7 @@ it("strips only a conventional-commit prefix and names the current batch on the 
   const board = buildBoard({ issues: [parent, child("a", 1, true), child("b", 2, false), child("c", 3, false)], rootIds: ["p"], viewer: { agentId: "x", forgeUsernames: [] } }, Date.now());
   const tree = [...board.sections.active, ...board.sections.parked][0]!;
   expect(treePhrase(tree)).toEqual({ text: "第 2/3 批" });
-  expect(treePhrase(tree.stages[1]!.nodes[0]!)).toEqual({ text: "未开始" });
+  expect(treePhrase(tree.stages[1]!.nodes[0]!)).toBeUndefined();
 });
 
 it("explains a disconnected session instead of an empty board", async () => {
@@ -116,15 +117,18 @@ it("folds a task's MRs into one signal", () => {
   const pr = (id: string, state: string, extra = {}) => ({ id, number: 1, repo: "r", title: "t", state, url: "https://git.woa.com/o/r/merge_requests/1", ...extra });
   const task = (pullRequests: ReturnType<typeof pr>[], extra = {}) => ({ ...base, id: "t", identifier: "T", title: "T", status: "in_progress", pullRequests, ...extra });
   expect(prSignal(task([]))).toBeUndefined();
-  expect(prSignal(task([pr("a", "merged")]))).toMatchObject({ icon: "GitMerge", count: 0 });
-  expect(prSignal(task([pr("a", "merged")], { status: "done", statusCategory: "completed" }))).toBeUndefined();
-  expect(prSignal(task([pr("a", "open"), pr("b", "draft", { ci: "failed" })]))).toMatchObject({ icon: "GitPullRequest", count: 2, tone: "danger" });
+  expect(prSignal(task([pr("b", "closed")]))).toBeUndefined();
+  expect(prSignal(task([pr("a", "merged"), pr("b", "closed")]))).toMatchObject({ icon: "GitMerge", text: "!1" });
+  expect(prSignal(task([pr("a", "merged"), pr("b", "open")]))).toMatchObject({ icon: "GitPullRequest", text: "!1" });
+  expect(prSignal(task([pr("a", "open")]))).toMatchObject({ icon: "GitPullRequest", text: "!1" });
+  expect(prSignal(task([pr("a", "open"), pr("b", "draft", { ci: "failed" })]))).toMatchObject({ icon: "GitPullRequest", text: "2", tone: "danger" });
   expect(prSignal(task([pr("a", "open", { myReview: "approving" })], { contract: { accepted: true } }))).toMatchObject({ tone: "action" });
   expect(prSignal(task([pr("a", "draft")]))).toMatchObject({ icon: "GitPullRequestDraft" });
 });
 
 it("draws a staged parent as a pipeline with only the current batch open", async () => {
-  const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage });
+  const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage,
+    pullRequests: done ? [{ id: `mr-${id}`, number: 813, repo: "slime", title: "t", state: "merged", url: "https://git.woa.com/o/slime/merge_requests/813" }] : [] });
   const parent = { ...base, id: "p", identifier: "P", title: "流水线", status: "in_progress", activeRun: true };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid("a", 1, true), kid("b", 2, false), kid("c", 2, false), kid("d", 3, false)], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
@@ -132,12 +136,46 @@ it("draws a staged parent as a pipeline with only the current batch open", async
   expect(text(renderer!)).toMatch(/流水线\s+第 2\/3 批/);
   await press(renderer!, "展开 P");
   const graph = text(renderer!);
-  expect(graph).toMatch(/第 1 批[\s\S]*1\/1[\s\S]*第 2 批[\s\S]*0\/2[\s\S]*子任务 b[\s\S]*子任务 c[\s\S]*第 3 批/);
+  expect(graph).toMatch(/第 1 批[\s\S]*slime!813[\s\S]*第 2 批[\s\S]*0\/2[\s\S]*子任务 b[\s\S]*子任务 c[\s\S]*第 3 批/);
+  expect(graph).not.toContain("1/1");
+  expect(graph).not.toContain("0/1");
+  openURL.mockClear();
+  await press(renderer!, "slime!813 已合并");
+  expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
   expect(graph).not.toContain("子任务 a");
   expect(graph).not.toContain("子任务 d");
   await press(renderer!, "第 1 批");
-  expect(text(renderer!)).toContain("子任务 a");
+  expect(text(renderer!)).not.toContain("子任务 a");
   await press(renderer!, "第 2 批");
   expect(text(renderer!)).not.toContain("子任务 b");
+  await act(async () => { renderer!.unmount(); });
+});
+
+it("names a closed task's open MR by what blocks it", () => {
+  const issue = { ...base, id: "m", identifier: "M", title: "M", status: "done", statusCategory: "completed" };
+  const pr = (extra = {}) => ({ id: "p", number: 7, repo: "r", title: "t", state: "open", url: "https://git.woa.com/o/r/merge_requests/7", ...extra });
+  expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr()] }, Date.now())).toEqual({ text: "!7 未合并" });
+  expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr({ ci: "failed" })] }, Date.now())).toEqual({ text: "!7 CI 失败", tone: "danger" });
+  expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr({ mergeable: "CONFLICTING" })] }, Date.now())).toEqual({ text: "!7 有冲突", tone: "danger" });
+});
+
+it("leads every task with its status glyph and leaves finished work out", async () => {
+  const kid = (id: string, status: string, category: string) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status, statusCategory: category, parentId: "p" });
+  const parent = { ...base, id: "p", identifier: "P", title: "父任务", status: "in_progress" };
+  const closed = { ...base, id: "x", identifier: "X", title: "早已完成", status: "done", statusCategory: "completed" };
+  getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, closed, kid("a", "done", "completed"), kid("b", "blocked", "started")], rootIds: ["p", "x"] });
+  const colors = Object.fromEntries(["foreground", "foregroundMuted", "statusDanger", "statusWarning", "statusSuccess"].map((key) => [key, key]));
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection agentId="glyph" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  expect(text(renderer!)).not.toContain("早已完成");
+  expect(text(renderer!)).not.toContain("已完成");
+  await press(renderer!, "展开 P");
+  expect(text(renderer!)).toContain("子任务 b");
+  expect(text(renderer!)).not.toContain("子任务 a");
+  const glyph = (name: string) => renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && String(node.props.accessibilityLabel).startsWith(name))[0]!
+    .findAll((node) => (node.type as unknown) === "Icon")[0]!.props;
+  expect(glyph("b 阻塞")).toMatchObject({ color: "statusDanger" });
+  expect(glyph("P 进行中")).toMatchObject({ color: "statusWarning" });
+  expect(glyph("P 进行中").icon.svg).toContain("<path");
   await act(async () => { renderer!.unmount(); });
 });

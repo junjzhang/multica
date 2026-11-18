@@ -86,7 +86,7 @@ export const boardDataSchema = z.discriminatedUnion("state", [
 export type BoardData = z.infer<typeof boardDataSchema>;
 
 export type Section = "attention" | "active" | "parked" | "done";
-export type TodoKind = "approval" | "user" | "acceptance" | "session" | "anomaly";
+export type TodoKind = "approval" | "merge" | "user" | "acceptance" | "session" | "anomaly";
 /** Row markers; the order is the subtree aggregation priority, highest last. */
 export const MARKERS = ["idle", "done", "running", "leader", "you", "anomaly"] as const;
 export type Marker = (typeof MARKERS)[number];
@@ -150,7 +150,9 @@ export function classify(issue: BoardIssue, viewer: Viewer, now: number): Classi
   const approval = awaitingApproval(issue).length > 0;
   // Acceptance and closing are usually one step, so a done task can still wait for MR approval.
   if (isTerminal(issue)) {
-    return approval && !isCancelled(issue) ? { section: "attention", todos: ["approval"], marker: "you" } : { section: "done", todos: [], marker: "done" };
+    // A closed task whose MR is still open is a loose end: approve it, or merge or close it.
+    if (isCancelled(issue) || !issue.pullRequests.some(isOpenPullRequest)) return { section: "done", todos: [], marker: "done" };
+    return { section: "attention", todos: [approval ? "approval" : "merge"], marker: "you" };
   }
   const contract = issue.contract;
   const todos: TodoKind[] = approval ? ["approval"] : [];
@@ -205,7 +207,7 @@ export interface Board {
 }
 
 const SECTION_ORDER: Section[] = ["attention", "active", "parked", "done"];
-const TODO_ORDER: TodoKind[] = ["approval", "user", "acceptance", "session", "anomaly"];
+const TODO_ORDER: TodoKind[] = ["approval", "user", "acceptance", "session", "merge", "anomaly"];
 
 function rank(marker: Marker): number {
   return MARKERS.indexOf(marker);

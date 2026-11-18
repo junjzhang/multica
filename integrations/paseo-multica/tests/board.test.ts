@@ -118,11 +118,12 @@ describe("classification rules", () => {
     expect(classify(issue({ status: "todo", lastActivityAt: ago(8) }), viewer, NOW).section).toBe("parked");
   });
 
-  it("keeps a done task with an MR waiting for the user's approval in needs-attention", () => {
+  it("keeps a done task with an open MR in needs-attention until the MR closes", () => {
     const waiting = pr({ myReview: "approving" });
     const done = { status: "done", statusCategory: "completed", contract: contract(undefined, true), pullRequests: [waiting] };
     expect(classify(issue(done), viewer, NOW)).toMatchObject({ section: "attention", todos: ["approval"], marker: "you" });
-    expect(classify(issue({ ...done, pullRequests: [{ ...waiting, myReview: "approved" }] }), viewer, NOW).section).toBe("done");
+    expect(classify(issue({ ...done, pullRequests: [{ ...waiting, myReview: "approved" }] }), viewer, NOW)).toMatchObject({ section: "attention", todos: ["merge"] });
+    expect(classify(issue({ ...done, pullRequests: [{ ...waiting, state: "merged" }] }), viewer, NOW).section).toBe("done");
     expect(classify(issue({ ...done, status: "cancelled", statusCategory: "cancelled" }), viewer, NOW).section).toBe("done");
     const root = issue({ status: "done", statusCategory: "completed" });
     const child = issue({ ...done, parentId: root.id });
