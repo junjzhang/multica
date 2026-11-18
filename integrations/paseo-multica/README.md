@@ -94,10 +94,14 @@ The panel has two parts:
   yours or this session's (usually an acceptance), and anomalies. The scope
   switch changes only the tree roots, never what counts as a to-do. Each row shows
   its MRs' CI, review and mergeability and opens the MR or the task.
-- **Task trees**, split into 需要处理 / 进行中 / 搁置, with 已完成 and 搁置 folded.
-  A tree's rows show their own status, linked MRs and child progress; children
-  are grouped by `stage` into batches. A folded row shows the most urgent marker
-  in its subtree (▲ > ● > ◐ > ⋯).
+- **Task trees**, split into 需要处理 / 进行中 / 搁置, with 搁置 folded. Finished
+  work is left out: a closed tree is not listed, and a closed child with no open
+  MR counts only in its parent's progress. Every task row leads with Multica's
+  status glyph (dotted backlog, ring todo, half in progress, three quarters in
+  review, slash blocked), colored amber, green or red for in progress, in review
+  and blocked. A row shows its open MRs by number (`!821`, or a count for
+  several); merged and closed MRs are not shown. Children are grouped by
+  `stage` into batches.
 
 **本会话** roots the trees at tasks this session executes, leads, accepts or
 delegated. **全部** roots them at every open task whose parent is not open, and
@@ -111,7 +115,7 @@ the clock. It is display-only: it never writes a task or changes a status.
 ```text
 需要处理: contract.pending_actor is this session or the user
           or an MR waits for the user: contract accepted, MR open, user is a reviewer and has not approved
-             (this also holds for a done task; a cancelled one is always 已完成)
+          or a done task still has an open MR (未合并 / 有冲突 / CI 失败); a cancelled task is always closed
           or an anomaly: blocked, failed CI on an open MR, or a failed latest run, with no active run
 进行中:   an active run (queued, dispatched, running, waiting_local_directory, deferred)
           or the executor's turn, not backlog, last_activity_at within STALE_AFTER_DAYS
@@ -121,11 +125,12 @@ no contract: in_review is this session's acceptance only when its coordinator is
 STALE_AFTER_DAYS = 7
 ```
 
-A tree goes to the section of its most urgent task, and to 已完成 only when
-every task in it is done.
+A tree goes to the section of its most urgent task, and is closed only when
+every task in it is done and no MR in it is open.
 
 "The user" is the bound external agent's owner. MR approval needs the user's
-forge usernames in the plugin settings; TGit reports a reviewer who has not
+forge usernames in the plugin settings (`forgeUsernames`, e.g. `name, github-name`);
+without them no MR counts as waiting for the user; TGit reports a reviewer who has not
 approved as `review_state: "approving"` and one who has as `"approved"`.
 
 The server builds the board from existing reads with the session credential:

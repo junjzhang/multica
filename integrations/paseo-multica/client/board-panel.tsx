@@ -21,6 +21,7 @@ import {
   type TreeNode,
 } from "../shared/board";
 import { sessionBoard, taskExpansion } from "../shared/contracts";
+import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-icon";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
 type OpenTask = (url: string, identifier?: string) => void;
@@ -70,12 +71,22 @@ function anomalyPhrase(issue: BoardIssue, now: number): Phrase {
   return { text: since ? `${text} · ${since}` : text, ...(urgent ? { tone: "danger" as const } : {}) };
 }
 
+/** A closed task's open MR: what blocks it, else that it is still unmerged. */
+function mergePhrase(pr: BoardPullRequest | undefined): Phrase {
+  if (!pr) return { text: "MR 未合并" };
+  if (pr.ci === "failed") return { text: `${prNumber(pr)} CI 失败`, tone: "danger" };
+  if (pr.mergeable?.toLowerCase() === "conflicting") return { text: `${prNumber(pr)} 有冲突`, tone: "danger" };
+  return { text: `${prNumber(pr)} 未合并` };
+}
+
 export function todoPhrase(todo: Todo, now: number): Phrase {
   switch (todo.kind) {
     case "approval": {
       const pr = todo.pullRequests[0];
       return { text: pr ? `${prNumber(pr)} 待你审批` : "待你审批", tone: "action" };
     }
+    case "merge":
+      return mergePhrase(todo.pullRequests[0]);
     case "user":
       return { text: "待你处理", tone: "action" };
     case "acceptance":
@@ -87,8 +98,6 @@ export function todoPhrase(todo: Todo, now: number): Phrase {
   }
 }
 
-const STATUS_PHRASE: Record<string, string> = { backlog: "未开始", todo: "未开始", blocked: "阻塞", in_review: "评审中", done: "已完成", cancelled: "已取消" };
-
 export function treePhrase(tree: TreeNode): Phrase | undefined {
   if (tree.total > 0) {
     const staged = tree.stages.filter((group) => group.stage !== undefined);
@@ -96,23 +105,18 @@ export function treePhrase(tree: TreeNode): Phrase | undefined {
     if (stage && staged.length > 1) return { text: `第 ${staged.indexOf(stage) + 1}/${staged.length} 批` };
     return { text: `${tree.done}/${tree.total}` };
   }
-  const text = STATUS_PHRASE[tree.issue.status];
-  return text ? { text } : undefined;
+  return undefined;
 }
 
 type Tone = Phrase["tone"];
 
-/** A task's MRs as one icon: open ones with a count, otherwise a merged mark; red for failed CI, amber when it waits for you. */
-export function prSignal(issue: BoardIssue): { icon: string; count: number; tone?: Tone; label: string } | undefined {
+/** A task's open MRs as one mark: the number of a single MR or the count of several; red for failed CI, amber when it waits for you. Merged and closed MRs are history. */
+export function prSignal(issue: BoardIssue): { icon: string; text: string; tone?: Tone; label: string } | undefined {
   const open = issue.pullRequests.filter(isOpenPullRequest);
-  if (open.length === 0) {
-    // A closed task's merged MRs are the expected end state, not news.
-    const merged = isTerminal(issue) ? 0 : issue.pullRequests.filter((pr) => pr.state === "merged").length;
-    return merged > 0 ? { icon: "GitMerge", count: 0, label: `已合并 ${merged} 个 MR` } : undefined;
-  }
+  if (open.length === 0) return undefined;
   const tone: Tone = open.some((pr) => pr.ci === "failed") ? "danger" : awaitingApproval(issue).length > 0 ? "action" : undefined;
   const icon = open.every((pr) => pr.state === "draft") ? "GitPullRequestDraft" : "GitPullRequest";
-  return { icon, count: open.length, ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
+  return { icon, text: open.length === 1 ? prNumber(open[0]!) : `${open.length}`, ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
 }
 
 function prDetail(pr: BoardPullRequest, issue: BoardIssue): Phrase | undefined {
@@ -143,7 +147,7 @@ function BoardContent({ agentId, theme, openTask }: Props) {
   const [loading, setLoading] = useState(true);
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const [expansionError, setExpansionError] = useState("");
-  const [open, setOpen] = useState<Record<"parked" | "done", boolean>>({ parked: false, done: false });
+  const [parkedOpen, setParkedOpen] = useState(false);
   const writes = useRef<Promise<unknown>>(Promise.resolve());
   const request = useRef(0);
 
@@ -180,7 +184,7 @@ function BoardContent({ agentId, theme, openTask }: Props) {
   const todoIds = new Set(todos.map((todo) => todo.issue.id));
   // A childless tree that needs you is fully described by its to-do row.
   const active = board ? [...board.sections.attention, ...board.sections.active].filter((tree) => tree.total > 0 || !todoIds.has(tree.issue.id)) : [];
-  const empty = board && todos.length === 0 && active.length === 0 && board.sections.parked.length === 0 && board.sections.done.length === 0;
+  const empty = board && todos.length === 0 && active.length === 0 && board.sections.parked.length === 0;
 
   return <View style={{ gap: SPACE.lg }}>
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: SPACE.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
@@ -201,12 +205,9 @@ function BoardContent({ agentId, theme, openTask }: Props) {
         {active.length === 0 ? null
           : ready.scope === "all" ? <View style={{ gap: 2 }}>{groupByProject(active, ready.projects).map((group) => <Folder key={group.id ?? group.name} name={group.name} nodes={group.nodes} row={row} />)}</View>
           : <Section title="进行中" colors={colors}>{active.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}</Section>}
-        {(["parked", "done"] as const).map((section) => board.sections[section].length > 0 ? <Section
-          key={section} title={section === "parked" ? "搁置" : "已完成"} count={board.sections[section].length} colors={colors}
-          open={open[section]} onToggle={() => setOpen((value) => ({ ...value, [section]: !value[section] }))}
-        >
-          {board.sections[section].map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
-        </Section> : null)}
+        {board.sections.parked.length > 0 ? <Section title="搁置" count={board.sections.parked.length} colors={colors} open={parkedOpen} onToggle={() => setParkedOpen(!parkedOpen)}>
+          {board.sections.parked.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
+        </Section> : null}
         {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, paddingLeft: GUTTER + SPACE.sm }}>部分子任务未显示</Text> : null}
       </View>}
   </View>;
@@ -268,8 +269,13 @@ function toneColor(tone: Tone, colors: Colors): string {
   return tone === "danger" ? colors.statusDanger : tone === "action" ? colors.statusWarning : colors.foregroundMuted;
 }
 
-function Row({ issue, phrase, depth, row, running, muted, signal, onPress, disclosure }: {
-  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; muted?: boolean; signal?: boolean; onPress?(): void;
+/** Multica's status hues, mapped onto the host theme: started work is amber, review green, blocked red, the rest quiet. */
+function statusColor(status: StatusKey, colors: Colors): string {
+  return status === "in_progress" ? colors.statusWarning : status === "in_review" ? colors.statusSuccess : status === "blocked" ? colors.statusDanger : colors.foregroundMuted;
+}
+
+function Row({ issue, phrase, depth, row, running, signal, onPress, disclosure }: {
+  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; signal?: boolean; onPress?(): void;
   disclosure?: { expanded: boolean; onToggle(): void };
 }) {
   const { colors } = row;
@@ -277,6 +283,7 @@ function Row({ issue, phrase, depth, row, running, muted, signal, onPress, discl
   const [pressed, setPressed] = useState(false);
   const tone = toneColor(phrase?.tone, colors);
   const title = displayTitle(issue.title);
+  const status = statusKey(issue);
   const prs = signal ? prSignal(issue) : undefined;
   return <View
     style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}
@@ -289,17 +296,18 @@ function Row({ issue, phrase, depth, row, running, muted, signal, onPress, discl
       {disclosure ? <View style={{ transform: [{ rotate: disclosure.expanded ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={colors.foregroundMuted} /></View> : null}
     </Pressable>
     <Pressable
-      accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${title}${prs ? ` ${prs.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
+      accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${STATUS_LABEL[status]} ${title}${prs ? ` ${prs.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
       disabled={!onPress} onPress={onPress}
       onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
       style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
     >
-      <Text numberOfLines={1} style={{ flex: 1, color: muted ? colors.foregroundMuted : colors.foreground, fontSize: FONT.base }}>{title}</Text>
+      <Icon icon={{ svg: STATUS_SVG[status] }} size={14} color={statusColor(status, colors)} />
+      <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.base }}>{title}</Text>
       {running ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
       {hover.hovered ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{issue.identifier}</Text> : null}
       {prs ? <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
         <Icon name={prs.icon} size={13} color={toneColor(prs.tone, colors)} />
-        {prs.count > 1 ? <Text style={{ color: toneColor(prs.tone, colors), fontSize: FONT.sm }}>{prs.count}</Text> : null}
+        <Text style={{ color: toneColor(prs.tone, colors), fontSize: FONT.sm }}>{prs.text}</Text>
       </View> : null}
       {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
     </Pressable>
@@ -343,17 +351,23 @@ function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: Row
   const { expandedIds, toggle, openTask } = row;
   const { issue } = tree;
   const openPrs = issue.pullRequests.filter(isOpenPullRequest);
-  const expandable = tree.total > 0 || openPrs.length > 0;
+  const hasOpenChildren = tree.stages.some((group) => group.nodes.some(isOpen));
+  const expandable = hasOpenChildren || openPrs.length > 0;
   const expanded = expandable && expandedIds.includes(issue.id);
   return <View>
     <Row
-      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} muted={tree.section === "done"} signal
+      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} signal
       onPress={issue.url ? () => openTask(issue.url!, issue.identifier) : undefined}
       disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
     />
     {expanded ? openPrs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
-    {expanded && tree.total > 0 ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
+    {expanded && hasOpenChildren ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
   </View>;
+}
+
+/** A finished subtree with no open MR is history; graphs keep it only in their counts. */
+function isOpen(tree: TreeNode): boolean {
+  return tree.section !== "done";
 }
 
 type RailState = "done" | "current" | "pending";
@@ -399,7 +413,9 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
   return <View style={{ marginLeft: INDENT * depth }}>
     {tree.stages.map((group, index) => {
       const last = index === tree.stages.length - 1;
-      const open = !staged || openStages.has(group.stage);
+      const nodes = group.nodes.filter(isOpen);
+      if (!staged && nodes.length === 0) return null;
+      const open = nodes.length > 0 && (!staged || openStages.has(group.stage));
       const state = stateOf(group);
       const toggle = () => setOpenStages((value) => {
         const next = new Set(value);
@@ -410,7 +426,7 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
         {staged ? <View style={{ flexDirection: "row" }}>
           <Rail colors={colors} top bottom={!last || open} node={state} />
           <Pressable
-            accessibilityRole="button" accessibilityLabel={group.stage === undefined ? "未分批" : `第 ${group.stage} 批`} accessibilityState={{ expanded: open }} onPress={toggle}
+            accessibilityRole="button" accessibilityLabel={group.stage === undefined ? "未分批" : `第 ${group.stage} 批`} accessibilityState={{ expanded: open }} disabled={nodes.length === 0} onPress={toggle}
             style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingHorizontal: SPACE.sm }}
           >
             <Text style={{ flex: 1, color: state === "current" ? colors.foreground : colors.foregroundMuted, fontSize: FONT.sm, fontWeight: state === "current" ? "600" : "400" }}>
@@ -420,8 +436,8 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
             <Text style={{ minWidth: 28, textAlign: "right", color: colors.foregroundMuted, fontSize: FONT.sm }}>{group.done}/{group.total}</Text>
           </Pressable>
         </View> : null}
-        {open ? group.nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
-          <Rail colors={colors} top bottom={!(last && childIndex === group.nodes.length - 1)} tick />
+        {open ? nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
+          <Rail colors={colors} top bottom={!(last && childIndex === nodes.length - 1)} tick />
           <View style={{ flex: 1 }}><TreeRow tree={child} depth={0} row={row} /></View>
         </View>) : null}
       </View>;
