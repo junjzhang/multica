@@ -410,6 +410,12 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         sessionTasks,
         forgeUsernames: parseForgeUsernames(settings.forgeUsernames ?? ""),
         checkedAt,
+        // Only this host's own sessions can be checked; Paseo itself resolves a session on another host.
+        sessionOpenable: async (session) => {
+          if (session.serverId !== hostId) return true;
+          const refreshed = await deps.paseo.refreshAgent(session.agentId);
+          return !!refreshed && !refreshed.agent.archivedAt;
+        },
       });
     } catch (error) {
       return { state: "unavailable", reason: unavailableReason(error), checkedAt };

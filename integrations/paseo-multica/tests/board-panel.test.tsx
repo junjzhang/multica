@@ -8,6 +8,7 @@ const { openURL } = vi.hoisted(() => ({ openURL: vi.fn() }));
 vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Linking: { openURL } }));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: (contract: { name: string }) => (contract.name === "session.board" ? getBoard : setExpansion) }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({ Icon: "Icon", Loading: "Loading" }));
+const HOST = { id: "srv_here", label: "Here" };
 const setExpansion = vi.fn(async () => [] as string[]);
 const recent = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 const base = { statusCategory: "started", lastActivityAt: recent, activeRun: false, lastRunFailed: false, pullRequests: [] };
@@ -38,12 +39,13 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   const openTask = vi.fn();
   const colors = Object.fromEntries(["surface0", "border", "foreground", "foregroundMuted", "accent", "statusDanger", "statusWarning"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="agent" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
   const first = text(renderer!);
   expect(getBoard).toHaveBeenCalledWith({ agentId: "agent", scope: "session", refresh: false });
   expect(first.indexOf("需要你")).toBeLessThan(first.indexOf("进行中"));
   expect(first).toMatch(/slime 修复\n+!813 待你审批/);
-  expect(first).toContain("删除会话 MR\n待验收");
+  expect(first.indexOf("需要你")).toBeLessThan(first.indexOf("待本会话处理"));
+  expect(first.slice(first.indexOf("待本会话处理"))).toContain("删除会话 MR\n待验收");
   expect(first.split("slime 修复").length).toBe(2);
   expect(first).toContain("统一 Leader 视图");
   expect(first).not.toContain("0/1");
@@ -101,7 +103,7 @@ it("strips only a conventional-commit prefix and names the current batch on the 
 it("explains a disconnected session instead of an empty board", async () => {
   getBoard.mockResolvedValueOnce({ state: "disconnected", reason: "Run multica session connect.", checkedAt: "x" } as never);
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection agentId="agent" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="agent" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
   expect(text(renderer!)).toContain("未连接 Multica");
   expect(text(renderer!)).toContain("Run multica session connect.");
   await act(async () => { renderer!.unmount(); });
@@ -184,7 +186,7 @@ it("opens MRs from their chip and the task from the row", async () => {
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues, rootIds: ["p"] });
   const colors = Object.fromEntries(["foreground", "foregroundMuted", "statusDanger", "statusWarning", "border"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection agentId="chips" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="chips" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
   openURL.mockClear();
 
   await press(renderer!, "打开 r!16 !16 有冲突");
@@ -212,7 +214,7 @@ it("draws a staged parent as a pipeline with only the current batch open", async
   const parent = { ...base, id: "p", identifier: "P", title: "流水线", status: "in_progress", activeRun: true };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid("a", 1, true), kid("b", 2, false), kid("c", 2, false), kid("d", 3, false)], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection agentId="graph" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="graph" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
   expect(text(renderer!)).toMatch(/流水线\s+第 2\/3 批/);
   await press(renderer!, "展开 P");
   const graph = text(renderer!);
@@ -246,7 +248,7 @@ it("leads every task with its status glyph and leaves finished work out", async 
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, closed, kid("a", "done", "completed"), kid("b", "blocked", "started")], rootIds: ["p", "x"] });
   const colors = Object.fromEntries(["foreground", "foregroundMuted", "statusDanger", "statusWarning", "statusSuccess"].map((key) => [key, key]));
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection agentId="glyph" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="glyph" theme={{ colors } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
   expect(text(renderer!)).not.toContain("早已完成");
   expect(text(renderer!)).not.toContain("已完成");
   await press(renderer!, "展开 P");
@@ -258,4 +260,69 @@ it("leads every task with its status glyph and leaves finished work out", async 
   expect(glyph("P 进行中")).toMatchObject({ color: "statusWarning" });
   expect(glyph("P 进行中").icon.svg).toContain("<path");
   await act(async () => { renderer!.unmount(); });
+});
+
+it("splits what only you can do from what waits on this session", async () => {
+  const pending = (id: string, pendingActor: Record<string, string>, extra = {}) => ({ ...base, id, identifier: id.toUpperCase(), title: `任务 ${id}`, status: "in_progress", contract: { pendingActor, accepted: false }, ...extra });
+  const me = { type: "member", id: "me" };
+  const issues: BoardIssue[] = [
+    pending("user", me),
+    pending("session", session),
+    pending("accept", session, { contract: { pendingActor: session, acceptor: session, accepted: false } }),
+    task("approve", [mr("4", "open", { myReview: "approving" })], { contract: { accepted: true } }),
+    task("merge", [mr("5", "open")], { status: "done", statusCategory: "completed" }),
+    task("anomaly", [], { status: "blocked" }),
+  ];
+  getBoard.mockResolvedValueOnce({ ...ready("session"), viewer: { agentId: "leader", sessionId: "s1", userId: "me", forgeUsernames: [] }, issues, rootIds: issues.map((issue) => issue.id), archivedDeliveries: [{ id: "d", issueIdentifier: "WORK-9", issueTitle: "投递", session: { serverId: "srv_here", agentId: "gone" } }] });
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="split" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  const all = text(renderer!);
+  const yours = all.slice(all.indexOf("需要你"), all.indexOf("待本会话处理"));
+  const session_ = all.slice(all.indexOf("待本会话处理"));
+  expect(all.indexOf("需要你")).toBeLessThan(all.indexOf("待本会话处理"));
+  for (const title of ["任务 user", "任务 approve", "WORK-9 投递"]) expect(yours).toContain(title);
+  for (const title of ["任务 session", "任务 accept", "任务 merge", "任务 anomaly"]) {
+    expect(session_).toContain(title);
+    expect(yours).not.toContain(title);
+  }
+  await act(async () => { renderer!.unmount(); });
+});
+
+it("opens a task's executing session from its own target, never another session's or a dead one", async () => {
+  const openTask = vi.fn();
+  const openAgent = vi.fn();
+  const elsewhere = { serverId: "srv_here", agentId: "worker" };
+  const issues: BoardIssue[] = [
+    task("other", [mr("7", "open")], { url: "https://app.example/acme/issues/OTHER", executionSession: elsewhere }),
+    task("remote", [], { executionSession: { serverId: "srv_far", agentId: "here" } }),
+    task("self", [], { executionSession: { serverId: "srv_here", agentId: "here" } }),
+    task("managed", []),
+  ];
+  getBoard.mockResolvedValue({ ...ready("session"), issues, rootIds: issues.map((issue) => issue.id), archivedDeliveries: [{ id: "d", issueIdentifier: "WORK-9", issueTitle: "投递", session: { serverId: "srv_here", agentId: "archived" } }] });
+  const render = async (navigation?: { openAgent: typeof openAgent }) => {
+    let renderer: ReactTestRenderer;
+    await act(async () => { renderer = create(<BoardSection host={HOST} agentId="here" navigation={navigation as PluginAgentPanelProps["navigation"]} theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
+    return renderer!;
+  };
+  const entries = (renderer: ReactTestRenderer) => renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && /的执行会话$/.test(String(node.props.accessibilityLabel))).map((node) => node.props.accessibilityLabel);
+
+  const renderer = await render({ openAgent: openAgent as never });
+  expect(entries(renderer)).toEqual(["打开 OTHER 的执行会话", "打开 REMOTE 的执行会话"]);
+  await press(renderer, "打开 OTHER 的执行会话");
+  expect(openAgent).toHaveBeenCalledWith(elsewhere);
+  expect(openTask).not.toHaveBeenCalled();
+  await press(renderer, "打开 REMOTE 的执行会话");
+  expect(openAgent).toHaveBeenLastCalledWith({ serverId: "srv_far", agentId: "here" });
+  await press(renderer, "WORK-9 投递，投递失败：会话已归档，在 Paseo 中打开");
+  expect(openAgent).toHaveBeenLastCalledWith({ serverId: "srv_here", agentId: "archived" });
+  expect(openURL).not.toHaveBeenCalledWith(expect.stringMatching(/^paseo:/));
+  await act(async () => { renderer.unmount(); });
+
+  const old = await render();
+  expect(entries(old)).toEqual([]);
+  expect(text(old)).not.toContain("在 Paseo 中打开");
+  const delivery = old.root.findAll((node) => (node.type as unknown) === "Pressable" && String(node.props.accessibilityLabel).startsWith("WORK-9"))[0]!;
+  expect(delivery.props.disabled).toBe(true);
+  await act(async () => { old.unmount(); });
+  getBoard.mockImplementation(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
 });

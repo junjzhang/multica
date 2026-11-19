@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { isCoordinatingSession, isSession, isTerminal, type Actor, type BoardIssue, type BoardPullRequest, type BoardScope, type ReadyBoardData, type Viewer } from "../shared/board";
+import { isCoordinatingSession, isSession, isTerminal, type Actor, type BoardIssue, type BoardPullRequest, type BoardScope, type PaseoSession, type ReadyBoardData, type Viewer } from "../shared/board";
 import type { SessionTasksWire } from "../shared/tasks";
-import { isLocator, returnAddress } from "../shared/session";
+import { PASEO_PROVIDER, isLocator } from "../shared/session";
 import type { ApiCredential, MulticaApi } from "./api";
 
 /** Upper bound on issues per board; a larger tree is cut and marked truncated. */
@@ -25,7 +25,13 @@ const issueWire = z.object({
   stage: z.number().nullish(),
   last_activity_at: z.string().nullish(),
   coordinator: actor.nullish(),
-  external_session_bindings: z.array(z.object({ agent_id: z.string(), session: z.object({ id: z.string() }).nullish() })).nullish(),
+  assignee_type: z.string().nullish(),
+  assignee_id: z.string().nullish(),
+  external_session_bindings: z.array(z.object({
+    agent_id: z.string(),
+    session: z.object({ id: z.string(), provider: z.string().nullish(), host_id: z.string().nullish(), session_id: z.string().nullish() }).nullish(),
+    deliverable: z.boolean().nullish(),
+  })).nullish(),
   contract: z
     .object({
       pending_actor: actor.nullish(),
@@ -72,6 +78,8 @@ export interface BoardRequest {
   sessionTasks?: SessionTasksWire;
   forgeUsernames: string[];
   checkedAt: string;
+  /** Whether the host can still open a Paseo session; a session it cannot vouch for is kept. */
+  sessionOpenable?: (session: PaseoSession) => Promise<boolean>;
 }
 
 export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise<ReadyBoardData> {
@@ -160,13 +168,14 @@ export async function loadBoard(api: MulticaApi, request: BoardRequest): Promise
     ]);
     return toBoardIssue(full, runs, prs, viewer, `${request.appUrl.replace(/\/+$/, "")}/${slug}/issues/`);
   });
+  await dropUnopenableSessions(board, request.sessionOpenable);
 
   const projects = request.scope === "all" ? (await read("/api/projects?limit=200", projectList)).projects.map((project) => ({ id: project.id, name: project.title })) : [];
   const archivedDeliveries = deliveries.map((delivery) => ({
     id: delivery.id,
     issueIdentifier: delivery.issue_identifier,
     issueTitle: delivery.issue_title,
-    sessionUrl: returnAddress(delivery),
+    session: { serverId: delivery.host_id, agentId: delivery.session_id },
   }));
   return { state: "ready", scope: request.scope, viewer, issues: board, rootIds, projects, archivedDeliveries, truncated, checkedAt: request.checkedAt };
 }
@@ -200,7 +209,31 @@ function toBoardIssue(issue: IssueWire, runs: z.infer<typeof runList>, prs: z.in
     activeRun: runs.some((run) => ACTIVE_RUN_STATES.has(run.status)),
     lastRunFailed: runs[0]?.status === "failed",
     pullRequests: prs.filter((pr) => httpURL(pr.html_url)).map((pr) => toPullRequest(pr, viewer)),
+    ...(executionSessionOf(issue) ? { executionSession: executionSessionOf(issue) } : {}),
   };
+}
+
+/**
+ * The deliverable Paseo session bound to the task's executor: the contract
+ * executor, else the assigned agent. A managed executor has no session binding.
+ */
+function executionSessionOf(issue: IssueWire): PaseoSession | undefined {
+  const executor = issue.contract?.executor ?? (issue.assignee_type && issue.assignee_id ? { type: issue.assignee_type, id: issue.assignee_id, session_id: undefined } : undefined);
+  if (executor?.type !== "agent") return undefined;
+  const session = issue.external_session_bindings?.find((binding) => binding.agent_id === executor.id && binding.deliverable === true && (!executor.session_id || binding.session?.id === executor.session_id))?.session;
+  if (session?.provider !== PASEO_PROVIDER || !session.host_id || !session.session_id || !isLocator(session.host_id) || !isLocator(session.session_id)) return undefined;
+  return { serverId: session.host_id, agentId: session.session_id };
+}
+
+async function dropUnopenableSessions(issues: BoardIssue[], openable: BoardRequest["sessionOpenable"]): Promise<void> {
+  if (!openable) return;
+  const key = (session: PaseoSession) => `${session.serverId}/${session.agentId}`;
+  const sessions = [...new Map(issues.flatMap((issue) => (issue.executionSession ? [[key(issue.executionSession), issue.executionSession] as const] : []))).values()];
+  const results = await mapLimit(sessions, (session) => openable(session).catch(() => false));
+  const closed = new Set(sessions.filter((_, index) => !results[index]).map(key));
+  for (const issue of issues) {
+    if (issue.executionSession && closed.has(key(issue.executionSession))) delete issue.executionSession;
+  }
 }
 
 function coordinatorOf(issue: IssueWire): Actor | undefined {

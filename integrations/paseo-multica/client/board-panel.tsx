@@ -11,10 +11,12 @@ import {
   isFresh,
   isOpenPullRequest,
   isTerminal,
+  isUserTodo,
   type BoardData,
   type BoardIssue,
   type BoardPullRequest,
   type BoardScope,
+  type PaseoSession,
   type StageGroup,
   type Todo,
   type TodoKind,
@@ -25,7 +27,8 @@ import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-ic
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
 type OpenTask = (url: string, identifier?: string) => void;
-type Props = Pick<PluginAgentPanelProps, "agentId" | "theme"> & { openTask: OpenTask };
+type OpenAgent = NonNullable<PluginAgentPanelProps["navigation"]>["openAgent"];
+type Props = Pick<PluginAgentPanelProps, "agentId" | "theme" | "host" | "navigation"> & { openTask: OpenTask };
 
 // Paseo's theme ramp: base 14 / sm 12, spacing 4·6·8·12·16·24.
 const FONT = { base: 14, sm: 12 } as const;
@@ -225,11 +228,17 @@ function firstPerIssue(todos: Todo[]): Todo[] {
   return todos.filter((todo) => !seen.has(todo.issue.id) && !!seen.add(todo.issue.id));
 }
 
+/** The session to jump to from a task row: its executing Paseo session, unless that is the session showing the board. */
+export function sessionTarget(issue: BoardIssue, here: PaseoSession): PaseoSession | undefined {
+  const session = issue.executionSession;
+  return session && !(session.serverId === here.serverId && session.agentId === here.agentId) ? session : undefined;
+}
+
 export function BoardSection(props: Props) {
   return <BoardContent key={props.agentId} {...props} />;
 }
 
-function BoardContent({ agentId, theme, openTask }: Props) {
+function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const getBoard = useRpc(sessionBoard);
   const expansion = useRpc(taskExpansion);
   const [scope, setScope] = useState<BoardScope>("session");
@@ -270,13 +279,22 @@ function BoardContent({ agentId, theme, openTask }: Props) {
   const ready = data?.state === "ready" ? data : null;
   const board = useMemo(() => (ready ? buildBoard(ready, Date.now()) : null), [ready]);
   const now = Date.now();
-  const row: RowContext = { colors, openTask, expandedIds, toggle };
+  const openAgent = navigation?.openAgent;
+  const here = { serverId: host.id, agentId };
+  const openSession = (issue: BoardIssue) => {
+    const target = sessionTarget(issue, here);
+    return target && openAgent ? () => openAgent(target) : undefined;
+  };
+  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle };
+  // Still one row per issue: its most urgent to-do decides which block it appears in.
   const todos = board ? firstPerIssue(board.todos) : [];
+  const yours = todos.filter((todo) => isUserTodo(todo.kind));
+  const sessions = todos.filter((todo) => !isUserTodo(todo.kind));
   const archivedDeliveries = ready?.archivedDeliveries ?? [];
-  const todoIds = new Set(todos.map((todo) => todo.issue.id));
+  const todoIds = new Set([...yours, ...sessions].map((todo) => todo.issue.id));
   // A childless tree that needs you is fully described by its to-do row.
   const active = board ? [...board.sections.attention, ...board.sections.active].filter((tree) => tree.total > 0 || !todoIds.has(tree.issue.id)) : [];
-  const empty = board && todos.length === 0 && archivedDeliveries.length === 0 && active.length === 0 && board.sections.parked.length === 0;
+  const empty = board && todoIds.size === 0 && archivedDeliveries.length === 0 && active.length === 0 && board.sections.parked.length === 0;
 
   return <View style={{ gap: SPACE.lg }}>
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: SPACE.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
@@ -291,20 +309,12 @@ function BoardContent({ agentId, theme, openTask }: Props) {
       : !board || !ready ? <Loading />
       : empty ? <Notice colors={colors} title="暂无任务" />
       : <View style={{ gap: SPACE.xl }}>
-        {todos.length > 0 || archivedDeliveries.length > 0 ? <Section title="需要你" colors={colors}>
-          {archivedDeliveries.map((delivery) => <Pressable
-            key={delivery.id}
-            accessibilityRole="link"
-            accessibilityLabel={`${delivery.issueIdentifier} ${delivery.issueTitle}，投递失败：会话已归档，在 Paseo 中打开`}
-            onPress={() => void Linking.openURL(delivery.sessionUrl)}
-            style={{ paddingVertical: SPACE.xs, paddingLeft: SPACE.sm }}
-          >
-            <View style={{ gap: SPACE.xs, alignItems: "flex-start" }}>
-              <Text style={{ color: colors.foreground }} numberOfLines={1}>{delivery.issueIdentifier} {delivery.issueTitle}</Text>
-              <Text style={{ color: colors.foregroundMuted }}>投递失败：会话已归档 · 在 Paseo 中打开</Text>
-            </View>
-          </Pressable>)}
-          {todos.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
+        {yours.length > 0 || archivedDeliveries.length > 0 ? <Section title="需要你" colors={colors}>
+          {archivedDeliveries.map((delivery) => <ArchivedDeliveryRow key={delivery.id} delivery={delivery} colors={colors} openAgent={openAgent} />)}
+          {yours.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
+        </Section> : null}
+        {sessions.length > 0 ? <Section title="待本会话处理" colors={colors}>
+          {sessions.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
         </Section> : null}
         {active.length === 0 ? null
           : ready.scope === "all" ? <View style={{ gap: 2 }}>{groupByProject(active, ready.projects).map((group) => <Folder key={group.id ?? group.name} name={group.name} nodes={group.nodes} row={row} />)}</View>
@@ -315,6 +325,24 @@ function BoardContent({ agentId, theme, openTask }: Props) {
         {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, paddingLeft: GUTTER + SPACE.sm }}>部分子任务未显示</Text> : null}
       </View>}
   </View>;
+}
+
+type ArchivedDelivery = NonNullable<Extract<BoardData, { state: "ready" }>["archivedDeliveries"]>[number];
+
+/** A delivery that failed because its session is archived; the archived session still opens in Paseo. */
+function ArchivedDeliveryRow({ delivery, colors, openAgent }: { delivery: ArchivedDelivery; colors: Colors; openAgent?: OpenAgent }) {
+  const summary = `${delivery.issueIdentifier} ${delivery.issueTitle}`;
+  return <Pressable
+    accessibilityRole={openAgent ? "link" : "text"}
+    accessibilityLabel={`${summary}，投递失败：会话已归档${openAgent ? "，在 Paseo 中打开" : ""}`}
+    disabled={!openAgent} onPress={openAgent ? () => openAgent(delivery.session) : undefined}
+    style={{ paddingVertical: SPACE.xs, paddingLeft: SPACE.sm }}
+  >
+    <View style={{ gap: SPACE.xs, alignItems: "flex-start" }}>
+      <Text style={{ color: colors.foreground }} numberOfLines={1}>{summary}</Text>
+      <Text style={{ color: colors.foregroundMuted }}>投递失败：会话已归档{openAgent ? " · 在 Paseo 中打开" : ""}</Text>
+    </View>
+  </Pressable>;
 }
 
 function Notice({ colors, title, detail }: { colors: Colors; title: string; detail?: string }) {
@@ -363,7 +391,11 @@ function Section({ title, count, colors, open = true, onToggle, children }: { ti
   </View>;
 }
 
-type RowContext = { colors: Colors; openTask: OpenTask; expandedIds: string[]; toggle(id: string, expanded: boolean): void };
+type RowContext = {
+  colors: Colors; openTask: OpenTask; expandedIds: string[]; toggle(id: string, expanded: boolean): void;
+  /** Opens the task's executing session; undefined when the row has no session to open. */
+  openSession(issue: BoardIssue): (() => void) | undefined;
+};
 
 /**
  * One line: disclosure gutter, title, then the muted phrase. Hover reveals the
@@ -389,6 +421,7 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
   const tone = toneColor(phrase?.tone, colors);
   const title = displayTitle(issue.title);
   const status = statusKey(issue);
+  const openSession = row.openSession(issue);
   return <View>
     <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}>
       <Pressable
@@ -415,6 +448,7 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
         {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
       </Pressable>
       {chip ? <Chip chip={chip} colors={colors} open={listOpen} onToggle={() => setListOpen(!listOpen)} /> : null}
+      {openSession ? <SessionButton identifier={issue.identifier} colors={colors} onPress={openSession} /> : null}
     </View>
     {chip && listOpen && chip.entries.length > 1 ? chip.entries.map((entry) => <PullRequestRow key={entry.pr.id} pr={entry.pr} issue={entry.issue} source={entry.issue.id === issue.id ? undefined : entry.issue} depth={depth + 1} row={row} />) : null}
   </View>;
@@ -444,6 +478,22 @@ function Chip({ chip, colors, open, onToggle }: { chip: PullRequestChip; colors:
     <Text numberOfLines={1} style={{ color, fontSize: FONT.sm, fontWeight: "500", textDecorationLine: hover.hovered ? "underline" : "none" }}>{chip.text}</Text>
     {single ? <Icon name="ArrowUpRight" size={12} color={color} />
       : <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={color} /></View>}
+  </Pressable>;
+}
+
+/** A quiet icon target after the row's other targets: it jumps to the Paseo session executing the task. */
+function SessionButton({ identifier, colors, onPress }: { identifier: string; colors: Colors; onPress(): void }) {
+  const hover = useHover();
+  return <Pressable
+    accessibilityRole="button" accessibilityLabel={`打开 ${identifier} 的执行会话`} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} hitSlop={SPACE.xs}
+    style={{
+      flexDirection: "row", alignItems: "center", justifyContent: "center", gap: SPACE.xs, minWidth: 22, height: 22, flexShrink: 0, marginRight: SPACE.xs,
+      paddingHorizontal: hover.hovered ? SPACE.sm : 0, borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface2 : "transparent", cursor: "pointer",
+    }}
+  >
+    <Icon name="MessageSquare" size={13} color={hover.hovered ? colors.foreground : colors.foregroundMuted} />
+    {hover.hovered ? <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: FONT.sm }}>会话</Text> : null}
   </Pressable>;
 }
 

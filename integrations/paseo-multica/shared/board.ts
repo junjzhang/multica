@@ -29,6 +29,10 @@ const pullRequestSchema = z.object({
 });
 export type BoardPullRequest = z.infer<typeof pullRequestSchema>;
 
+/** A Paseo session as the host's `openAgent` takes it: the host's server id and the session's agent id. */
+const paseoSessionSchema = z.object({ serverId: z.string(), agentId: z.string() });
+export type PaseoSession = z.infer<typeof paseoSessionSchema>;
+
 const issueSchema = z.object({
   id: z.string(),
   identifier: z.string(),
@@ -55,6 +59,8 @@ const issueSchema = z.object({
   activeRun: z.boolean(),
   lastRunFailed: z.boolean(),
   pullRequests: z.array(pullRequestSchema),
+  /** The external Paseo session executing this task; absent when execution is managed or the session cannot be opened. */
+  executionSession: paseoSessionSchema.optional(),
 });
 export type BoardIssue = z.infer<typeof issueSchema>;
 
@@ -70,7 +76,7 @@ const archivedDeliverySchema = z.object({
   id: z.string(),
   issueIdentifier: z.string(),
   issueTitle: z.string(),
-  sessionUrl: z.string(),
+  session: paseoSessionSchema,
 });
 
 const readyBoardSchema = z.object({
@@ -95,6 +101,11 @@ export type BoardData = z.infer<typeof boardDataSchema>;
 
 export type Section = "attention" | "active" | "parked" | "done";
 export type TodoKind = "approval" | "merge" | "user" | "acceptance" | "session" | "anomaly";
+/** To-dos only the user can clear; every other kind waits on this session. */
+const USER_TODOS = new Set<TodoKind>(["approval", "user"]);
+export function isUserTodo(kind: TodoKind): boolean {
+  return USER_TODOS.has(kind);
+}
 /** Row markers; the order is the subtree aggregation priority, highest last. */
 export const MARKERS = ["idle", "done", "running", "leader", "you", "anomaly"] as const;
 export type Marker = (typeof MARKERS)[number];
