@@ -94,7 +94,14 @@ The panel has two parts:
   yours or this session's (usually an acceptance), and anomalies. The scope
   switch changes only the tree roots, never what counts as a to-do. The row opens
   the task; a to-do about an MR (approval, unmerged, conflicting, failed CI) ends
-  in an MR chip that opens that MR.
+  in an MR chip that opens that MR. A row whose task runs in another Paseo session
+  ends in a session target that jumps to that session instead.
+- **需要你** holds only what the user alone can clear: an MR waiting for their
+  approval, a contract pending the user, and a delivery that failed because its
+  session is archived. **待本会话处理** holds everything this session must do:
+  acceptance, its own pending turn, an unmerged MR of a closed task, and an
+  anomaly. The to-do kinds are unchanged; only the two blocks and their titles
+  differ. The pill counts both, since both are still open work.
 - **Task trees**, split into 需要处理 / 进行中 / 搁置, with 搁置 folded. Finished
   work is left out: a closed tree is not listed, and a closed child with no open
   MR counts only in its parent's progress. Every task row leads with Multica's
@@ -151,7 +158,14 @@ share a 15-second cache; the panel's ⟳ bypasses it.
 A session without an identity on Multica has an empty session board. The
 workspace board remains available. Owner authorization and network failures
 show an explanation in the panel. Failed deliveries to archived sessions show
-under **需要你** and link to the target Paseo session.
+under **需要你** and open the archived session in Paseo.
+
+A row's session target appears only when the host exposes
+`navigation.openAgent` (absent on older hosts and in the browser), the task's
+executor is an external agent with a deliverable Paseo binding, that binding is
+not the session showing the board, and the daemon still lists the session
+unarchived. It calls `openAgent({ serverId, agentId })` with the binding's host
+and session ids and never opens the task.
 
 ## What it reuses
 

@@ -33,7 +33,7 @@ try {
   await expect(page.getByText("投递失败：会话已归档 · 在 Paseo 中打开")).toBeVisible();
   await page.screenshot({ path: join(output, "archived-delivery.png") });
   await page.getByRole("link", { name: /WORK-3.+会话已归档/ }).click();
-  await expect(page.locator("body")).toHaveAttribute("data-opened-external-url", "paseo://h/same-host/agent/archived-session");
+  await expect(page.locator("body")).toHaveAttribute("data-opened-agent", "same-host/archived-session");
   await openTask("session-a");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-1" })).toBeVisible();
   await page.screenshot({ path: join(output, "session-a-details.png") });
@@ -64,8 +64,23 @@ try {
   await expect(page.getByRole("link", { name: "打开 slime!16 !16 有冲突" })).toBeVisible();
   await expect(page.getByRole("link", { name: /^打开 sglang!901 !901 CI 失败/ })).toBeVisible();
   await expect(page.getByRole("link", { name: "打开 gw!41 !41 待你审批" })).toBeVisible();
+  const sections = await panel.innerText();
+  expect(sections.indexOf("需要你")).toBeGreaterThanOrEqual(0);
+  expect(sections.indexOf("需要你")).toBeLessThan(sections.indexOf("待本会话处理"));
+  expect(sections.slice(sections.indexOf("待本会话处理"))).toContain("复核调度器补丁");
+  await expect(page.getByRole("button", { name: "打开 WORK-841 的执行会话" })).toHaveCount(0);
   await page.mouse.move(0, 0);
   await panel.screenshot({ path: join(output, "mr-light.png") });
+  const sessionEntry = page.getByRole("button", { name: "打开 WORK-840 的执行会话" });
+  await sessionEntry.hover();
+  await expect(sessionEntry).toContainText("会话");
+  await panel.screenshot({ path: join(output, "session-entry-hover.png") });
+  await sessionEntry.click();
+  await expect(body).toHaveAttribute("data-opened-agent", "same-host/worker-session");
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await page.getByRole("button", { name: "打开 WORK-830 的执行会话" }).click();
+  await expect(body).toHaveAttribute("data-opened-agent", "same-host/worker-session");
+  await expect(page.locator("iframe")).toHaveCount(0);
   await failedChip.hover();
   await expect(failedChip.locator("span", { hasText: "!833 CI 失败" })).toHaveCSS("text-decoration-line", "underline");
   await panel.screenshot({ path: join(output, "mr-chip-hover.png") });
@@ -89,7 +104,7 @@ try {
   await page.getByRole("button", { name: "theme", exact: true }).click();
   await panel.screenshot({ path: join(output, "mr-dark.png") });
   expect(errors).toEqual([]);
-  console.log("PASS: Chromium same-host/workspace session tasks, detail history, empty and disconnected states, MR chips");
+  console.log("PASS: Chromium same-host/workspace session tasks, detail history, empty and disconnected states, MR chips, session entries, split to-dos");
 } finally {
   if (browser) await browser.close();
   await new Promise(done => server.close(done));

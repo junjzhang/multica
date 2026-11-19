@@ -597,6 +597,44 @@ describe("session board service", () => {
     expect(api.gets.length).toBeGreaterThan(reads);
   });
 
+  it("names a task's executing Paseo session only when the host can open it", async () => {
+    const refreshed: string[] = [];
+    const host: PaseoHostAdapter = {
+      async listHosts() { return { self: { serverId: HOST_ID, label: "Workstation" } }; },
+      async refreshAgent(agentId) {
+        refreshed.push(agentId);
+        if (agentId === "missing") return null;
+        return { agent: { id: agentId, title: null, archivedAt: agentId === "archived" ? "2026-10-26T00:00:00Z" : null } };
+      },
+    };
+    const { home, api, service } = await setup({ host });
+    await writeSessionContext(home, makeContext());
+    routes(api, "session");
+    const binding = (agentId: string, hostId: string, sessionId: string, extra: Record<string, unknown> = {}) => ({ agent_id: agentId, deliverable: true, session: { id: `${agentId}-${sessionId}`, provider: "paseo", host_id: hostId, session_id: sessionId }, ...extra });
+    const executionOf = async (extra: Record<string, unknown>) => {
+      api.routes.set(`/api/issues/${OWNED}`, wireIssue(OWNED, "WORK-1", { status: "in_progress", status_category: "started", ...extra }));
+      const view = await service.board(SESSION_A, "session", true);
+      if (view.state !== "ready") throw new Error(view.state);
+      return view.issues.find((issue) => issue.id === OWNED)?.executionSession;
+    };
+    const contract = (executor: Record<string, string>) => ({ pending_actor: executor, executor, accepted: [], stale: false, contract: { versions: [{ criteria: ["works"] }] } });
+    const assigned = { assignee_type: "agent", assignee_id: AGENT_B };
+
+    expect(await executionOf({ ...assigned, external_session_bindings: [binding(AGENT_A, HOST_ID, "leader"), binding(AGENT_B, HOST_ID, "worker")] })).toEqual({ serverId: HOST_ID, agentId: "worker" });
+    expect(await executionOf({ contract: contract({ type: "agent", id: AGENT_B, session_id: `${AGENT_B}-second` }), external_session_bindings: [binding(AGENT_B, HOST_ID, "worker"), binding(AGENT_B, HOST_ID, "second")] })).toEqual({ serverId: HOST_ID, agentId: "second" });
+    refreshed.length = 0;
+    expect(await executionOf({ ...assigned, external_session_bindings: [binding(AGENT_B, "srv_far", "archived")] })).toEqual({ serverId: "srv_far", agentId: "archived" });
+    expect(refreshed).toEqual([]);
+
+    expect(await executionOf({ assignee_type: "agent", assignee_id: "managed", external_session_bindings: [binding(AGENT_A, HOST_ID, "leader")] })).toBeUndefined();
+    expect(await executionOf({ assignee_type: "member", assignee_id: AGENT_B, external_session_bindings: [binding(AGENT_B, HOST_ID, "worker")] })).toBeUndefined();
+    expect(await executionOf({ ...assigned })).toBeUndefined();
+    expect(await executionOf({ ...assigned, external_session_bindings: [binding(AGENT_B, HOST_ID, "worker", { deliverable: false })] })).toBeUndefined();
+    expect(await executionOf({ ...assigned, external_session_bindings: [binding(AGENT_B, HOST_ID, "archived")] })).toBeUndefined();
+    expect(await executionOf({ ...assigned, external_session_bindings: [binding(AGENT_B, HOST_ID, "missing")] })).toBeUndefined();
+    expect(await executionOf({ ...assigned, external_session_bindings: [{ ...binding(AGENT_B, HOST_ID, "worker"), session: { id: "x", provider: "codex", host_id: HOST_ID, session_id: "worker" } }] })).toBeUndefined();
+  });
+
   it("adds this session's closed tasks that still have an open MR as roots", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());

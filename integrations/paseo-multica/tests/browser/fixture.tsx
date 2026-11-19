@@ -17,7 +17,8 @@ function App() {
   const theme = themes[scheme];
   document.body.style.background = theme.colors.surface0;
   document.body.style.color = theme.colors.foreground;
-  const props = { context: "agent", workspaceId: "same-workspace", agentId, host: { id: "same-host" }, theme, layout: { compact: false }, tab: { state: states[agentId], setState: (next: any) => setStates(old => ({ ...old, [agentId]: next })) } } as unknown as PluginAgentPanelProps;
+  const navigation = { openAgent: ({ serverId, agentId: target }: { serverId?: string; agentId: string }) => { document.body.dataset.openedAgent = `${serverId}/${target}`; }, openWorkspace: () => {} };
+  const props = { context: "agent", workspaceId: "same-workspace", agentId, host: { id: "same-host" }, navigation, theme, layout: { compact: false }, tab: { state: states[agentId], setState: (next: any) => setStates(old => ({ ...old, [agentId]: next })) } } as unknown as PluginAgentPanelProps;
   return <><nav>{["session-a", "session-b", "empty", "disconnected", "mr"].map(id => <button key={id} onClick={() => select(id)}>{id}</button>)}<button onClick={() => setScheme(scheme === "light" ? "dark" : "light")}>theme</button></nav><h1>This session’s tasks · {agentId}</h1><p>Same Paseo host and workspace · shared external Agent</p><main style={{ display: "flex", gap: 24, height: 620 }}><section style={{ width: 430 }}><StatusPanel {...props} openTask={url => panels.open(props, url)} /></section><aside style={{ display: "flex", flex: 1 }}><Detail {...props} /></aside></main></>;
 }
 createRoot(document.getElementById("root")!).render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>);
