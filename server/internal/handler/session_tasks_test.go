@@ -6,16 +6,22 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 func sessionTasksRequest(userID, agentID string, external bool, sessionID string) *http.Request {
-	req := newRequestAs(userID, http.MethodGet, "/api/agents/"+agentID+"/session-tasks", nil)
+	path := "/api/agents/" + agentID + "/session-tasks"
+	if !external && sessionID != "" {
+		path += "?session_id=" + sessionID
+	}
+	req := newRequestAs(userID, http.MethodGet, path, nil)
 	if !external {
 		return withURLParam(req, "id", agentID)
 	}
@@ -338,10 +344,11 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 		t.Fatalf("reopened returning item = %+v, want the follow-up run status", reopened)
 	}
 
-	// Even the workspace owner cannot read an agent's session summary through
-	// this endpoint: it is the session's own view, not a management surface.
-	if code, _ := getSessionTasks(t, sessionTasksRequest(testUserID, agentID, false, "")); code != http.StatusForbidden {
-		t.Fatalf("human read status = %d, want 403", code)
+	if code, human := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, false, sessionID)); code != http.StatusOK || !reflect.DeepEqual(human, resp) {
+		t.Fatalf("owner read status=%d response=%+v, want same session projection", code, human)
+	}
+	if code, _ := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, false, "")); code != http.StatusBadRequest {
+		t.Fatalf("human read without an explicit session status = %d, want 400", code)
 	}
 	// A session credential without its session binding is refused rather than
 	// silently widened to every session of the agent.
@@ -349,6 +356,19 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 		t.Fatalf("unbound session credential status = %d, want 403", code)
 	}
 	otherAgent, otherSession, _ := externalAgentFixture(t, "Session Tasks Other", "daemon-session-tasks-other")
+	if code, _ := getSessionTasks(t, sessionTasksRequest(ownerID, agentID, false, otherSession)); code != http.StatusNotFound {
+		t.Fatalf("owner read of session from another agent status = %d, want 404", code)
+	}
+	override := sessionTasksRequest(ownerID, agentID, true, sessionID)
+	override.URL.RawQuery = "session_id=" + otherSession
+	if code, _ := getSessionTasks(t, override); code != http.StatusForbidden {
+		t.Fatalf("external credential overriding its session status = %d, want 403", code)
+	}
+	taskRequest := sessionTasksRequest(ownerID, agentID, false, sessionID)
+	taskRequest.Header.Set("X-Actor-Source", "task_token")
+	if code, _ := getSessionTasks(t, taskRequest); code != http.StatusForbidden {
+		t.Fatalf("managed task reading session status = %d, want 403", code)
+	}
 	crossReq := newRequestAs(ownerID, http.MethodGet, "/api/agents/"+agentID+"/session-tasks", nil)
 	crossReq.Header.Set("X-Actor-Source", "external_agent")
 	crossReq.Header.Set("X-Agent-ID", otherAgent)
@@ -358,7 +378,7 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	}
 	plain := dbfx.User(t, "Session Tasks Plain", "session-tasks-plain-"+suffix+"@test.local")
 	dbfx.Member(t, testWorkspaceID, plain, "member")
-	if code, _ := getSessionTasks(t, sessionTasksRequest(plain, agentID, false, "")); code != http.StatusForbidden {
+	if code, _ := getSessionTasks(t, sessionTasksRequest(plain, agentID, false, sessionID)); code != http.StatusForbidden {
 		t.Fatalf("plain member read status = %d, want 403", code)
 	}
 
@@ -374,6 +394,89 @@ func TestGetAgentSessionTasksReadAPI(t *testing.T) {
 	foreignReq := sessionTasksRequest(ownerID, foreignWorkspaceAgent, true, sessionID)
 	if code, _ := getSessionTasks(t, foreignReq); code != http.StatusNotFound {
 		t.Fatalf("foreign workspace agent status = %d, want 404", code)
+	}
+}
+
+func TestPaseoOwnerReadsArchiveFailuresForExactSession(t *testing.T) {
+	targetAgent, targetID, targetOwner := externalAgentFixture(t, "Archived target", "daemon-archived-target")
+	_, sourceID, sourceOwner := externalAgentFixture(t, "Archived source", "daemon-archived-source")
+	target, err := testHandler.Queries.GetExternalAgentSessionByID(context.Background(), db.GetExternalAgentSessionByIDParams{
+		ID: parseUUID(targetID), WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup := "/api/agents/external/session?host_id=" + target.HostID + "&session_id=" + target.SessionID
+	var identity map[string]string
+	testutil.Call(t, testHandler.GetOwnPaseoSession, newRequestAs(targetOwner, http.MethodGet, lookup, nil)).Want(http.StatusOK).JSON(&identity)
+	if identity["agent_id"] != targetAgent || identity["session_id"] != targetID {
+		t.Fatalf("wrong registered identity: %+v", identity)
+	}
+	testutil.Call(t, testHandler.GetOwnPaseoSession, newRequestAs(sourceOwner, http.MethodGet, lookup, nil)).Want(http.StatusOK).JSON(&identity)
+	if identity != nil {
+		t.Fatalf("found another owner's identity: %+v", identity)
+	}
+
+	issue := dbfx.Issue(t, "Completed issue with failed result delivery", testutil.Cols{"status": "done"})
+	insert := func(reason string) string {
+		return dbfx.Insert(t, "agent_mailbox_message", testutil.Cols{
+			"workspace_id": testWorkspaceID, "issue_id": issue, "recipient_agent_id": targetAgent,
+			"source_type": "delivery", "kind": "delegation_result", "source_session_id": sourceID, "target_session_id": targetID,
+			"delivery_status": "failed", "last_error": reason,
+		})
+	}
+	failed := insert("agent_archived: restore the session")
+	unrelated := insert("paseo_host_mismatch: invalid host")
+	path := "/api/agents/external/archived-deliveries"
+	for _, scope := range []string{"", "?session_id=" + sourceID} {
+		var rows []archivedPaseoDelivery
+		testutil.Call(t, testHandler.ListArchivedPaseoDeliveries, newRequestAs(sourceOwner, http.MethodGet, path+scope, nil)).Want(http.StatusOK).JSON(&rows)
+		found := false
+		for _, row := range rows {
+			if row.ID == unrelated {
+				t.Fatalf("unrelated failure included: %+v", row)
+			}
+			if row.ID == failed {
+				found = row.HostID == target.HostID && row.SessionID == target.SessionID
+			}
+		}
+		if !found {
+			t.Fatalf("failed delivery %s missing expected target: %+v", failed, rows)
+		}
+	}
+	testutil.Call(t, testHandler.ListArchivedPaseoDeliveries, newRequestAs(sourceOwner, http.MethodGet, path+"?session_id="+targetID, nil)).Want(http.StatusNotFound)
+
+	unrelatedOwner := dbfx.User(t, "Unrelated member", "unrelated-archived-"+target.SessionID+"@test.local")
+	dbfx.Member(t, testWorkspaceID, unrelatedOwner, "member")
+	var rows []archivedPaseoDelivery
+	testutil.Call(t, testHandler.ListArchivedPaseoDeliveries, newRequestAs(unrelatedOwner, http.MethodGet, path, nil)).Want(http.StatusOK).JSON(&rows)
+	for _, row := range rows {
+		if row.ID == failed {
+			t.Fatalf("ordinary member received another member's archived delivery: %+v", row)
+		}
+	}
+}
+
+func TestExpiredExternalTokenCleanupKeepsSessionAndLiveToken(t *testing.T) {
+	agentID, sessionID, ownerID := externalAgentFixture(t, "Token sweep", "daemon-token-sweep")
+	makeToken := func(expiry time.Time) string {
+		return dbfx.Insert(t, "external_agent_token", testutil.Cols{
+			"workspace_id": testWorkspaceID, "agent_id": agentID, "external_session_id": sessionID,
+			"owner_user_id": ownerID, "expires_at": expiry, "token_hash": fmt.Sprintf("test-%s-%d", sessionID, expiry.Unix()),
+		})
+	}
+	expired := makeToken(time.Now().Add(-time.Hour))
+	live := makeToken(time.Now().Add(time.Hour))
+	if _, err := testHandler.Queries.DeleteExpiredExternalAgentTokens(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var expiredCount, liveCount, sessionCount int
+	err := testPool.QueryRow(context.Background(), `SELECT
+		(SELECT count(*) FROM external_agent_token WHERE id = $1),
+		(SELECT count(*) FROM external_agent_token WHERE id = $2),
+		(SELECT count(*) FROM external_agent_session WHERE id = $3)`, expired, live, sessionID).Scan(&expiredCount, &liveCount, &sessionCount)
+	if err != nil || expiredCount != 0 || liveCount != 1 || sessionCount != 1 {
+		t.Fatalf("cleanup counts expired=%d live=%d session=%d err=%v", expiredCount, liveCount, sessionCount, err)
 	}
 }
 

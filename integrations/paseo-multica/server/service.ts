@@ -40,7 +40,6 @@ export interface SessionServiceDeps {
   store?: SessionStore;
   readSettings(): Promise<ConnectionConfig>;
   now?: () => Date;
-  tokenTtlMs?: number;
 }
 
 export interface SessionService {
@@ -50,7 +49,8 @@ export interface SessionService {
   board(agentId: string, scope: BoardScope, refresh?: boolean): Promise<BoardData>;
 }
 
-const DEFAULT_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const DEFAULT_TOKEN_TTL_MS = 60 * 60 * 1000;
+const TOKEN_RENEW_WINDOW_MS = 5 * 60 * 1000;
 const CONNECT_HINT = "Run multica session connect (or /multica connect in the composer)";
 const locks = new Map<string, Promise<unknown>>();
 /** The pill and the panel read the same board; a short cache keeps them from doubling the fan-out. */
@@ -82,7 +82,6 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     remove: removeSessionContext,
   };
   const now = deps.now ?? (() => new Date());
-  const tokenTtlMs = deps.tokenTtlMs ?? DEFAULT_TOKEN_TTL_MS;
 
   async function readConfig(): Promise<Pick<ConnectionConfig, "ownerProfile" | "daemonId">> {
     const raw = await deps.readSettings();
@@ -181,7 +180,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
             `${conflict} Refusing to rebind this session. Restore the owner profile that issued the current binding and run /multica disconnect to revoke it. ${CONNECT_HINT}.`,
           );
         }
-        if (!isExpired(existing.context, now())) {
+        if (Date.parse(existing.context.expires_at) > now().getTime() + TOKEN_RENEW_WINDOW_MS) {
           const validity = await api.verifyExternalAgentToken(
             contextCredential(existing.context),
             existing.context.agent_id,
@@ -198,7 +197,11 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
         );
       }
 
-      const registration = await registerSession(api, ownerCredential(owner), host, config.daemonId);
+      const credential = ownerCredential(owner);
+      const registered = await api.findPaseoSession(credential, host.hostId, host.sessionId);
+      const registration = registered?.daemon_id === config.daemonId
+        ? { id: registered.agent_id, sessionId: registered.session_id }
+        : await registerSession(api, credential, host, config.daemonId);
       if (existing.status === "ok" && existing.context.agent_id !== registration.id) {
         throw new ConfigurationError(
           "Multica returned a different agent identity for this session. Refusing to overwrite the existing binding.",
@@ -206,10 +209,10 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       }
 
       const issued = await api.createExternalAgentToken(
-        ownerCredential(owner),
+        credential,
         registration.id,
         registration.sessionId,
-        new Date(now().getTime() + tokenTtlMs).toISOString(),
+        new Date(now().getTime() + DEFAULT_TOKEN_TTL_MS).toISOString(),
       );
       const context: SessionContext = {
         version: 1,
@@ -368,36 +371,31 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
    * convenience surface and must never break the composer.
    */
   async function readBoard(agentId: string, scope: BoardScope): Promise<BoardData> {
-    const existing = await store.read(deps.home, agentId);
     const checkedAt = now().toISOString();
-    if (existing.status === "missing") {
-      return { state: "disconnected", reason: `This Paseo session has no Multica binding. ${CONNECT_HINT}.`, checkedAt };
-    }
-    if (existing.status === "invalid") return { state: "disconnected", reason: existing.reason, checkedAt };
-    const context = existing.context;
-    if (isExpired(context, now())) {
-      return { state: "unavailable", reason: `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`, checkedAt };
-    }
-    const credential = contextCredential(context);
-    let sessionTasks: Awaited<ReturnType<MulticaApi["listSessionTasks"]>>;
-    try {
-      sessionTasks = await api.listSessionTasks(credential, context.agent_id);
-    } catch (error) {
-      return { state: "unavailable", reason: unavailableReason(error), checkedAt };
-    }
     try {
       const settings = await deps.readSettings();
+      const owner = await loadOwnerProfile(deps.home, settings.ownerProfile.trim());
+      const credential = ownerCredential(owner);
+      const hostId = (await deps.paseo.listHosts()).self.serverId.trim();
+      const registered = await api.findPaseoSession(credential, hostId, agentId);
+      if (scope === "session" && !registered) {
+        return { state: "ready", scope, viewer: { agentId: "", forgeUsernames: [] }, issues: [], rootIds: [], projects: [], truncated: false, checkedAt };
+      }
+      const sessionTasks = scope === "session" && registered
+        ? await api.listSessionTasks(credential, registered.agent_id, registered.session_id)
+        : undefined;
       return await loadBoard(api, {
         scope,
         credential,
-        appUrl: context.app_url,
-        agentId: context.agent_id,
+        appUrl: owner.appUrl,
+        agentId: registered?.agent_id ?? "",
+        sessionId: registered?.session_id,
         sessionTasks,
         forgeUsernames: parseForgeUsernames(settings.forgeUsernames ?? ""),
         checkedAt,
       });
     } catch (error) {
-      return { state: "unavailable", reason: `Could not read this session's Multica tasks: ${describeError(error)}.`, checkedAt };
+      return { state: "unavailable", reason: unavailableReason(error), checkedAt };
     }
   }
 
@@ -443,10 +441,10 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
 function unavailableReason(error: unknown): string {
   if (error instanceof MulticaApiError) {
     if (error.status === 403) {
-      return "This Multica agent has no registered session, so it has no session task summary. Reconnect this session to issue a session credential.";
+      return "The configured Multica owner profile cannot read this board. Check the profile's workspace access.";
     }
     if (error.status === 404) return "This Multica server does not expose session task summaries yet. Update the server to use the task panel.";
-    if (error.status === 401) return `Multica no longer accepts this session's credential. ${CONNECT_HINT} to repair it.`;
+    if (error.status === 401) return "Sign in again with the configured Multica owner profile.";
   }
   return `Could not read this session's Multica tasks: ${describeError(error)}.`;
 }

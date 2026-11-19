@@ -3,6 +3,7 @@ const board = (agentId: string) => ({
   state: "ready", scope: "session", viewer: { agentId: "shared-external-agent", sessionId: agentId, forgeUsernames: [] },
   issues: ["session-a", "session-b"].includes(agentId) ? [{ id: agentId, identifier: agentId === "session-a" ? "WORK-1" : "WORK-2", title: `Only ${agentId}`, status: "in_progress", statusCategory: "started", lastActivityAt: new Date().toISOString(), activeRun: true, lastRunFailed: false, pullRequests: [], url: `${location.origin}/acme/issues/${agentId === "session-a" ? "WORK-1" : "WORK-2"}` }] : [],
   rootIds: ["session-a", "session-b"].includes(agentId) ? [agentId] : [], projects: [], truncated: false, checkedAt: new Date().toISOString(),
+  archivedDeliveries: agentId === "session-a" ? [{ id: "failed-delivery", issueIdentifier: "WORK-3", issueTitle: "Delivery to a closed conversation", sessionUrl: "paseo://h/same-host/agent/archived-session" }] : [],
 });
 const handlers: Record<string, (input: any) => Promise<any>> = {
   "session.board": async ({ agentId }) => agentId === "disconnected" ? { state: "disconnected", reason: "This Paseo session has no Multica binding.", checkedAt: "fixture" } : board(agentId),

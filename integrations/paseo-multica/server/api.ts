@@ -44,6 +44,7 @@ export interface IssuedToken {
 }
 
 export interface MulticaApi {
+  findPaseoSession(credential: ApiCredential, hostId: string, sessionId: string): Promise<RegisteredPaseoSession | null>;
   registerExternalAgent(
     credential: ApiCredential,
     input: RegisterExternalAgentInput,
@@ -58,7 +59,7 @@ export interface MulticaApi {
   /** A live external credential for this exact agent is the only "valid" answer. */
   verifyExternalAgentToken(credential: ApiCredential, agentId: string): Promise<"valid" | "invalid">;
   /** Read-only "this session's tasks" projection; scoped by the credential. */
-  listSessionTasks(credential: ApiCredential, agentId: string): Promise<SessionTasksWire>;
+  listSessionTasks(credential: ApiCredential, agentId: string, sessionId?: string): Promise<SessionTasksWire>;
   /** A read-only GET of an existing Multica endpoint; the caller validates the body. */
   get(credential: ApiCredential, path: string): Promise<unknown>;
 }
@@ -81,6 +82,9 @@ const agentResponseSchema = z.object({
   external_session: z.object({ id: z.string() }).nullish(),
   external_template: z.object({ id: z.string() }).nullish(),
 });
+
+const registeredPaseoSessionSchema = z.object({ agent_id: z.uuid(), session_id: z.uuid(), daemon_id: z.string().min(1) });
+type RegisteredPaseoSession = z.infer<typeof registeredPaseoSessionSchema>;
 
 const tokenResponseSchema = z.object({
   id: z.string(),
@@ -133,7 +137,7 @@ export function createMulticaApi(options: {
         );
       }
       if (response.status >= 400) {
-        const detail = redactSecrets(text.slice(0, MAX_ERROR_BODY)).trim();
+        const detail = redactSecrets(text.replaceAll(token, "[redacted]").slice(0, MAX_ERROR_BODY)).trim();
         const body = parseJson(text) as { code?: unknown } | null;
         const code = typeof body?.code === "string" && body.code !== "" ? body.code : undefined;
         throw new MulticaApiError(
@@ -152,6 +156,13 @@ export function createMulticaApi(options: {
     async get(credential, path) {
       if (!path.startsWith("/api/")) throw new Error("Invalid Multica API path");
       return parseJson(await request(credential, "GET", path, credential.token));
+    },
+    async findPaseoSession(credential, hostId, sessionId) {
+      const query = new URLSearchParams({ host_id: hostId, session_id: sessionId });
+      const text = await request(credential, "GET", `/api/agents/external/session?${query}`, credential.token);
+      const parsed = registeredPaseoSessionSchema.nullable().safeParse(text.trim() === "null" ? null : parseJson(text) ?? undefined);
+      if (!parsed.success) throw new MulticaApiError(0, "Multica did not return a valid Paseo session.");
+      return parsed.data;
     },
     async registerExternalAgent(credential, input) {
       const text = await request(credential, "POST", "/api/agents/external", credential.token, {
@@ -209,11 +220,12 @@ export function createMulticaApi(options: {
       );
     },
 
-    async listSessionTasks(credential, agentId) {
+    async listSessionTasks(credential, agentId, sessionId) {
+      const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
       const text = await request(
         credential,
         "GET",
-        `/api/agents/${encodeURIComponent(agentId)}/session-tasks`,
+        `/api/agents/${encodeURIComponent(agentId)}/session-tasks${query}`,
         credential.token,
       );
       const parsed = sessionTasksWireSchema.safeParse(parseJson(text));

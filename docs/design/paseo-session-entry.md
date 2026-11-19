@@ -73,8 +73,9 @@ including issue, comment, wakeup, repo and runtime-profile commands.
    is refused rather than resolved.
 2. **Paseo session binding.** Otherwise, `PASEO_AGENT_ID` or an explicit file
    selects the binding, and its server, workspace and credential are used. A
-   missing, corrupt, expired or mismatched file fails closed with the reconnect
-   instruction; it never falls through to the human's default profile.
+   missing or expiring default cache triggers issuance through the Paseo
+   plugin. An unusable file or failed issuance stops the command. See
+   [Paseo session identity and credentials](paseo-session-credentials.md).
 3. **The credential's own agent must match.** The binding names an agent, but
    the file alone cannot prove the `mea_` token belongs to it. Before any
    command issues a business request, the CLI reads that agent's own mailbox

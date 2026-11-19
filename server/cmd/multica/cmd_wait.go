@@ -149,7 +149,7 @@ func callWait(cmd *cobra.Command, method, path string, body any, bound *external
 		return fmt.Errorf("wait endpoint must be a loopback HTTP address")
 	}
 	if method == http.MethodGet && strings.HasPrefix(path, "/waits?") && !inDaemonManagedExecutionContext() {
-		bound, err = readExternalSessionContext()
+		bound, err = externalSessionForCommand(cmd)
 		if err != nil {
 			return err
 		}

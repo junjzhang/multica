@@ -30,12 +30,17 @@ try {
     await page.getByRole("link", { name: new RegExp(`Only ${name}`) }).click();
   }
   await expect(page.getByText("Only session-a", { exact: false })).toBeVisible();
+  await expect(page.getByText("投递失败：会话已归档 · 在 Paseo 中打开")).toBeVisible();
+  await page.screenshot({ path: join(output, "archived-delivery.png") });
+  await page.getByRole("link", { name: /WORK-3.+会话已归档/ }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-opened-external-url", "paseo://h/same-host/agent/archived-session");
   await openTask("session-a");
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-1" })).toBeVisible();
   await page.screenshot({ path: join(output, "session-a-details.png") });
   await page.getByRole("button", { name: "session-b", exact: true }).click();
   await expect(page.getByText("Only session-b", { exact: false })).toBeVisible();
   await expect(page.getByText("Only session-a", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("投递失败：会话已归档 · 在 Paseo 中打开")).toHaveCount(0);
   await expect(page.locator("iframe")).toHaveCount(0);
   await expect(page.getByText("Select a task to open its details.")).toBeVisible();
   await openTask("session-b");
