@@ -277,22 +277,23 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       if (hostError || !host) {
         return viewFor(context, "invalid", hostError ?? "This Paseo session could not be verified.");
       }
+      let owner: OwnerProfile;
       try {
         const config = await readConfig();
-        const owner = await loadOwnerProfile(deps.home, config.ownerProfile);
+        owner = await loadOwnerProfile(deps.home, config.ownerProfile);
         const conflict = conflictFor(context, host, owner, config.daemonId);
         if (conflict) return viewFor(context, "invalid", `${conflict} ${CONNECT_HINT} after fixing the configuration.`);
       } catch (error) {
         return viewFor(context, "invalid", describeError(error));
       }
-      if (isExpired(context, now())) {
-        return viewFor(
-          context,
-          "invalid",
-          `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`,
-        );
-      }
       try {
+        if (isExpired(context, now())) {
+          const registered = await api.findPaseoSession(ownerCredential(owner), host.hostId, host.sessionId);
+          if (!registered || registered.agent_id !== context.agent_id || registered.daemon_id !== context.daemon_id) {
+            return viewFor(context, "invalid", `The Multica session binding no longer matches its registration. ${CONNECT_HINT} to repair it.`);
+          }
+          return viewFor(context, "connected");
+        }
         const validity = await api.verifyExternalAgentToken(contextCredential(context), context.agent_id);
         if (validity === "invalid") {
           return viewFor(
