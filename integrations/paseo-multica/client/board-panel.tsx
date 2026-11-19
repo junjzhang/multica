@@ -66,7 +66,7 @@ function elapsed(value: string | undefined, now: number): string {
 function anomalyPhrase(issue: BoardIssue, now: number): Phrase {
   const since = elapsed(issue.lastActivityAt, now);
   const failed = failedCi(issue);
-  const text = failed.length > 0 ? `${numberOf(failed)} CI 失败` : issue.lastRunFailed ? "运行失败" : "阻塞";
+  const text = failed.length > 0 ? stateOf(failed, "CI 失败") : issue.lastRunFailed ? "运行失败" : "阻塞";
   const urgent = (failed.length > 0 || issue.lastRunFailed) && isFresh(issue.lastActivityAt, now);
   return { text: since ? `${text} · ${since}` : text, ...(urgent ? { tone: "danger" as const } : {}) };
 }
@@ -75,9 +75,9 @@ function failedCi(issue: BoardIssue): BoardPullRequest[] {
   return issue.pullRequests.filter((pr) => isOpenPullRequest(pr) && pr.ci === "failed");
 }
 
-/** The first MR's number, with how many more follow: `!7`, `!7 +1`. */
-function numberOf(prs: BoardPullRequest[]): string {
-  return prs.length > 1 ? `${prNumber(prs[0]!)} +${prs.length - 1}` : prNumber(prs[0]!);
+/** The first MR's number and state, then how many more follow, whatever their state: `!7 CI 失败 +1`. */
+function stateOf(prs: BoardPullRequest[], state: string): string {
+  return `${prNumber(prs[0]!)} ${state}${prs.length > 1 ? ` +${prs.length - 1}` : ""}`;
 }
 
 function isConflicting(pr: BoardPullRequest): boolean {
@@ -88,9 +88,9 @@ function isConflicting(pr: BoardPullRequest): boolean {
 function mergePhrase(prs: BoardPullRequest[]): Phrase {
   const pr = prs[0];
   if (!pr) return { text: "MR 未合并" };
-  if (pr.ci === "failed") return { text: `${numberOf(prs)} CI 失败`, tone: "danger" };
-  if (isConflicting(pr)) return { text: `${numberOf(prs)} 有冲突`, tone: "danger" };
-  return { text: `${numberOf(prs)} 未合并` };
+  if (pr.ci === "failed") return { text: stateOf(prs, "CI 失败"), tone: "danger" };
+  if (isConflicting(pr)) return { text: stateOf(prs, "有冲突"), tone: "danger" };
+  return { text: stateOf(prs, "未合并") };
 }
 
 /** The MRs a to-do is about, most urgent first; empty when the to-do is not about an MR. */
@@ -110,7 +110,7 @@ export function todoPhrase(todo: Todo, now: number): Phrase {
   switch (todo.kind) {
     case "approval": {
       const prs = todoPullRequests(todo);
-      return { text: prs.length > 0 ? `${numberOf(prs)} 待你审批` : "待你审批", tone: "action" };
+      return { text: prs.length > 0 ? stateOf(prs, "待你审批") : "待你审批", tone: "action" };
     }
     case "merge":
       return mergePhrase(todoPullRequests(todo));
@@ -163,19 +163,30 @@ function byUrgency(entries: PullRequestEntry[]): PullRequestEntry[] {
 }
 
 /** Open MRs anywhere in a tree, the task's own first, then its subtree in board order. */
-export function openIn(tree: TreeNode): PullRequestEntry[] {
+function openIn(tree: TreeNode): PullRequestEntry[] {
   const own = tree.issue.pullRequests.filter(isOpenPullRequest).map((pr) => ({ pr, issue: tree.issue }));
   return [...own, ...tree.stages.flatMap((group) => group.nodes.flatMap(openIn))];
 }
 
-/** A tree row's chip: the open MRs of its whole subtree, colored by the most urgent one. */
+/**
+ * Each open MR of a tree once. An MR can link to several tasks, often a
+ * subtask and the parent its description mentions; the deepest task keeps it,
+ * since that one delivers it and comes last in board order.
+ */
+export function openMergeRequestsIn(tree: TreeNode): PullRequestEntry[] {
+  return [...new Map(openIn(tree).map((entry) => [entry.pr.id, entry])).values()];
+}
+
+/** A tree row's chip: the open MRs of its whole subtree, colored by the most urgent one; a single MR also names its state. */
 export function treeChip(tree: TreeNode): PullRequestChip | undefined {
-  const entries = byUrgency(openIn(tree));
+  const entries = byUrgency(openMergeRequestsIn(tree));
   if (entries.length === 0) return undefined;
   const prs = entries.map((entry) => entry.pr);
   const tone = prTone(entries[0]!);
-  const text = prs.length === 1 ? prNumber(prs[0]!) : `${prs.length}`;
-  return { icon: prIcon(prs), text, ...(tone ? { tone } : {}), label: prs.map(prRef).join(" "), entries };
+  const detail = prs.length === 1 ? prDetail(entries[0]!.pr, entries[0]!.issue) : undefined;
+  const text = prs.length > 1 ? `${prs.length}` : detail ? `${prNumber(prs[0]!)} ${detail.text}` : prNumber(prs[0]!);
+  const label = detail ? `${prRef(prs[0]!)} ${detail.text}` : prs.map(prRef).join(" ");
+  return { icon: prIcon(prs), text, ...(tone ? { tone } : {}), label, entries };
 }
 
 /** A to-do row's chip: its MR state phrase, opening the MRs it names. */

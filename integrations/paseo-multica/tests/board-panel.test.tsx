@@ -66,7 +66,7 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   await press(renderer!, "打开 slime!813 !813 待你审批");
   expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
 
-  await press(renderer!, "打开 mimikyu!818");
+  await press(renderer!, "打开 mimikyu!818 CI 运行中");
   expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/mimikyu/merge_requests/818");
   await press(renderer!, "展开 WORK-497");
   expect(text(renderer!)).toContain("mimikyu!700 旧\n已合并");
@@ -126,7 +126,8 @@ it("folds a task's open MRs into one chip and keeps merged ones as a quiet mark"
   expect(chip([mr("b", "closed")])).toBeUndefined();
   expect(chip([mr("a1", "merged")])).toBeUndefined();
   expect(mergedMark(task("t", [mr("a1", "merged"), mr("b", "closed")]))).toMatchObject({ text: "!1", label: "已合并 r!1" });
-  expect(chip([mr("a1", "merged"), mr("b2", "open")])).toMatchObject({ icon: "GitPullRequest", text: "!2" });
+  expect(chip([mr("a1", "merged"), mr("b2", "open")])).toMatchObject({ icon: "GitPullRequest", text: "!2", label: "r!2" });
+  expect(chip([mr("b2", "open", { ci: "pending" })])).toMatchObject({ text: "!2 CI 运行中", label: "r!2 CI 运行中" });
   expect(chip([mr("a1", "open"), mr("b2", "draft", { ci: "failed" })])).toMatchObject({ icon: "GitPullRequest", text: "2", tone: "danger" });
   expect(chip([mr("a1", "open", { mergeable: "CONFLICTING" })])).toMatchObject({ tone: "danger" });
   expect(chip([mr("a1", "open", { myReview: "approving" })], { contract: { accepted: true } })).toMatchObject({ tone: "action" });
@@ -143,6 +144,9 @@ it("sums a parent's whole subtree of open MRs, most urgent first", () => {
   const chip = treeChip(treeOf(issues, "p"))!;
   expect(chip).toMatchObject({ text: "4", tone: "danger" });
   expect(chip.entries.map((entry) => `${entry.issue.id}:${entry.pr.id}`)).toEqual(["g:g3", "c:c2", "p:p1", "d:d5"]);
+  const shared = treeChip(treeOf([task("p", [mr("p1", "open", { ci: "failed" })]), task("c", [mr("p1", "open", { ci: "failed" })], { parentId: "p" })], "p"))!;
+  expect(shared).toMatchObject({ text: "!1 CI 失败", tone: "danger" });
+  expect(shared.entries.map((entry) => `${entry.issue.id}:${entry.pr.id}`)).toEqual(["c:p1"]);
   const calm = treeChip(treeOf(issues.slice(0, 2), "p"))!;
   expect(calm).toMatchObject({ text: "2", tone: "action" });
 });
@@ -156,7 +160,7 @@ it("points every MR to-do at its MR", () => {
   expect(merge([mr("7", "open", { mergeable: "CONFLICTING" })])).toMatchObject({ text: "!7 有冲突", tone: "danger" });
   expect(merge([mr("7", "open", { ci: "failed" })])).toMatchObject({ text: "!7 CI 失败", tone: "danger" });
   expect(urls(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })]))).toEqual(["https://git.woa.com/o/r/merge_requests/8", "https://git.woa.com/o/r/merge_requests/7"]);
-  expect(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })])).toMatchObject({ text: "!8 +1 CI 失败" });
+  expect(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })])).toMatchObject({ text: "!8 CI 失败 +1" });
   const approve = [mr("5", "open", { myReview: "approving" })];
   expect(todoChip({ kind: "approval", issue: task("a", approve, { contract: { accepted: true } }), pullRequests: approve }, now)).toMatchObject({ text: "!5 待你审批", tone: "action" });
   const ci = [mr("9", "open", { ci: "failed" }), mr("6", "open")];

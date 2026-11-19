@@ -100,8 +100,9 @@ The panel has two parts:
   MR counts only in its parent's progress. Every task row leads with Multica's
   status glyph (dotted backlog, ring todo, half in progress, three quarters in
   review, slash blocked), colored amber, green or red for in progress, in review
-  and blocked. A row's MR chip gathers the open MRs of its whole subtree: the
-  number of a single MR, or a count for several, colored by the most urgent one
+  and blocked. A row's MR chip gathers the open MRs of its whole subtree, each
+  MR once even when several tasks link it: a single MR's number and state, or a
+  count for several, colored by the most urgent one
   (red for failed CI or a conflict, amber when one waits for your approval). A
   single MR opens directly; several expand in place, each naming the subtask it
   came from. Merged MRs appear on the rows that delivered them: an open task's
