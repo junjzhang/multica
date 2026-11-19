@@ -170,8 +170,8 @@ function openIn(tree: TreeNode): PullRequestEntry[] {
 
 /**
  * Each open MR of a tree once. An MR can link to several tasks, often a
- * subtask and the parent its description mentions; the deepest task keeps it,
- * since that one delivers it and comes last in board order.
+ * subtask and the parent its description mentions; the task last in board
+ * order keeps it, so a descendant always wins over its own ancestors.
  */
 export function openMergeRequestsIn(tree: TreeNode): PullRequestEntry[] {
   return [...new Map(openIn(tree).map((entry) => [entry.pr.id, entry])).values()];
