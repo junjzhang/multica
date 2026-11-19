@@ -92,16 +92,21 @@ The panel has two parts:
 
 - **待办** (to-do queue): MRs waiting for your approval, tasks whose turn is
   yours or this session's (usually an acceptance), and anomalies. The scope
-  switch changes only the tree roots, never what counts as a to-do. Each row shows
-  its MRs' CI, review and mergeability and opens the MR or the task.
+  switch changes only the tree roots, never what counts as a to-do. The row opens
+  the task; a to-do about an MR (approval, unmerged, conflicting, failed CI) ends
+  in an MR chip that opens that MR.
 - **Task trees**, split into 需要处理 / 进行中 / 搁置, with 搁置 folded. Finished
   work is left out: a closed tree is not listed, and a closed child with no open
   MR counts only in its parent's progress. Every task row leads with Multica's
   status glyph (dotted backlog, ring todo, half in progress, three quarters in
   review, slash blocked), colored amber, green or red for in progress, in review
-  and blocked. A row shows its open MRs by number (`!821`, or a count for
-  several). Merged MRs appear on the rows that delivered them: an open task's
-  merged MRs, and a finished batch, which lists up to three with a count for the
+  and blocked. A row's MR chip gathers the open MRs of its whole subtree, each
+  MR once even when several tasks link it: a single MR's number and state, or a
+  count for several, colored by the most urgent one
+  (red for failed CI or a conflict, amber when one waits for your approval). A
+  single MR opens directly; several expand in place, each naming the subtask it
+  came from. Merged MRs appear on the rows that delivered them: an open task's
+  merged MRs, under its disclosure, and a finished batch, which lists up to three with a count for the
   rest instead of a `done/total` count. A single-child parent shows no count. Children are grouped by
   `stage` into batches.
 

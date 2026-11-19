@@ -65,28 +65,55 @@ function elapsed(value: string | undefined, now: number): string {
 /** A failure is red only while fresh; an old one is history, not an emergency. */
 function anomalyPhrase(issue: BoardIssue, now: number): Phrase {
   const since = elapsed(issue.lastActivityAt, now);
-  const failedCi = issue.pullRequests.some((pr) => isOpenPullRequest(pr) && pr.ci === "failed");
-  const text = failedCi ? "CI 失败" : issue.lastRunFailed ? "运行失败" : "阻塞";
-  const urgent = (failedCi || issue.lastRunFailed) && isFresh(issue.lastActivityAt, now);
+  const failed = failedCi(issue);
+  const text = failed.length > 0 ? stateOf(failed, "CI 失败") : issue.lastRunFailed ? "运行失败" : "阻塞";
+  const urgent = (failed.length > 0 || issue.lastRunFailed) && isFresh(issue.lastActivityAt, now);
   return { text: since ? `${text} · ${since}` : text, ...(urgent ? { tone: "danger" as const } : {}) };
 }
 
-/** A closed task's open MR: what blocks it, else that it is still unmerged. */
-function mergePhrase(pr: BoardPullRequest | undefined): Phrase {
+function failedCi(issue: BoardIssue): BoardPullRequest[] {
+  return issue.pullRequests.filter((pr) => isOpenPullRequest(pr) && pr.ci === "failed");
+}
+
+/** The first MR's number and state, then how many more follow, whatever their state: `!7 CI 失败 +1`. */
+function stateOf(prs: BoardPullRequest[], state: string): string {
+  return `${prNumber(prs[0]!)} ${state}${prs.length > 1 ? ` +${prs.length - 1}` : ""}`;
+}
+
+function isConflicting(pr: BoardPullRequest): boolean {
+  return pr.mergeable?.toLowerCase() === "conflicting";
+}
+
+/** A closed task's open MRs, most urgent first: what blocks them, else that they are still unmerged. */
+function mergePhrase(prs: BoardPullRequest[]): Phrase {
+  const pr = prs[0];
   if (!pr) return { text: "MR 未合并" };
-  if (pr.ci === "failed") return { text: `${prNumber(pr)} CI 失败`, tone: "danger" };
-  if (pr.mergeable?.toLowerCase() === "conflicting") return { text: `${prNumber(pr)} 有冲突`, tone: "danger" };
-  return { text: `${prNumber(pr)} 未合并` };
+  if (pr.ci === "failed") return { text: stateOf(prs, "CI 失败"), tone: "danger" };
+  if (isConflicting(pr)) return { text: stateOf(prs, "有冲突"), tone: "danger" };
+  return { text: stateOf(prs, "未合并") };
+}
+
+/** The MRs a to-do is about, most urgent first; empty when the to-do is not about an MR. */
+export function todoPullRequests(todo: Todo): BoardPullRequest[] {
+  switch (todo.kind) {
+    case "approval":
+    case "merge":
+      return byUrgency(todo.pullRequests.map((pr) => ({ pr, issue: todo.issue }))).map((entry) => entry.pr);
+    case "anomaly":
+      return failedCi(todo.issue);
+    default:
+      return [];
+  }
 }
 
 export function todoPhrase(todo: Todo, now: number): Phrase {
   switch (todo.kind) {
     case "approval": {
-      const pr = todo.pullRequests[0];
-      return { text: pr ? `${prNumber(pr)} 待你审批` : "待你审批", tone: "action" };
+      const prs = todoPullRequests(todo);
+      return { text: prs.length > 0 ? stateOf(prs, "待你审批") : "待你审批", tone: "action" };
     }
     case "merge":
-      return mergePhrase(todo.pullRequests[0]);
+      return mergePhrase(todoPullRequests(todo));
     case "user":
       return { text: "待你处理", tone: "action" };
     case "acceptance":
@@ -110,25 +137,71 @@ export function treePhrase(tree: TreeNode): Phrase | undefined {
 }
 
 type Tone = Phrase["tone"];
+const TONE_RANK: Record<NonNullable<Tone> | "none", number> = { none: 0, action: 1, danger: 2 };
 
-/** One mark for a task's MRs: the number of a single MR or the count of several. Open MRs win, red for failed CI and amber when one waits for you; otherwise merged ones in muted. */
-export function prSignal(issue: BoardIssue): { icon: string; text: string; tone?: Tone; label: string } | undefined {
-  const open = issue.pullRequests.filter(isOpenPullRequest);
-  if (open.length === 0) {
-    const merged = issue.pullRequests.filter(isMerged);
-    return merged.length > 0 ? { icon: "GitMerge", text: countOrNumber(merged), label: `已合并 ${merged.map(prRef).join(" ")}` } : undefined;
-  }
-  const tone: Tone = open.some((pr) => pr.ci === "failed") ? "danger" : awaitingApproval(issue).length > 0 ? "action" : undefined;
-  const icon = open.every((pr) => pr.state === "draft") ? "GitPullRequestDraft" : "GitPullRequest";
-  return { icon, text: countOrNumber(open), ...(tone ? { tone } : {}), label: open.map(prRef).join(" ") };
-}
+/** An MR with the task it belongs to; a parent's chip lists MRs from its whole subtree. */
+export type PullRequestEntry = { pr: BoardPullRequest; issue: BoardIssue };
 
-function countOrNumber(prs: BoardPullRequest[]): string {
-  return prs.length === 1 ? prNumber(prs[0]!) : `${prs.length}`;
-}
+/** A clickable MR mark: one MR opens directly, several expand a list under the row. */
+export type PullRequestChip = { icon: string; text: string; tone?: Tone; label: string; entries: PullRequestEntry[] };
 
 function isMerged(pr: BoardPullRequest): boolean {
   return pr.state === "merged";
+}
+
+function prIcon(prs: BoardPullRequest[]): string {
+  return prs.every(isMerged) ? "GitMerge" : prs.every((pr) => pr.state === "draft") ? "GitPullRequestDraft" : "GitPullRequest";
+}
+
+function prTone(entry: PullRequestEntry): Tone {
+  return prDetail(entry.pr, entry.issue)?.tone;
+}
+
+/** Most urgent first; ties keep their order. */
+function byUrgency(entries: PullRequestEntry[]): PullRequestEntry[] {
+  return [...entries].sort((a, b) => TONE_RANK[prTone(b) ?? "none"] - TONE_RANK[prTone(a) ?? "none"]);
+}
+
+/** Open MRs anywhere in a tree, the task's own first, then its subtree in board order. */
+function openIn(tree: TreeNode): PullRequestEntry[] {
+  const own = tree.issue.pullRequests.filter(isOpenPullRequest).map((pr) => ({ pr, issue: tree.issue }));
+  return [...own, ...tree.stages.flatMap((group) => group.nodes.flatMap(openIn))];
+}
+
+/**
+ * Each open MR of a tree once. An MR can link to several tasks, often a
+ * subtask and the parent its description mentions; the task last in board
+ * order keeps it, so a descendant always wins over its own ancestors.
+ */
+export function openMergeRequestsIn(tree: TreeNode): PullRequestEntry[] {
+  return [...new Map(openIn(tree).map((entry) => [entry.pr.id, entry])).values()];
+}
+
+/** A tree row's chip: the open MRs of its whole subtree, colored by the most urgent one; a single MR also names its state. */
+export function treeChip(tree: TreeNode): PullRequestChip | undefined {
+  const entries = byUrgency(openMergeRequestsIn(tree));
+  if (entries.length === 0) return undefined;
+  const prs = entries.map((entry) => entry.pr);
+  const tone = prTone(entries[0]!);
+  const detail = prs.length === 1 ? prDetail(entries[0]!.pr, entries[0]!.issue) : undefined;
+  const text = prs.length > 1 ? `${prs.length}` : detail ? `${prNumber(prs[0]!)} ${detail.text}` : prNumber(prs[0]!);
+  const label = detail ? `${prRef(prs[0]!)} ${detail.text}` : prs.map(prRef).join(" ");
+  return { icon: prIcon(prs), text, ...(tone ? { tone } : {}), label, entries };
+}
+
+/** A to-do row's chip: its MR state phrase, opening the MRs it names. */
+export function todoChip(todo: Todo, now: number): PullRequestChip | undefined {
+  const prs = todoPullRequests(todo);
+  if (prs.length === 0) return undefined;
+  const phrase = todoPhrase(todo, now);
+  const entries = prs.map((pr) => ({ pr, issue: todo.issue }));
+  return { icon: prIcon(prs), text: phrase.text, ...(phrase.tone ? { tone: phrase.tone } : {}), label: `${prs.map(prRef).join(" ")} ${phrase.text}`, entries };
+}
+
+/** A task whose subtree has no open MR keeps its merged MRs as a quiet, unclickable mark. */
+export function mergedMark(issue: BoardIssue): { text: string; label: string } | undefined {
+  const merged = issue.pullRequests.filter(isMerged);
+  return merged.length > 0 ? { text: merged.length === 1 ? prNumber(merged[0]!) : `${merged.length}`, label: `已合并 ${merged.map(prRef).join(" ")}` } : undefined;
 }
 
 /** What a finished part of a tree delivered: the merged MRs anywhere in it. */
@@ -140,7 +213,7 @@ function prDetail(pr: BoardPullRequest, issue: BoardIssue): Phrase | undefined {
   if (isMerged(pr)) return { text: "已合并" };
   if (pr.ci === "failed") return { text: "CI 失败", tone: "danger" };
   if (awaitingApproval(issue).includes(pr)) return { text: "待你审批", tone: "action" };
-  if (pr.mergeable?.toLowerCase() === "conflicting") return { text: "有冲突", tone: "danger" };
+  if (isConflicting(pr)) return { text: "有冲突", tone: "danger" };
   if (pr.ci === "pending") return { text: "CI 运行中" };
   if (pr.ci === "passed") return { text: "CI 通过" };
   return pr.state === "draft" ? { text: "草稿" } : undefined;
@@ -305,53 +378,81 @@ function statusColor(status: StatusKey, colors: Colors): string {
   return status === "in_progress" ? colors.statusWarning : status === "in_review" ? colors.statusSuccess : status === "blocked" ? colors.statusDanger : colors.foregroundMuted;
 }
 
-function Row({ issue, phrase, depth, row, running, signal, onPress, disclosure }: {
-  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; signal?: boolean; onPress?(): void;
+function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosure }: {
+  issue: BoardIssue; phrase?: Phrase; depth: number; row: RowContext; running?: boolean; chip?: PullRequestChip; mark?: { text: string; label: string }; onPress?(): void;
   disclosure?: { expanded: boolean; onToggle(): void };
 }) {
   const { colors } = row;
   const hover = useHover();
   const [pressed, setPressed] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
   const tone = toneColor(phrase?.tone, colors);
   const title = displayTitle(issue.title);
   const status = statusKey(issue);
-  const prs = signal ? prSignal(issue) : undefined;
-  return <View
-    style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}
-  >
-    <Pressable
-      accessibilityRole="button" accessibilityLabel={`${disclosure?.expanded ? "收起" : "展开"} ${issue.identifier}`} accessibilityState={{ expanded: !!disclosure?.expanded }}
-      disabled={!disclosure} onPress={disclosure?.onToggle} hitSlop={SPACE.xs}
-      style={{ width: GUTTER, alignSelf: "stretch", alignItems: "center", justifyContent: "center" }}
-    >
-      {disclosure ? <View style={{ transform: [{ rotate: disclosure.expanded ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={colors.foregroundMuted} /></View> : null}
-    </Pressable>
-    <Pressable
-      accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${STATUS_LABEL[status]} ${title}${prs ? ` ${prs.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
-      disabled={!onPress} onPress={onPress}
-      onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
-      style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
-    >
-      <Icon icon={{ svg: STATUS_SVG[status] }} size={14} color={statusColor(status, colors)} />
-      <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.base }}>{title}</Text>
-      {running ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
-      {hover.hovered ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{issue.identifier}</Text> : null}
-      {prs ? <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
-        <Icon name={prs.icon} size={13} color={toneColor(prs.tone, colors)} />
-        <Text style={{ color: toneColor(prs.tone, colors), fontSize: FONT.sm }}>{prs.text}</Text>
-      </View> : null}
-      {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
-    </Pressable>
+  return <View>
+    <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}>
+      <Pressable
+        accessibilityRole="button" accessibilityLabel={`${disclosure?.expanded ? "收起" : "展开"} ${issue.identifier}`} accessibilityState={{ expanded: !!disclosure?.expanded }}
+        disabled={!disclosure} onPress={disclosure?.onToggle} hitSlop={SPACE.xs}
+        style={{ width: GUTTER, alignSelf: "stretch", alignItems: "center", justifyContent: "center" }}
+      >
+        {disclosure ? <View style={{ transform: [{ rotate: disclosure.expanded ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={colors.foregroundMuted} /></View> : null}
+      </Pressable>
+      <Pressable
+        accessibilityRole="link" accessibilityLabel={`${issue.identifier} ${STATUS_LABEL[status]} ${title}${mark ? ` ${mark.label}` : ""}${phrase ? ` ${phrase.text}` : ""}`}
+        disabled={!onPress} onPress={onPress}
+        onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
+        style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: SPACE.md, minHeight: ROW_H, paddingVertical: SPACE.sm, paddingLeft: SPACE.sm, paddingRight: SPACE.sm }}
+      >
+        <Icon icon={{ svg: STATUS_SVG[status] }} size={14} color={statusColor(status, colors)} />
+        <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.base }}>{title}</Text>
+        {running ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
+        {hover.hovered ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{issue.identifier}</Text> : null}
+        {mark ? <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+          <Icon name="GitMerge" size={13} color={colors.foregroundMuted} />
+          <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{mark.text}</Text>
+        </View> : null}
+        {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
+      </Pressable>
+      {chip ? <Chip chip={chip} colors={colors} open={listOpen} onToggle={() => setListOpen(!listOpen)} /> : null}
+    </View>
+    {chip && listOpen && chip.entries.length > 1 ? chip.entries.map((entry) => <PullRequestRow key={entry.pr.id} pr={entry.pr} issue={entry.issue} source={entry.issue.id === issue.id ? undefined : entry.issue} depth={depth + 1} row={row} />) : null}
   </View>;
 }
 
+/**
+ * The MR target at a row's end, apart from the row that opens the task: an
+ * outlined chip that fills on hover and ends in an outbound arrow for one MR,
+ * or a chevron when it expands the list of several.
+ */
+function Chip({ chip, colors, open, onToggle }: { chip: PullRequestChip; colors: Colors; open: boolean; onToggle(): void }) {
+  const hover = useHover();
+  const single = chip.entries.length === 1 ? chip.entries[0]!.pr : undefined;
+  const color = toneColor(chip.tone, colors);
+  const label = single ? `打开 ${chip.label}` : `${chip.entries.length} 个 MR ${chip.label}`;
+  return <Pressable
+    accessibilityRole={single ? "link" : "button"} accessibilityLabel={label} accessibilityState={single ? undefined : { expanded: open }}
+    onPress={single ? () => void Linking.openURL(single.url) : onToggle}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{
+      flexDirection: "row", alignItems: "center", gap: SPACE.xs, flexShrink: 0, height: 22, marginRight: SPACE.xs, paddingHorizontal: SPACE.sm,
+      borderRadius: RADIUS, borderWidth: 1, borderColor: chip.tone || hover.hovered ? color : colors.border,
+      backgroundColor: hover.hovered || open ? colors.surface2 : colors.surface1, cursor: "pointer",
+    }}
+  >
+    <Icon name={chip.icon} size={12} color={color} />
+    <Text numberOfLines={1} style={{ color, fontSize: FONT.sm, fontWeight: "500", textDecorationLine: hover.hovered ? "underline" : "none" }}>{chip.text}</Text>
+    {single ? <Icon name="ArrowUpRight" size={12} color={color} />
+      : <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}><Icon name="ChevronRight" size={12} color={color} /></View>}
+  </Pressable>;
+}
+
 function TodoRow({ todo, now, row }: { todo: Todo; now: number; row: RowContext }) {
-  const pr = todo.pullRequests[0];
-  const external = todo.kind === "approval" && pr ? pr.url : undefined;
-  const target = external ?? todo.issue.url;
+  const url = todo.issue.url;
+  const chip = todoChip(todo, now);
   return <Row
-    issue={todo.issue} phrase={todoPhrase(todo, now)} depth={0} row={row} running={todo.issue.activeRun}
-    onPress={target ? () => (external ? void Linking.openURL(external) : row.openTask(target, todo.issue.identifier)) : undefined}
+    issue={todo.issue} phrase={chip ? undefined : todoPhrase(todo, now)} chip={chip} depth={0} row={row} running={todo.issue.activeRun}
+    onPress={url ? () => row.openTask(url, todo.issue.identifier) : undefined}
   />;
 }
 
@@ -381,17 +482,19 @@ function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: Ro
 function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: RowContext }) {
   const { expandedIds, toggle, openTask } = row;
   const { issue } = tree;
-  const prs = [...issue.pullRequests.filter(isOpenPullRequest), ...issue.pullRequests.filter(isMerged)];
+  // Open MRs live in the chip; the disclosure keeps only the task's merged history.
+  const merged = issue.pullRequests.filter(isMerged);
+  const chip = treeChip(tree);
   const hasOpenChildren = tree.stages.some((group) => group.nodes.some(isOpen));
-  const expandable = hasOpenChildren || prs.length > 0;
+  const expandable = hasOpenChildren || merged.length > 0;
   const expanded = expandable && expandedIds.includes(issue.id);
   return <View>
     <Row
-      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} signal
+      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} chip={chip} mark={chip ? undefined : mergedMark(issue)}
       onPress={issue.url ? () => openTask(issue.url!, issue.identifier) : undefined}
       disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
     />
-    {expanded ? prs.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
+    {expanded ? merged.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
     {expanded && hasOpenChildren ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
   </View>;
 }
@@ -498,18 +601,19 @@ function PullRequestLinks({ prs, colors }: { prs: BoardPullRequest[]; colors: Co
   </View>;
 }
 
-/** An MR under its task: number and title, then its one state that matters; opens the MR. */
-function PullRequestRow({ pr, issue, depth, row }: { pr: BoardPullRequest; issue: BoardIssue; depth: number; row: RowContext }) {
+/** An MR under its task: number and title, or the subtask it came from, then its one state that matters; opens the MR. */
+function PullRequestRow({ pr, issue, source, depth, row }: { pr: BoardPullRequest; issue: BoardIssue; source?: BoardIssue; depth: number; row: RowContext }) {
   const { colors } = row;
   const hover = useHover();
   const detail = prDetail(pr, issue);
+  const name = source ? `${prRef(pr)} · ${source.identifier} ${displayTitle(source.title)}` : `${prRef(pr)} ${displayTitle(pr.title)}`;
   return <Pressable
-    accessibilityRole="link" accessibilityLabel={`${prRef(pr)} ${displayTitle(pr.title)}${detail ? ` ${detail.text}` : ""}`} onPress={() => void Linking.openURL(pr.url)}
+    accessibilityRole="link" accessibilityLabel={`${name}${detail ? ` ${detail.text}` : ""}`} onPress={() => void Linking.openURL(pr.url)}
     onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
     style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingLeft: INDENT * depth + GUTTER + SPACE.sm, paddingRight: SPACE.sm, paddingVertical: SPACE.sm, borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface1 : "transparent" }}
   >
     <Icon name={isMerged(pr) ? "GitMerge" : pr.state === "draft" ? "GitPullRequestDraft" : "GitPullRequest"} size={13} color={colors.foregroundMuted} />
-    <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: FONT.sm }}>{prRef(pr)} {displayTitle(pr.title)}</Text>
+    <Text numberOfLines={1} style={{ flex: 1, color: colors.foregroundMuted, fontSize: FONT.sm }}>{name}</Text>
     {detail ? <Text numberOfLines={1} style={{ color: toneColor(detail.tone, colors), fontSize: FONT.sm, fontWeight: detail.tone ? "500" : "400" }}>{detail.text}</Text> : null}
   </Pressable>;
 }
