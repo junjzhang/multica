@@ -58,6 +58,7 @@ type HostErrorKind int
 const (
 	// HostRejected is a terminal refusal: replaying cannot succeed.
 	HostRejected HostErrorKind = iota
+	HostSessionArchived
 	// HostBusy means the session is working and nothing was accepted. Retry
 	// quickly; this is not a failure.
 	HostBusy
@@ -318,6 +319,8 @@ func (w *Worker) handleHostFailure(ctx context.Context, claim Claim, err error) 
 		return w.record(ctx, claim, OutcomeRetry, RetryUnavailable, "", hostReason(hostErr, "host_unreachable"))
 	case HostUnsupported:
 		return w.record(ctx, claim, OutcomeRetry, RetryDependency, "", hostReason(hostErr, "host_capability_unsupported"))
+	case HostSessionArchived:
+		return w.record(ctx, claim, OutcomeRejected, "", "", hostReason(hostErr, "agent_archived"))
 	case HostRejected:
 		return w.record(ctx, claim, OutcomeRejected, "", "", hostReason(hostErr, "host_rejected"))
 	default:

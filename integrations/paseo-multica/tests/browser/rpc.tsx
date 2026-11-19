@@ -3,6 +3,7 @@ const board = (agentId: string) => ({
   state: "ready", scope: "session", viewer: { agentId: "shared-external-agent", sessionId: agentId, forgeUsernames: [] },
   issues: ["session-a", "session-b"].includes(agentId) ? [{ id: agentId, identifier: agentId === "session-a" ? "WORK-1" : "WORK-2", title: `Only ${agentId}`, status: "in_progress", statusCategory: "started", lastActivityAt: new Date().toISOString(), activeRun: true, lastRunFailed: false, pullRequests: [], url: `${location.origin}/acme/issues/${agentId === "session-a" ? "WORK-1" : "WORK-2"}` }] : [],
   rootIds: ["session-a", "session-b"].includes(agentId) ? [agentId] : [], projects: [], truncated: false, checkedAt: new Date().toISOString(),
+  archivedDeliveries: agentId === "session-a" ? [{ id: "failed-delivery", issueIdentifier: "WORK-3", issueTitle: "Delivery to a closed conversation", sessionUrl: "paseo://h/same-host/agent/archived-session" }] : [],
 });
 const recent = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 const issue = (identifier: string, title: string, extra: object) => ({ id: identifier, identifier, title, status: "in_progress", statusCategory: "started", lastActivityAt: recent, activeRun: false, lastRunFailed: false, pullRequests: [], url: `${location.origin}/acme/issues/${identifier}`, ...extra });
@@ -18,7 +19,7 @@ const mrBoard = {
     issue("WORK-835", "灰度开关", { status: "in_review", parentId: "WORK-830", stage: 2, contract: { accepted: true }, pullRequests: [mr("gw", 41, { ci: "passed", myReview: "approving" })] }),
     issue("WORK-840", "fix(sched): 修复调度器抢占", { pullRequests: [mr("sglang", 901, { ci: "failed" })] }),
   ],
-  rootIds: ["WORK-830", "WORK-840"], projects: [], truncated: false, checkedAt: new Date().toISOString(),
+  rootIds: ["WORK-830", "WORK-840"], projects: [], truncated: false, archivedDeliveries: [], checkedAt: new Date().toISOString(),
 };
 const handlers: Record<string, (input: any) => Promise<any>> = {
   "session.board": async ({ agentId }) => agentId === "disconnected" ? { state: "disconnected", reason: "This Paseo session has no Multica binding.", checkedAt: "fixture" } : agentId === "mr" ? mrBoard : board(agentId),

@@ -38,10 +38,12 @@ const (
 	externalSessionProvider    = "paseo"
 	externalSessionTokenPrefix = "mea_"
 	externalSessionConnectHint = "run `multica session connect` in the Paseo session (or `/multica connect` in the composer)"
+	externalSessionRenewWindow = 5 * time.Minute
 )
 
 var (
-	sessionSecretPattern = regexp.MustCompile(`(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
+	errExternalSessionExpired = errors.New("the credential expired")
+	sessionSecretPattern      = regexp.MustCompile(`(?:mea|mat|mul)_[A-Za-z0-9._-]{8,}\b`)
 	// errExternalSessionFileMissing lets session status report `disconnected`
 	// for a default path that was never written (or was removed by
 	// `/multica disconnect`) instead of calling that file invalid. Commands
@@ -169,6 +171,9 @@ func readExternalSessionContext() (*externalSessionContext, error) {
 	// Normalize once so an explicit --server-url / MULTICA_SERVER_URL that
 	// names the same endpoint in another spelling is not a false conflict.
 	ctx.ServerURL = normalizeAPIBaseURL(ctx.ServerURL)
+	if !time.Now().Before(ctx.expiration()) {
+		return &ctx, fmt.Errorf("%w at %s; %s", errExternalSessionExpired, ctx.ExpiresAt, externalSessionConnectHint)
+	}
 	return &ctx, nil
 }
 
@@ -221,14 +226,15 @@ func (c *externalSessionContext) validate() error {
 	if !strings.HasPrefix(c.Token, externalSessionTokenPrefix) {
 		return fmt.Errorf("token is not an external agent credential (%s...)", externalSessionTokenPrefix)
 	}
-	expiresAt, err := time.Parse(time.RFC3339, c.ExpiresAt)
-	if err != nil {
+	if _, err := time.Parse(time.RFC3339, c.ExpiresAt); err != nil {
 		return fmt.Errorf("expires_at %q is not RFC3339", c.ExpiresAt)
 	}
-	if !time.Now().Before(expiresAt) {
-		return fmt.Errorf("the credential expired at %s; reconnect the session to issue a new one", expiresAt.UTC().Format(time.RFC3339))
-	}
 	return nil
+}
+
+func (c *externalSessionContext) expiration() time.Time {
+	expiration, _ := time.Parse(time.RFC3339, c.ExpiresAt)
+	return expiration
 }
 
 // sessionReturnURL is the existing conversation's deep link. The v1 file
@@ -248,14 +254,60 @@ func (c *externalSessionContext) sessionReturnURL() string {
 //     contradiction, not a preference, so it is refused instead of resolved.
 //   - Inside a Paseo session the binding is required. A missing or broken file
 //     fails closed; it never falls through to the human's default profile.
-func externalSessionForCommand() (*externalSessionContext, error) {
+func externalSessionForCommand(cmd *cobra.Command) (*externalSessionContext, error) {
 	if inDaemonManagedExecutionContext() {
 		if raw := strings.TrimSpace(os.Getenv(externalSessionFileEnv)); raw != "" {
 			return nil, fmt.Errorf("%s is set inside a daemon-managed task; the task's own credential is authoritative and cannot be replaced by an external session", externalSessionFileEnv)
 		}
 		return nil, nil
 	}
-	return readExternalSessionContext()
+	binding, err := readExternalSessionContext()
+	if err != nil && !errors.Is(err, errExternalSessionFileMissing) && !errors.Is(err, errExternalSessionExpired) {
+		return nil, err
+	}
+	if binding != nil {
+		if conflict := sessionContextConflicts(cmd, binding); conflict != nil {
+			return nil, conflict
+		}
+		if binding.expiration().After(time.Now().Add(externalSessionRenewWindow)) {
+			return binding, nil
+		}
+	}
+	agentID := strings.TrimSpace(os.Getenv(paseoAgentIDEnv))
+	if agentID == "" || (binding == nil && err == nil) {
+		return binding, err
+	}
+	path, _, _, pathErr := externalSessionFilePath()
+	if pathErr != nil {
+		return nil, pathErr
+	}
+	defaultPath, pathErr := defaultExternalSessionFilePath(agentID)
+	if pathErr != nil {
+		return nil, pathErr
+	}
+	if path != defaultPath {
+		return binding, err
+	}
+	if binding == nil {
+		if _, preflightErr := sessionConnectPreflight(cmd); preflightErr != nil {
+			return nil, fmt.Errorf("cannot obtain a credential for this Paseo session: %w", preflightErr)
+		}
+	}
+	if issueErr := issuePaseoSessionCredential(cmd.Context(), agentID); issueErr != nil {
+		return nil, fmt.Errorf("could not obtain a Multica credential for this Paseo session: %w; %s", issueErr, externalSessionConnectHint)
+	}
+	renewed, err := readExternalSessionContext()
+	if err != nil {
+		return nil, err
+	}
+	if renewed == nil || !renewed.expiration().After(time.Now().Add(externalSessionRenewWindow)) {
+		return nil, fmt.Errorf("Paseo did not save a fresh Multica credential; update the paseo-multica plugin and run `multica session connect`")
+	}
+	if binding != nil && (renewed.AgentID != binding.AgentID || renewed.HostID != binding.HostID ||
+		renewed.ServerURL != binding.ServerURL || renewed.WorkspaceID != binding.WorkspaceID || renewed.DaemonID != binding.DaemonID) {
+		return nil, fmt.Errorf("Paseo changed the Multica session binding during renewal; check the plugin connection settings")
+	}
+	return renewed, sessionContextConflicts(cmd, renewed)
 }
 
 // sessionContextConflicts rejects explicit inputs that disagree with the

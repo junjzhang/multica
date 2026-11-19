@@ -2433,6 +2433,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				// Register one existing host session as an external agent
 				// identity. Human owner/admin only; no runtime is bound.
 				r.With(handler.RequireHumanActor).Post("/external", h.CreateExternalAgent)
+				r.With(handler.RequireHumanActor).Get("/external/session", h.GetOwnPaseoSession)
+				r.With(handler.RequireHumanActor).Get("/external/archived-deliveries", h.ListArchivedPaseoDeliveries)
 				// The workspace's built-in Chief of Staff. Server-owned: the
 				// caller supplies only a runtime and a language, so a client
 				// cannot mint an agent carrying `system_key` and thereby claim
@@ -2470,9 +2472,6 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					// (agent, issue) binding is its own read.
 					r.Get("/sessions", h.ListAgentSessions)
 					r.Get("/session-bindings", h.GetAgentSessionBinding)
-					// The session panel's task summary: the three obligations
-					// of the credential's agent, read-only and scoped to that
-					// agent by loadAgentForSessionRead.
 					r.Get("/session-tasks", h.GetAgentSessionTasks)
 					r.Get("/session-pull-requests", h.GetAgentSessionPullRequests)
 					// Mailbox: the recipient's own external credential or an

@@ -147,6 +147,16 @@ WHERE token_hash = $1
   AND revoked_at IS NULL
   AND expires_at > now();
 
+-- name: DeleteExpiredExternalAgentTokens :execrows
+DELETE FROM external_agent_token
+WHERE id IN (
+    SELECT id FROM external_agent_token
+    WHERE expires_at <= now()
+    ORDER BY expires_at, id
+    LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+);
+
 -- name: RevokeExternalAgentToken :one
 UPDATE external_agent_token
 SET revoked_at = now()

@@ -139,6 +139,13 @@ func TestPaseoDeliveryErrorsAreTypedAndContentFree(t *testing.T) {
 			wantCode: mailboxErrorAgentBusy,
 		},
 		{
+			name:     "archived is a terminal refusal",
+			stderr:   `{"error":{"code":"agent_archived","message":"Agent is archived"}}`,
+			runErr:   &exec.ExitError{},
+			wantKind: delivery.HostSessionArchived,
+			wantCode: "agent_archived",
+		},
+		{
 			name:     "unknown outcome is not retried",
 			stderr:   `{"error":{"code":"agent_request_outcome_unknown","message":"outcome unknown"}}`,
 			runErr:   &exec.ExitError{},

@@ -338,6 +338,25 @@ func TestWorkerRecordsExplicitRefusalAsTerminalFailure(t *testing.T) {
 	}
 }
 
+func TestWorkerSettlesArchivedSessionWithoutRetryOrReceipt(t *testing.T) {
+	client := newFakeOutcomeClient()
+	client.claims["ws-1"] = [][]Claim{{testClaim("delivery-1", "session-1", "lease-1")}}
+	host := newFakeHost()
+	host.deliverErrs["delivery-1"] = &HostError{Kind: HostSessionArchived, Message: "restore the session"}
+	worker := newTestWorker(client, host)
+
+	worker.round(context.Background())
+	worker.round(context.Background())
+
+	acks := client.ackSnapshot()
+	if len(acks) != 1 || acks[0].request.storedStatus() != "failed" || acks[0].request.Error != "agent_archived: restore the session" {
+		t.Fatalf("ack = %+v", acks)
+	}
+	if host.deliverCount() != 1 || host.receiptCalls != 0 {
+		t.Fatalf("archived delivery sent %d times with %d receipt lookups", host.deliverCount(), host.receiptCalls)
+	}
+}
+
 // An ambiguous result is resolved by the host's read-only receipt. Accepted is
 // the only result that completes the delivery.
 func TestWorkerVerifiesUnknownWithAcceptedReceipt(t *testing.T) {

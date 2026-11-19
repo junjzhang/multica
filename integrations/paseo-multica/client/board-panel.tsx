@@ -261,10 +261,11 @@ function BoardContent({ agentId, theme, openTask }: Props) {
   const now = Date.now();
   const row: RowContext = { colors, openTask, expandedIds, toggle };
   const todos = board ? firstPerIssue(board.todos) : [];
+  const archivedDeliveries = ready?.archivedDeliveries ?? [];
   const todoIds = new Set(todos.map((todo) => todo.issue.id));
   // A childless tree that needs you is fully described by its to-do row.
   const active = board ? [...board.sections.attention, ...board.sections.active].filter((tree) => tree.total > 0 || !todoIds.has(tree.issue.id)) : [];
-  const empty = board && todos.length === 0 && active.length === 0 && board.sections.parked.length === 0;
+  const empty = board && todos.length === 0 && archivedDeliveries.length === 0 && active.length === 0 && board.sections.parked.length === 0;
 
   return <View style={{ gap: SPACE.lg }}>
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: SPACE.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
@@ -279,7 +280,19 @@ function BoardContent({ agentId, theme, openTask }: Props) {
       : !board || !ready ? <Loading />
       : empty ? <Notice colors={colors} title="暂无任务" />
       : <View style={{ gap: SPACE.xl }}>
-        {todos.length > 0 ? <Section title="需要你" colors={colors}>
+        {todos.length > 0 || archivedDeliveries.length > 0 ? <Section title="需要你" colors={colors}>
+          {archivedDeliveries.map((delivery) => <Pressable
+            key={delivery.id}
+            accessibilityRole="link"
+            accessibilityLabel={`${delivery.issueIdentifier} ${delivery.issueTitle}，投递失败：会话已归档，在 Paseo 中打开`}
+            onPress={() => void Linking.openURL(delivery.sessionUrl)}
+            style={{ paddingVertical: SPACE.xs, paddingLeft: SPACE.sm }}
+          >
+            <View style={{ gap: SPACE.xs, alignItems: "flex-start" }}>
+              <Text style={{ color: colors.foreground }} numberOfLines={1}>{delivery.issueIdentifier} {delivery.issueTitle}</Text>
+              <Text style={{ color: colors.foregroundMuted }}>投递失败：会话已归档 · 在 Paseo 中打开</Text>
+            </View>
+          </Pressable>)}
           {todos.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
         </Section> : null}
         {active.length === 0 ? null

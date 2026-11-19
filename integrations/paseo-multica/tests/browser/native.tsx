@@ -1,6 +1,6 @@
 import React from "react";
 export const Platform = { OS: "web" };
-export const Linking = { openURL: async (url: string) => { (window as any).__opened = [...((window as any).__opened ?? []), url]; } };
+export const Linking = { openURL: async (url: string) => { document.body.dataset.openedExternalUrl = url; } };
 // React Native layout defaults and the shorthand props a DOM element does not understand.
 const BOX = { display: "flex", flexDirection: "column", position: "relative", boxSizing: "border-box", minWidth: 0, flexShrink: 0 };
 function css({ paddingHorizontal: px, paddingVertical: py, marginHorizontal: mx, transform, borderWidth, ...rest }: any = {}) {
