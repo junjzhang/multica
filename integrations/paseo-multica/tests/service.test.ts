@@ -224,6 +224,9 @@ describe("session service", () => {
     const binding = await readSessionContext(home, SESSION_A);
     if (binding.status !== "ok") throw new Error("Expected binding");
     await writeSessionContext(home, { ...binding.context, expires_at: new Date(NOW.getTime() - 60_000).toISOString() });
+    api.routes.set(`/api/agents/${AGENT_A}/sessions`, {
+      sessions: [{ id: api.tokensRequested[0].sessionId, deliverable: true }],
+    });
     const lookup = vi.spyOn(api, "findPaseoSession");
 
     const before = await service.status(SESSION_A);
@@ -239,6 +242,34 @@ describe("session service", () => {
     const written = await readSessionContext(home, SESSION_A);
     expect(written.status).toBe("ok");
     if (written.status === "ok") expect(written.context.expires_at).toBe(after.expiresAt);
+  });
+
+  it.each(["agent_archived", "session_revoked", "owner_not_member", "missing_session"] as const)(
+    "rejects an expired binding when the registered session is %s",
+    async (reason) => {
+      const { home, api, service } = await setup();
+      await service.connect(SESSION_A);
+      const binding = await readSessionContext(home, SESSION_A);
+      if (binding.status !== "ok") throw new Error("Expected binding");
+      await writeSessionContext(home, { ...binding.context, expires_at: NOW.toISOString() });
+      api.routes.set(`/api/agents/${AGENT_A}/sessions`, {
+        sessions: reason === "missing_session" ? [] : [{
+          id: api.tokensRequested[0].sessionId, deliverable: false, unavailable_reason: reason,
+        }],
+      });
+      expect((await service.status(SESSION_A)).state).toBe("invalid");
+      expect(api.tokensRequested).toHaveLength(1);
+    },
+  );
+
+  it("reports a malformed session inventory as unverified", async () => {
+    const { home, api, service } = await setup();
+    await service.connect(SESSION_A);
+    const binding = await readSessionContext(home, SESSION_A);
+    if (binding.status !== "ok") throw new Error("Expected binding");
+    await writeSessionContext(home, { ...binding.context, expires_at: NOW.toISOString() });
+    api.routes.set(`/api/agents/${AGENT_A}/sessions`, { sessions: [{ id: api.tokensRequested[0].sessionId }] });
+    expect((await service.status(SESSION_A)).state).toBe("unverified");
   });
 
   it.each(["missing", "agent", "daemon"] as const)("rejects an expired binding with a %s registration", async (kind) => {
