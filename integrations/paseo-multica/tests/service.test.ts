@@ -218,23 +218,97 @@ describe("session service", () => {
     expect(api.tokensRequested).toHaveLength(2);
   });
 
-  it("repairs an expired credential only through explicit connect", async () => {
+  it("reports a renewable expired credential connected without issuing a token", async () => {
     const { home, api, service } = await setup();
-    const expired = makeContext({ expires_at: new Date(NOW.getTime() - 60_000).toISOString() });
-    await writeSessionContext(home, expired);
+    await service.connect(SESSION_A);
+    const binding = await readSessionContext(home, SESSION_A);
+    if (binding.status !== "ok") throw new Error("Expected binding");
+    await writeSessionContext(home, { ...binding.context, expires_at: new Date(NOW.getTime() - 60_000).toISOString() });
+    api.routes.set(`/api/agents/${AGENT_A}/sessions`, {
+      sessions: [{ id: api.tokensRequested[0].sessionId, deliverable: true }],
+    });
+    const lookup = vi.spyOn(api, "findPaseoSession");
 
     const before = await service.status(SESSION_A);
-    expect(before.state).toBe("invalid");
-    expect(before.reason).toMatch(/expired/);
-    expect(api.tokensRequested).toHaveLength(0);
+    expect(before.state).toBe("connected");
+    expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ token: OWNER_TOKEN }), HOST_ID, SESSION_A);
+    expect(api.tokensRequested).toHaveLength(1);
+    expect(api.verifyCalls).toBe(0);
 
     const after = await service.connect(SESSION_A);
     expect(after.state).toBe("connected");
-    expect(api.tokensRequested).toHaveLength(1);
+    expect(api.tokensRequested).toHaveLength(2);
     expect(api.verifyCalls).toBe(0);
     const written = await readSessionContext(home, SESSION_A);
     expect(written.status).toBe("ok");
     if (written.status === "ok") expect(written.context.expires_at).toBe(after.expiresAt);
+  });
+
+  it.each(["agent_archived", "session_revoked", "owner_not_member", "missing_session"] as const)(
+    "rejects an expired binding when the registered session is %s",
+    async (reason) => {
+      const { home, api, service } = await setup();
+      await service.connect(SESSION_A);
+      const binding = await readSessionContext(home, SESSION_A);
+      if (binding.status !== "ok") throw new Error("Expected binding");
+      await writeSessionContext(home, { ...binding.context, expires_at: NOW.toISOString() });
+      api.routes.set(`/api/agents/${AGENT_A}/sessions`, {
+        sessions: reason === "missing_session" ? [] : [{
+          id: api.tokensRequested[0].sessionId, deliverable: false, unavailable_reason: reason,
+        }],
+      });
+      expect((await service.status(SESSION_A)).state).toBe("invalid");
+      expect(api.tokensRequested).toHaveLength(1);
+    },
+  );
+
+  it("reports a malformed session inventory as unverified", async () => {
+    const { home, api, service } = await setup();
+    await service.connect(SESSION_A);
+    const binding = await readSessionContext(home, SESSION_A);
+    if (binding.status !== "ok") throw new Error("Expected binding");
+    await writeSessionContext(home, { ...binding.context, expires_at: NOW.toISOString() });
+    api.routes.set(`/api/agents/${AGENT_A}/sessions`, { sessions: [{ id: api.tokensRequested[0].sessionId }] });
+    expect((await service.status(SESSION_A)).state).toBe("unverified");
+  });
+
+  it.each(["missing", "agent", "daemon"] as const)("rejects an expired binding with a %s registration", async (kind) => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext({ expires_at: new Date(NOW.getTime() - 1_000).toISOString() }));
+    vi.spyOn(api, "findPaseoSession").mockResolvedValue(kind === "missing" ? null : {
+      agent_id: kind === "agent" ? AGENT_B : AGENT_A,
+      session_id: SESSION_A,
+      daemon_id: kind === "daemon" ? "other-daemon" : DAEMON_ID,
+    });
+    expect((await service.status(SESSION_A)).state).toBe("invalid");
+    expect(api.tokensRequested).toHaveLength(0);
+  });
+
+  it("reports an inconclusive expired binding lookup as unverified", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext({ expires_at: NOW.toISOString() }));
+    vi.spyOn(api, "findPaseoSession").mockRejectedValue(new Error("network unavailable"));
+    expect((await service.status(SESSION_A)).state).toBe("unverified");
+  });
+
+  it.each(["archived", "missing", "conflict"] as const)("rejects an expired binding when the host is %s", async (kind) => {
+    const { home, api, service } = await setup({
+      host: kind === "archived" ? fakeHost({ archivedAt: NOW.toISOString() }) : kind === "missing" ? fakeHost({ exists: false }) : fakeHost(),
+    });
+    await writeSessionContext(home, makeContext({
+      expires_at: new Date(NOW.getTime() - 1_000).toISOString(),
+      ...(kind === "conflict" ? { host_id: "srv_other" } : {}),
+    }));
+    expect((await service.status(SESSION_A)).state).toBe("invalid");
+    expect(api.tokensRequested).toHaveLength(0);
+  });
+
+  it("checks revocation even when a credential is close to expiry", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext({ expires_at: new Date(NOW.getTime() + 1_000).toISOString() }));
+    api.verifyResult = "invalid";
+    expect((await service.status(SESSION_A)).state).toBe("invalid");
+    expect(api.verifyCalls).toBe(1);
   });
 
   it("repairs a revoked credential with a fresh token for the same agent", async () => {

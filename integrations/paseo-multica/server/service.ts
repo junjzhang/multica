@@ -1,4 +1,5 @@
 import type { BoardData, BoardScope } from "../shared/board";
+import { z } from "zod";
 import type { StatusView } from "../shared/contracts";
 import { parseForgeUsernames } from "../shared/settings";
 import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
@@ -51,6 +52,9 @@ export interface SessionService {
 
 const DEFAULT_TOKEN_TTL_MS = 60 * 60 * 1000;
 const TOKEN_RENEW_WINDOW_MS = 5 * 60 * 1000;
+const sessionsSchema = z.object({
+  sessions: z.array(z.object({ id: z.string(), deliverable: z.boolean() })),
+});
 const CONNECT_HINT = "Run multica session connect (or /multica connect in the composer)";
 const locks = new Map<string, Promise<unknown>>();
 /** The pill and the panel read the same board; a short cache keeps them from doubling the fan-out. */
@@ -277,22 +281,35 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
       if (hostError || !host) {
         return viewFor(context, "invalid", hostError ?? "This Paseo session could not be verified.");
       }
+      let owner: OwnerProfile;
       try {
         const config = await readConfig();
-        const owner = await loadOwnerProfile(deps.home, config.ownerProfile);
+        owner = await loadOwnerProfile(deps.home, config.ownerProfile);
         const conflict = conflictFor(context, host, owner, config.daemonId);
         if (conflict) return viewFor(context, "invalid", `${conflict} ${CONNECT_HINT} after fixing the configuration.`);
       } catch (error) {
         return viewFor(context, "invalid", describeError(error));
       }
-      if (isExpired(context, now())) {
-        return viewFor(
-          context,
-          "invalid",
-          `The Multica credential expired at ${context.expires_at}. ${CONNECT_HINT} to repair it.`,
-        );
-      }
       try {
+        if (isExpired(context, now())) {
+          const registered = await api.findPaseoSession(ownerCredential(owner), host.hostId, host.sessionId);
+          if (!registered || registered.agent_id !== context.agent_id || registered.daemon_id !== context.daemon_id) {
+            return viewFor(context, "invalid", `The Multica session binding no longer matches its registration. ${CONNECT_HINT} to repair it.`);
+          }
+          let sessions: z.infer<typeof sessionsSchema>;
+          try {
+            sessions = sessionsSchema.parse(await api.get(ownerCredential(owner), `/api/agents/${encodeURIComponent(context.agent_id)}/sessions`));
+          } catch (error) {
+            if (error instanceof MulticaApiError && error.status === 404) {
+              return viewFor(context, "invalid", `The Multica external agent no longer exists. ${CONNECT_HINT} to repair it.`);
+            }
+            throw error;
+          }
+          if (!sessions.sessions.some((session) => session.id === registered.session_id && session.deliverable)) {
+            return viewFor(context, "invalid", `The Multica session is no longer available. ${CONNECT_HINT} to repair it.`);
+          }
+          return viewFor(context, "connected");
+        }
         const validity = await api.verifyExternalAgentToken(contextCredential(context), context.agent_id);
         if (validity === "invalid") {
           return viewFor(
