@@ -16,7 +16,7 @@ const server = createServer((req, res) => {
     res.end(`<html><body style="font:20px system-ui"><h1>${req.url.split("/").at(-1)}</h1><p>Task detail fixture</p></body></html>`);
     return;
   }
-  res.end(`<html><head><style>body{font:15px system-ui;margin:24px;color:#17202a}button{padding:8px;margin:4px;border:1px solid #ccc;border-radius:6px;background:#f7f8fa;cursor:pointer}aside{min-width:400px}</style></head><body><div id="root"></div><script>${bundle.outputFiles[0].text.replace(/<\/script/gi, "<\\/script")}</script></body></html>`);
+  res.end(`<html><head><style>body{font:15px system-ui;margin:24px;color:#17202a}nav button{padding:8px;margin:4px;border:1px solid #ccc;border-radius:6px;background:#f7f8fa;cursor:pointer}aside{min-width:400px}</style></head><body><div id="root"></div><script>${bundle.outputFiles[0].text.replace(/<\/script/gi, "<\\/script")}</script></body></html>`);
 });
 await new Promise(done => server.listen(0, "127.0.0.1", done));
 let browser;
@@ -51,8 +51,40 @@ try {
   await page.getByRole("button", { name: "disconnected", exact: true }).click();
   await expect(page.getByText("This Paseo session has no Multica binding.", { exact: false })).toBeVisible();
   await expect(page.locator("iframe")).toHaveCount(0);
+  await page.getByRole("button", { name: "mr", exact: true }).click();
+  const panel = page.locator("section");
+  const opened = () => page.evaluate(() => window.__opened ?? []);
+  const failedChip = page.getByRole("link", { name: "打开 sglang!833 !833 CI 失败" });
+  await expect(failedChip).toBeVisible();
+  await expect(page.getByRole("link", { name: "打开 slime!16 !16 有冲突" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /^打开 sglang!901 !901 CI 失败/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "打开 gw!41 !41 待你审批" })).toBeVisible();
+  await page.mouse.move(0, 0);
+  await panel.screenshot({ path: join(output, "mr-light.png") });
+  await failedChip.hover();
+  await expect(failedChip.locator("span", { hasText: "!833 CI 失败" })).toHaveCSS("text-decoration-line", "underline");
+  await panel.screenshot({ path: join(output, "mr-chip-hover.png") });
+  await failedChip.click();
+  expect(await opened()).toEqual(["https://git.woa.com/o/sglang/merge_requests/833"]);
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await page.getByRole("link", { name: "WORK-831 已完成 接入 CI 结果" }).click();
+  await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-831" })).toBeVisible();
+  expect(await opened()).toHaveLength(1);
+  const summary = page.getByRole("button", { name: /^4 个 MR / });
+  await expect(summary).toHaveAttribute("aria-expanded", "false");
+  await summary.click();
+  await expect(summary).toHaveAttribute("aria-expanded", "true");
+  for (const name of ["sglang!833 · WORK-831 接入 CI 结果 CI 失败", "slime!16 · WORK-832 迁移调度配置 有冲突", "gw!41 · WORK-835 灰度开关 待你审批", "mimikyu!20 · WORK-834 补齐压测脚本 CI 运行中"]) {
+    await expect(page.getByRole("link", { name, exact: true })).toBeVisible();
+  }
+  await page.getByRole("link", { name: "mimikyu!20 · WORK-834 补齐压测脚本 CI 运行中" }).click();
+  expect((await opened()).at(-1)).toBe("https://git.woa.com/o/mimikyu/merge_requests/20");
+  await page.mouse.move(0, 0);
+  await panel.screenshot({ path: join(output, "mr-parent-summary.png") });
+  await page.getByRole("button", { name: "theme", exact: true }).click();
+  await panel.screenshot({ path: join(output, "mr-dark.png") });
   expect(errors).toEqual([]);
-  console.log("PASS: Chromium same-host/workspace session tasks, detail history, empty and disconnected states");
+  console.log("PASS: Chromium same-host/workspace session tasks, detail history, empty and disconnected states, MR chips");
 } finally {
   if (browser) await browser.close();
   await new Promise(done => server.close(done));
