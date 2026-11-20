@@ -749,6 +749,104 @@ describe("session board service", () => {
     expect(view.reason).toMatch(/Could not read this session's Multica tasks/);
     expect(view.reason).not.toContain(OWNER_TOKEN);
   });
+
+  it("explains a row from existing reads: the failed run, the blocked move, the parent and who holds the turn", async () => {
+    const { api, service } = await setup();
+    const sessionId = api.tasksResult instanceof Error ? "" : api.tasksResult.session_id!;
+    routes(api, sessionId);
+    const PARENT = "0199a0b1-9999-7999-8999-999999999990";
+    api.routes.set(`/api/issues/${OWNED}`, wireIssue(OWNED, "WORK-1", {
+      status: "blocked", status_category: "started", parent_issue_id: PARENT,
+      contract: { pending_actor: { type: "agent", id: AGENT_B }, acceptor: { type: "member", id: "user-1" }, executor: { type: "agent", id: AGENT_B }, accepted: [], stale: false, contract: { versions: [{ criteria: ["works"] }] } },
+    }));
+    api.routes.set(`/api/issues/${PARENT}`, wireIssue(PARENT, "WORK-0", { title: "Parent task" }));
+    api.routes.set(`/api/issues/${OWNED}/timeline`, [
+      { type: "activity", action: "status_changed", details: { from: "todo", to: "blocked" }, created_at: "2026-10-20T00:00:00Z" },
+      { type: "comment", created_at: "2026-10-21T00:00:00Z" },
+      { type: "activity", action: "status_changed", details: { from: "in_progress", to: "blocked" }, created_at: "2026-10-22T00:00:00Z" },
+    ]);
+    api.routes.set(`/api/issues/${RETURNING}/task-runs`, [{ status: "failed", error: `agent exited with ${OWNER_TOKEN}`, completed_at: "2026-10-24T00:00:00Z" }]);
+    api.routes.set("/api/agents", [{ id: AGENT_B, name: "Reviewer" }]);
+
+    const view = await service.board(SESSION_A, "session");
+    expect(view.state).toBe("ready");
+    if (view.state !== "ready") return;
+    const byId = new Map(view.issues.map((issue) => [issue.id, issue]));
+    expect(byId.get(OWNED)).toMatchObject({
+      blockedSince: "2026-10-22T00:00:00Z",
+      parent: { identifier: "WORK-0", title: "Parent task", url: "https://app.multica.example/acme/issues/WORK-0" },
+      contract: { pendingName: "Reviewer" },
+    });
+    expect(byId.get(OPEN_CHILD)?.parent).toEqual({ identifier: "WORK-1", title: "WORK-1", url: "https://app.multica.example/acme/issues/WORK-1" });
+    expect(byId.get(RETURNING)?.lastFailure).toEqual({ summary: "agent exited with [redacted]", at: "2026-10-24T00:00:00Z" });
+    expect(byId.get(ACCEPTING)?.lastFailure).toBeUndefined();
+    expect(byId.get(ACCEPTING)?.blockedSince).toBeUndefined();
+    expect(api.gets).not.toContain(`/api/issues/${ACCEPTING}/timeline`);
+    expect(api.gets).not.toContain(`/api/workspaces/${WORKSPACE_ID}/members`);
+    expect(JSON.stringify(view)).not.toContain(OWNER_TOKEN);
+  });
+
+  it("leaves out a detail whose optional read fails instead of failing the board", async () => {
+    const { api, service } = await setup();
+    routes(api, "session");
+    api.routes.set(`/api/issues/${OWNED}`, wireIssue(OWNED, "WORK-1", { status: "blocked", status_category: "started", parent_issue_id: "0199a0b1-9999-7999-8999-999999999990" }));
+    const view = await service.board(SESSION_A, "session");
+    expect(view.state).toBe("ready");
+    if (view.state !== "ready") return;
+    const owned = view.issues.find((issue) => issue.id === OWNED);
+    expect(owned?.status).toBe("blocked");
+    expect(owned?.blockedSince).toBeUndefined();
+    expect(owned?.parent).toBeUndefined();
+  });
+  it("drops the cached board after a write so the refresh shows the new state", async () => {
+    const { api, service } = await setup();
+    routes(api, "session");
+    await service.board(SESSION_A, "session");
+    const reads = api.gets.length;
+    await service.taskAction(SESSION_A, OWNED, { kind: "status", status: "blocked" });
+    await service.board(SESSION_A, "session");
+    expect(api.gets.length).toBeGreaterThan(reads);
+  });
+});
+
+describe("task actions", () => {
+  const ISSUE = "0199a0b1-4444-7444-8444-444444444444";
+
+  it("writes each action with the owner credential through the existing issue endpoints", async () => {
+    const { home, api, service } = await setup();
+    await writeSessionContext(home, makeContext());
+    for (const action of [{ kind: "rerun" }, ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ kind: "status", status }))] as const) {
+      expect(await service.taskAction(SESSION_A, ISSUE, action as never)).toEqual({ ok: true });
+    }
+    expect(api.writes).toEqual([
+      { method: "POST", path: `/api/issues/${ISSUE}/rerun`, token: OWNER_TOKEN },
+      ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ method: "PUT", path: `/api/issues/${ISSUE}`, body: { status }, token: OWNER_TOKEN })),
+    ]);
+    expect(api.writes.some((write) => write.token === EXTERNAL_TOKEN)).toBe(false);
+    expect(api.registrations).toHaveLength(0);
+    expect(api.tokensRequested).toHaveLength(0);
+  });
+
+  it("returns the server's reason for a refusal, and never the credential", async () => {
+    const { api, service } = await setup();
+    api.writeError = new MulticaApiError(409, `Multica API PUT /api/issues/x returned 409: ${OWNER_TOKEN}`, undefined, "accept the current contract before completing this issue");
+    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "status", status: "in_progress" })).toEqual({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
+    api.writeError = new MulticaApiError(403, "forbidden");
+    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "rerun" })).toEqual({ ok: false, status: 403, reason: "Multica 返回 403" });
+    api.writeError = new Error(`socket closed for ${OWNER_TOKEN}`);
+    const failed = await service.taskAction(SESSION_A, ISSUE, { kind: "rerun" });
+    expect(failed).toMatchObject({ ok: false, status: 0 });
+    expect(JSON.stringify(failed)).not.toContain(OWNER_TOKEN);
+  });
+
+  it("refuses to write without the owner profile instead of falling back to another identity", async () => {
+    const home = await makeHome();
+    await writeSessionContext(home, makeContext());
+    const { api, service } = await setup({ home, settings: { ownerProfile: "missing", daemonId: DAEMON_ID } });
+    const result = await service.taskAction(SESSION_A, ISSUE, { kind: "status", status: "blocked" });
+    expect(result).toMatchObject({ ok: false, status: 0, reason: expect.stringMatching(/owner profile "missing" was not found/) });
+    expect(api.writes).toHaveLength(0);
+  });
 });
 
 describe("background wait source", () => {

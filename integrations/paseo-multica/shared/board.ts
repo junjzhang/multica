@@ -52,12 +52,20 @@ const issueSchema = z.object({
       executor: actorSchema.optional(),
       /** Every criterion of the current version is accepted. */
       accepted: z.boolean(),
+      /** Display name of the pending actor when it is neither the viewer nor this session. */
+      pendingName: z.string().optional(),
     })
     .optional(),
   /** The issue coordinator; `session_id` is set only from its active session binding on this issue. */
   coordinator: actorSchema.optional(),
   activeRun: z.boolean(),
   lastRunFailed: z.boolean(),
+  /** The latest run's failure, when that run failed: its redacted error and when it ended. */
+  lastFailure: z.object({ summary: z.string(), at: z.string().optional() }).optional(),
+  /** When the task last moved to blocked; set only while it is blocked. */
+  blockedSince: z.string().optional(),
+  /** The parent task as a link target, whether or not the parent is on the board. */
+  parent: z.object({ identifier: z.string(), title: z.string(), url: z.string().optional() }).optional(),
   pullRequests: z.array(pullRequestSchema),
   /** The external Paseo session executing this task; absent when execution is managed or the session cannot be opened. */
   executionSession: paseoSessionSchema.optional(),
@@ -145,7 +153,7 @@ export function isCoordinatingSession(coordinator: Actor | undefined, viewer: Vi
   return !!coordinator && !!viewer.sessionId && coordinator.type === "agent" && coordinator.id === viewer.agentId && coordinator.session_id === viewer.sessionId;
 }
 
-function isUser(actor: Actor | undefined, viewer: Viewer): boolean {
+export function isUser(actor: Actor | undefined, viewer: Viewer): boolean {
   return !!actor && !!viewer.userId && (actor.type === "member" || actor.type === "user") && actor.id === viewer.userId;
 }
 

@@ -1,6 +1,7 @@
 import type { BoardData, BoardScope } from "../shared/board";
 import { z } from "zod";
 import type { StatusView } from "../shared/contracts";
+import type { TaskAction, TaskActionResult } from "../shared/task-actions";
 import { parseForgeUsernames } from "../shared/settings";
 import { describeError, SESSION_CONNECT_ERROR_PREFIX } from "../shared/redaction";
 import { isExpired, isLocator, returnAddress, type SessionContext } from "../shared/session";
@@ -48,6 +49,8 @@ export interface SessionService {
   status(agentId: string): Promise<StatusView>;
   disconnect(agentId: string): Promise<StatusView>;
   board(agentId: string, scope: BoardScope, refresh?: boolean): Promise<BoardData>;
+  /** Writes with the owner profile only: never the session credential, never an agent identity. */
+  taskAction(agentId: string, issueId: string, action: TaskAction): Promise<TaskActionResult>;
 }
 
 const DEFAULT_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -430,7 +433,28 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     }
   }
 
+  async function taskAction(issueId: string, action: TaskAction): Promise<TaskActionResult> {
+    try {
+      const settings = await deps.readSettings();
+      const credential = ownerCredential(await loadOwnerProfile(deps.home, settings.ownerProfile.trim()));
+      if (action.kind === "rerun") await api.rerunIssue(credential, issueId);
+      else await api.updateIssueStatus(credential, issueId, action.status);
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof MulticaApiError && error.status > 0) {
+        return { ok: false, status: error.status, reason: error.reason ?? `Multica 返回 ${error.status}` };
+      }
+      return { ok: false, status: 0, reason: describeError(error) };
+    }
+  }
+
   return {
+    async taskAction(agentId, issueId, action) {
+      if (!isLocator(agentId)) throw new ConfigurationError("The current Paseo session id is invalid.");
+      const result = await taskAction(issueId, action);
+      if (result.ok) forgetBoards(agentId);
+      return result;
+    },
     async connect(agentId) {
       try {
         return await connect(agentId);

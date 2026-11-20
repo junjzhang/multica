@@ -97,6 +97,29 @@ describe("Multica API client", () => {
     });
   });
 
+  it("moves a status with PUT and reruns with an empty POST, surfacing the server's reason", async () => {
+    const issueId = randomUUID();
+    const { credential, calls } = await startServer((request, response) => {
+      if (request.method === "PUT" && request.body.includes("cancelled")) {
+        response.writeHead(409, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: `accept the current contract first ${OWNER_TOKEN}` }));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end("{}");
+    });
+    const api = createMulticaApi();
+    await api.updateIssueStatus(credential, issueId, "blocked");
+    await api.rerunIssue(credential, issueId);
+    expect(calls.map((call) => [call.method, call.url, call.body, call.headers.authorization])).toEqual([
+      ["PUT", `/api/issues/${issueId}`, JSON.stringify({ status: "blocked" }), `Bearer ${OWNER_TOKEN}`],
+      ["POST", `/api/issues/${issueId}/rerun`, "", `Bearer ${OWNER_TOKEN}`],
+    ]);
+    const refused = await api.updateIssueStatus(credential, issueId, "cancelled").catch((error: unknown) => error);
+    expect(refused).toMatchObject({ status: 409, reason: "accept the current contract first [redacted]" });
+    expect(String((refused as Error).message)).not.toContain(OWNER_TOKEN);
+  });
+
   it("mints and revokes a credential through the documented endpoints", async () => {
     const tokenId = randomUUID();
     const { credential, calls } = await startServer((request, response) => {

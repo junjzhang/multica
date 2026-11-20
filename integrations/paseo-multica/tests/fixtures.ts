@@ -53,6 +53,17 @@ export class FakeApi implements MulticaApi {
     if (value instanceof Error) throw value;
     return value;
   }
+  /** Writes in order, with the token that made them. */
+  readonly writes: { method: "PUT" | "POST"; path: string; body?: unknown; token: string }[] = [];
+  writeError: Error | null = null;
+  async updateIssueStatus(credential: ApiCredential, issueId: string, status: string): Promise<void> {
+    this.writes.push({ method: "PUT", path: `/api/issues/${issueId}`, body: { status }, token: credential.token });
+    if (this.writeError) throw this.writeError;
+  }
+  async rerunIssue(credential: ApiCredential, issueId: string): Promise<void> {
+    this.writes.push({ method: "POST", path: `/api/issues/${issueId}/rerun`, token: credential.token });
+    if (this.writeError) throw this.writeError;
+  }
   readonly registrations: RegisterExternalAgentInput[] = [];
   readonly credentialCalls: ApiCredential[] = [];
   readonly tokensRequested: { agentId: string; sessionId: string; expiresAt: string }[] = [];

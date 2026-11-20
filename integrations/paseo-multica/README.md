@@ -117,6 +117,29 @@ The panel has two parts:
   rest instead of a `done/total` count. A single-child parent shows no count. Children are grouped by
   `stage` into batches.
 
+A to-do row and a tree row are the same component: same glyph, title and MR
+chip. Both open the same detail on the same disclosure, and expansion is keyed
+by issue id in one set, so a task that appears in 待办 and in a tree is open in
+both at once. The detail lists only what exists, in this order: why the task is
+here (the latest failed run's summary and when it failed, whose turn it is, how
+long it has been blocked), a parent link that opens the parent's task, the MRs,
+the children, and the quick actions. A blocked task's duration comes from the
+last status change to blocked.
+
+Quick actions follow the task's state: a failed run offers 重跑, 转为阻塞 and
+取消; a blocked task offers 恢复进行中, 放回待规划 and 取消; any other open task
+switches between 进行中, 阻塞, 待规划 and 取消; a closed task offers nothing.
+Done is never a quick action: completing a task goes through acceptance. 取消
+needs a second confirmation. An action shows its own in-progress state and
+disables its neighbours while it runs; success reloads the board, and a refusal
+shows the server's reason (including a 409) while the row keeps its local state.
+
+Actions are written with the plugin's owner profile, never the session's token:
+`PUT /api/issues/{id}` with `{"status": …}` for a status change and
+`POST /api/issues/{id}/rerun` for a rerun. A refusal is a result, not an error:
+the panel shows the reason and the credential never reaches the client, the
+logs, or the message.
+
 **本会话** roots the trees at tasks this session executes, leads, accepts or
 delegated. **全部** roots them at every open task whose parent is not open, and
 groups them by Multica Project. Both add closed tasks that still have an open MR
@@ -124,7 +147,8 @@ groups them by Multica Project. Both add closed tasks that still have an open MR
 acceptance usually closes the task while its MR still waits for approval.
 
 Classification lives in `shared/board.ts` as a pure function of issue facts and
-the clock. It is display-only: it never writes a task or changes a status.
+the clock. Classification itself never writes a task; the only writes are the
+quick actions described below.
 
 ```text
 需要处理: contract.pending_actor is this session or the user
@@ -152,7 +176,10 @@ The plugin uses its configured owner profile to build the board:
 issues for 全部, batched `children` for the subtrees, and per open task its
 issue (contract, coordinator session binding and `last_activity_at`),
 `task-runs` and, when linked, `pull-requests`. The workspace MR summary finds
-closed tasks with open MRs. A reconnect or disconnect drops the cached board. A board stops at 300 tasks and says so. The pill and panel
+closed tasks with open MRs. A blocked task adds its `timeline`, a parent outside
+the board is read on its own, and a contract pending someone other than you or
+this session reads the `agents` or workspace `members` list for a name; a failed
+optional read only hides that line. A reconnect or disconnect drops the cached board. A board stops at 300 tasks and says so. The pill and panel
 share a 15-second cache; the panel's ⟳ bypasses it.
 
 A session without an identity on Multica has an empty session board. The
