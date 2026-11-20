@@ -7,7 +7,7 @@ const board = (agentId: string) => ({
 });
 const recent = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 const issue = (identifier: string, title: string, extra: object) => ({ id: identifier, identifier, title, status: "in_progress", statusCategory: "started", lastActivityAt: recent, activeRun: false, lastRunFailed: false, pullRequests: [], url: `${location.origin}/acme/issues/${identifier}`, ...extra });
-const mr = (repo: string, number: number, extra: object) => ({ id: `${repo}-${number}`, number, repo, title: `MR ${number}`, state: "open", url: `https://git.woa.com/o/${repo}/merge_requests/${number}`, ...extra });
+const mr = (repo: string, number: number, extra: object) => ({ id: `${repo}-${number}`, number, repo, title: `MR ${number}`, state: "open", url: `https://git.example.com/o/${repo}/merge_requests/${number}`, ...extra });
 const closed = { status: "done", statusCategory: "completed" };
 const mrBoard = {
   state: "ready", scope: "session", viewer: { agentId: "shared-external-agent", sessionId: "mr", userId: "me", forgeUsernames: ["me"] },

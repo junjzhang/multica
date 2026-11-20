@@ -550,7 +550,7 @@ describe("session board service", () => {
     api.routes.set(`/api/issues/${OPEN_CHILD}`, wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED, stage: 2 }));
     api.routes.set("/api/issues/pull-requests", { pull_requests: [{ issue_id: OWNED, state: "open" }, { issue_id: DONE_CHILD, state: "merged" }] });
     api.routes.set(`/api/issues/${OWNED}/pull-requests`, { pull_requests: [{
-      id: "pr-1", number: 813, title: "MR", state: "open", repo_name: "slime", html_url: "https://git.woa.com/o/slime/merge_requests/813",
+      id: "pr-1", number: 813, title: "MR", state: "open", repo_name: "slime", html_url: "https://git.example.com/o/slime/merge_requests/813",
       checks_conclusion: "failed", mergeable: "mergeable",
       review: { state: "approving", reviewers: [{ username: "someone", review_state: "approved" }, { username: "jayjayzhang", review_state: "approving" }] },
     }] });

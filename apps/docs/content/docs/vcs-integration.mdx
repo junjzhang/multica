@@ -21,9 +21,9 @@ Unlike GitHub, these providers have no App model. Each workspace stores its own 
 
 ## TGit (工蜂)
 
-Choose **TGit (工蜂)** in Settings → Code and enter the instance URL (for example `https://git.woa.com`) and a personal access token with API access to read your account. Multica validates it with `GET /api/v3/user`.
+Choose **TGit (工蜂)** in Settings → Code and enter the instance URL and a personal access token with API access to read your account. Multica validates it with `GET /api/v3/user`.
 
-In the repository's Webhook settings, use Multica's webhook URL, paste its secret into **Token**, and enable **Merge request events**. TGit sends `X-Event: Merge Request Hook` and authenticates with `X-Token`. See the [TGit webhook API](https://git.tencent.com/help/menu/api/hooks.html).
+In the repository's Webhook settings, use Multica's webhook URL, paste its secret into **Token**, and enable **Merge request events**. TGit sends `X-Event: Merge Request Hook` and authenticates with `X-Token`.
 
 MR events sync draft, open, closed and merged states into the existing issue cards. Fork MRs belong to their target repository. The webhook actor is not presented as the MR author, and update times are not presented as merge or close times.
 
@@ -41,7 +41,7 @@ Only already-mirrored open MRs are refreshed. The server scans every 30 seconds,
 
 Refresh capacity is shared across the service: four workers, up to 100 candidates per scan, and a queue of 256 MRs. Large queues or slow provider responses can exceed the two-minute freshness window; skipped queue entries remain eligible for later scans. Visits and webhooks respect the same cooldown, so a new head can remain unavailable until the next eligible refresh. Unchanged snapshots do not broadcast updates; changes and recovery from stale data do.
 
-For `git.woa.com`, the callback port must be 80, 443, 8080 or 8081. If Multica runs on another port, publish its authenticated webhook path through a reverse proxy on an accepted port.
+Check which callback ports your TGit instance allows. If it only accepts ports 80, 443, 8080 or 8081 and Multica runs on another port, publish its authenticated webhook path through a reverse proxy on an accepted port.
 
 ## Prerequisites (server)
 

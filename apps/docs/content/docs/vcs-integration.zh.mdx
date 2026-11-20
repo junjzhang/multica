@@ -21,9 +21,9 @@ Multica 按工作区连接自托管的 Git 代码托管：Forgejo、Gitea 或 Gi
 
 ## 工蜂（TGit）
 
-在设置 → 代码中选择 **TGit (工蜂)**，填写实例地址（例如 `https://git.woa.com`）和具备 API 账户读取权限的个人访问令牌。Multica 通过 `GET /api/v3/user` 校验令牌。
+在设置 → 代码中选择 **TGit (工蜂)**，填写实例地址和具备 API 账户读取权限的个人访问令牌。Multica 通过 `GET /api/v3/user` 校验令牌。
 
-在仓库的 Webhook 设置中填写 Multica 提供的地址，将密钥填入 **Token**，启用**合并请求事件**。工蜂使用 `X-Event: Merge Request Hook` 和 `X-Token` 发送、校验事件。参见[工蜂 Webhook API](https://git.tencent.com/help/menu/api/hooks.html)。
+在仓库的 Webhook 设置中填写 Multica 提供的地址，将密钥填入 **Token**，启用**合并请求事件**。工蜂使用 `X-Event: Merge Request Hook` 和 `X-Token` 发送、校验事件。
 
 MR 的草稿、打开、关闭、合并状态同步到现有任务卡片。Fork MR 归属目标仓库；不会把事件操作者当作 MR 作者，也不会把更新时间当作合并或关闭时间。
 
@@ -41,7 +41,7 @@ MR 的草稿、打开、关闭、合并状态同步到现有任务卡片。Fork 
 
 刷新能力由整个服务共享：4 个 Worker，每轮最多选择 100 个 MR，队列容量为 256。MR 较多或工蜂响应较慢时，刷新可能超过两分钟的新鲜度窗口；未能入队的 MR 会在后续扫描中重试。页面和 Webhook 同样遵守冷却时间，新提交可能要等下一次刷新才有结果。内容不变时不广播，内容变化或旧数据恢复有效时才通知。
 
-`git.woa.com` 的回调端口必须是 80、443、8080 或 8081。若 Multica 使用其他端口，请通过反向代理在允许的端口提供回调路径，并保留 Webhook 密钥校验。
+请确认工蜂实例允许的回调端口。如果实例只允许 80、443、8080 或 8081，而 Multica 使用其他端口，请通过反向代理在允许的端口提供回调路径，并保留 Webhook 密钥校验。
 
 ## 前置条件（服务端）
 
