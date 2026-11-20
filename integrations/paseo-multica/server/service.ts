@@ -437,7 +437,7 @@ export function createSessionService(deps: SessionServiceDeps): SessionService {
     try {
       const settings = await deps.readSettings();
       const credential = ownerCredential(await loadOwnerProfile(deps.home, settings.ownerProfile.trim()));
-      if (action.kind === "rerun") await api.rerunIssue(credential, issueId);
+      if (action.kind === "rerun") await api.rerunIssue(credential, issueId, action.taskId);
       else await api.updateIssueStatus(credential, issueId, action.status);
       return { ok: true };
     } catch (error) {

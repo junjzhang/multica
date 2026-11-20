@@ -64,8 +64,8 @@ export interface MulticaApi {
   get(credential: ApiCredential, path: string): Promise<unknown>;
   /** `PUT /api/issues/{id}` with only `status`. */
   updateIssueStatus(credential: ApiCredential, issueId: string, status: string): Promise<void>;
-  /** `POST /api/issues/{id}/rerun` with no body: the server reruns for the current assignee. */
-  rerunIssue(credential: ApiCredential, issueId: string): Promise<void>;
+  /** `POST /api/issues/{id}/rerun` with `task_id`: the server repeats that run of this issue. */
+  rerunIssue(credential: ApiCredential, issueId: string, taskId: string): Promise<void>;
 }
 
 export class MulticaApiError extends Error {
@@ -168,8 +168,8 @@ export function createMulticaApi(options: {
     async updateIssueStatus(credential, issueId, status) {
       await request(credential, "PUT", `/api/issues/${encodeURIComponent(issueId)}`, credential.token, { status });
     },
-    async rerunIssue(credential, issueId) {
-      await request(credential, "POST", `/api/issues/${encodeURIComponent(issueId)}/rerun`, credential.token);
+    async rerunIssue(credential, issueId, taskId) {
+      await request(credential, "POST", `/api/issues/${encodeURIComponent(issueId)}/rerun`, credential.token, { task_id: taskId });
     },
     async findPaseoSession(credential, hostId, sessionId) {
       const query = new URLSearchParams({ host_id: hostId, session_id: sessionId });

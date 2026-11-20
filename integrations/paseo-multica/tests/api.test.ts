@@ -97,7 +97,7 @@ describe("Multica API client", () => {
     });
   });
 
-  it("moves a status with PUT and reruns with an empty POST, surfacing the server's reason", async () => {
+  it("moves a status with PUT and reruns the given run with POST, surfacing the server's reason", async () => {
     const issueId = randomUUID();
     const { credential, calls } = await startServer((request, response) => {
       if (request.method === "PUT" && request.body.includes("cancelled")) {
@@ -110,10 +110,11 @@ describe("Multica API client", () => {
     });
     const api = createMulticaApi();
     await api.updateIssueStatus(credential, issueId, "blocked");
-    await api.rerunIssue(credential, issueId);
+    const taskId = randomUUID();
+    await api.rerunIssue(credential, issueId, taskId);
     expect(calls.map((call) => [call.method, call.url, call.body, call.headers.authorization])).toEqual([
       ["PUT", `/api/issues/${issueId}`, JSON.stringify({ status: "blocked" }), `Bearer ${OWNER_TOKEN}`],
-      ["POST", `/api/issues/${issueId}/rerun`, "", `Bearer ${OWNER_TOKEN}`],
+      ["POST", `/api/issues/${issueId}/rerun`, JSON.stringify({ task_id: taskId }), `Bearer ${OWNER_TOKEN}`],
     ]);
     const refused = await api.updateIssueStatus(credential, issueId, "cancelled").catch((error: unknown) => error);
     expect(refused).toMatchObject({ status: 409, reason: "accept the current contract first [redacted]" });

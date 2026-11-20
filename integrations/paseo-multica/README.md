@@ -130,13 +130,18 @@ Quick actions follow the task's state: a failed run offers 重跑, 转为阻塞 
 取消; a blocked task offers 恢复进行中, 放回待规划 and 取消; any other open task
 switches between 进行中, 阻塞, 待规划 and 取消; a closed task offers nothing.
 Done is never a quick action: completing a task goes through acceptance. 取消
-needs a second confirmation. An action shows its own in-progress state and
-disables its neighbours while it runs; success reloads the board, and a refusal
-shows the server's reason (including a 409) while the row keeps its local state.
+needs a second confirmation. An action's state belongs to its task, so a task
+open in two places shows the same in-progress state and disables its other
+actions in both while it runs; success reloads the board, and a refusal shows
+the server's reason (including a 409) while the row keeps its local state, until
+the next reload.
 
 Actions are written with the plugin's owner profile, never the session's token:
 `PUT /api/issues/{id}` with `{"status": …}` for a status change and
-`POST /api/issues/{id}/rerun` for a rerun. A refusal is a result, not an error:
+`POST /api/issues/{id}/rerun` with `{"task_id": …}` of the failed run for a
+rerun. Without that id the server would rerun the current assignee's own run,
+or refuse one that came from a delegation, so 重跑 appears only when the failed
+run's id is known. A refusal is a result, not an error:
 the panel shows the reason and the credential never reaches the client, the
 logs, or the message.
 

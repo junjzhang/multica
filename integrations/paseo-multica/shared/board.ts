@@ -60,8 +60,8 @@ const issueSchema = z.object({
   coordinator: actorSchema.optional(),
   activeRun: z.boolean(),
   lastRunFailed: z.boolean(),
-  /** The latest run's failure, when that run failed: its redacted error and when it ended. */
-  lastFailure: z.object({ summary: z.string(), at: z.string().optional() }).optional(),
+  /** The latest run's failure, when that run failed: its redacted error, when it ended, and the run a rerun repeats. */
+  lastFailure: z.object({ summary: z.string(), at: z.string().optional(), taskId: z.string().optional() }).optional(),
   /** When the task last moved to blocked; set only while it is blocked. */
   blockedSince: z.string().optional(),
   /** The parent task as a link target, whether or not the parent is on the board. */

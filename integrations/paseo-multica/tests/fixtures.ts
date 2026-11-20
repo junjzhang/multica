@@ -60,8 +60,8 @@ export class FakeApi implements MulticaApi {
     this.writes.push({ method: "PUT", path: `/api/issues/${issueId}`, body: { status }, token: credential.token });
     if (this.writeError) throw this.writeError;
   }
-  async rerunIssue(credential: ApiCredential, issueId: string): Promise<void> {
-    this.writes.push({ method: "POST", path: `/api/issues/${issueId}/rerun`, token: credential.token });
+  async rerunIssue(credential: ApiCredential, issueId: string, taskId: string): Promise<void> {
+    this.writes.push({ method: "POST", path: `/api/issues/${issueId}/rerun`, body: { task_id: taskId }, token: credential.token });
     if (this.writeError) throw this.writeError;
   }
   readonly registrations: RegisterExternalAgentInput[] = [];

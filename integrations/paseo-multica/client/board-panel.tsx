@@ -25,7 +25,7 @@ import {
   type Viewer,
 } from "../shared/board";
 import { sessionBoard, taskAction, taskExpansion } from "../shared/contracts";
-import { quickActions, type QuickAction, type TaskAction, type TaskActionResult } from "../shared/task-actions";
+import { quickActions, type QuickAction } from "../shared/task-actions";
 import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-icon";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
@@ -258,6 +258,7 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const [expansionError, setExpansionError] = useState("");
   const [parkedOpen, setParkedOpen] = useState(false);
+  const [actions, setActions] = useState<Record<string, ActionState>>({});
   const writes = useRef<Promise<unknown>>(Promise.resolve());
   const request = useRef(0);
 
@@ -267,7 +268,10 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     setError("");
     try {
       const next = await getBoard({ agentId, scope, refresh });
-      if (revision === request.current) setData(next);
+      if (revision === request.current) {
+        setData(next);
+        setActions((all) => Object.fromEntries(Object.entries(all).filter(([, state]) => state.pending)));
+      }
     } catch (cause) {
       if (revision === request.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -295,13 +299,20 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     const target = sessionTarget(issue, here);
     return target && openAgent ? () => openAgent(target) : undefined;
   };
-  const act = useCallback(async (issue: BoardIssue, action: TaskAction) => {
-    const result = await runAction({ agentId, issueId: issue.id, action });
-    if (result.ok) await load(true);
-    return result;
+  const act = useCallback(async (issue: BoardIssue, action: QuickAction) => {
+    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${action.label}失败：${reason}` } }));
+    setActions((all) => ({ ...all, [issue.id]: { pending: action.label } }));
+    try {
+      const result = await runAction({ agentId, issueId: issue.id, action: action.action });
+      if (!result.ok) return fail(result.reason);
+      setActions(({ [issue.id]: _done, ...rest }) => rest);
+      await load(true);
+    } catch (cause) {
+      fail(cause instanceof Error ? cause.message : String(cause));
+    }
   }, [agentId, runAction, load]);
   const trees = useMemo(() => new Map(board ? Object.values(board.sections).flat().flatMap(nodesOf).map((tree) => [tree.issue.id, tree] as const) : []), [board]);
-  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle, viewer: ready?.viewer ?? NO_VIEWER, now, trees, act };
+  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle, viewer: ready?.viewer ?? NO_VIEWER, now, trees, actions, act };
   // Still one row per issue: its most urgent to-do decides which block it appears in.
   const todos = board ? firstPerIssue(board.todos) : [];
   const yours = todos.filter((todo) => isUserTodo(todo.kind));
@@ -407,12 +418,16 @@ function Section({ title, count, colors, open = true, onToggle, children }: { ti
   </View>;
 }
 
+type ActionState = { pending?: string; error?: string };
+
 type RowContext = {
   colors: Colors; openTask: OpenTask; expandedIds: string[]; toggle(id: string, expanded: boolean): void;
   viewer: Viewer; now: number;
   /** Every tree node on the board by issue id, so a to-do row expands to the same subtree as its tree row. */
   trees: Map<string, TreeNode>;
-  act(issue: BoardIssue, action: TaskAction): Promise<TaskActionResult>;
+  /** Per issue, so a task open in two places shows one running action and one error. A reload clears settled errors. */
+  actions: Record<string, ActionState>;
+  act(issue: BoardIssue, action: QuickAction): Promise<void>;
   /** Opens the task's executing session; undefined when the row has no session to open. */
   openSession(issue: BoardIssue): (() => void) | undefined;
 };
@@ -650,32 +665,22 @@ function ParentLink({ parent, inset, row }: { parent: NonNullable<BoardIssue["pa
  */
 function Actions({ issue, actions, inset, row }: { issue: BoardIssue; actions: QuickAction[]; inset: number; row: RowContext }) {
   const { colors } = row;
-  const [pending, setPending] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<QuickAction | null>(null);
-  const [error, setError] = useState("");
-  const run = async (action: QuickAction) => {
+  const { pending, error } = row.actions[issue.id] ?? {};
+  const run = (action: QuickAction) => {
     setConfirming(null);
-    setPending(action.label);
-    setError("");
-    try {
-      const result = await row.act(issue, action.action);
-      if (!result.ok) setError(`${action.label}失败：${result.reason}`);
-    } catch (cause) {
-      setError(`${action.label}失败：${cause instanceof Error ? cause.message : String(cause)}`);
-    } finally {
-      setPending(null);
-    }
+    void row.act(issue, action);
   };
   return <View style={{ gap: SPACE.xs, paddingLeft: inset, paddingRight: SPACE.sm, paddingVertical: SPACE.xs }}>
     {confirming ? <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
       <Text style={{ color: colors.foreground, fontSize: FONT.sm }}>确认取消 {issue.identifier}？</Text>
-      <ActionButton label="确认取消" accessibilityLabel={`确认取消 ${issue.identifier}`} tone="danger" colors={colors} onPress={() => void run(confirming)} />
+      <ActionButton label="确认取消" accessibilityLabel={`确认取消 ${issue.identifier}`} tone="danger" colors={colors} onPress={() => run(confirming)} />
       <ActionButton label="返回" accessibilityLabel={`不取消 ${issue.identifier}`} colors={colors} onPress={() => setConfirming(null)} />
     </View> : <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
       {actions.map((action) => <ActionButton
         key={action.label} label={action.label} accessibilityLabel={`${action.label} ${issue.identifier}`} colors={colors}
-        busy={pending === action.label} disabled={pending !== null}
-        onPress={() => (action.confirm ? setConfirming(action) : void run(action))}
+        busy={pending === action.label} disabled={pending !== undefined}
+        onPress={() => (action.confirm ? setConfirming(action) : run(action))}
       />)}
     </View>}
     {error ? <Text selectable style={{ color: colors.statusDanger, fontSize: FONT.sm }}>{error}</Text> : null}

@@ -338,9 +338,11 @@ const pressables = (renderer: ReactTestRenderer, name: string) => renderer.root.
 
 it("gives each state only the actions that fit it, never done", () => {
   const labels = (extra: Partial<BoardIssue>) => quickActions({ ...base, status: "in_progress", ...extra }).map((action) => [action.label, action.action, !!action.confirm]);
-  expect(labels({ lastRunFailed: true })).toEqual([
-    ["重跑", { kind: "rerun" }, false], ["转为阻塞", { kind: "status", status: "blocked" }, false], ["取消", { kind: "status", status: "cancelled" }, true],
+  expect(labels({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } })).toEqual([
+    ["重跑", { kind: "rerun", taskId: "run-1" }, false], ["转为阻塞", { kind: "status", status: "blocked" }, false], ["取消", { kind: "status", status: "cancelled" }, true],
   ]);
+  // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
+  expect(labels({ lastRunFailed: true }).map(([label]) => label)).toEqual(["转为阻塞", "取消"]);
   expect(labels({ status: "blocked", lastRunFailed: true })).toEqual([
     ["恢复进行中", { kind: "status", status: "in_progress" }, false], ["放回待规划", { kind: "status", status: "backlog" }, false], ["取消", { kind: "status", status: "cancelled" }, true],
   ]);
@@ -373,7 +375,7 @@ describe("an expanded task row", () => {
   const failedAt = new Date(Date.now() - 10 * 86400000).toISOString();
   const failing: BoardIssue = {
     ...base, id: "fail", identifier: "WORK-60", title: "跑训练", status: "in_progress", url: "https://app.example/acme/issues/WORK-60",
-    lastRunFailed: true, lastFailure: { summary: "OOM on rank 3", at: failedAt }, parentId: "parent-off-board",
+    lastRunFailed: true, lastFailure: { summary: "OOM on rank 3", at: failedAt, taskId: "run-60" }, parentId: "parent-off-board",
     parent: { identifier: "WORK-50", title: "feat(train): 训练总任务", url: "https://app.example/acme/issues/WORK-50" },
     contract: { pendingActor: { type: "agent", id: "worker" }, pendingName: "开发 · Opus", accepted: false },
     pullRequests: [mr("61", "open", { ci: "failed" })], executionSession: { serverId: "srv_here", agentId: "worker" },
@@ -413,7 +415,7 @@ describe("an expanded task row", () => {
     const renderer = await render();
     await pressExact(renderer, "展开 WORK-60");
     await pressExact(renderer, "展开 WORK-70");
-    for (const [label, action] of [["重跑 WORK-60", { kind: "rerun" }], ["转为阻塞 WORK-60", { kind: "status", status: "blocked" }], ["恢复进行中 WORK-70", { kind: "status", status: "in_progress" }], ["放回待规划 WORK-70", { kind: "status", status: "backlog" }]] as const) {
+    for (const [label, action] of [["重跑 WORK-60", { kind: "rerun", taskId: "run-60" }], ["转为阻塞 WORK-60", { kind: "status", status: "blocked" }], ["恢复进行中 WORK-70", { kind: "status", status: "in_progress" }], ["放回待规划 WORK-70", { kind: "status", status: "backlog" }]] as const) {
       getBoard.mockClear();
       await pressExact(renderer, label);
       expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: label.endsWith("60") ? "fail" : "blk", action });
@@ -453,6 +455,8 @@ describe("an expanded task row", () => {
     runAction.mockRejectedValueOnce(new Error("rpc unavailable"));
     await pressExact(renderer, "放回待规划 WORK-70");
     expect(text(renderer)).toContain("放回待规划失败：rpc unavailable");
+    await pressExact(renderer, "刷新");
+    expect(text(renderer)).not.toContain("放回待规划失败");
     await act(async () => { renderer.unmount(); });
   });
 
@@ -496,5 +500,12 @@ it("opens a task listed both as a to-do and in the tree in both places at once",
   expect(setExpansion).toHaveBeenLastCalledWith({ agentId: "both", issueId: "p", expanded: true });
   expect(pressables(renderer!, "收起 P")).toHaveLength(2);
   expect(text(renderer!).split("恢复进行中").length).toBe(3);
+  let settle!: (value: { ok: false; status: number; reason: string }) => void;
+  runAction.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+  await act(async () => { pressables(renderer!, "放回待规划 P")[0]!.props.onPress(); });
+  expect(pressables(renderer!, "恢复进行中 P").map((node) => node.props.disabled)).toEqual([true, true]);
+  await act(async () => { settle({ ok: false, status: 409, reason: "busy" }); });
+  expect(text(renderer!).split("放回待规划失败：busy").length).toBe(3);
+  expect(runAction).toHaveBeenCalledTimes(1);
   await act(async () => { renderer!.unmount(); });
 });

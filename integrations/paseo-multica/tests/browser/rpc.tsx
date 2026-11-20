@@ -29,7 +29,7 @@ const actionsBoard = {
     issue("WORK-860", "feat(train): 长序列训练", { status: "in_progress" }),
     issue("WORK-861", "跑 32k 长序列基线", {
       parentId: "WORK-860", stage: 1, lastRunFailed: true, lastActivityAt: daysAgo(10),
-      lastFailure: { summary: "CUDA out of memory on rank 3 (tried to allocate 2.00 GiB)", at: daysAgo(10) },
+      lastFailure: { summary: "CUDA out of memory on rank 3 (tried to allocate 2.00 GiB)", at: daysAgo(10), taskId: "0199a0b1-8610-7861-8861-000000000001" },
       parent: { identifier: "WORK-860", title: "feat(train): 长序列训练", url: `${location.origin}/acme/issues/WORK-860` },
       contract: { pendingActor: { type: "agent", id: "worker" }, pendingName: "开发 · Opus", accepted: false },
       pullRequests: [mr("mimikyu", 52, { state: "merged" })],

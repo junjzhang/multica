@@ -47,6 +47,7 @@ const issueWire = z.object({
 type IssueWire = z.infer<typeof issueWire>;
 const issueList = z.object({ issues: z.array(issueWire) });
 const runList = z.array(z.object({
+  id: z.string().optional(),
   status: z.string(),
   error: z.string().nullish(),
   failure_reason: z.string().nullish(),
@@ -214,7 +215,7 @@ function failureOf(run: Run | undefined): BoardIssue["lastFailure"] {
   if (run?.status !== "failed") return undefined;
   const summary = redactSecrets((run.error || run.failure_reason || "").trim()).slice(0, MAX_FAILURE_SUMMARY);
   const at = run.completed_at ?? run.created_at ?? undefined;
-  return { summary, ...(at ? { at } : {}) };
+  return { summary, ...(at ? { at } : {}), ...(run.id ? { taskId: run.id } : {}) };
 }
 
 /** Every task with a parent links to it: from the board when the parent is on it, else from one read of the parent. */

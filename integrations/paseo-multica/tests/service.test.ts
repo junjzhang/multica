@@ -765,7 +765,7 @@ describe("session board service", () => {
       { type: "comment", created_at: "2026-10-21T00:00:00Z" },
       { type: "activity", action: "status_changed", details: { from: "in_progress", to: "blocked" }, created_at: "2026-10-22T00:00:00Z" },
     ]);
-    api.routes.set(`/api/issues/${RETURNING}/task-runs`, [{ status: "failed", error: `agent exited with ${OWNER_TOKEN}`, completed_at: "2026-10-24T00:00:00Z" }]);
+    api.routes.set(`/api/issues/${RETURNING}/task-runs`, [{ id: "run-reviewer", status: "failed", error: `agent exited with ${OWNER_TOKEN}`, completed_at: "2026-10-24T00:00:00Z" }, { id: "run-older", status: "completed" }]);
     api.routes.set("/api/agents", [{ id: AGENT_B, name: "Reviewer" }]);
 
     const view = await service.board(SESSION_A, "session");
@@ -778,7 +778,7 @@ describe("session board service", () => {
       contract: { pendingName: "Reviewer" },
     });
     expect(byId.get(OPEN_CHILD)?.parent).toEqual({ identifier: "WORK-1", title: "WORK-1", url: "https://app.multica.example/acme/issues/WORK-1" });
-    expect(byId.get(RETURNING)?.lastFailure).toEqual({ summary: "agent exited with [redacted]", at: "2026-10-24T00:00:00Z" });
+    expect(byId.get(RETURNING)?.lastFailure).toEqual({ summary: "agent exited with [redacted]", at: "2026-10-24T00:00:00Z", taskId: "run-reviewer" });
     expect(byId.get(ACCEPTING)?.lastFailure).toBeUndefined();
     expect(byId.get(ACCEPTING)?.blockedSince).toBeUndefined();
     expect(api.gets).not.toContain(`/api/issues/${ACCEPTING}/timeline`);
@@ -811,15 +811,16 @@ describe("session board service", () => {
 
 describe("task actions", () => {
   const ISSUE = "0199a0b1-4444-7444-8444-444444444444";
+  const RUN = "0199a0b1-5555-7555-8555-555555555555";
 
   it("writes each action with the owner credential through the existing issue endpoints", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
-    for (const action of [{ kind: "rerun" }, ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ kind: "status", status }))] as const) {
+    for (const action of [{ kind: "rerun", taskId: RUN }, ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ kind: "status", status }))] as const) {
       expect(await service.taskAction(SESSION_A, ISSUE, action as never)).toEqual({ ok: true });
     }
     expect(api.writes).toEqual([
-      { method: "POST", path: `/api/issues/${ISSUE}/rerun`, token: OWNER_TOKEN },
+      { method: "POST", path: `/api/issues/${ISSUE}/rerun`, body: { task_id: RUN }, token: OWNER_TOKEN },
       ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ method: "PUT", path: `/api/issues/${ISSUE}`, body: { status }, token: OWNER_TOKEN })),
     ]);
     expect(api.writes.some((write) => write.token === EXTERNAL_TOKEN)).toBe(false);
@@ -832,9 +833,9 @@ describe("task actions", () => {
     api.writeError = new MulticaApiError(409, `Multica API PUT /api/issues/x returned 409: ${OWNER_TOKEN}`, undefined, "accept the current contract before completing this issue");
     expect(await service.taskAction(SESSION_A, ISSUE, { kind: "status", status: "in_progress" })).toEqual({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
     api.writeError = new MulticaApiError(403, "forbidden");
-    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "rerun" })).toEqual({ ok: false, status: 403, reason: "Multica 返回 403" });
+    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "rerun", taskId: RUN })).toEqual({ ok: false, status: 403, reason: "Multica 返回 403" });
     api.writeError = new Error(`socket closed for ${OWNER_TOKEN}`);
-    const failed = await service.taskAction(SESSION_A, ISSUE, { kind: "rerun" });
+    const failed = await service.taskAction(SESSION_A, ISSUE, { kind: "rerun", taskId: RUN });
     expect(failed).toMatchObject({ ok: false, status: 0 });
     expect(JSON.stringify(failed)).not.toContain(OWNER_TOKEN);
   });
