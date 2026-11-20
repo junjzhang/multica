@@ -720,8 +720,11 @@ function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: Ro
   </View>;
 }
 
-/** What a row shows besides its task: the to-do or tree supplies the phrase and MR marks; everything else is the task's. */
-type RowData = { issue: BoardIssue; phrase?: Phrase; chip?: PullRequestChip; mark?: { text: string; label: string } };
+/**
+ * What a row shows besides its task: the to-do or tree supplies the phrase and MR marks; everything else is the task's.
+ * `underParent` marks a tree child, whose parent is the row right above it, so its details skip the parent link.
+ */
+type RowData = { issue: BoardIssue; phrase?: Phrase; chip?: PullRequestChip; mark?: { text: string; label: string }; underParent?: boolean };
 
 export function todoRow(todo: Todo, now: number): RowData {
   const chip = todoChip(todo, now);
@@ -742,7 +745,7 @@ export function treeRow(tree: TreeNode): RowData {
 function TaskRow({ data, depth, row }: { data: RowData; depth: number; row: RowContext }) {
   const { issue } = data;
   const tree = row.trees.get(issue.id);
-  const details = taskDetails(issue, tree, row);
+  const details = taskDetails(issue, tree, row, data.underParent);
   const expandable = hasDetails(details);
   const expanded = expandable && row.expandedIds.includes(issue.id);
   return <View>
@@ -785,10 +788,10 @@ export function reasonsOf(issue: BoardIssue, viewer: Viewer, now: number): strin
   return reasons;
 }
 
-export function taskDetails(issue: BoardIssue, tree: TreeNode | undefined, row: Pick<RowContext, "viewer" | "now">): Details {
+export function taskDetails(issue: BoardIssue, tree: TreeNode | undefined, row: Pick<RowContext, "viewer" | "now">, underParent = false): Details {
   return {
     reasons: reasonsOf(issue, row.viewer, row.now),
-    ...(issue.parent ? { parent: issue.parent } : {}),
+    ...(issue.parent && !underParent ? { parent: issue.parent } : {}),
     // Open MRs live in the chip; the details keep only the task's merged history.
     merged: issue.pullRequests.filter(isMerged),
     children: !!tree && tree.stages.some((group) => group.nodes.some(isOpen)),
@@ -904,7 +907,7 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
         </View> : null}
         {open ? nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
           <Rail colors={colors} top bottom={!(last && childIndex === nodes.length - 1)} tick />
-          <View style={{ flex: 1 }}><TaskRow data={treeRow(child)} depth={0} row={row} /></View>
+          <View style={{ flex: 1 }}><TaskRow data={{ ...treeRow(child), underParent: true }} depth={0} row={row} /></View>
         </View>) : null}
       </View>;
     })}

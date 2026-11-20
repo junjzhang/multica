@@ -147,6 +147,11 @@ try {
   await expect(page.getByText("运行失败（10d 前）：CUDA out of memory", { exact: false }).first()).toBeVisible();
   await expect(page.getByText("轮到：开发 · Opus").first()).toBeVisible();
   await expect(page.getByRole("link", { name: "父任务 WORK-860 长序列训练" }).first()).toBeVisible();
+  // Under WORK-860 in the tree the same expanded task drops its parent row: the parent is the row above.
+  await page.getByRole("button", { name: "展开 WORK-860" }).click();
+  await expect(page.getByRole("button", { name: "收起 WORK-861" })).toHaveCount(2);
+  await expect(page.getByRole("link", { name: "父任务 WORK-860 长序列训练" })).toHaveCount(1);
+  await page.getByRole("button", { name: "收起 WORK-860" }).click();
   await expect(panel.getByText("重跑", { exact: true })).toHaveCount(0);
   await page.mouse.move(0, 0);
   await panel.screenshot({ path: join(output, "todo-details-light.png") });

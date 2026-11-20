@@ -265,6 +265,25 @@ it("leads every task with its status glyph and leaves finished work out", async 
   await act(async () => { renderer!.unmount(); });
 });
 
+it("links the parent from a to-do row but not from a tree child sitting under it", async () => {
+  const parent = { ...base, id: "p", identifier: "P", title: "总任务", status: "in_progress", url: "https://app.example/acme/issues/P" };
+  const kid = { ...base, id: "b", identifier: "B", title: "子任务 b", status: "blocked", statusCategory: "started", parentId: "p", parent: { identifier: "P", title: "总任务", url: "https://app.example/acme/issues/P" } };
+  getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid], rootIds: ["p"] });
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="parent-link" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await press(renderer!, "展开 P");
+  const expanders = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === "展开 B");
+  expect(expanders).toHaveLength(2);
+  await act(async () => { expanders[0]!.props.onPress(); });
+  const rows = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && String(node.props.accessibilityLabel).startsWith("B 阻塞"));
+  expect(rows).toHaveLength(2);
+  const links = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === "父任务 P 总任务");
+  expect(links).toHaveLength(1);
+  const all = text(renderer!);
+  expect(all.indexOf("父任务")).toBeLessThan(all.indexOf("进行中"));
+  await act(async () => { renderer!.unmount(); });
+});
+
 it("splits what only you can do from what waits on this session", async () => {
   const pending = (id: string, pendingActor: Record<string, string>, extra = {}) => ({ ...base, id, identifier: id.toUpperCase(), title: `任务 ${id}`, status: "in_progress", contract: { pendingActor, accepted: false }, ...extra });
   const me = { type: "member", id: "me" };

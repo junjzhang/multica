@@ -122,8 +122,9 @@ chip. Both open the same detail on the same disclosure, and expansion is keyed
 by issue id in one set, so a task that appears in 待办 and in a tree is open in
 both at once. The detail lists only what exists, in this order: why the task is
 here (the latest failed run's summary and when it failed, whose turn it is, how
-long it has been blocked), a parent link that opens the parent's task, the MRs,
-and the children. It holds no buttons. A blocked task's duration comes from the
+long it has been blocked), a parent link that opens the parent's task (only on
+to-do rows; a tree child's parent is already the row above it), the MRs, and the
+children. It holds no buttons. A blocked task's duration comes from the
 last status change to blocked.
 
 Quick actions sit behind a ⋯ at the end of every task's row, to-do and tree
