@@ -27,8 +27,8 @@ export interface QuickAction {
 }
 
 const status = (to: ActionStatus, label: string): QuickAction => ({ action: { kind: "status", status: to }, label, ...(to === "cancelled" ? { confirm: true } : {}) });
-const CANCEL = status("cancelled", "取消");
-const SWITCH_LABEL: Record<ActionStatus, string> = { in_progress: "改为进行中", blocked: "改为阻塞", backlog: "放回待规划", cancelled: "取消" };
+const CANCEL = status("cancelled", "取消任务");
+const SWITCH_LABEL: Record<ActionStatus, string> = { in_progress: "改为进行中", blocked: "改为阻塞", backlog: "放回待规划", cancelled: "取消任务" };
 
 /** The few actions that fit the task's state; a closed task has none. */
 export function quickActions(issue: Pick<BoardIssue, "status" | "statusCategory" | "lastRunFailed" | "lastFailure" | "activeRun">): QuickAction[] {

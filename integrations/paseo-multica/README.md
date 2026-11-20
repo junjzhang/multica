@@ -123,18 +123,26 @@ by issue id in one set, so a task that appears in 待办 and in a tree is open i
 both at once. The detail lists only what exists, in this order: why the task is
 here (the latest failed run's summary and when it failed, whose turn it is, how
 long it has been blocked), a parent link that opens the parent's task, the MRs,
-the children, and the quick actions. A blocked task's duration comes from the
+and the children. It holds no buttons. A blocked task's duration comes from the
 last status change to blocked.
 
-Quick actions follow the task's state: a failed run offers 重跑, 转为阻塞 and
-取消; a blocked task offers 恢复进行中, 放回待规划 and 取消; any other open task
-switches between 进行中, 阻塞, 待规划 and 取消; a closed task offers nothing.
-Done is never a quick action: completing a task goes through acceptance. 取消
-needs a second confirmation. An action's state belongs to its task, so a task
-open in two places shows the same in-progress state and disables its other
-actions in both while it runs; success reloads the board, and a refusal shows
-the server's reason (including a 409) while the row keeps its local state, until
-the next reload.
+Quick actions sit behind a ⋯ at the end of every open task's row, to-do and
+tree alike, without expanding it. ⋯ appears while the row is hovered or ⋯ has
+keyboard focus, and always on touch screens. Its menu floats in a transparent
+modal, so no scroll view or panel edge clips it; it opens below ⋯, or above it
+when the window's bottom is too close. Pressing outside, Esc, or ⋯ again closes
+it.
+
+The items follow the task's state: a failed run offers 重跑, 转为阻塞 and
+取消任务; a blocked task offers 恢复进行中, 放回待规划 and 取消任务; any other open task
+switches between 进行中, 阻塞, 待规划 and 取消任务; the current status is never
+offered, and a closed task has no ⋯. Done is never a quick action: completing a
+task goes through acceptance. 取消任务 is last, in red after a separator; its
+first press turns it into 确认取消？ and only the second runs it. Running an
+action closes the menu and ⋯ spins. An action's state belongs to its task, so a
+task open in two places shows the same running state in both; success reloads
+the board, and a refusal shows the server's reason (including a 409) as one line
+under the row, until dismissed or the next reload.
 
 Actions are written with the plugin's owner profile, never the session's token:
 `PUT /api/issues/{id}` with `{"status": …}` for a status change and
