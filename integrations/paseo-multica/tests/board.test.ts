@@ -44,7 +44,7 @@ function contract(pendingActor: Actor | undefined, accepted = false) {
   return { ...(pendingActor ? { pendingActor } : {}), acceptor: SESSION, executor: EXECUTOR, accepted };
 }
 function pr(overrides: Partial<BoardPullRequest> = {}): BoardPullRequest {
-  return { id: "pr-1", number: 813, repo: "slime", title: "MR", state: "open", url: "https://git.woa.com/o/slime/merge_requests/813", ...overrides };
+  return { id: "pr-1", number: 813, repo: "slime", title: "MR", state: "open", url: "https://git.example.com/o/slime/merge_requests/813", ...overrides };
 }
 
 describe("classification rules", () => {

@@ -85,11 +85,11 @@ try {
   await expect(failedChip.locator("span", { hasText: "!833 CI 失败" })).toHaveCSS("text-decoration-line", "underline");
   await panel.screenshot({ path: join(output, "mr-chip-hover.png") });
   await failedChip.click();
-  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.woa.com/o/sglang/merge_requests/833");
+  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.example.com/o/sglang/merge_requests/833");
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.getByRole("link", { name: "WORK-831 已完成 接入 CI 结果" }).click();
   await expect(page.frameLocator("iframe").getByRole("heading", { name: "WORK-831" })).toBeVisible();
-  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.woa.com/o/sglang/merge_requests/833");
+  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.example.com/o/sglang/merge_requests/833");
   const summary = page.getByRole("button", { name: /^4 个 MR / });
   await expect(summary).toHaveAttribute("aria-expanded", "false");
   await summary.click();
@@ -98,7 +98,7 @@ try {
     await expect(page.getByRole("link", { name, exact: true })).toBeVisible();
   }
   await page.getByRole("link", { name: "mimikyu!20 · WORK-834 补齐压测脚本 CI 运行中" }).click();
-  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.woa.com/o/mimikyu/merge_requests/20");
+  await expect(body).toHaveAttribute("data-opened-external-url", "https://git.example.com/o/mimikyu/merge_requests/20");
   await page.mouse.move(0, 0);
   await panel.screenshot({ path: join(output, "mr-parent-summary.png") });
   await page.getByRole("button", { name: "theme", exact: true }).click();

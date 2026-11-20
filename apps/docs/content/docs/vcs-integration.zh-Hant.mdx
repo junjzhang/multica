@@ -21,9 +21,9 @@ Multica 按工作區連線自託管的 Git 程式碼託管：Forgejo、Gitea 或
 
 ## 工蜂（TGit）
 
-在設定 → 程式碼中選擇 **TGit (工蜂)**，填寫例項地址（例如 `https://git.woa.com`）和具備 API 帳戶讀取權限的個人訪問令牌。Multica 透過 `GET /api/v3/user` 校驗令牌。
+在設定 → 程式碼中選擇 **TGit (工蜂)**，填寫例項地址和具備 API 帳戶讀取權限的個人訪問令牌。Multica 透過 `GET /api/v3/user` 校驗令牌。
 
-在倉庫的 Webhook 設定中填寫 Multica 提供的地址，將金鑰填入 **Token**，啟用**合併請求事件**。工蜂使用 `X-Event: Merge Request Hook` 和 `X-Token` 傳送、校驗事件。參見[工蜂 Webhook API](https://git.tencent.com/help/menu/api/hooks.html)。
+在倉庫的 Webhook 設定中填寫 Multica 提供的地址，將金鑰填入 **Token**，啟用**合併請求事件**。工蜂使用 `X-Event: Merge Request Hook` 和 `X-Token` 傳送、校驗事件。
 
 MR 的草稿、開啟、關閉、合併狀態同步到現有任務卡片。Fork MR 歸屬目標倉庫；不會把事件操作者當作 MR 作者，也不會把更新時間當作合併或關閉時間。
 
@@ -41,7 +41,7 @@ MR 的草稿、開啟、關閉、合併狀態同步到現有任務卡片。Fork 
 
 重新整理能力由整個服務共享：4 個 Worker，每輪最多選擇 100 個 MR，佇列容量為 256。MR 較多或工蜂回應較慢時，重新整理可能超過兩分鐘的新鮮度視窗；未能入隊的 MR 會在後續掃描中重試。頁面和 Webhook 同樣遵守冷卻時間，新提交可能要等下一次重新整理才有結果。內容不變時不廣播，內容變化或舊資料恢復有效時才通知。
 
-`git.woa.com` 的回呼連接埠必須是 80、443、8080 或 8081。若 Multica 使用其他連接埠，請透過反向代理在允許的連接埠提供回呼路徑，並保留 Webhook 金鑰校驗。
+請確認工蜂例項允許的回呼連接埠。如果例項只允許 80、443、8080 或 8081，而 Multica 使用其他連接埠，請透過反向代理在允許的連接埠提供回呼路徑，並保留 Webhook 金鑰校驗。
 
 ## 前置條件（服務端）
 

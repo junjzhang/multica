@@ -23,7 +23,7 @@ Contrairement à GitHub, ces fournisseurs n'ont pas de modèle App. Chaque espac
 
 Sélectionnez **TGit (工蜂)** dans Paramètres → Code, puis saisissez l’URL de l’instance et un jeton personnel autorisé à lire votre compte via l’API. La validation utilise `GET /api/v3/user`.
 
-Ajoutez un webhook au dépôt avec l’URL fournie, placez le secret dans **Token** et activez les événements **Merge request**. TGit utilise `X-Event: Merge Request Hook` et `X-Token`. Voir l’[API Webhook TGit](https://git.tencent.com/help/menu/api/hooks.html).
+Ajoutez un webhook au dépôt avec l’URL fournie, placez le secret dans **Token** et activez les événements **Merge request**. TGit utilise `X-Event: Merge Request Hook` et `X-Token`.
 
 Les cartes affichent les états brouillon, ouvert, fermé et fusionné. Les MR de forks appartiennent au dépôt cible. L’acteur de l’événement n’est pas affiché comme auteur de la MR. Les heures de fusion et de fermeture restent inconnues.
 
@@ -37,7 +37,7 @@ Seules les MR ouvertes déjà synchronisées sont actualisées : balayage toutes
 
 La capacité est partagée par le service : quatre workers, 100 candidats par balayage et une file de 256 MR. Une file importante ou des réponses lentes peuvent dépasser la fenêtre de fraîcheur de deux minutes ; les MR non mises en file restent éligibles aux balayages suivants. Les visites et webhooks respectent le même délai, donc une nouvelle révision peut rester indisponible jusqu’au prochain rafraîchissement autorisé. Les instantanés inchangés ne sont pas diffusés ; les changements et le retour à des données à jour le sont.
 
-Pour `git.woa.com`, utilisez le port de callback 80, 443, 8080 ou 8081. Si Multica utilise un autre port, exposez le chemin webhook authentifié via un proxy inverse sur un port accepté.
+Vérifiez les ports de rappel autorisés par votre instance TGit. Si elle n’accepte que les ports 80, 443, 8080 ou 8081 et que Multica utilise un autre port, exposez le chemin webhook authentifié via un proxy inverse sur un port autorisé.
 
 ## Prérequis (serveur)
 

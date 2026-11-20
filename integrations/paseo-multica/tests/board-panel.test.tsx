@@ -16,9 +16,9 @@ const session = { type: "agent", id: "leader", session_id: "s1" };
 const issues: BoardIssue[] = [
   { ...base, id: "root", identifier: "WORK-494", title: "feat(ui): 统一 Leader 视图", status: "backlog", projectId: "p1", url: "https://app.example/acme/issues/WORK-494" },
   { ...base, id: "delivered", identifier: "WORK-496", title: "删除会话 MR", status: "in_review", parentId: "root", stage: 1, url: "https://app.example/acme/issues/WORK-496", contract: { pendingActor: session, acceptor: session, accepted: false } },
-  { ...base, id: "approval", identifier: "WORK-470", title: "slime 修复", status: "in_review", projectId: "p1", contract: { accepted: true }, pullRequests: [{ id: "pr", number: 813, repo: "slime", title: "fix", state: "open", url: "https://git.woa.com/o/slime/merge_requests/813", ci: "passed", review: "approving", myReview: "approving", mergeable: "mergeable" }] },
+  { ...base, id: "approval", identifier: "WORK-470", title: "slime 修复", status: "in_review", projectId: "p1", contract: { accepted: true }, pullRequests: [{ id: "pr", number: 813, repo: "slime", title: "fix", state: "open", url: "https://git.example.com/o/slime/merge_requests/813", ci: "passed", review: "approving", myReview: "approving", mergeable: "mergeable" }] },
   { ...base, id: "old", identifier: "WORK-100", title: "旧任务", status: "backlog" },
-  { ...base, id: "mr", identifier: "WORK-497", title: "接入 MR 行", status: "in_progress", projectId: "p1", activeRun: true, pullRequests: [{ id: "pr2", number: 818, repo: "mimikyu", title: "refactor(lint): 清理分支", state: "open", url: "https://git.woa.com/o/mimikyu/merge_requests/818", ci: "pending" }, { id: "pr3", number: 700, repo: "mimikyu", title: "旧", state: "merged", url: "https://git.woa.com/o/mimikyu/merge_requests/700" }] },
+  { ...base, id: "mr", identifier: "WORK-497", title: "接入 MR 行", status: "in_progress", projectId: "p1", activeRun: true, pullRequests: [{ id: "pr2", number: 818, repo: "mimikyu", title: "refactor(lint): 清理分支", state: "open", url: "https://git.example.com/o/mimikyu/merge_requests/818", ci: "pending" }, { id: "pr3", number: 700, repo: "mimikyu", title: "旧", state: "merged", url: "https://git.example.com/o/mimikyu/merge_requests/700" }] },
 ];
 const ready = (scope: "session" | "all"): ReadyBoardData => ({ state: "ready", scope, viewer: { agentId: "leader", sessionId: "s1", forgeUsernames: ["me"] }, issues, rootIds: ["root", "approval", "old", "mr"], projects: [{ id: "p1", name: "Paseo" }], truncated: false, checkedAt: "2026-11-17T07:08:00Z" });
 const getBoard = vi.fn(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
@@ -66,10 +66,10 @@ it("lists what needs you once, then the trees, on single lines", async () => {
   await press(renderer!, "WORK-496 评审中 删除会话 MR 待验收");
   expect(openTask).toHaveBeenCalledWith("https://app.example/acme/issues/WORK-496", "WORK-496");
   await press(renderer!, "打开 slime!813 !813 待你审批");
-  expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
+  expect(openURL).toHaveBeenCalledWith("https://git.example.com/o/slime/merge_requests/813");
 
   await press(renderer!, "打开 mimikyu!818 CI 运行中");
-  expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/mimikyu/merge_requests/818");
+  expect(openURL).toHaveBeenLastCalledWith("https://git.example.com/o/mimikyu/merge_requests/818");
   await press(renderer!, "展开 WORK-497");
   expect(text(renderer!)).toContain("mimikyu!700 旧\n已合并");
   expect(text(renderer!)).not.toContain("mimikyu!818 清理分支");
@@ -115,7 +115,7 @@ it("reserves red for fresh failures", () => {
   expect(todoPhrase(failed(9), Date.now())).toEqual({ text: "运行失败 · 9d" });
 });
 
-const mr = (id: string, state: string, extra = {}) => ({ id, number: Number(id.replace(/\D/g, "")) || 1, repo: "r", title: `MR ${id}`, state, url: `https://git.woa.com/o/r/merge_requests/${id}`, ...extra });
+const mr = (id: string, state: string, extra = {}) => ({ id, number: Number(id.replace(/\D/g, "")) || 1, repo: "r", title: `MR ${id}`, state, url: `https://git.example.com/o/r/merge_requests/${id}`, ...extra });
 const task = (id: string, pullRequests: ReturnType<typeof mr>[], extra = {}) => ({ ...base, id, identifier: id.toUpperCase(), title: `任务 ${id}`, status: "in_progress", pullRequests, ...extra });
 const treeOf = (issues: BoardIssue[], root: string) => {
   const board = buildBoard({ issues, rootIds: [root], viewer: { agentId: "x", forgeUsernames: [] } }, Date.now());
@@ -161,14 +161,14 @@ it("points every MR to-do at its MR", () => {
   expect(merge([mr("7", "open")])).toMatchObject({ text: "!7 未合并" });
   expect(merge([mr("7", "open", { mergeable: "CONFLICTING" })])).toMatchObject({ text: "!7 有冲突", tone: "danger" });
   expect(merge([mr("7", "open", { ci: "failed" })])).toMatchObject({ text: "!7 CI 失败", tone: "danger" });
-  expect(urls(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })]))).toEqual(["https://git.woa.com/o/r/merge_requests/8", "https://git.woa.com/o/r/merge_requests/7"]);
+  expect(urls(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })]))).toEqual(["https://git.example.com/o/r/merge_requests/8", "https://git.example.com/o/r/merge_requests/7"]);
   expect(merge([mr("7", "open"), mr("8", "open", { ci: "failed" })])).toMatchObject({ text: "!8 CI 失败 +1" });
   const approve = [mr("5", "open", { myReview: "approving" })];
   expect(todoChip({ kind: "approval", issue: task("a", approve, { contract: { accepted: true } }), pullRequests: approve }, now)).toMatchObject({ text: "!5 待你审批", tone: "action" });
   const ci = [mr("9", "open", { ci: "failed" }), mr("6", "open")];
   const anomaly = todoChip({ kind: "anomaly", issue: task("x", ci), pullRequests: ci }, now)!;
   expect(anomaly).toMatchObject({ text: "!9 CI 失败 · 1h", tone: "danger" });
-  expect(urls(anomaly)).toEqual(["https://git.woa.com/o/r/merge_requests/9"]);
+  expect(urls(anomaly)).toEqual(["https://git.example.com/o/r/merge_requests/9"]);
   expect(todoChip({ kind: "anomaly", issue: task("y", [], { lastRunFailed: true }), pullRequests: [] }, now)).toBeUndefined();
   expect(todoChip({ kind: "user", issue: task("u", approve), pullRequests: approve }, now)).toBeUndefined();
 });
@@ -190,7 +190,7 @@ it("opens MRs from their chip and the task from the row", async () => {
   openURL.mockClear();
 
   await press(renderer!, "打开 r!16 !16 有冲突");
-  expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/r/merge_requests/16");
+  expect(openURL).toHaveBeenLastCalledWith("https://git.example.com/o/r/merge_requests/16");
   await press(renderer!, "D 已完成 任务 d");
   expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/D", "D");
   expect(openURL).toHaveBeenCalledTimes(1);
@@ -202,7 +202,7 @@ it("opens MRs from their chip and the task from the row", async () => {
   const list = text(renderer!);
   expect(list).toMatch(/r!21 · C 任务 c\nCI 失败[\s\S]*r!16 · D 任务 d\n有冲突[\s\S]*r!33 · E 很长很长的子任务标题/);
   await press(renderer!, "r!33 · E 很长很长的子任务标题");
-  expect(openURL).toHaveBeenLastCalledWith("https://git.woa.com/o/r/merge_requests/33");
+  expect(openURL).toHaveBeenLastCalledWith("https://git.example.com/o/r/merge_requests/33");
   await press(renderer!, "P 进行中 任务 p 1/3");
   expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/P", "P");
   await act(async () => { renderer!.unmount(); });
@@ -210,7 +210,7 @@ it("opens MRs from their chip and the task from the row", async () => {
 
 it("draws a staged parent as a pipeline with only the current batch open", async () => {
   const kid = (id: string, stage: number, done: boolean) => ({ ...base, id, identifier: id, title: `子任务 ${id}`, status: done ? "done" : "todo", statusCategory: done ? "completed" : "unstarted", parentId: "p", stage,
-    pullRequests: done ? [{ id: `mr-${id}`, number: 813, repo: "slime", title: "t", state: "merged", url: "https://git.woa.com/o/slime/merge_requests/813" }] : [] });
+    pullRequests: done ? [{ id: `mr-${id}`, number: 813, repo: "slime", title: "t", state: "merged", url: "https://git.example.com/o/slime/merge_requests/813" }] : [] });
   const parent = { ...base, id: "p", identifier: "P", title: "流水线", status: "in_progress", activeRun: true };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid("a", 1, true), kid("b", 2, false), kid("c", 2, false), kid("d", 3, false)], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
@@ -223,7 +223,7 @@ it("draws a staged parent as a pipeline with only the current batch open", async
   expect(graph).not.toContain("0/1");
   openURL.mockClear();
   await press(renderer!, "slime!813 已合并");
-  expect(openURL).toHaveBeenCalledWith("https://git.woa.com/o/slime/merge_requests/813");
+  expect(openURL).toHaveBeenCalledWith("https://git.example.com/o/slime/merge_requests/813");
   expect(graph).not.toContain("子任务 a");
   expect(graph).not.toContain("子任务 d");
   await press(renderer!, "第 1 批");
@@ -235,7 +235,7 @@ it("draws a staged parent as a pipeline with only the current batch open", async
 
 it("names a closed task's open MR by what blocks it", () => {
   const issue = { ...base, id: "m", identifier: "M", title: "M", status: "done", statusCategory: "completed" };
-  const pr = (extra = {}) => ({ id: "p", number: 7, repo: "r", title: "t", state: "open", url: "https://git.woa.com/o/r/merge_requests/7", ...extra });
+  const pr = (extra = {}) => ({ id: "p", number: 7, repo: "r", title: "t", state: "open", url: "https://git.example.com/o/r/merge_requests/7", ...extra });
   expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr()] }, Date.now())).toEqual({ text: "!7 未合并" });
   expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr({ ci: "failed" })] }, Date.now())).toEqual({ text: "!7 CI 失败", tone: "danger" });
   expect(todoPhrase({ kind: "merge", issue, pullRequests: [pr({ mergeable: "CONFLICTING" })] }, Date.now())).toEqual({ text: "!7 有冲突", tone: "danger" });
