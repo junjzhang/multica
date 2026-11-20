@@ -122,19 +122,30 @@ chip. Both open the same detail on the same disclosure, and expansion is keyed
 by issue id in one set, so a task that appears in 待办 and in a tree is open in
 both at once. The detail lists only what exists, in this order: why the task is
 here (the latest failed run's summary and when it failed, whose turn it is, how
-long it has been blocked), a parent link that opens the parent's task, the MRs,
-the children, and the quick actions. A blocked task's duration comes from the
+long it has been blocked), a parent link that opens the parent's task (only on
+to-do rows; a tree child's parent is already the row above it), the MRs, and the
+children. It holds no buttons. A blocked task's duration comes from the
 last status change to blocked.
 
-Quick actions follow the task's state: a failed run offers 重跑, 转为阻塞 and
-取消; a blocked task offers 恢复进行中, 放回待规划 and 取消; any other open task
-switches between 进行中, 阻塞, 待规划 and 取消; a closed task offers nothing.
-Done is never a quick action: completing a task goes through acceptance. 取消
-needs a second confirmation. An action's state belongs to its task, so a task
-open in two places shows the same in-progress state and disables its other
-actions in both while it runs; success reloads the board, and a refusal shows
-the server's reason (including a 409) while the row keeps its local state, until
-the next reload.
+Quick actions sit behind a ⋯ at the end of every task's row, to-do and tree
+alike, without expanding it. ⋯ appears while the row is hovered or ⋯ has
+keyboard focus, and always on touch screens. Its menu floats in a transparent
+modal, so no scroll view or panel edge clips it; it opens below ⋯, or above it
+when the window's bottom is too close. Pressing outside, Esc, or ⋯ again closes
+it.
+
+The menu is a status picker: 待规划, 未开始, 进行中, 评审中, 阻塞, 已完成 and 已取消,
+each with its status icon. The current status is checked and cannot be chosen,
+so a closed task can be reopened from the same list. 已完成 is greyed with
+需先验收合同 while the task's contract is not fully accepted, because the server
+refuses it (`issue_contract_acceptance_required`); without a contract, or once
+it is accepted, done is set directly. When the latest run failed and its id is
+known, 重跑 sits above the list. 已取消 is last, in red after a separator; its
+first press turns it into 确认取消？ and only the second runs it. Running an
+action closes the menu and ⋯ spins. An action's state belongs to its task, so a
+task open in two places shows the same running state in both; success reloads
+the board, and a refusal shows the server's reason (including a 409) as one line
+under the row, until dismissed or the next reload.
 
 Actions are written with the plugin's owner profile, never the session's token:
 `PUT /api/issues/{id}` with `{"status": …}` for a status change and
@@ -153,7 +164,7 @@ acceptance usually closes the task while its MR still waits for approval.
 
 Classification lives in `shared/board.ts` as a pure function of issue facts and
 the clock. Classification itself never writes a task; the only writes are the
-quick actions described below.
+quick actions described above.
 
 ```text
 需要处理: contract.pending_actor is this session or the user

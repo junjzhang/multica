@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 const board = (agentId: string) => ({
   state: "ready", scope: "session", viewer: { agentId: "shared-external-agent", sessionId: agentId, forgeUsernames: [] },
   issues: ["session-a", "session-b"].includes(agentId) ? [{ id: agentId, identifier: agentId === "session-a" ? "WORK-1" : "WORK-2", title: `Only ${agentId}`, status: "in_progress", statusCategory: "started", lastActivityAt: new Date().toISOString(), activeRun: true, lastRunFailed: false, pullRequests: [], url: `${location.origin}/acme/issues/${agentId === "session-a" ? "WORK-1" : "WORK-2"}` }] : [],
@@ -45,7 +45,7 @@ const handlers: Record<string, (input: any) => Promise<any>> = {
   "session.task-action": async ({ action }) => {
     document.body.dataset.lastAction = JSON.stringify(action);
     if (action.kind === "rerun") return new Promise((resolve) => { held.settle = resolve; });
-    if (action.kind === "status" && action.status === "in_progress") return { ok: false, status: 409, reason: "accept the current contract before completing this issue" };
+    if (action.kind === "status" && action.status === "done") return { ok: false, status: 409, reason: "accept the current contract before completing this issue" };
     return { ok: true };
   },
   "session.board": async ({ agentId }) => agentId === "disconnected" ? { state: "disconnected", reason: "This Paseo session has no Multica binding.", checkedAt: "fixture" } : agentId === "mr" ? mrBoard : agentId === "actions" ? actionsBoard : board(agentId),
@@ -64,10 +64,16 @@ const LUCIDE: Record<string, string> = {
   GitPullRequest: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/>',
   GitPullRequestDraft: '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M18 6V5"/><path d="M18 11v-1"/><path d="M6 9v12"/>',
   MessageSquare: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  Check: '<path d="M20 6 9 17l-5-5"/>',
+  RotateCcw: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  X: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   RefreshCw: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/>',
 };
 export function Icon({ name, icon, size = 14, color }: { name?: string; icon?: { svg: string }; size?: number; color?: string }) {
   const svg = icon?.svg ?? (name && LUCIDE[name] ? `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${LUCIDE[name]}</svg>` : "");
-  return <span aria-hidden="true" data-icon={name} style={{ display: "inline-flex", width: size, height: size, flexShrink: 0, color }} dangerouslySetInnerHTML={{ __html: svg.replace("<svg ", `<svg width="${size}" height="${size}" `) }} />;
+  const html = svg.replace("<svg ", `<svg width="${size}" height="${size}" `);
+  // A new object every render makes React rewrite the SVG, replacing a press target between mousedown and mouseup.
+  const inner = useMemo(() => ({ __html: html }), [html]);
+  return <span aria-hidden="true" data-icon={name} style={{ display: "inline-flex", width: size, height: size, flexShrink: 0, color }} dangerouslySetInnerHTML={inner} />;
 }
 export function Loading() { return <span>Loading...</span>; }

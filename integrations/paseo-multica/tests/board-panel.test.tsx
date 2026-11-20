@@ -5,7 +5,8 @@ import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import type { BoardIssue, ReadyBoardData } from "../shared/board";
 
 const { openURL } = vi.hoisted(() => ({ openURL: vi.fn() }));
-vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Linking: { openURL } }));
+const { platform } = vi.hoisted(() => ({ platform: { OS: "web" } }));
+vi.mock("react-native", () => ({ View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Modal: "Modal", Platform: platform, useWindowDimensions: () => ({ width: 400, height: 600 }), Linking: { openURL } }));
 vi.mock("@getpaseo/plugin/client", () => ({ useRpc: (contract: { name: string }) => (contract.name === "session.board" ? getBoard : contract.name === "session.task-action" ? runAction : setExpansion) }));
 vi.mock("@getpaseo/plugin/client/ui", () => ({ Icon: "Icon", Loading: "Loading" }));
 const HOST = { id: "srv_here", label: "Here" };
@@ -23,8 +24,8 @@ const issues: BoardIssue[] = [
 ];
 const ready = (scope: "session" | "all"): ReadyBoardData => ({ state: "ready", scope, viewer: { agentId: "leader", sessionId: "s1", forgeUsernames: ["me"] }, issues, rootIds: ["root", "approval", "old", "mr"], projects: [{ id: "p1", name: "Paseo" }], truncated: false, checkedAt: "2026-11-17T07:08:00Z" });
 const getBoard = vi.fn(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
-import { BoardSection, displayTitle, mergedMark, reasonsOf, todoChip, todoPhrase, treeChip, treePhrase } from "../client/board-panel";
-import { quickActions } from "../shared/task-actions";
+import { BoardSection, displayTitle, menuHeight, menuPlacement, mergedMark, reasonsOf, todoChip, todoPhrase, treeChip, treePhrase } from "../client/board-panel";
+import { taskMenu } from "../shared/task-actions";
 import { buildBoard } from "../shared/board";
 
 type Rendered = ReturnType<ReactTestRenderer["toJSON"]>;
@@ -264,6 +265,25 @@ it("leads every task with its status glyph and leaves finished work out", async 
   await act(async () => { renderer!.unmount(); });
 });
 
+it("links the parent from a to-do row but not from a tree child sitting under it", async () => {
+  const parent = { ...base, id: "p", identifier: "P", title: "总任务", status: "in_progress", url: "https://app.example/acme/issues/P" };
+  const kid = { ...base, id: "b", identifier: "B", title: "子任务 b", status: "blocked", statusCategory: "started", parentId: "p", parent: { identifier: "P", title: "总任务", url: "https://app.example/acme/issues/P" } };
+  getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid], rootIds: ["p"] });
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="parent-link" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await press(renderer!, "展开 P");
+  const expanders = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === "展开 B");
+  expect(expanders).toHaveLength(2);
+  await act(async () => { expanders[0]!.props.onPress(); });
+  const rows = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && String(node.props.accessibilityLabel).startsWith("B 阻塞"));
+  expect(rows).toHaveLength(2);
+  const links = renderer!.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === "父任务 P 总任务");
+  expect(links).toHaveLength(1);
+  const all = text(renderer!);
+  expect(all.indexOf("父任务")).toBeLessThan(all.indexOf("进行中"));
+  await act(async () => { renderer!.unmount(); });
+});
+
 it("splits what only you can do from what waits on this session", async () => {
   const pending = (id: string, pendingActor: Record<string, string>, extra = {}) => ({ ...base, id, identifier: id.toUpperCase(), title: `任务 ${id}`, status: "in_progress", contract: { pendingActor, accepted: false }, ...extra });
   const me = { type: "member", id: "me" };
@@ -336,24 +356,25 @@ const pressExact = async (renderer: ReactTestRenderer, name: string) => {
 };
 const pressables = (renderer: ReactTestRenderer, name: string) => renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === name);
 
-it("gives each state only the actions that fit it, never done", () => {
-  const labels = (extra: Partial<BoardIssue>) => quickActions({ ...base, status: "in_progress", ...extra }).map((action) => [action.label, action.action, !!action.confirm]);
-  expect(labels({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } })).toEqual([
-    ["重跑", { kind: "rerun", taskId: "run-1" }, false], ["转为阻塞", { kind: "status", status: "blocked" }, false], ["取消", { kind: "status", status: "cancelled" }, true],
-  ]);
-  // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
-  expect(labels({ lastRunFailed: true }).map(([label]) => label)).toEqual(["转为阻塞", "取消"]);
-  expect(labels({ status: "blocked", lastRunFailed: true })).toEqual([
-    ["恢复进行中", { kind: "status", status: "in_progress" }, false], ["放回待规划", { kind: "status", status: "backlog" }, false], ["取消", { kind: "status", status: "cancelled" }, true],
-  ]);
-  expect(labels({}).map(([label]) => label)).toEqual(["改为阻塞", "放回待规划", "取消"]);
-  expect(labels({ status: "backlog" }).map(([label]) => label)).toEqual(["改为进行中", "改为阻塞", "取消"]);
-  expect(labels({ status: "in_review" }).map(([label]) => label)).toEqual(["改为进行中", "改为阻塞", "放回待规划", "取消"]);
-  expect(labels({ status: "done", statusCategory: "completed" })).toEqual([]);
-  expect(labels({ status: "cancelled", statusCategory: "cancelled" })).toEqual([]);
-  for (const status of ["in_progress", "blocked", "backlog", "todo"]) {
-    expect(quickActions({ ...base, status }).some((action) => action.action.kind === "status" && (action.action.status as string) === "done")).toBe(false);
+it("offers every status with the current one checked, done held back by an unaccepted contract, and rerun for a failed run", () => {
+  const menu = (extra: Partial<BoardIssue>) => taskMenu({ ...base, status: "in_progress", ...extra });
+  const all = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
+  for (const status of [...all, "custom"]) {
+    const { statuses } = menu({ status });
+    expect(statuses.map((choice) => choice.status)).toEqual(all);
+    expect(statuses.filter((choice) => choice.current).map((choice) => choice.status)).toEqual(status === "custom" ? [] : [status]);
   }
+  const done = (extra: Partial<BoardIssue>) => menu(extra).statuses.find((choice) => choice.status === "done");
+  expect(done({})).toEqual({ status: "done", current: false });
+  expect(done({ contract: { accepted: true } })).toEqual({ status: "done", current: false });
+  expect(done({ contract: { accepted: false } })).toEqual({ status: "done", current: false, blocked: "需先验收合同" });
+  expect(done({ status: "done", contract: { accepted: false } })).toEqual({ status: "done", current: true });
+  expect(menu({ contract: { accepted: false } }).statuses.filter((choice) => choice.blocked).map((choice) => choice.status)).toEqual(["done"]);
+  expect(menu({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } }).rerunTaskId).toBe("run-1");
+  // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
+  expect(menu({ lastRunFailed: true }).rerunTaskId).toBeUndefined();
+  expect(menu({ lastRunFailed: true, activeRun: true, lastFailure: { summary: "", taskId: "run-1" } }).rerunTaskId).toBeUndefined();
+  expect(menu({}).rerunTaskId).toBeUndefined();
 });
 
 it("says why a task is here: its failed run, whose turn, how long blocked", () => {
@@ -371,7 +392,11 @@ it("says why a task is here: its failed run, whose turn, how long blocked", () =
   expect(reasonsOf(issue({ blockedSince: days(3) }), viewer, now)).toEqual([]);
 });
 
-describe("an expanded task row", () => {
+/** react-test-renderer has no layout; ⋯ measures itself at a fixed spot. */
+const createNodeMock = () => ({ measureInWindow: (done: (x: number, y: number, w: number, h: number) => void) => done(360, 100, 22, 22) });
+const COLORS = Object.fromEntries(["surface0", "surface1", "surface2", "border", "foreground", "foregroundMuted", "statusDanger", "statusWarning", "statusSuccess"].map((key) => [key, key]));
+
+describe("a task row's ⋯ menu", () => {
   const failedAt = new Date(Date.now() - 10 * 86400000).toISOString();
   const failing: BoardIssue = {
     ...base, id: "fail", identifier: "WORK-60", title: "跑训练", status: "in_progress", url: "https://app.example/acme/issues/WORK-60",
@@ -386,39 +411,110 @@ describe("an expanded task row", () => {
   const render = async () => {
     getBoard.mockResolvedValue({ ...ready("session"), issues: [failing, blocked], rootIds: ["fail", "blk"] });
     let renderer: ReactTestRenderer;
-    await act(async () => { renderer = create(<BoardSection host={HOST} agentId="acts" navigation={{ openAgent } as unknown as PluginAgentPanelProps["navigation"]} theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={openTask} />); });
+        await act(async () => { renderer = create(<BoardSection host={HOST} agentId="acts" navigation={{ openAgent } as unknown as PluginAgentPanelProps["navigation"]} theme={{ colors: COLORS } as PluginAgentPanelProps["theme"]} openTask={openTask} />, { createNodeMock }); });
     return renderer!;
   };
+  const menus = (renderer: ReactTestRenderer) => renderer.root.findAll((node) => (node.type as unknown) === "Modal");
+  const items = (renderer: ReactTestRenderer) => renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityRole === "menuitem").map((node) => node.props.accessibilityLabel as string);
+  const trigger = (renderer: ReactTestRenderer, identifier: string) => pressables(renderer, `${identifier} 的操作`)[0]!;
   afterEach(() => {
     getBoard.mockReset();
     getBoard.mockImplementation(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
     runAction.mockReset();
     runAction.mockImplementation(async () => ({ ok: true }));
     openTask.mockClear(); openAgent.mockClear(); openURL.mockClear();
+    platform.OS = "web";
   });
 
-  it("opens a to-do to its reason, parent and actions, and the parent is a link", async () => {
+  it("sits on every row without expanding it, hidden until the row is hovered or ⋯ is focused", async () => {
     const renderer = await render();
-    expect(text(renderer)).not.toContain("OOM on rank 3");
-    await pressExact(renderer, "展开 WORK-60");
-    const details = text(renderer);
-    expect(details).toMatch(/运行失败（10d 前）：OOM on rank 3\n轮到：开发 · Opus[\s\S]*父任务\n+WORK-50 训练总任务[\s\S]*重跑[\s\S]*转为阻塞[\s\S]*取消/);
-    expect(details).not.toContain("改为进行中");
-    await pressExact(renderer, "父任务 WORK-50 训练总任务");
-    expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/WORK-50", "WORK-50");
-    await pressExact(renderer, "展开 WORK-70");
-    expect(text(renderer)).toMatch(/已阻塞 4d[\s\S]*恢复进行中[\s\S]*放回待规划/);
+    // WORK-60 is a to-do and a tree row; WORK-70 too: each row has its own ⋯.
+    expect(pressables(renderer, "WORK-60 的操作").length).toBeGreaterThanOrEqual(1);
+    expect(pressables(renderer, "WORK-70 的操作").length).toBeGreaterThanOrEqual(1);
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(0);
+    const main = pressables(renderer, "WORK-60 进行中 跑训练")[0]!;
+    await act(async () => { main.props.onHoverIn(); });
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(1);
+    await act(async () => { main.props.onHoverOut(); });
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(0);
+    await act(async () => { pressables(renderer, "打开 WORK-60 的执行会话")[0]!.props.onHoverIn(); });
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(1);
+    await act(async () => { pressables(renderer, "打开 WORK-60 的执行会话")[0]!.props.onHoverOut(); });
+    await act(async () => { trigger(renderer, "WORK-60").props.onFocus(); });
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(1);
+    await act(async () => { trigger(renderer, "WORK-60").props.onBlur(); });
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(0);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("is always visible on touch screens", async () => {
+    platform.OS = "ios";
+    const renderer = await render();
+    expect(trigger(renderer, "WORK-60").props.style.opacity).toBe(1);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("lists every status, the current one checked, cancelled last in danger, rerun on top for a failed run", async () => {
+    const renderer = await render();
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    expect(menus(renderer)).toHaveLength(1);
+    expect(trigger(renderer, "WORK-60").props.accessibilityState.expanded).toBe(true);
+    expect(items(renderer)).toEqual([
+      "重跑 WORK-60", "待规划 WORK-60", "未开始 WORK-60", "进行中 WORK-60", "评审中 WORK-60", "阻塞 WORK-60", "已完成 WORK-60，需先验收合同", "已取消 WORK-60",
+    ]);
+    expect(text(renderer)).not.toMatch(/改为|放回|转为|恢复/);
+    const menu = menus(renderer)[0]!;
+    const children = menu.findByProps({ accessibilityRole: "menu" }).children as Instance[];
+    expect(children.map((node) => (node.type as unknown) === "View" ? "|" : "item").join("")).toBe("item|itemitemitemitemitemitem|item");
+    const item = (name: string) => menu.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === name)[0]!;
+    const current = item("进行中 WORK-60");
+    expect(current.props.disabled).toBe(true);
+    expect(current.props.accessibilityState).toEqual({ checked: true, disabled: true });
+    expect(current.findAll((node) => (node.type as unknown) === "Icon" && node.props.name === "Check")).toHaveLength(1);
+    expect(item("阻塞 WORK-60").props.disabled).toBe(false);
+    expect(item("阻塞 WORK-60").findAll((node) => (node.type as unknown) === "Icon" && node.props.name === "Check")).toHaveLength(0);
+    const done = item("已完成 WORK-60，需先验收合同");
+    expect(done.props.disabled).toBe(true);
+    expect(label(done)).toContain("需先验收合同");
+    expect(done.props.style.opacity).toBeLessThan(1);
+    const cancel = menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "已取消")[0]!;
+    expect(cancel.props.style.color).toBe("statusDanger");
+    expect(menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "阻塞")[0]!.props.style.color).toBe("foreground");
+    await act(async () => { menus(renderer)[0]!.props.onRequestClose(); });
+    // No failed run and no contract: no rerun, and done is open.
+    await act(async () => { pressables(renderer, "WORK-70 的操作")[0]!.props.onPress(); });
+    expect(items(renderer)).toEqual(["待规划 WORK-70", "未开始 WORK-70", "进行中 WORK-70", "评审中 WORK-70", "阻塞 WORK-70", "已完成 WORK-70", "已取消 WORK-70"]);
+    expect(pressables(renderer, "已完成 WORK-70")[0]!.props.disabled).toBe(false);
+    expect(pressables(renderer, "阻塞 WORK-70")[0]!.props.accessibilityState.checked).toBe(true);
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("closes on an outside press, on Esc, and on a second press of ⋯", async () => {
+    const renderer = await render();
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    await pressExact(renderer, "关闭菜单");
+    expect(menus(renderer)).toHaveLength(0);
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    await act(async () => { menus(renderer)[0]!.props.onRequestClose(); });
+    expect(menus(renderer)).toHaveLength(0);
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    expect(menus(renderer)).toHaveLength(0);
+    expect(runAction).not.toHaveBeenCalled();
     await act(async () => { renderer.unmount(); });
   });
 
   it("runs each action through the plugin with its issue, then refreshes the board", async () => {
     const renderer = await render();
-    await pressExact(renderer, "展开 WORK-60");
-    await pressExact(renderer, "展开 WORK-70");
-    for (const [label, action] of [["重跑 WORK-60", { kind: "rerun", taskId: "run-60" }], ["转为阻塞 WORK-60", { kind: "status", status: "blocked" }], ["恢复进行中 WORK-70", { kind: "status", status: "in_progress" }], ["放回待规划 WORK-70", { kind: "status", status: "backlog" }]] as const) {
+    for (const [name, action] of [
+      ["重跑 WORK-60", { kind: "rerun", taskId: "run-60" }], ["阻塞 WORK-60", { kind: "status", status: "blocked" }], ["评审中 WORK-60", { kind: "status", status: "in_review" }],
+      ["进行中 WORK-70", { kind: "status", status: "in_progress" }], ["待规划 WORK-70", { kind: "status", status: "backlog" }], ["未开始 WORK-70", { kind: "status", status: "todo" }], ["已完成 WORK-70", { kind: "status", status: "done" }],
+    ] as const) {
       getBoard.mockClear();
-      await pressExact(renderer, label);
-      expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: label.endsWith("60") ? "fail" : "blk", action });
+      await act(async () => { trigger(renderer, name.split(" ")[1]!).props.onPress(); });
+      await pressExact(renderer, name);
+      expect(menus(renderer)).toHaveLength(0);
+      expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: name.endsWith("60") ? "fail" : "blk", action });
       expect(getBoard).toHaveBeenCalledWith({ agentId: "acts", scope: "session", refresh: true });
     }
     expect(openTask).not.toHaveBeenCalled();
@@ -427,66 +523,115 @@ describe("an expanded task row", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("asks once more before cancelling", async () => {
+  it("asks once more inside the menu before cancelling", async () => {
     const renderer = await render();
-    await pressExact(renderer, "展开 WORK-60");
-    await pressExact(renderer, "取消 WORK-60");
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    await pressExact(renderer, "已取消 WORK-60");
     expect(runAction).not.toHaveBeenCalled();
-    expect(text(renderer)).toContain("确认取消 WORK-60？");
-    expect(pressables(renderer, "重跑 WORK-60")).toHaveLength(0);
-    await pressExact(renderer, "不取消 WORK-60");
-    expect(runAction).not.toHaveBeenCalled();
-    expect(text(renderer)).not.toContain("确认取消 WORK-60？");
-    await pressExact(renderer, "取消 WORK-60");
+    expect(menus(renderer)).toHaveLength(1);
+    expect(items(renderer).at(-1)).toBe("确认取消 WORK-60");
+    expect(items(renderer)).toHaveLength(8);
+    expect(text(renderer)).toContain("确认取消？");
+    // Closing forgets the pending confirmation.
+    await pressExact(renderer, "关闭菜单");
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    expect(items(renderer).at(-1)).toBe("已取消 WORK-60");
+    await pressExact(renderer, "已取消 WORK-60");
     await pressExact(renderer, "确认取消 WORK-60");
     expect(runAction).toHaveBeenCalledWith({ agentId: "acts", issueId: "fail", action: { kind: "status", status: "cancelled" } });
+    expect(menus(renderer)).toHaveLength(0);
     await act(async () => { renderer.unmount(); });
   });
 
-  it("shows the server's reason for a refusal and leaves the board alone", async () => {
+  it("spins ⋯ while an action runs and keeps the menu shut", async () => {
     const renderer = await render();
-    await pressExact(renderer, "展开 WORK-70");
-    runAction.mockResolvedValueOnce({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
-    getBoard.mockClear();
-    await pressExact(renderer, "恢复进行中 WORK-70");
-    expect(text(renderer)).toContain("恢复进行中失败：accept the current contract before completing this issue");
-    expect(getBoard).not.toHaveBeenCalled();
-    expect(text(renderer)).toContain("等数据");
-    runAction.mockRejectedValueOnce(new Error("rpc unavailable"));
-    await pressExact(renderer, "放回待规划 WORK-70");
-    expect(text(renderer)).toContain("放回待规划失败：rpc unavailable");
-    await pressExact(renderer, "刷新");
-    expect(text(renderer)).not.toContain("放回待规划失败");
-    await act(async () => { renderer.unmount(); });
-  });
-
-  it("marks the running action and holds the others until it settles", async () => {
-    const renderer = await render();
-    await pressExact(renderer, "展开 WORK-70");
     let settle!: (value: { ok: true }) => void;
     runAction.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
-    await pressExact(renderer, "恢复进行中 WORK-70");
-    expect(text(renderer)).toContain("恢复进行中中…");
-    expect(pressables(renderer, "放回待规划 WORK-70")[0]!.props.disabled).toBe(true);
+    await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
+    await pressExact(renderer, "进行中 WORK-70");
+    const busy = pressables(renderer, "WORK-70 正在改为进行中")[0]!;
+    expect(busy.props.disabled).toBe(true);
+    expect(busy.props.style.opacity).toBe(1);
+    expect(busy.findAll((node) => (node.type as unknown) === "ActivityIndicator")).toHaveLength(1);
+    expect(menus(renderer)).toHaveLength(0);
     await act(async () => { settle({ ok: true }); });
-    expect(text(renderer)).not.toContain("恢复进行中中…");
-    expect(pressables(renderer, "放回待规划 WORK-70")[0]!.props.disabled).toBe(false);
+    expect(pressables(renderer, "WORK-70 正在改为进行中")).toHaveLength(0);
+    expect(trigger(renderer, "WORK-70").props.disabled).toBe(false);
     await act(async () => { renderer.unmount(); });
   });
 
-  it("keeps the row, its MR chip and its session entry apart from the actions", async () => {
+  it("shows a failure, the server's own reason included, as one dismissible line under the row until the board reloads", async () => {
     const renderer = await render();
-    await pressExact(renderer, "展开 WORK-60");
+    // The board may not know a contract the server still enforces; its refusal is shown as given.
+    runAction.mockResolvedValueOnce({ ok: false, status: 409, reason: "issue_contract_acceptance_required" });
+    getBoard.mockClear();
+    await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
+    await pressExact(renderer, "已完成 WORK-70");
+    expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: "blk", action: { kind: "status", status: "done" } });
+    expect(text(renderer)).toContain("改为已完成失败：issue_contract_acceptance_required");
+    expect(getBoard).not.toHaveBeenCalled();
+    await pressExact(renderer, "关闭 WORK-70 的错误");
+    expect(text(renderer)).not.toContain("改为已完成失败");
+    runAction.mockRejectedValueOnce(new Error("rpc unavailable"));
+    await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
+    await pressExact(renderer, "待规划 WORK-70");
+    expect(text(renderer)).toContain("改为待规划失败：rpc unavailable");
+    await pressExact(renderer, "刷新");
+    expect(text(renderer)).not.toContain("改为待规划失败");
+    await act(async () => { renderer.unmount(); });
+  });
+
+  it("keeps ⋯, the row, its MR chip and its session entry apart", async () => {
+    const renderer = await render();
+    await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
+    expect(openTask).not.toHaveBeenCalled();
+    expect(openURL).not.toHaveBeenCalled();
+    expect(openAgent).not.toHaveBeenCalled();
+    await pressExact(renderer, "关闭菜单");
     await pressExact(renderer, "WORK-60 进行中 跑训练");
     expect(openTask).toHaveBeenCalledWith("https://app.example/acme/issues/WORK-60", "WORK-60");
     await pressExact(renderer, "打开 r!61 !61 CI 失败 · 1h");
     expect(openURL).toHaveBeenCalledWith("https://git.example.com/o/r/merge_requests/61");
     await pressExact(renderer, "打开 WORK-60 的执行会话");
     expect(openAgent).toHaveBeenCalledWith({ serverId: "srv_here", agentId: "worker" });
+    expect(menus(renderer)).toHaveLength(0);
     expect(runAction).not.toHaveBeenCalled();
     expect(openTask).toHaveBeenCalledTimes(1);
     await act(async () => { renderer.unmount(); });
   });
+
+  it("expands to information only: reason, parent, merged MRs, children, no action buttons", async () => {
+    const renderer = await render();
+    expect(text(renderer)).not.toContain("OOM on rank 3");
+    await pressExact(renderer, "展开 WORK-60");
+    const details = text(renderer);
+    expect(details).toMatch(/运行失败（10d 前）：OOM on rank 3\n轮到：开发 · Opus[\s\S]*父任务\n+WORK-50 训练总任务/);
+    expect(details).not.toMatch(/重跑|已取消/);
+    expect(renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityRole === "menuitem")).toHaveLength(0);
+    await pressExact(renderer, "父任务 WORK-50 训练总任务");
+    expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/WORK-50", "WORK-50");
+    await pressExact(renderer, "展开 WORK-70");
+    expect(text(renderer)).toContain("已阻塞 4d");
+    expect(text(renderer)).not.toContain("已取消");
+    await act(async () => { renderer.unmount(); });
+  });
+});
+
+it("opens the menu below ⋯, or above it near the bottom, and keeps it inside the window", () => {
+  const plain = taskMenu({ ...base, status: "in_progress" });
+  const size = { width: 168, height: menuHeight(plain) };
+  // Seven statuses, padding, and the separator before cancelled.
+  expect(size.height).toBe(7 * 30 + 8 + 9);
+  const window = { width: 400, height: 600 };
+  expect(menuPlacement({ x: 360, y: 100, width: 22, height: 22 }, size, window)).toEqual({ left: 382 - 168, top: 126, upward: false });
+  const low = menuPlacement({ x: 360, y: 560, width: 22, height: 22 }, size, window);
+  expect(low).toEqual({ left: 214, top: 560 - 4 - size.height, upward: true });
+  expect(menuPlacement({ x: 0, y: 100, width: 22, height: 22 }, size, window).left).toBe(8);
+  expect(menuPlacement({ x: 395, y: 100, width: 22, height: 22 }, size, window).left).toBe(400 - 168 - 8);
+  // A window too short for either side opens downward rather than off the top.
+  expect(menuPlacement({ x: 360, y: 40, width: 22, height: 22 }, size, { width: 400, height: 120 }).upward).toBe(false);
+  // Rerun adds an item and its own separator.
+  expect(menuHeight(taskMenu({ ...base, status: "in_progress", lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } }))).toBe(8 * 30 + 8 + 2 * 9);
 });
 
 it("opens a task listed both as a to-do and in the tree in both places at once", async () => {
@@ -494,18 +639,21 @@ it("opens a task listed both as a to-do and in the tree in both places at once",
   const child: BoardIssue = { ...base, id: "c", identifier: "C", title: "子", status: "in_progress", parentId: "p", parent: { identifier: "P", title: "父" } };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, child], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
-  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="both" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="both" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />, { createNodeMock }); });
   expect(pressables(renderer!, "展开 P")).toHaveLength(2);
   await act(async () => { pressables(renderer!, "展开 P")[0]!.props.onPress(); });
   expect(setExpansion).toHaveBeenLastCalledWith({ agentId: "both", issueId: "p", expanded: true });
   expect(pressables(renderer!, "收起 P")).toHaveLength(2);
-  expect(text(renderer!).split("恢复进行中").length).toBe(3);
+  expect(pressables(renderer!, "P 的操作")).toHaveLength(2);
   let settle!: (value: { ok: false; status: number; reason: string }) => void;
   runAction.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
-  await act(async () => { pressables(renderer!, "放回待规划 P")[0]!.props.onPress(); });
-  expect(pressables(renderer!, "恢复进行中 P").map((node) => node.props.disabled)).toEqual([true, true]);
+  await act(async () => { pressables(renderer!, "P 的操作")[0]!.props.onPress(); });
+  await act(async () => { pressables(renderer!, "待规划 P")[0]!.props.onPress(); });
+  expect(pressables(renderer!, "P 正在改为待规划").map((node) => node.props.disabled)).toEqual([true, true]);
   await act(async () => { settle({ ok: false, status: 409, reason: "busy" }); });
-  expect(text(renderer!).split("放回待规划失败：busy").length).toBe(3);
+  expect(text(renderer!).split("改为待规划失败：busy").length).toBe(3);
+  await act(async () => { pressables(renderer!, "关闭 P 的错误")[1]!.props.onPress(); });
+  expect(text(renderer!)).not.toContain("改为待规划失败");
   expect(runAction).toHaveBeenCalledTimes(1);
   await act(async () => { renderer!.unmount(); });
 });

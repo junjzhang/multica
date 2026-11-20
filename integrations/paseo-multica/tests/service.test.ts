@@ -5,6 +5,7 @@ import type { PaseoHostAdapter } from "../server/host";
 import { MulticaApiError } from "../server/api";
 import { ConfigurationError } from "../server/owner-profile";
 import { createSessionService } from "../server/service";
+import { ACTION_STATUSES } from "../shared/task-actions";
 import {
   contextPath,
   readSessionContext,
@@ -816,12 +817,12 @@ describe("task actions", () => {
   it("writes each action with the owner credential through the existing issue endpoints", async () => {
     const { home, api, service } = await setup();
     await writeSessionContext(home, makeContext());
-    for (const action of [{ kind: "rerun", taskId: RUN }, ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ kind: "status", status }))] as const) {
+    for (const action of [{ kind: "rerun", taskId: RUN }, ...ACTION_STATUSES.map((status) => ({ kind: "status", status }))] as const) {
       expect(await service.taskAction(SESSION_A, ISSUE, action as never)).toEqual({ ok: true });
     }
     expect(api.writes).toEqual([
       { method: "POST", path: `/api/issues/${ISSUE}/rerun`, body: { task_id: RUN }, token: OWNER_TOKEN },
-      ...["in_progress", "blocked", "backlog", "cancelled"].map((status) => ({ method: "PUT", path: `/api/issues/${ISSUE}`, body: { status }, token: OWNER_TOKEN })),
+      ...ACTION_STATUSES.map((status) => ({ method: "PUT", path: `/api/issues/${ISSUE}`, body: { status }, token: OWNER_TOKEN })),
     ]);
     expect(api.writes.some((write) => write.token === EXTERNAL_TOKEN)).toBe(false);
     expect(api.registrations).toHaveLength(0);
@@ -831,7 +832,7 @@ describe("task actions", () => {
   it("returns the server's reason for a refusal, and never the credential", async () => {
     const { api, service } = await setup();
     api.writeError = new MulticaApiError(409, `Multica API PUT /api/issues/x returned 409: ${OWNER_TOKEN}`, undefined, "accept the current contract before completing this issue");
-    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "status", status: "in_progress" })).toEqual({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
+    expect(await service.taskAction(SESSION_A, ISSUE, { kind: "status", status: "done" })).toEqual({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
     api.writeError = new MulticaApiError(403, "forbidden");
     expect(await service.taskAction(SESSION_A, ISSUE, { kind: "rerun", taskId: RUN })).toEqual({ ok: false, status: 403, reason: "Multica 返回 403" });
     api.writeError = new Error(`socket closed for ${OWNER_TOKEN}`);

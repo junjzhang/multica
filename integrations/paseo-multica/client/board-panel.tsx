@@ -2,7 +2,7 @@ import type { PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, Loading } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ActivityIndicator, Linking, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Modal, Platform, Pressable, Text, useWindowDimensions, View } from "react-native";
 import {
   awaitingApproval,
   buildBoard,
@@ -25,7 +25,7 @@ import {
   type Viewer,
 } from "../shared/board";
 import { sessionBoard, taskAction, taskExpansion } from "../shared/contracts";
-import { quickActions, type QuickAction } from "../shared/task-actions";
+import { taskMenu, type StatusChoice, type TaskAction } from "../shared/task-actions";
 import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-icon";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
@@ -299,11 +299,12 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     const target = sessionTarget(issue, here);
     return target && openAgent ? () => openAgent(target) : undefined;
   };
-  const act = useCallback(async (issue: BoardIssue, action: QuickAction) => {
-    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${action.label}失败：${reason}` } }));
-    setActions((all) => ({ ...all, [issue.id]: { pending: action.label } }));
+  const act = useCallback(async (issue: BoardIssue, action: TaskAction) => {
+    const label = actionLabel(action);
+    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${label}失败：${reason}` } }));
+    setActions((all) => ({ ...all, [issue.id]: { pending: label } }));
     try {
-      const result = await runAction({ agentId, issueId: issue.id, action: action.action });
+      const result = await runAction({ agentId, issueId: issue.id, action });
       if (!result.ok) return fail(result.reason);
       setActions(({ [issue.id]: _done, ...rest }) => rest);
       await load(true);
@@ -311,8 +312,11 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
       fail(cause instanceof Error ? cause.message : String(cause));
     }
   }, [agentId, runAction, load]);
+  const dismiss = useCallback((issueId: string) => {
+    setActions((all) => (all[issueId]?.pending ? all : Object.fromEntries(Object.entries(all).filter(([id]) => id !== issueId))));
+  }, []);
   const trees = useMemo(() => new Map(board ? Object.values(board.sections).flat().flatMap(nodesOf).map((tree) => [tree.issue.id, tree] as const) : []), [board]);
-  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle, viewer: ready?.viewer ?? NO_VIEWER, now, trees, actions, act };
+  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle, viewer: ready?.viewer ?? NO_VIEWER, now, trees, actions, act, dismiss };
   // Still one row per issue: its most urgent to-do decides which block it appears in.
   const todos = board ? firstPerIssue(board.todos) : [];
   const yours = todos.filter((todo) => isUserTodo(todo.kind));
@@ -379,9 +383,18 @@ function Notice({ colors, title, detail }: { colors: Colors; title: string; deta
   </View>;
 }
 
-function useHover() {
+/** `onChange` lets a row know one of its targets is hovered. */
+function useHover(onChange?: (hovered: boolean) => void) {
   const [hovered, setHovered] = useState(false);
-  return { hovered, onHoverIn: () => setHovered(true), onHoverOut: () => setHovered(false) };
+  const report = useRef(onChange);
+  report.current = onChange;
+  // A target that unmounts while hovered, such as a chip gone after a reload, must not keep its row hovered.
+  useEffect(() => () => report.current?.(false), []);
+  return {
+    hovered,
+    onHoverIn: () => { setHovered(true); onChange?.(true); },
+    onHoverOut: () => { setHovered(false); onChange?.(false); },
+  };
 }
 
 function Segment({ label, selected, colors, onPress }: { label: string; selected: boolean; colors: Colors; onPress(): void }) {
@@ -427,7 +440,9 @@ type RowContext = {
   trees: Map<string, TreeNode>;
   /** Per issue, so a task open in two places shows one running action and one error. A reload clears settled errors. */
   actions: Record<string, ActionState>;
-  act(issue: BoardIssue, action: QuickAction): Promise<void>;
+  act(issue: BoardIssue, action: TaskAction): Promise<void>;
+  /** Clears a settled error; a running action stays. */
+  dismiss(issueId: string): void;
   /** Opens the task's executing session; undefined when the row has no session to open. */
   openSession(issue: BoardIssue): (() => void) | undefined;
 };
@@ -450,13 +465,17 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
   disclosure?: { expanded: boolean; onToggle(): void };
 }) {
   const { colors } = row;
-  const hover = useHover();
+  // Which of the row's targets the pointer is over; ⋯ shows while any is.
+  const [over, setOver] = useState<Record<string, boolean>>({});
+  const track = (target: string) => (on: boolean) => setOver((all) => ({ ...all, [target]: on }));
+  const hover = useHover(track("row"));
   const [pressed, setPressed] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const tone = toneColor(phrase?.tone, colors);
   const title = displayTitle(issue.title);
   const status = statusKey(issue);
   const openSession = row.openSession(issue);
+  const error = row.actions[issue.id]?.error;
   return <View>
     <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}>
       <Pressable
@@ -482,9 +501,11 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
         </View> : null}
         {phrase ? <Text numberOfLines={1} style={{ color: tone, fontSize: FONT.sm, fontWeight: phrase.tone ? "500" : "400" }}>{phrase.text}</Text> : null}
       </Pressable>
-      {chip ? <Chip chip={chip} colors={colors} open={listOpen} onToggle={() => setListOpen(!listOpen)} /> : null}
-      {openSession ? <SessionButton identifier={issue.identifier} colors={colors} onPress={openSession} /> : null}
+      {chip ? <Chip chip={chip} colors={colors} open={listOpen} onToggle={() => setListOpen(!listOpen)} onHover={track("chip")} /> : null}
+      {openSession ? <SessionButton identifier={issue.identifier} colors={colors} onPress={openSession} onHover={track("session")} /> : null}
+      <TaskMenu issue={issue} row={row} rowHovered={Object.values(over).some(Boolean)} onHover={track("menu")} />
     </View>
+    {error ? <ActionError issue={issue} error={error} depth={depth} row={row} /> : null}
     {chip && listOpen && chip.entries.length > 1 ? chip.entries.map((entry) => <PullRequestRow key={entry.pr.id} pr={entry.pr} issue={entry.issue} source={entry.issue.id === issue.id ? undefined : entry.issue} depth={depth + 1} row={row} />) : null}
   </View>;
 }
@@ -494,8 +515,8 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
  * outlined chip that fills on hover and ends in an outbound arrow for one MR,
  * or a chevron when it expands the list of several.
  */
-function Chip({ chip, colors, open, onToggle }: { chip: PullRequestChip; colors: Colors; open: boolean; onToggle(): void }) {
-  const hover = useHover();
+function Chip({ chip, colors, open, onToggle, onHover }: { chip: PullRequestChip; colors: Colors; open: boolean; onToggle(): void; onHover(hovered: boolean): void }) {
+  const hover = useHover(onHover);
   const single = chip.entries.length === 1 ? chip.entries[0]!.pr : undefined;
   const color = toneColor(chip.tone, colors);
   const label = single ? `打开 ${chip.label}` : `${chip.entries.length} 个 MR ${chip.label}`;
@@ -517,8 +538,8 @@ function Chip({ chip, colors, open, onToggle }: { chip: PullRequestChip; colors:
 }
 
 /** A quiet icon target after the row's other targets: it jumps to the Paseo session executing the task. */
-function SessionButton({ identifier, colors, onPress }: { identifier: string; colors: Colors; onPress(): void }) {
-  const hover = useHover();
+function SessionButton({ identifier, colors, onPress, onHover }: { identifier: string; colors: Colors; onPress(): void; onHover(hovered: boolean): void }) {
+  const hover = useHover(onHover);
   return <Pressable
     accessibilityRole="button" accessibilityLabel={`打开 ${identifier} 的执行会话`} onPress={onPress}
     onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} hitSlop={SPACE.xs}
@@ -530,6 +551,150 @@ function SessionButton({ identifier, colors, onPress }: { identifier: string; co
     <Icon name="MessageSquare" size={13} color={hover.hovered ? colors.foreground : colors.foregroundMuted} />
     {hover.hovered ? <Text numberOfLines={1} style={{ color: colors.foreground, fontSize: FONT.sm }}>会话</Text> : null}
   </Pressable>;
+}
+
+const ELLIPSIS_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="19" cy="12" r="1.75"/></svg>';
+const MENU_W = 200;
+const ITEM_H = 30;
+const MENU_PAD = 4;
+const SEPARATOR_H = 9;
+const MENU_GAP = 4;
+const EDGE = 8;
+
+export type Rect = { x: number; y: number; width: number; height: number };
+
+/** What a write is called in its running state and its error: 重跑, or 改为 and the status's name. */
+export function actionLabel(action: TaskAction): string {
+  return action.kind === "rerun" ? "重跑" : `改为${STATUS_LABEL[action.status]}`;
+}
+
+/** Every item is ITEM_H tall, so the menu's height is known before it renders: rerun and its separator, the statuses, and the separator before cancelled. */
+export function menuHeight(menu: { rerunTaskId?: string; statuses: unknown[] }): number {
+  const rerun = menu.rerunTaskId ? 1 : 0;
+  return (rerun + menu.statuses.length) * ITEM_H + 2 * MENU_PAD + (rerun + 1) * SEPARATOR_H;
+}
+
+/** Below the anchor, right-aligned to it; above it when below would cross the window's bottom and above fits. */
+export function menuPlacement(anchor: Rect, size: { width: number; height: number }, window: { width: number; height: number }): { left: number; top: number; upward: boolean } {
+  const below = anchor.y + anchor.height + MENU_GAP;
+  const above = anchor.y - MENU_GAP - size.height;
+  const upward = below + size.height > window.height - EDGE && above >= EDGE;
+  const left = Math.max(EDGE, Math.min(anchor.x + anchor.width - size.width, window.width - size.width - EDGE));
+  return { left, top: upward ? above : below, upward };
+}
+
+/**
+ * The row's status picker behind a quiet ⋯ at its end: rerun first when the
+ * last run failed, then every status with the current one checked. The menu
+ * floats in a transparent modal, so no scroll view or panel edge clips it; the
+ * backdrop closes it, which also makes a second press on ⋯ close it.
+ * Cancelling asks once more in place. While a write runs the menu stays
+ * closed and ⋯ spins.
+ */
+function TaskMenu({ issue, row, rowHovered, onHover }: { issue: BoardIssue; row: RowContext; rowHovered: boolean; onHover(hovered: boolean): void }) {
+  const { colors } = row;
+  const hover = useHover(onHover);
+  const anchor = useRef<View>(null);
+  const window = useWindowDimensions();
+  const [at, setAt] = useState<Rect | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const pending = row.actions[issue.id]?.pending;
+  const close = () => { setAt(null); setConfirming(false); };
+  const toggle = () => (at ? close() : anchor.current?.measureInWindow((x, y, width, height) => setAt({ x, y, width, height })));
+  const run = (action: TaskAction) => { close(); void row.act(issue, action); };
+  // Touch screens have no hover, so the target is always there.
+  const shown = Platform.OS !== "web" || rowHovered || hover.hovered || focused || !!at || !!pending;
+  const menu = taskMenu(issue);
+  const cancel = menu.statuses.find((choice) => choice.status === "cancelled")!;
+  const place = at ? menuPlacement(at, { width: MENU_W, height: menuHeight(menu) }, window) : undefined;
+  const separator = <View style={{ height: 1, marginVertical: (SEPARATOR_H - 1) / 2, backgroundColor: colors.border }} />;
+  const statusItem = (choice: StatusChoice, extra: Partial<MenuItemProps> = {}) => <MenuItem
+    key={choice.status} label={STATUS_LABEL[choice.status]} name={`${STATUS_LABEL[choice.status]} ${issue.identifier}${choice.blocked ? `，${choice.blocked}` : ""}`}
+    icon={<Icon icon={{ svg: STATUS_SVG[choice.status] }} size={14} color={choice.status === "cancelled" ? colors.statusDanger : statusColor(choice.status, colors)} />}
+    checked={choice.current} note={choice.blocked} disabled={choice.current || !!choice.blocked} colors={colors}
+    onPress={() => run({ kind: "status", status: choice.status })} {...extra}
+  />;
+  return <>
+    <Pressable
+      ref={anchor} accessibilityRole="button" accessibilityLabel={pending ? `${issue.identifier} 正在${pending}` : `${issue.identifier} 的操作`}
+      accessibilityState={{ expanded: !!at, busy: !!pending, disabled: !!pending }} disabled={!!pending} onPress={toggle}
+      onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} hitSlop={SPACE.xs}
+      style={{
+        width: 22, height: 22, flexShrink: 0, marginRight: SPACE.xs, alignItems: "center", justifyContent: "center", borderRadius: RADIUS,
+        backgroundColor: at || hover.hovered ? colors.surface2 : "transparent", opacity: shown ? 1 : 0, cursor: pending ? "auto" : "pointer",
+      }}
+    >
+      {pending ? <ActivityIndicator size={10} color={colors.foregroundMuted} />
+        : <Icon icon={{ svg: ELLIPSIS_SVG }} size={14} color={at || hover.hovered ? colors.foreground : colors.foregroundMuted} />}
+    </Pressable>
+    {place ? <Modal visible transparent animationType="none" statusBarTranslucent onRequestClose={close}>
+      <Pressable accessibilityLabel="关闭菜单" onPress={close} style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, cursor: "auto" }} />
+      <View
+        accessibilityRole="menu" accessibilityLabel={`${issue.identifier} 的操作`}
+        style={{
+          position: "absolute", left: place.left, top: place.top, width: MENU_W, padding: MENU_PAD, borderRadius: RADIUS + 2, borderWidth: 1,
+          borderColor: colors.border, backgroundColor: colors.surface0, boxShadow: "0 6px 20px rgba(0, 0, 0, 0.18)",
+        }}
+      >
+        {menu.rerunTaskId ? <>
+          <MenuItem
+            label="重跑" name={`重跑 ${issue.identifier}`} icon={<Icon name="RotateCcw" size={14} color={colors.foregroundMuted} />} colors={colors}
+            onPress={() => run({ kind: "rerun", taskId: menu.rerunTaskId! })}
+          />
+          {separator}
+        </> : null}
+        {menu.statuses.filter((choice) => choice !== cancel).map((choice) => statusItem(choice))}
+        {separator}
+        {statusItem(cancel, confirming
+          ? { label: "确认取消？", name: `确认取消 ${issue.identifier}`, confirming: true, onPress: () => run({ kind: "status", status: "cancelled" }) }
+          : { danger: true, onPress: () => setConfirming(true) })}
+      </View>
+    </Modal> : null}
+  </>;
+}
+
+type MenuItemProps = {
+  label: string; name: string; icon: ReactNode; colors: Colors; onPress(): void;
+  /** The task's current status. */
+  checked?: boolean;
+  /** Why the item is unavailable, shown muted at its end. */
+  note?: string;
+  disabled?: boolean; danger?: boolean; confirming?: boolean;
+};
+
+function MenuItem({ label, name, icon, colors, onPress, checked, note, disabled, danger, confirming }: MenuItemProps) {
+  const hover = useHover();
+  const active = hover.hovered && !disabled;
+  return <Pressable
+    accessibilityRole="menuitem" accessibilityLabel={name} accessibilityState={{ checked: !!checked, disabled: !!disabled }} disabled={disabled} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{
+      flexDirection: "row", alignItems: "center", gap: SPACE.md, height: ITEM_H, paddingHorizontal: SPACE.md, borderRadius: RADIUS - 2,
+      backgroundColor: confirming || active ? colors.surface2 : "transparent", opacity: note ? 0.55 : 1, cursor: disabled ? "auto" : "pointer",
+    }}
+  >
+    {icon}
+    <Text numberOfLines={1} style={{ flex: 1, color: danger || confirming ? colors.statusDanger : colors.foreground, fontSize: FONT.sm, fontWeight: checked || confirming ? "600" : "400" }}>{label}</Text>
+    {note ? <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{note}</Text> : null}
+    {checked ? <Icon name="Check" size={14} color={colors.foreground} /> : null}
+  </Pressable>;
+}
+
+/** A refused or failed action, one line under its row until dismissed or the board reloads. */
+function ActionError({ issue, error, depth, row }: { issue: BoardIssue; error: string; depth: number; row: RowContext }) {
+  const { colors } = row;
+  const hover = useHover();
+  return <View style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingLeft: INDENT * depth + GUTTER + SPACE.sm, paddingRight: SPACE.sm, paddingVertical: 2 }}>
+    <Text numberOfLines={1} selectable style={{ flex: 1, color: colors.statusDanger, fontSize: FONT.sm }}>{error}</Text>
+    <Pressable
+      accessibilityRole="button" accessibilityLabel={`关闭 ${issue.identifier} 的错误`} onPress={() => row.dismiss(issue.id)}
+      onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut} hitSlop={SPACE.xs}
+      style={{ width: 18, height: 18, alignItems: "center", justifyContent: "center", borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface2 : "transparent", cursor: "pointer" }}
+    >
+      <Icon name="X" size={12} color={hover.hovered ? colors.foreground : colors.foregroundMuted} />
+    </Pressable>
+  </View>;
 }
 
 /** A project in the all view: a collapsible folder whose count turns amber when something inside needs you. */
@@ -555,8 +720,11 @@ function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: Ro
   </View>;
 }
 
-/** What a row shows besides its task: the to-do or tree supplies the phrase and MR marks; everything else is the task's. */
-type RowData = { issue: BoardIssue; phrase?: Phrase; chip?: PullRequestChip; mark?: { text: string; label: string } };
+/**
+ * What a row shows besides its task: the to-do or tree supplies the phrase and MR marks; everything else is the task's.
+ * `underParent` marks a tree child, whose parent is the row right above it, so its details skip the parent link.
+ */
+type RowData = { issue: BoardIssue; phrase?: Phrase; chip?: PullRequestChip; mark?: { text: string; label: string }; underParent?: boolean };
 
 export function todoRow(todo: Todo, now: number): RowData {
   const chip = todoChip(todo, now);
@@ -577,7 +745,7 @@ export function treeRow(tree: TreeNode): RowData {
 function TaskRow({ data, depth, row }: { data: RowData; depth: number; row: RowContext }) {
   const { issue } = data;
   const tree = row.trees.get(issue.id);
-  const details = taskDetails(issue, tree, row);
+  const details = taskDetails(issue, tree, row, data.underParent);
   const expandable = hasDetails(details);
   const expanded = expandable && row.expandedIds.includes(issue.id);
   return <View>
@@ -591,10 +759,10 @@ function TaskRow({ data, depth, row }: { data: RowData; depth: number; row: RowC
 }
 
 /** The parts of an expanded row, in display order; an empty part is left out. */
-export type Details = { reasons: string[]; parent?: NonNullable<BoardIssue["parent"]>; merged: BoardPullRequest[]; children: boolean; actions: QuickAction[] };
+export type Details = { reasons: string[]; parent?: NonNullable<BoardIssue["parent"]>; merged: BoardPullRequest[]; children: boolean };
 
 function hasDetails(details: Details): boolean {
-  return details.reasons.length > 0 || !!details.parent || details.merged.length > 0 || details.children || details.actions.length > 0;
+  return details.reasons.length > 0 || !!details.parent || details.merged.length > 0 || details.children;
 }
 
 /** Who holds the contract's turn, from the viewer's side. */
@@ -620,14 +788,13 @@ export function reasonsOf(issue: BoardIssue, viewer: Viewer, now: number): strin
   return reasons;
 }
 
-export function taskDetails(issue: BoardIssue, tree: TreeNode | undefined, row: Pick<RowContext, "viewer" | "now">): Details {
+export function taskDetails(issue: BoardIssue, tree: TreeNode | undefined, row: Pick<RowContext, "viewer" | "now">, underParent = false): Details {
   return {
     reasons: reasonsOf(issue, row.viewer, row.now),
-    ...(issue.parent ? { parent: issue.parent } : {}),
+    ...(issue.parent && !underParent ? { parent: issue.parent } : {}),
     // Open MRs live in the chip; the details keep only the task's merged history.
     merged: issue.pullRequests.filter(isMerged),
     children: !!tree && tree.stages.some((group) => group.nodes.some(isOpen)),
-    actions: quickActions(issue),
   };
 }
 
@@ -639,7 +806,6 @@ function TaskDetails({ details, issue, tree, depth, row }: { details: Details; i
     {details.parent ? <ParentLink parent={details.parent} inset={inset} row={row} /> : null}
     {details.merged.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />)}
     {details.children && tree ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
-    {details.actions.length > 0 ? <Actions issue={issue} actions={details.actions} inset={inset} row={row} /> : null}
   </View>;
 }
 
@@ -655,51 +821,6 @@ function ParentLink({ parent, inset, row }: { parent: NonNullable<BoardIssue["pa
   >
     <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>父任务</Text>
     <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.sm, textDecorationLine: hover.hovered ? "underline" : "none" }}>{parent.identifier} {displayTitle(parent.title)}</Text>
-  </Pressable>;
-}
-
-/**
- * The task's quick actions. One runs at a time; cancelling asks once more.
- * A refusal shows the server's reason and leaves the board as it was; success
- * refreshes the board, which is the only place the new state comes from.
- */
-function Actions({ issue, actions, inset, row }: { issue: BoardIssue; actions: QuickAction[]; inset: number; row: RowContext }) {
-  const { colors } = row;
-  const [confirming, setConfirming] = useState<QuickAction | null>(null);
-  const { pending, error } = row.actions[issue.id] ?? {};
-  const run = (action: QuickAction) => {
-    setConfirming(null);
-    void row.act(issue, action);
-  };
-  return <View style={{ gap: SPACE.xs, paddingLeft: inset, paddingRight: SPACE.sm, paddingVertical: SPACE.xs }}>
-    {confirming ? <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
-      <Text style={{ color: colors.foreground, fontSize: FONT.sm }}>确认取消 {issue.identifier}？</Text>
-      <ActionButton label="确认取消" accessibilityLabel={`确认取消 ${issue.identifier}`} tone="danger" colors={colors} onPress={() => run(confirming)} />
-      <ActionButton label="返回" accessibilityLabel={`不取消 ${issue.identifier}`} colors={colors} onPress={() => setConfirming(null)} />
-    </View> : <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
-      {actions.map((action) => <ActionButton
-        key={action.label} label={action.label} accessibilityLabel={`${action.label} ${issue.identifier}`} colors={colors}
-        busy={pending === action.label} disabled={pending !== undefined}
-        onPress={() => (action.confirm ? setConfirming(action) : run(action))}
-      />)}
-    </View>}
-    {error ? <Text selectable style={{ color: colors.statusDanger, fontSize: FONT.sm }}>{error}</Text> : null}
-  </View>;
-}
-
-function ActionButton({ label, accessibilityLabel, tone, busy, disabled, colors, onPress }: { label: string; accessibilityLabel: string; tone?: Tone; busy?: boolean; disabled?: boolean; colors: Colors; onPress(): void }) {
-  const hover = useHover();
-  const color = tone ? toneColor(tone, colors) : colors.foreground;
-  return <Pressable
-    accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: !!disabled, busy: !!busy }} disabled={disabled} onPress={onPress}
-    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
-    style={{
-      flexDirection: "row", alignItems: "center", gap: SPACE.xs, height: 24, paddingHorizontal: SPACE.md, borderRadius: RADIUS, borderWidth: 1,
-      borderColor: tone ? color : colors.border, backgroundColor: hover.hovered && !disabled ? colors.surface2 : colors.surface1, opacity: disabled && !busy ? 0.5 : 1, cursor: disabled ? "auto" : "pointer",
-    }}
-  >
-    {busy ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
-    <Text style={{ color, fontSize: FONT.sm, fontWeight: "500" }}>{busy ? `${label}中…` : label}</Text>
   </Pressable>;
 }
 
@@ -786,7 +907,7 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
         </View> : null}
         {open ? nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
           <Rail colors={colors} top bottom={!(last && childIndex === nodes.length - 1)} tick />
-          <View style={{ flex: 1 }}><TaskRow data={treeRow(child)} depth={0} row={row} /></View>
+          <View style={{ flex: 1 }}><TaskRow data={{ ...treeRow(child), underParent: true }} depth={0} row={row} /></View>
         </View>) : null}
       </View>;
     })}
