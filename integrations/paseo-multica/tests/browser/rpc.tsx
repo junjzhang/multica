@@ -22,8 +22,33 @@ const mrBoard = {
   ],
   rootIds: ["WORK-830", "WORK-840", "WORK-841"], projects: [], truncated: false, archivedDeliveries: [], checkedAt: new Date().toISOString(),
 };
+const daysAgo = (days: number) => new Date(Date.now() - days * 86400000).toISOString();
+const actionsBoard = {
+  state: "ready", scope: "session", viewer: { agentId: "shared-external-agent", sessionId: "actions", userId: "me", forgeUsernames: [] },
+  issues: [
+    issue("WORK-860", "feat(train): 长序列训练", { status: "in_progress" }),
+    issue("WORK-861", "跑 32k 长序列基线", {
+      parentId: "WORK-860", stage: 1, lastRunFailed: true, lastActivityAt: daysAgo(10),
+      lastFailure: { summary: "CUDA out of memory on rank 3 (tried to allocate 2.00 GiB)", at: daysAgo(10), taskId: "0199a0b1-8610-7861-8861-000000000001" },
+      parent: { identifier: "WORK-860", title: "feat(train): 长序列训练", url: `${location.origin}/acme/issues/WORK-860` },
+      contract: { pendingActor: { type: "agent", id: "worker" }, pendingName: "开发 · Opus", accepted: false },
+      pullRequests: [mr("mimikyu", 52, { state: "merged" })],
+    }),
+    issue("WORK-862", "等数据集导出", { parentId: "WORK-860", stage: 1, status: "blocked", blockedSince: daysAgo(4), parent: { identifier: "WORK-860", title: "feat(train): 长序列训练", url: `${location.origin}/acme/issues/WORK-860` } }),
+  ],
+  rootIds: ["WORK-860"], projects: [], truncated: false, archivedDeliveries: [], checkedAt: new Date().toISOString(),
+};
+/** The browser run settles a held action itself, so the in-progress state can be captured. */
+const held: { settle?: (result: unknown) => void } = {};
+(window as any).settleAction = (result: unknown) => held.settle?.(result);
 const handlers: Record<string, (input: any) => Promise<any>> = {
-  "session.board": async ({ agentId }) => agentId === "disconnected" ? { state: "disconnected", reason: "This Paseo session has no Multica binding.", checkedAt: "fixture" } : agentId === "mr" ? mrBoard : board(agentId),
+  "session.task-action": async ({ action }) => {
+    document.body.dataset.lastAction = JSON.stringify(action);
+    if (action.kind === "rerun") return new Promise((resolve) => { held.settle = resolve; });
+    if (action.kind === "status" && action.status === "in_progress") return { ok: false, status: 409, reason: "accept the current contract before completing this issue" };
+    return { ok: true };
+  },
+  "session.board": async ({ agentId }) => agentId === "disconnected" ? { state: "disconnected", reason: "This Paseo session has no Multica binding.", checkedAt: "fixture" } : agentId === "mr" ? mrBoard : agentId === "actions" ? actionsBoard : board(agentId),
   "session.task-expansion": async () => [],
   "session.status": async () => ({ state: "connected", checkedAt: "fixture" }),
   "web.open": async ({ path }) => ({ url: location.origin + path, externalUrl: location.origin + path }),

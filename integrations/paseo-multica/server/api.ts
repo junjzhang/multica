@@ -62,6 +62,10 @@ export interface MulticaApi {
   listSessionTasks(credential: ApiCredential, agentId: string, sessionId?: string): Promise<SessionTasksWire>;
   /** A read-only GET of an existing Multica endpoint; the caller validates the body. */
   get(credential: ApiCredential, path: string): Promise<unknown>;
+  /** `PUT /api/issues/{id}` with only `status`. */
+  updateIssueStatus(credential: ApiCredential, issueId: string, status: string): Promise<void>;
+  /** `POST /api/issues/{id}/rerun` with `task_id`: the server repeats that run of this issue. */
+  rerunIssue(credential: ApiCredential, issueId: string, taskId: string): Promise<void>;
 }
 
 export class MulticaApiError extends Error {
@@ -70,6 +74,8 @@ export class MulticaApiError extends Error {
     message: string,
     /** Machine-readable error code from the response body, when present. */
     readonly code?: string,
+    /** The server's own redacted explanation (`error` in the body), when present. */
+    readonly reason?: string,
   ) {
     super(message);
     this.name = "MulticaApiError";
@@ -104,7 +110,7 @@ export function createMulticaApi(options: {
 
   async function request(
     credential: ApiCredential,
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     token: string,
     body?: unknown,
@@ -138,12 +144,14 @@ export function createMulticaApi(options: {
       }
       if (response.status >= 400) {
         const detail = redactSecrets(text.replaceAll(token, "[redacted]").slice(0, MAX_ERROR_BODY)).trim();
-        const body = parseJson(text) as { code?: unknown } | null;
+        const body = parseJson(text) as { code?: unknown; error?: unknown } | null;
         const code = typeof body?.code === "string" && body.code !== "" ? body.code : undefined;
+        const reason = typeof body?.error === "string" ? redactSecrets(body.error.replaceAll(token, "[redacted]").slice(0, MAX_ERROR_BODY)).trim() : "";
         throw new MulticaApiError(
           response.status,
           `Multica API ${method} ${path} returned ${response.status}${detail ? `: ${detail}` : ""}`,
           code,
+          reason || undefined,
         );
       }
       return text;
@@ -156,6 +164,12 @@ export function createMulticaApi(options: {
     async get(credential, path) {
       if (!path.startsWith("/api/")) throw new Error("Invalid Multica API path");
       return parseJson(await request(credential, "GET", path, credential.token));
+    },
+    async updateIssueStatus(credential, issueId, status) {
+      await request(credential, "PUT", `/api/issues/${encodeURIComponent(issueId)}`, credential.token, { status });
+    },
+    async rerunIssue(credential, issueId, taskId) {
+      await request(credential, "POST", `/api/issues/${encodeURIComponent(issueId)}/rerun`, credential.token, { task_id: taskId });
     },
     async findPaseoSession(credential, hostId, sessionId) {
       const query = new URLSearchParams({ host_id: hostId, session_id: sessionId });

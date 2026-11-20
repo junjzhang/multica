@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { BOARD_SCOPES, boardDataSchema } from "./board";
+import { taskActionResultSchema, taskActionSchema } from "./task-actions";
 
 export const statusViewSchema = z.object({
   state: z.enum(["connected", "invalid", "unverified", "disconnected"]),
@@ -55,6 +56,13 @@ export const taskExpansion = defineRpc({
   name: "session.task-expansion",
   input: agentInput.extend({ issueId: z.string().uuid().optional(), expanded: z.boolean().optional() }),
   output: z.array(z.string().uuid()),
+});
+
+/** Reruns a task or moves its status, written with the owner profile; a refusal is a result, not a thrown error. */
+export const taskAction = defineRpc({
+  name: "session.task-action",
+  input: agentInput.extend({ issueId: z.string().uuid(), action: taskActionSchema }),
+  output: taskActionResultSchema,
 });
 
 export const backgroundWorkSupport = defineRpc({

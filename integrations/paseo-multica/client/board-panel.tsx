@@ -10,7 +10,8 @@ import {
   groupByProject,
   isFresh,
   isOpenPullRequest,
-  isTerminal,
+  isSession,
+  isUser,
   isUserTodo,
   type BoardData,
   type BoardIssue,
@@ -21,8 +22,10 @@ import {
   type Todo,
   type TodoKind,
   type TreeNode,
+  type Viewer,
 } from "../shared/board";
-import { sessionBoard, taskExpansion } from "../shared/contracts";
+import { sessionBoard, taskAction, taskExpansion } from "../shared/contracts";
+import { quickActions, type QuickAction } from "../shared/task-actions";
 import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-icon";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
@@ -234,6 +237,12 @@ export function sessionTarget(issue: BoardIssue, here: PaseoSession): PaseoSessi
   return session && !(session.serverId === here.serverId && session.agentId === here.agentId) ? session : undefined;
 }
 
+const NO_VIEWER: Viewer = { agentId: "", forgeUsernames: [] };
+
+function nodesOf(tree: TreeNode): TreeNode[] {
+  return [tree, ...tree.stages.flatMap((group) => group.nodes.flatMap(nodesOf))];
+}
+
 export function BoardSection(props: Props) {
   return <BoardContent key={props.agentId} {...props} />;
 }
@@ -241,6 +250,7 @@ export function BoardSection(props: Props) {
 function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const getBoard = useRpc(sessionBoard);
   const expansion = useRpc(taskExpansion);
+  const runAction = useRpc(taskAction);
   const [scope, setScope] = useState<BoardScope>("session");
   const [data, setData] = useState<BoardData | null>(null);
   const [error, setError] = useState("");
@@ -248,6 +258,7 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const [expansionError, setExpansionError] = useState("");
   const [parkedOpen, setParkedOpen] = useState(false);
+  const [actions, setActions] = useState<Record<string, ActionState>>({});
   const writes = useRef<Promise<unknown>>(Promise.resolve());
   const request = useRef(0);
 
@@ -257,7 +268,10 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     setError("");
     try {
       const next = await getBoard({ agentId, scope, refresh });
-      if (revision === request.current) setData(next);
+      if (revision === request.current) {
+        setData(next);
+        setActions((all) => Object.fromEntries(Object.entries(all).filter(([, state]) => state.pending)));
+      }
     } catch (cause) {
       if (revision === request.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -285,7 +299,20 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     const target = sessionTarget(issue, here);
     return target && openAgent ? () => openAgent(target) : undefined;
   };
-  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle };
+  const act = useCallback(async (issue: BoardIssue, action: QuickAction) => {
+    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${action.label}失败：${reason}` } }));
+    setActions((all) => ({ ...all, [issue.id]: { pending: action.label } }));
+    try {
+      const result = await runAction({ agentId, issueId: issue.id, action: action.action });
+      if (!result.ok) return fail(result.reason);
+      setActions(({ [issue.id]: _done, ...rest }) => rest);
+      await load(true);
+    } catch (cause) {
+      fail(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [agentId, runAction, load]);
+  const trees = useMemo(() => new Map(board ? Object.values(board.sections).flat().flatMap(nodesOf).map((tree) => [tree.issue.id, tree] as const) : []), [board]);
+  const row: RowContext = { colors, openTask, openSession, expandedIds, toggle, viewer: ready?.viewer ?? NO_VIEWER, now, trees, actions, act };
   // Still one row per issue: its most urgent to-do decides which block it appears in.
   const todos = board ? firstPerIssue(board.todos) : [];
   const yours = todos.filter((todo) => isUserTodo(todo.kind));
@@ -311,16 +338,16 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
       : <View style={{ gap: SPACE.xl }}>
         {yours.length > 0 || archivedDeliveries.length > 0 ? <Section title="需要你" colors={colors}>
           {archivedDeliveries.map((delivery) => <ArchivedDeliveryRow key={delivery.id} delivery={delivery} colors={colors} openAgent={openAgent} />)}
-          {yours.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
+          {yours.map((todo) => <TaskRow key={todo.issue.id} data={todoRow(todo, now)} depth={0} row={row} />)}
         </Section> : null}
         {sessions.length > 0 ? <Section title="待本会话处理" colors={colors}>
-          {sessions.map((todo) => <TodoRow key={todo.issue.id} todo={todo} now={now} row={row} />)}
+          {sessions.map((todo) => <TaskRow key={todo.issue.id} data={todoRow(todo, now)} depth={0} row={row} />)}
         </Section> : null}
         {active.length === 0 ? null
           : ready.scope === "all" ? <View style={{ gap: 2 }}>{groupByProject(active, ready.projects).map((group) => <Folder key={group.id ?? group.name} name={group.name} nodes={group.nodes} row={row} />)}</View>
-          : <Section title="进行中" colors={colors}>{active.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}</Section>}
+          : <Section title="进行中" colors={colors}>{active.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={0} row={row} />)}</Section>}
         {board.sections.parked.length > 0 ? <Section title="搁置" count={board.sections.parked.length} colors={colors} open={parkedOpen} onToggle={() => setParkedOpen(!parkedOpen)}>
-          {board.sections.parked.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={0} row={row} />)}
+          {board.sections.parked.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={0} row={row} />)}
         </Section> : null}
         {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, paddingLeft: GUTTER + SPACE.sm }}>部分子任务未显示</Text> : null}
       </View>}
@@ -391,8 +418,16 @@ function Section({ title, count, colors, open = true, onToggle, children }: { ti
   </View>;
 }
 
+type ActionState = { pending?: string; error?: string };
+
 type RowContext = {
   colors: Colors; openTask: OpenTask; expandedIds: string[]; toggle(id: string, expanded: boolean): void;
+  viewer: Viewer; now: number;
+  /** Every tree node on the board by issue id, so a to-do row expands to the same subtree as its tree row. */
+  trees: Map<string, TreeNode>;
+  /** Per issue, so a task open in two places shows one running action and one error. A reload clears settled errors. */
+  actions: Record<string, ActionState>;
+  act(issue: BoardIssue, action: QuickAction): Promise<void>;
   /** Opens the task's executing session; undefined when the row has no session to open. */
   openSession(issue: BoardIssue): (() => void) | undefined;
 };
@@ -497,15 +532,6 @@ function SessionButton({ identifier, colors, onPress }: { identifier: string; co
   </Pressable>;
 }
 
-function TodoRow({ todo, now, row }: { todo: Todo; now: number; row: RowContext }) {
-  const url = todo.issue.url;
-  const chip = todoChip(todo, now);
-  return <Row
-    issue={todo.issue} phrase={chip ? undefined : todoPhrase(todo, now)} chip={chip} depth={0} row={row} running={todo.issue.activeRun}
-    onPress={url ? () => row.openTask(url, todo.issue.identifier) : undefined}
-  />;
-}
-
 /** A project in the all view: a collapsible folder whose count turns amber when something inside needs you. */
 function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: RowContext }) {
   const { colors } = row;
@@ -525,28 +551,156 @@ function Folder({ name, nodes, row }: { name: string; nodes: TreeNode[]; row: Ro
         <Text style={{ color: urgent ? colors.statusWarning : colors.foregroundMuted, fontSize: FONT.sm }}>{nodes.length}</Text>
       </View>
     </Pressable>
-    {open ? nodes.map((tree) => <TreeRow key={tree.issue.id} tree={tree} depth={1} row={row} />) : null}
+    {open ? nodes.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={1} row={row} />) : null}
   </View>;
 }
 
-function TreeRow({ tree, depth, row }: { tree: TreeNode; depth: number; row: RowContext }) {
-  const { expandedIds, toggle, openTask } = row;
-  const { issue } = tree;
-  // Open MRs live in the chip; the disclosure keeps only the task's merged history.
-  const merged = issue.pullRequests.filter(isMerged);
+/** What a row shows besides its task: the to-do or tree supplies the phrase and MR marks; everything else is the task's. */
+type RowData = { issue: BoardIssue; phrase?: Phrase; chip?: PullRequestChip; mark?: { text: string; label: string } };
+
+export function todoRow(todo: Todo, now: number): RowData {
+  const chip = todoChip(todo, now);
+  return { issue: todo.issue, ...(chip ? { chip } : { phrase: todoPhrase(todo, now) }) };
+}
+
+export function treeRow(tree: TreeNode): RowData {
   const chip = treeChip(tree);
-  const hasOpenChildren = tree.stages.some((group) => group.nodes.some(isOpen));
-  const expandable = hasOpenChildren || merged.length > 0;
-  const expanded = expandable && expandedIds.includes(issue.id);
+  const phrase = treePhrase(tree);
+  const mark = chip ? undefined : mergedMark(tree.issue);
+  return { issue: tree.issue, ...(phrase ? { phrase } : {}), ...(chip ? { chip } : { ...(mark ? { mark } : {}) }) };
+}
+
+/**
+ * Every task row, in the to-do blocks and in the trees alike. Its disclosure is
+ * keyed by issue, so a task listed in both places opens and closes in both.
+ */
+function TaskRow({ data, depth, row }: { data: RowData; depth: number; row: RowContext }) {
+  const { issue } = data;
+  const tree = row.trees.get(issue.id);
+  const details = taskDetails(issue, tree, row);
+  const expandable = hasDetails(details);
+  const expanded = expandable && row.expandedIds.includes(issue.id);
   return <View>
     <Row
-      issue={issue} phrase={treePhrase(tree)} depth={depth} row={row} running={issue.activeRun} chip={chip} mark={chip ? undefined : mergedMark(issue)}
-      onPress={issue.url ? () => openTask(issue.url!, issue.identifier) : undefined}
-      disclosure={expandable ? { expanded, onToggle: () => toggle(issue.id, !expanded) } : undefined}
+      issue={issue} phrase={data.phrase} chip={data.chip} mark={data.mark} depth={depth} row={row} running={issue.activeRun}
+      onPress={issue.url ? () => row.openTask(issue.url!, issue.identifier) : undefined}
+      disclosure={expandable ? { expanded, onToggle: () => row.toggle(issue.id, !expanded) } : undefined}
     />
-    {expanded ? merged.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />) : null}
-    {expanded && hasOpenChildren ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
+    {expanded ? <TaskDetails details={details} issue={issue} tree={tree} depth={depth} row={row} /> : null}
   </View>;
+}
+
+/** The parts of an expanded row, in display order; an empty part is left out. */
+export type Details = { reasons: string[]; parent?: NonNullable<BoardIssue["parent"]>; merged: BoardPullRequest[]; children: boolean; actions: QuickAction[] };
+
+function hasDetails(details: Details): boolean {
+  return details.reasons.length > 0 || !!details.parent || details.merged.length > 0 || details.children || details.actions.length > 0;
+}
+
+/** Who holds the contract's turn, from the viewer's side. */
+function turnOf(issue: BoardIssue, viewer: Viewer): string | undefined {
+  const actor = issue.contract?.pendingActor;
+  if (!actor) return undefined;
+  if (isUser(actor, viewer)) return "你";
+  if (isSession(actor, viewer)) return "本会话";
+  return issue.contract?.pendingName ?? (actor.type === "agent" ? "其他 Agent" : actor.type === "member" ? "其他成员" : actor.type);
+}
+
+/** Why the task is where it is: its last failed run, whose turn it is, how long it has been blocked. */
+export function reasonsOf(issue: BoardIssue, viewer: Viewer, now: number): string[] {
+  const reasons: string[] = [];
+  if (issue.lastFailure) {
+    const ago = elapsed(issue.lastFailure.at, now);
+    reasons.push(`运行失败${ago ? `（${ago} 前）` : ""}${issue.lastFailure.summary ? `：${issue.lastFailure.summary}` : ""}`);
+  }
+  const turn = turnOf(issue, viewer);
+  if (turn) reasons.push(`轮到：${turn}`);
+  const blocked = issue.status === "blocked" ? elapsed(issue.blockedSince, now) : "";
+  if (blocked) reasons.push(`已阻塞 ${blocked}`);
+  return reasons;
+}
+
+export function taskDetails(issue: BoardIssue, tree: TreeNode | undefined, row: Pick<RowContext, "viewer" | "now">): Details {
+  return {
+    reasons: reasonsOf(issue, row.viewer, row.now),
+    ...(issue.parent ? { parent: issue.parent } : {}),
+    // Open MRs live in the chip; the details keep only the task's merged history.
+    merged: issue.pullRequests.filter(isMerged),
+    children: !!tree && tree.stages.some((group) => group.nodes.some(isOpen)),
+    actions: quickActions(issue),
+  };
+}
+
+function TaskDetails({ details, issue, tree, depth, row }: { details: Details; issue: BoardIssue; tree?: TreeNode; depth: number; row: RowContext }) {
+  const { colors } = row;
+  const inset = INDENT * depth + GUTTER + SPACE.sm;
+  return <View>
+    {details.reasons.map((reason) => <Text key={reason} selectable style={{ paddingLeft: inset, paddingRight: SPACE.sm, paddingVertical: 2, color: colors.foregroundMuted, fontSize: FONT.sm }}>{reason}</Text>)}
+    {details.parent ? <ParentLink parent={details.parent} inset={inset} row={row} /> : null}
+    {details.merged.map((pr) => <PullRequestRow key={pr.id} pr={pr} issue={issue} depth={depth + 1} row={row} />)}
+    {details.children && tree ? <StageGraph tree={tree} depth={depth} row={row} /> : null}
+    {details.actions.length > 0 ? <Actions issue={issue} actions={details.actions} inset={inset} row={row} /> : null}
+  </View>;
+}
+
+function ParentLink({ parent, inset, row }: { parent: NonNullable<BoardIssue["parent"]>; inset: number; row: RowContext }) {
+  const { colors } = row;
+  const hover = useHover();
+  const url = parent.url;
+  return <Pressable
+    accessibilityRole="link" accessibilityLabel={`父任务 ${parent.identifier} ${displayTitle(parent.title)}`}
+    disabled={!url} onPress={url ? () => row.openTask(url, parent.identifier) : undefined}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{ flexDirection: "row", alignItems: "center", gap: SPACE.sm, paddingLeft: inset, paddingRight: SPACE.sm, paddingVertical: SPACE.xs, borderRadius: RADIUS, backgroundColor: hover.hovered ? colors.surface1 : "transparent" }}
+  >
+    <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>父任务</Text>
+    <Text numberOfLines={1} style={{ flex: 1, color: colors.foreground, fontSize: FONT.sm, textDecorationLine: hover.hovered ? "underline" : "none" }}>{parent.identifier} {displayTitle(parent.title)}</Text>
+  </Pressable>;
+}
+
+/**
+ * The task's quick actions. One runs at a time; cancelling asks once more.
+ * A refusal shows the server's reason and leaves the board as it was; success
+ * refreshes the board, which is the only place the new state comes from.
+ */
+function Actions({ issue, actions, inset, row }: { issue: BoardIssue; actions: QuickAction[]; inset: number; row: RowContext }) {
+  const { colors } = row;
+  const [confirming, setConfirming] = useState<QuickAction | null>(null);
+  const { pending, error } = row.actions[issue.id] ?? {};
+  const run = (action: QuickAction) => {
+    setConfirming(null);
+    void row.act(issue, action);
+  };
+  return <View style={{ gap: SPACE.xs, paddingLeft: inset, paddingRight: SPACE.sm, paddingVertical: SPACE.xs }}>
+    {confirming ? <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
+      <Text style={{ color: colors.foreground, fontSize: FONT.sm }}>确认取消 {issue.identifier}？</Text>
+      <ActionButton label="确认取消" accessibilityLabel={`确认取消 ${issue.identifier}`} tone="danger" colors={colors} onPress={() => run(confirming)} />
+      <ActionButton label="返回" accessibilityLabel={`不取消 ${issue.identifier}`} colors={colors} onPress={() => setConfirming(null)} />
+    </View> : <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACE.sm }}>
+      {actions.map((action) => <ActionButton
+        key={action.label} label={action.label} accessibilityLabel={`${action.label} ${issue.identifier}`} colors={colors}
+        busy={pending === action.label} disabled={pending !== undefined}
+        onPress={() => (action.confirm ? setConfirming(action) : run(action))}
+      />)}
+    </View>}
+    {error ? <Text selectable style={{ color: colors.statusDanger, fontSize: FONT.sm }}>{error}</Text> : null}
+  </View>;
+}
+
+function ActionButton({ label, accessibilityLabel, tone, busy, disabled, colors, onPress }: { label: string; accessibilityLabel: string; tone?: Tone; busy?: boolean; disabled?: boolean; colors: Colors; onPress(): void }) {
+  const hover = useHover();
+  const color = tone ? toneColor(tone, colors) : colors.foreground;
+  return <Pressable
+    accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled: !!disabled, busy: !!busy }} disabled={disabled} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    style={{
+      flexDirection: "row", alignItems: "center", gap: SPACE.xs, height: 24, paddingHorizontal: SPACE.md, borderRadius: RADIUS, borderWidth: 1,
+      borderColor: tone ? color : colors.border, backgroundColor: hover.hovered && !disabled ? colors.surface2 : colors.surface1, opacity: disabled && !busy ? 0.5 : 1, cursor: disabled ? "auto" : "pointer",
+    }}
+  >
+    {busy ? <ActivityIndicator size={10} color={colors.foregroundMuted} /> : null}
+    <Text style={{ color, fontSize: FONT.sm, fontWeight: "500" }}>{busy ? `${label}中…` : label}</Text>
+  </Pressable>;
 }
 
 /** A finished subtree with no open MR is history; graphs keep it only in their counts. */
@@ -632,7 +786,7 @@ function StageGraph({ tree, depth, row }: { tree: TreeNode; depth: number; row: 
         </View> : null}
         {open ? nodes.map((child, childIndex) => <View key={child.issue.id} style={{ flexDirection: "row" }}>
           <Rail colors={colors} top bottom={!(last && childIndex === nodes.length - 1)} tick />
-          <View style={{ flex: 1 }}><TreeRow tree={child} depth={0} row={row} /></View>
+          <View style={{ flex: 1 }}><TaskRow data={treeRow(child)} depth={0} row={row} /></View>
         </View>) : null}
       </View>;
     })}

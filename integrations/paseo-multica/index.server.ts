@@ -1,7 +1,7 @@
 import { backgroundWorkSource } from "./server/background-work";
 import { homedir } from "node:os";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { backgroundWorkSupport, connectSession, disconnectSession, sessionBoard, statusSession, taskExpansion } from "./shared/contracts";
+import { backgroundWorkSupport, connectSession, disconnectSession, sessionBoard, statusSession, taskAction, taskExpansion } from "./shared/contracts";
 import { connectionSettings } from "./shared/settings";
 import { ConfigurationError, loadOwnerProfile } from "./server/owner-profile";
 import { z } from "zod";
@@ -66,6 +66,7 @@ export default function contribute(server: PluginServerContext & {
   server.handle(statusSession, async ({ agentId }, context) => service(context).status(agentId));
   server.handle(disconnectSession, async ({ agentId }, context) => service(context).disconnect(agentId));
   server.handle(sessionBoard, async ({ agentId, scope, refresh }, context) => service(context).board(agentId, scope, refresh));
+  server.handle(taskAction, async ({ agentId, issueId, action }, context) => service(context).taskAction(agentId, issueId, action));
   server.handle(taskExpansion, async ({ agentId, issueId, expanded }) => expansion(homedir(), agentId, issueId, expanded));
 
   // Only the context path, only for an existing binding, and never for history
