@@ -25,7 +25,7 @@ import {
   type Viewer,
 } from "../shared/board";
 import { sessionBoard, taskAction, taskExpansion } from "../shared/contracts";
-import { quickActions, type QuickAction } from "../shared/task-actions";
+import { taskMenu, type StatusChoice, type TaskAction } from "../shared/task-actions";
 import { STATUS_LABEL, STATUS_SVG, statusKey, type StatusKey } from "./status-icon";
 
 type Colors = PluginAgentPanelProps["theme"]["colors"];
@@ -299,11 +299,12 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
     const target = sessionTarget(issue, here);
     return target && openAgent ? () => openAgent(target) : undefined;
   };
-  const act = useCallback(async (issue: BoardIssue, action: QuickAction) => {
-    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${action.label}失败：${reason}` } }));
-    setActions((all) => ({ ...all, [issue.id]: { pending: action.label } }));
+  const act = useCallback(async (issue: BoardIssue, action: TaskAction) => {
+    const label = actionLabel(action);
+    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${label}失败：${reason}` } }));
+    setActions((all) => ({ ...all, [issue.id]: { pending: label } }));
     try {
-      const result = await runAction({ agentId, issueId: issue.id, action: action.action });
+      const result = await runAction({ agentId, issueId: issue.id, action });
       if (!result.ok) return fail(result.reason);
       setActions(({ [issue.id]: _done, ...rest }) => rest);
       await load(true);
@@ -385,6 +386,10 @@ function Notice({ colors, title, detail }: { colors: Colors; title: string; deta
 /** `onChange` lets a row know one of its targets is hovered. */
 function useHover(onChange?: (hovered: boolean) => void) {
   const [hovered, setHovered] = useState(false);
+  const report = useRef(onChange);
+  report.current = onChange;
+  // A target that unmounts while hovered, such as a chip gone after a reload, must not keep its row hovered.
+  useEffect(() => () => report.current?.(false), []);
   return {
     hovered,
     onHoverIn: () => { setHovered(true); onChange?.(true); },
@@ -435,7 +440,7 @@ type RowContext = {
   trees: Map<string, TreeNode>;
   /** Per issue, so a task open in two places shows one running action and one error. A reload clears settled errors. */
   actions: Record<string, ActionState>;
-  act(issue: BoardIssue, action: QuickAction): Promise<void>;
+  act(issue: BoardIssue, action: TaskAction): Promise<void>;
   /** Clears a settled error; a running action stays. */
   dismiss(issueId: string): void;
   /** Opens the task's executing session; undefined when the row has no session to open. */
@@ -470,7 +475,6 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
   const title = displayTitle(issue.title);
   const status = statusKey(issue);
   const openSession = row.openSession(issue);
-  const actions = quickActions(issue);
   const error = row.actions[issue.id]?.error;
   return <View>
     <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: INDENT * depth, borderRadius: RADIUS, backgroundColor: pressed ? colors.surface2 : hover.hovered ? colors.surface1 : "transparent" }}>
@@ -499,7 +503,7 @@ function Row({ issue, phrase, depth, row, running, chip, mark, onPress, disclosu
       </Pressable>
       {chip ? <Chip chip={chip} colors={colors} open={listOpen} onToggle={() => setListOpen(!listOpen)} onHover={track("chip")} /> : null}
       {openSession ? <SessionButton identifier={issue.identifier} colors={colors} onPress={openSession} onHover={track("session")} /> : null}
-      {actions.length > 0 ? <TaskMenu issue={issue} actions={actions} row={row} rowHovered={Object.values(over).some(Boolean)} onHover={track("menu")} /> : null}
+      <TaskMenu issue={issue} row={row} rowHovered={Object.values(over).some(Boolean)} onHover={track("menu")} />
     </View>
     {error ? <ActionError issue={issue} error={error} depth={depth} row={row} /> : null}
     {chip && listOpen && chip.entries.length > 1 ? chip.entries.map((entry) => <PullRequestRow key={entry.pr.id} pr={entry.pr} issue={entry.issue} source={entry.issue.id === issue.id ? undefined : entry.issue} depth={depth + 1} row={row} />) : null}
@@ -550,7 +554,7 @@ function SessionButton({ identifier, colors, onPress, onHover }: { identifier: s
 }
 
 const ELLIPSIS_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="19" cy="12" r="1.75"/></svg>';
-const MENU_W = 168;
+const MENU_W = 200;
 const ITEM_H = 30;
 const MENU_PAD = 4;
 const SEPARATOR_H = 9;
@@ -559,10 +563,15 @@ const EDGE = 8;
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
-/** Every item is ITEM_H tall, so the menu's height is known before it renders. */
-export function menuHeight(actions: QuickAction[]): number {
-  const separated = actions.some((action) => action.confirm) && actions.some((action) => !action.confirm);
-  return actions.length * ITEM_H + 2 * MENU_PAD + (separated ? SEPARATOR_H : 0);
+/** What a write is called in its running state and its error: 重跑, or 改为 and the status's name. */
+export function actionLabel(action: TaskAction): string {
+  return action.kind === "rerun" ? "重跑" : `改为${STATUS_LABEL[action.status]}`;
+}
+
+/** Every item is ITEM_H tall, so the menu's height is known before it renders: rerun and its separator, the statuses, and the separator before cancelled. */
+export function menuHeight(menu: { rerunTaskId?: string; statuses: unknown[] }): number {
+  const rerun = menu.rerunTaskId ? 1 : 0;
+  return (rerun + menu.statuses.length) * ITEM_H + 2 * MENU_PAD + (rerun + 1) * SEPARATOR_H;
 }
 
 /** Below the anchor, right-aligned to it; above it when below would cross the window's bottom and above fits. */
@@ -575,12 +584,14 @@ export function menuPlacement(anchor: Rect, size: { width: number; height: numbe
 }
 
 /**
- * The row's quick actions behind a quiet ⋯ at its end. The menu floats in a
- * transparent modal, so no scroll view or panel edge clips it; the backdrop
- * closes it, which also makes a second press on ⋯ close it. Cancelling asks
- * once more in place. While an action runs the menu stays closed and ⋯ spins.
+ * The row's status picker behind a quiet ⋯ at its end: rerun first when the
+ * last run failed, then every status with the current one checked. The menu
+ * floats in a transparent modal, so no scroll view or panel edge clips it; the
+ * backdrop closes it, which also makes a second press on ⋯ close it.
+ * Cancelling asks once more in place. While a write runs the menu stays
+ * closed and ⋯ spins.
  */
-function TaskMenu({ issue, actions, row, rowHovered, onHover }: { issue: BoardIssue; actions: QuickAction[]; row: RowContext; rowHovered: boolean; onHover(hovered: boolean): void }) {
+function TaskMenu({ issue, row, rowHovered, onHover }: { issue: BoardIssue; row: RowContext; rowHovered: boolean; onHover(hovered: boolean): void }) {
   const { colors } = row;
   const hover = useHover(onHover);
   const anchor = useRef<View>(null);
@@ -591,12 +602,19 @@ function TaskMenu({ issue, actions, row, rowHovered, onHover }: { issue: BoardIs
   const pending = row.actions[issue.id]?.pending;
   const close = () => { setAt(null); setConfirming(false); };
   const toggle = () => (at ? close() : anchor.current?.measureInWindow((x, y, width, height) => setAt({ x, y, width, height })));
-  const run = (action: QuickAction) => { close(); void row.act(issue, action); };
+  const run = (action: TaskAction) => { close(); void row.act(issue, action); };
   // Touch screens have no hover, so the target is always there.
   const shown = Platform.OS !== "web" || rowHovered || hover.hovered || focused || !!at || !!pending;
-  const cancel = actions.find((action) => action.confirm);
-  const others = actions.filter((action) => !action.confirm);
-  const place = at ? menuPlacement(at, { width: MENU_W, height: menuHeight(actions) }, window) : undefined;
+  const menu = taskMenu(issue);
+  const cancel = menu.statuses.find((choice) => choice.status === "cancelled")!;
+  const place = at ? menuPlacement(at, { width: MENU_W, height: menuHeight(menu) }, window) : undefined;
+  const separator = <View style={{ height: 1, marginVertical: (SEPARATOR_H - 1) / 2, backgroundColor: colors.border }} />;
+  const statusItem = (choice: StatusChoice, extra: Partial<MenuItemProps> = {}) => <MenuItem
+    key={choice.status} label={STATUS_LABEL[choice.status]} name={`${STATUS_LABEL[choice.status]} ${issue.identifier}${choice.blocked ? `，${choice.blocked}` : ""}`}
+    icon={<Icon icon={{ svg: STATUS_SVG[choice.status] }} size={14} color={choice.status === "cancelled" ? colors.statusDanger : statusColor(choice.status, colors)} />}
+    checked={choice.current} note={choice.blocked} disabled={choice.current || !!choice.blocked} colors={colors}
+    onPress={() => run({ kind: "status", status: choice.status })} {...extra}
+  />;
   return <>
     <Pressable
       ref={anchor} accessibilityRole="button" accessibilityLabel={pending ? `${issue.identifier} 正在${pending}` : `${issue.identifier} 的操作`}
@@ -619,34 +637,47 @@ function TaskMenu({ issue, actions, row, rowHovered, onHover }: { issue: BoardIs
           borderColor: colors.border, backgroundColor: colors.surface0, boxShadow: "0 6px 20px rgba(0, 0, 0, 0.18)",
         }}
       >
-        {others.map((action) => <MenuItem key={action.label} label={action.label} name={`${action.label} ${issue.identifier}`} icon={actionIcon(action, colors)} colors={colors} onPress={() => run(action)} />)}
-        {cancel && others.length > 0 ? <View style={{ height: 1, marginVertical: (SEPARATOR_H - 1) / 2, backgroundColor: colors.border }} /> : null}
-        {cancel ? <MenuItem
-          label={confirming ? "确认取消？" : cancel.label} name={confirming ? `确认取消 ${issue.identifier}` : `${cancel.label} ${issue.identifier}`}
-          icon={actionIcon(cancel, colors)} danger confirming={confirming} colors={colors} onPress={() => (confirming ? run(cancel) : setConfirming(true))}
-        /> : null}
+        {menu.rerunTaskId ? <>
+          <MenuItem
+            label="重跑" name={`重跑 ${issue.identifier}`} icon={<Icon name="RotateCcw" size={14} color={colors.foregroundMuted} />} colors={colors}
+            onPress={() => run({ kind: "rerun", taskId: menu.rerunTaskId! })}
+          />
+          {separator}
+        </> : null}
+        {menu.statuses.filter((choice) => choice !== cancel).map((choice) => statusItem(choice))}
+        {separator}
+        {statusItem(cancel, confirming
+          ? { label: "确认取消？", name: `确认取消 ${issue.identifier}`, confirming: true, onPress: () => run({ kind: "status", status: "cancelled" }) }
+          : { danger: true, onPress: () => setConfirming(true) })}
       </View>
     </Modal> : null}
   </>;
 }
 
-function actionIcon(action: QuickAction, colors: Colors): ReactNode {
-  const { action: target } = action;
-  if (target.kind === "rerun") return <Icon name="RotateCcw" size={14} color={colors.foregroundMuted} />;
-  return <Icon icon={{ svg: STATUS_SVG[target.status] }} size={14} color={target.status === "cancelled" ? colors.statusDanger : statusColor(target.status, colors)} />;
-}
+type MenuItemProps = {
+  label: string; name: string; icon: ReactNode; colors: Colors; onPress(): void;
+  /** The task's current status. */
+  checked?: boolean;
+  /** Why the item is unavailable, shown muted at its end. */
+  note?: string;
+  disabled?: boolean; danger?: boolean; confirming?: boolean;
+};
 
-function MenuItem({ label, name, icon, danger, confirming, colors, onPress }: { label: string; name: string; icon: ReactNode; danger?: boolean; confirming?: boolean; colors: Colors; onPress(): void }) {
+function MenuItem({ label, name, icon, colors, onPress, checked, note, disabled, danger, confirming }: MenuItemProps) {
   const hover = useHover();
+  const active = hover.hovered && !disabled;
   return <Pressable
-    accessibilityRole="menuitem" accessibilityLabel={name} onPress={onPress} onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
+    accessibilityRole="menuitem" accessibilityLabel={name} accessibilityState={{ checked: !!checked, disabled: !!disabled }} disabled={disabled} onPress={onPress}
+    onHoverIn={hover.onHoverIn} onHoverOut={hover.onHoverOut}
     style={{
       flexDirection: "row", alignItems: "center", gap: SPACE.md, height: ITEM_H, paddingHorizontal: SPACE.md, borderRadius: RADIUS - 2,
-      backgroundColor: confirming || hover.hovered ? colors.surface2 : "transparent", cursor: "pointer",
+      backgroundColor: confirming || active ? colors.surface2 : "transparent", opacity: note ? 0.55 : 1, cursor: disabled ? "auto" : "pointer",
     }}
   >
     {icon}
-    <Text numberOfLines={1} style={{ flex: 1, color: danger ? colors.statusDanger : colors.foreground, fontSize: FONT.sm, fontWeight: confirming ? "600" : "400" }}>{label}</Text>
+    <Text numberOfLines={1} style={{ flex: 1, color: danger || confirming ? colors.statusDanger : colors.foreground, fontSize: FONT.sm, fontWeight: checked || confirming ? "600" : "400" }}>{label}</Text>
+    {note ? <Text numberOfLines={1} style={{ color: colors.foregroundMuted, fontSize: FONT.sm }}>{note}</Text> : null}
+    {checked ? <Icon name="Check" size={14} color={colors.foreground} /> : null}
   </Pressable>;
 }
 

@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { isTerminal, type BoardIssue } from "./board";
+import type { BoardIssue } from "./board";
 
-/** Statuses a quick action may write. Done is absent on purpose: completing a task goes through acceptance. */
-export const ACTION_STATUSES = ["in_progress", "blocked", "backlog", "cancelled"] as const;
+/** Multica's built-in statuses in board order; cancelled is last because the menu sets it apart. */
+export const ACTION_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"] as const;
 export type ActionStatus = (typeof ACTION_STATUSES)[number];
 
 export const taskActionSchema = z.discriminatedUnion("kind", [
@@ -19,24 +19,30 @@ export const taskActionResultSchema = z.discriminatedUnion("ok", [
 ]);
 export type TaskActionResult = z.infer<typeof taskActionResultSchema>;
 
-export interface QuickAction {
-  action: TaskAction;
-  label: string;
-  /** Cancelling needs a second press; every other action runs at once. */
-  confirm?: boolean;
+export interface StatusChoice {
+  status: ActionStatus;
+  current: boolean;
+  /** Why this status cannot be chosen now; the current status needs no reason. */
+  blocked?: string;
 }
 
-const status = (to: ActionStatus, label: string): QuickAction => ({ action: { kind: "status", status: to }, label, ...(to === "cancelled" ? { confirm: true } : {}) });
-const CANCEL = status("cancelled", "取消任务");
-const SWITCH_LABEL: Record<ActionStatus, string> = { in_progress: "改为进行中", blocked: "改为阻塞", backlog: "放回待规划", cancelled: "取消任务" };
+export interface TaskMenuModel {
+  /** The failed run a rerun repeats, when the latest run failed and its id is known. */
+  rerunTaskId?: string;
+  statuses: StatusChoice[];
+}
 
-/** The few actions that fit the task's state; a closed task has none. */
-export function quickActions(issue: Pick<BoardIssue, "status" | "statusCategory" | "lastRunFailed" | "lastFailure" | "activeRun">): QuickAction[] {
-  if (isTerminal(issue)) return [];
-  if (issue.status === "blocked") return [status("in_progress", "恢复进行中"), status("backlog", "放回待规划"), CANCEL];
-  if (issue.lastRunFailed && !issue.activeRun) {
-    const taskId = issue.lastFailure?.taskId;
-    return [...(taskId ? [{ action: { kind: "rerun", taskId }, label: "重跑" } satisfies QuickAction] : []), status("blocked", "转为阻塞"), CANCEL];
-  }
-  return ACTION_STATUSES.filter((to) => to !== issue.status).map((to) => status(to, SWITCH_LABEL[to]));
+/** The server refuses done (`issue_contract_acceptance_required`) until every criterion of the current contract is accepted. */
+const CONTRACT_PENDING = "需先验收合同";
+
+export function taskMenu(issue: Pick<BoardIssue, "status" | "contract" | "lastRunFailed" | "lastFailure" | "activeRun">): TaskMenuModel {
+  const taskId = issue.lastRunFailed && !issue.activeRun ? issue.lastFailure?.taskId : undefined;
+  const contractPending = !!issue.contract && !issue.contract.accepted;
+  return {
+    ...(taskId ? { rerunTaskId: taskId } : {}),
+    statuses: ACTION_STATUSES.map((status) => {
+      const current = status === issue.status;
+      return { status, current, ...(!current && status === "done" && contractPending ? { blocked: CONTRACT_PENDING } : {}) };
+    }),
+  };
 }

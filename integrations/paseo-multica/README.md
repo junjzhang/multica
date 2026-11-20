@@ -126,18 +126,20 @@ long it has been blocked), a parent link that opens the parent's task, the MRs,
 and the children. It holds no buttons. A blocked task's duration comes from the
 last status change to blocked.
 
-Quick actions sit behind a ⋯ at the end of every open task's row, to-do and
-tree alike, without expanding it. ⋯ appears while the row is hovered or ⋯ has
+Quick actions sit behind a ⋯ at the end of every task's row, to-do and tree
+alike, without expanding it. ⋯ appears while the row is hovered or ⋯ has
 keyboard focus, and always on touch screens. Its menu floats in a transparent
 modal, so no scroll view or panel edge clips it; it opens below ⋯, or above it
 when the window's bottom is too close. Pressing outside, Esc, or ⋯ again closes
 it.
 
-The items follow the task's state: a failed run offers 重跑, 转为阻塞 and
-取消任务; a blocked task offers 恢复进行中, 放回待规划 and 取消任务; any other open task
-switches between 进行中, 阻塞, 待规划 and 取消任务; the current status is never
-offered, and a closed task has no ⋯. Done is never a quick action: completing a
-task goes through acceptance. 取消任务 is last, in red after a separator; its
+The menu is a status picker: 待规划, 未开始, 进行中, 评审中, 阻塞, 已完成 and 已取消,
+each with its status icon. The current status is checked and cannot be chosen,
+so a closed task can be reopened from the same list. 已完成 is greyed with
+需先验收合同 while the task's contract is not fully accepted, because the server
+refuses it (`issue_contract_acceptance_required`); without a contract, or once
+it is accepted, done is set directly. When the latest run failed and its id is
+known, 重跑 sits above the list. 已取消 is last, in red after a separator; its
 first press turns it into 确认取消？ and only the second runs it. Running an
 action closes the menu and ⋯ spins. An action's state belongs to its task, so a
 task open in two places shows the same running state in both; success reloads
@@ -161,7 +163,7 @@ acceptance usually closes the task while its MR still waits for approval.
 
 Classification lives in `shared/board.ts` as a pure function of issue facts and
 the clock. Classification itself never writes a task; the only writes are the
-quick actions described below.
+quick actions described above.
 
 ```text
 需要处理: contract.pending_actor is this session or the user

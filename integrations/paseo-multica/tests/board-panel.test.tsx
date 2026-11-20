@@ -25,7 +25,7 @@ const issues: BoardIssue[] = [
 const ready = (scope: "session" | "all"): ReadyBoardData => ({ state: "ready", scope, viewer: { agentId: "leader", sessionId: "s1", forgeUsernames: ["me"] }, issues, rootIds: ["root", "approval", "old", "mr"], projects: [{ id: "p1", name: "Paseo" }], truncated: false, checkedAt: "2026-11-17T07:08:00Z" });
 const getBoard = vi.fn(async ({ scope }: { scope: "session" | "all" }) => ready(scope));
 import { BoardSection, displayTitle, menuHeight, menuPlacement, mergedMark, reasonsOf, todoChip, todoPhrase, treeChip, treePhrase } from "../client/board-panel";
-import { quickActions } from "../shared/task-actions";
+import { taskMenu } from "../shared/task-actions";
 import { buildBoard } from "../shared/board";
 
 type Rendered = ReturnType<ReactTestRenderer["toJSON"]>;
@@ -337,24 +337,25 @@ const pressExact = async (renderer: ReactTestRenderer, name: string) => {
 };
 const pressables = (renderer: ReactTestRenderer, name: string) => renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === name);
 
-it("gives each state only the actions that fit it, never done", () => {
-  const labels = (extra: Partial<BoardIssue>) => quickActions({ ...base, status: "in_progress", ...extra }).map((action) => [action.label, action.action, !!action.confirm]);
-  expect(labels({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } })).toEqual([
-    ["重跑", { kind: "rerun", taskId: "run-1" }, false], ["转为阻塞", { kind: "status", status: "blocked" }, false], ["取消任务", { kind: "status", status: "cancelled" }, true],
-  ]);
-  // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
-  expect(labels({ lastRunFailed: true }).map(([label]) => label)).toEqual(["转为阻塞", "取消任务"]);
-  expect(labels({ status: "blocked", lastRunFailed: true })).toEqual([
-    ["恢复进行中", { kind: "status", status: "in_progress" }, false], ["放回待规划", { kind: "status", status: "backlog" }, false], ["取消任务", { kind: "status", status: "cancelled" }, true],
-  ]);
-  expect(labels({}).map(([label]) => label)).toEqual(["改为阻塞", "放回待规划", "取消任务"]);
-  expect(labels({ status: "backlog" }).map(([label]) => label)).toEqual(["改为进行中", "改为阻塞", "取消任务"]);
-  expect(labels({ status: "in_review" }).map(([label]) => label)).toEqual(["改为进行中", "改为阻塞", "放回待规划", "取消任务"]);
-  expect(labels({ status: "done", statusCategory: "completed" })).toEqual([]);
-  expect(labels({ status: "cancelled", statusCategory: "cancelled" })).toEqual([]);
-  for (const status of ["in_progress", "blocked", "backlog", "todo"]) {
-    expect(quickActions({ ...base, status }).some((action) => action.action.kind === "status" && (action.action.status as string) === "done")).toBe(false);
+it("offers every status with the current one checked, done held back by an unaccepted contract, and rerun for a failed run", () => {
+  const menu = (extra: Partial<BoardIssue>) => taskMenu({ ...base, status: "in_progress", ...extra });
+  const all = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
+  for (const status of [...all, "custom"]) {
+    const { statuses } = menu({ status });
+    expect(statuses.map((choice) => choice.status)).toEqual(all);
+    expect(statuses.filter((choice) => choice.current).map((choice) => choice.status)).toEqual(status === "custom" ? [] : [status]);
   }
+  const done = (extra: Partial<BoardIssue>) => menu(extra).statuses.find((choice) => choice.status === "done");
+  expect(done({})).toEqual({ status: "done", current: false });
+  expect(done({ contract: { accepted: true } })).toEqual({ status: "done", current: false });
+  expect(done({ contract: { accepted: false } })).toEqual({ status: "done", current: false, blocked: "需先验收合同" });
+  expect(done({ status: "done", contract: { accepted: false } })).toEqual({ status: "done", current: true });
+  expect(menu({ contract: { accepted: false } }).statuses.filter((choice) => choice.blocked).map((choice) => choice.status)).toEqual(["done"]);
+  expect(menu({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } }).rerunTaskId).toBe("run-1");
+  // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
+  expect(menu({ lastRunFailed: true }).rerunTaskId).toBeUndefined();
+  expect(menu({ lastRunFailed: true, activeRun: true, lastFailure: { summary: "", taskId: "run-1" } }).rerunTaskId).toBeUndefined();
+  expect(menu({}).rerunTaskId).toBeUndefined();
 });
 
 it("says why a task is here: its failed run, whose turn, how long blocked", () => {
@@ -434,25 +435,38 @@ describe("a task row's ⋯ menu", () => {
     await act(async () => { renderer.unmount(); });
   });
 
-  it("lists exactly the quick actions, cancel last in danger after a separator, and no current status", async () => {
+  it("lists every status, the current one checked, cancelled last in danger, rerun on top for a failed run", async () => {
     const renderer = await render();
     await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
     expect(menus(renderer)).toHaveLength(1);
     expect(trigger(renderer, "WORK-60").props.accessibilityState.expanded).toBe(true);
-    expect(items(renderer)).toEqual(quickActions(failing).map((action) => `${action.label} WORK-60`));
-    expect(items(renderer)).toEqual(["重跑 WORK-60", "转为阻塞 WORK-60", "取消任务 WORK-60"]);
+    expect(items(renderer)).toEqual([
+      "重跑 WORK-60", "待规划 WORK-60", "未开始 WORK-60", "进行中 WORK-60", "评审中 WORK-60", "阻塞 WORK-60", "已完成 WORK-60，需先验收合同", "已取消 WORK-60",
+    ]);
+    expect(text(renderer)).not.toMatch(/改为|放回|转为|恢复/);
     const menu = menus(renderer)[0]!;
     const children = menu.findByProps({ accessibilityRole: "menu" }).children as Instance[];
-    expect(children.map((node) => (node.type as unknown) === "View" ? "separator" : "menuitem")).toEqual(["menuitem", "menuitem", "separator", "menuitem"]);
-    const cancel = menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "取消任务")[0]!;
+    expect(children.map((node) => (node.type as unknown) === "View" ? "|" : "item").join("")).toBe("item|itemitemitemitemitemitem|item");
+    const item = (name: string) => menu.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityLabel === name)[0]!;
+    const current = item("进行中 WORK-60");
+    expect(current.props.disabled).toBe(true);
+    expect(current.props.accessibilityState).toEqual({ checked: true, disabled: true });
+    expect(current.findAll((node) => (node.type as unknown) === "Icon" && node.props.name === "Check")).toHaveLength(1);
+    expect(item("阻塞 WORK-60").props.disabled).toBe(false);
+    expect(item("阻塞 WORK-60").findAll((node) => (node.type as unknown) === "Icon" && node.props.name === "Check")).toHaveLength(0);
+    const done = item("已完成 WORK-60，需先验收合同");
+    expect(done.props.disabled).toBe(true);
+    expect(label(done)).toContain("需先验收合同");
+    expect(done.props.style.opacity).toBeLessThan(1);
+    const cancel = menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "已取消")[0]!;
     expect(cancel.props.style.color).toBe("statusDanger");
-    expect(menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "重跑")[0]!.props.style.color).toBe("foreground");
+    expect(menu.findAll((node) => (node.type as unknown) === "Text" && label(node) === "阻塞")[0]!.props.style.color).toBe("foreground");
     await act(async () => { menus(renderer)[0]!.props.onRequestClose(); });
+    // No failed run and no contract: no rerun, and done is open.
     await act(async () => { pressables(renderer, "WORK-70 的操作")[0]!.props.onPress(); });
-    expect(items(renderer)).toEqual(["恢复进行中 WORK-70", "放回待规划 WORK-70", "取消任务 WORK-70"]);
-    for (const issue of [failing, blocked]) {
-      expect(quickActions(issue).some((action) => action.action.kind === "status" && action.action.status === issue.status)).toBe(false);
-    }
+    expect(items(renderer)).toEqual(["待规划 WORK-70", "未开始 WORK-70", "进行中 WORK-70", "评审中 WORK-70", "阻塞 WORK-70", "已完成 WORK-70", "已取消 WORK-70"]);
+    expect(pressables(renderer, "已完成 WORK-70")[0]!.props.disabled).toBe(false);
+    expect(pressables(renderer, "阻塞 WORK-70")[0]!.props.accessibilityState.checked).toBe(true);
     await act(async () => { renderer.unmount(); });
   });
 
@@ -473,9 +487,12 @@ describe("a task row's ⋯ menu", () => {
 
   it("runs each action through the plugin with its issue, then refreshes the board", async () => {
     const renderer = await render();
-    for (const [name, action] of [["重跑 WORK-60", { kind: "rerun", taskId: "run-60" }], ["转为阻塞 WORK-60", { kind: "status", status: "blocked" }], ["恢复进行中 WORK-70", { kind: "status", status: "in_progress" }], ["放回待规划 WORK-70", { kind: "status", status: "backlog" }]] as const) {
+    for (const [name, action] of [
+      ["重跑 WORK-60", { kind: "rerun", taskId: "run-60" }], ["阻塞 WORK-60", { kind: "status", status: "blocked" }], ["评审中 WORK-60", { kind: "status", status: "in_review" }],
+      ["进行中 WORK-70", { kind: "status", status: "in_progress" }], ["待规划 WORK-70", { kind: "status", status: "backlog" }], ["未开始 WORK-70", { kind: "status", status: "todo" }], ["已完成 WORK-70", { kind: "status", status: "done" }],
+    ] as const) {
       getBoard.mockClear();
-      await act(async () => { trigger(renderer, name.slice(-7)).props.onPress(); });
+      await act(async () => { trigger(renderer, name.split(" ")[1]!).props.onPress(); });
       await pressExact(renderer, name);
       expect(menus(renderer)).toHaveLength(0);
       expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: name.endsWith("60") ? "fail" : "blk", action });
@@ -490,16 +507,17 @@ describe("a task row's ⋯ menu", () => {
   it("asks once more inside the menu before cancelling", async () => {
     const renderer = await render();
     await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
-    await pressExact(renderer, "取消任务 WORK-60");
+    await pressExact(renderer, "已取消 WORK-60");
     expect(runAction).not.toHaveBeenCalled();
     expect(menus(renderer)).toHaveLength(1);
-    expect(items(renderer)).toEqual(["重跑 WORK-60", "转为阻塞 WORK-60", "确认取消 WORK-60"]);
+    expect(items(renderer).at(-1)).toBe("确认取消 WORK-60");
+    expect(items(renderer)).toHaveLength(8);
     expect(text(renderer)).toContain("确认取消？");
     // Closing forgets the pending confirmation.
     await pressExact(renderer, "关闭菜单");
     await act(async () => { trigger(renderer, "WORK-60").props.onPress(); });
-    expect(items(renderer)).toContain("取消任务 WORK-60");
-    await pressExact(renderer, "取消任务 WORK-60");
+    expect(items(renderer).at(-1)).toBe("已取消 WORK-60");
+    await pressExact(renderer, "已取消 WORK-60");
     await pressExact(renderer, "确认取消 WORK-60");
     expect(runAction).toHaveBeenCalledWith({ agentId: "acts", issueId: "fail", action: { kind: "status", status: "cancelled" } });
     expect(menus(renderer)).toHaveLength(0);
@@ -511,34 +529,36 @@ describe("a task row's ⋯ menu", () => {
     let settle!: (value: { ok: true }) => void;
     runAction.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
     await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
-    await pressExact(renderer, "恢复进行中 WORK-70");
-    const busy = pressables(renderer, "WORK-70 正在恢复进行中")[0]!;
+    await pressExact(renderer, "进行中 WORK-70");
+    const busy = pressables(renderer, "WORK-70 正在改为进行中")[0]!;
     expect(busy.props.disabled).toBe(true);
     expect(busy.props.style.opacity).toBe(1);
     expect(busy.findAll((node) => (node.type as unknown) === "ActivityIndicator")).toHaveLength(1);
     expect(menus(renderer)).toHaveLength(0);
     await act(async () => { settle({ ok: true }); });
-    expect(pressables(renderer, "WORK-70 正在恢复进行中")).toHaveLength(0);
+    expect(pressables(renderer, "WORK-70 正在改为进行中")).toHaveLength(0);
     expect(trigger(renderer, "WORK-70").props.disabled).toBe(false);
     await act(async () => { renderer.unmount(); });
   });
 
-  it("shows a failure as one dismissible line under the row until the board reloads", async () => {
+  it("shows a failure, the server's own reason included, as one dismissible line under the row until the board reloads", async () => {
     const renderer = await render();
-    runAction.mockResolvedValueOnce({ ok: false, status: 409, reason: "accept the current contract before completing this issue" });
+    // The board may not know a contract the server still enforces; its refusal is shown as given.
+    runAction.mockResolvedValueOnce({ ok: false, status: 409, reason: "issue_contract_acceptance_required" });
     getBoard.mockClear();
     await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
-    await pressExact(renderer, "恢复进行中 WORK-70");
-    expect(text(renderer)).toContain("恢复进行中失败：accept the current contract before completing this issue");
+    await pressExact(renderer, "已完成 WORK-70");
+    expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: "blk", action: { kind: "status", status: "done" } });
+    expect(text(renderer)).toContain("改为已完成失败：issue_contract_acceptance_required");
     expect(getBoard).not.toHaveBeenCalled();
     await pressExact(renderer, "关闭 WORK-70 的错误");
-    expect(text(renderer)).not.toContain("恢复进行中失败");
+    expect(text(renderer)).not.toContain("改为已完成失败");
     runAction.mockRejectedValueOnce(new Error("rpc unavailable"));
     await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
-    await pressExact(renderer, "放回待规划 WORK-70");
-    expect(text(renderer)).toContain("放回待规划失败：rpc unavailable");
+    await pressExact(renderer, "待规划 WORK-70");
+    expect(text(renderer)).toContain("改为待规划失败：rpc unavailable");
     await pressExact(renderer, "刷新");
-    expect(text(renderer)).not.toContain("放回待规划失败");
+    expect(text(renderer)).not.toContain("改为待规划失败");
     await act(async () => { renderer.unmount(); });
   });
 
@@ -567,21 +587,22 @@ describe("a task row's ⋯ menu", () => {
     await pressExact(renderer, "展开 WORK-60");
     const details = text(renderer);
     expect(details).toMatch(/运行失败（10d 前）：OOM on rank 3\n轮到：开发 · Opus[\s\S]*父任务\n+WORK-50 训练总任务/);
-    expect(details).not.toMatch(/重跑|转为阻塞|取消任务/);
-    expect(renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && /^(重跑|转为阻塞|取消任务) /.test(node.props.accessibilityLabel ?? ""))).toHaveLength(0);
+    expect(details).not.toMatch(/重跑|已取消/);
+    expect(renderer.root.findAll((node) => (node.type as unknown) === "Pressable" && node.props.accessibilityRole === "menuitem")).toHaveLength(0);
     await pressExact(renderer, "父任务 WORK-50 训练总任务");
     expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/WORK-50", "WORK-50");
     await pressExact(renderer, "展开 WORK-70");
     expect(text(renderer)).toContain("已阻塞 4d");
-    expect(text(renderer)).not.toContain("恢复进行中");
+    expect(text(renderer)).not.toContain("已取消");
     await act(async () => { renderer.unmount(); });
   });
 });
 
 it("opens the menu below ⋯, or above it near the bottom, and keeps it inside the window", () => {
-  const actions = quickActions({ ...base, status: "in_progress" });
-  const size = { width: 168, height: menuHeight(actions) };
-  expect(size.height).toBe(3 * 30 + 8 + 9);
+  const plain = taskMenu({ ...base, status: "in_progress" });
+  const size = { width: 168, height: menuHeight(plain) };
+  // Seven statuses, padding, and the separator before cancelled.
+  expect(size.height).toBe(7 * 30 + 8 + 9);
   const window = { width: 400, height: 600 };
   expect(menuPlacement({ x: 360, y: 100, width: 22, height: 22 }, size, window)).toEqual({ left: 382 - 168, top: 126, upward: false });
   const low = menuPlacement({ x: 360, y: 560, width: 22, height: 22 }, size, window);
@@ -590,7 +611,8 @@ it("opens the menu below ⋯, or above it near the bottom, and keeps it inside t
   expect(menuPlacement({ x: 395, y: 100, width: 22, height: 22 }, size, window).left).toBe(400 - 168 - 8);
   // A window too short for either side opens downward rather than off the top.
   expect(menuPlacement({ x: 360, y: 40, width: 22, height: 22 }, size, { width: 400, height: 120 }).upward).toBe(false);
-  expect(menuHeight(quickActions({ ...base, status: "in_progress", lastRunFailed: true }))).toBe(2 * 30 + 8 + 9);
+  // Rerun adds an item and its own separator.
+  expect(menuHeight(taskMenu({ ...base, status: "in_progress", lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } }))).toBe(8 * 30 + 8 + 2 * 9);
 });
 
 it("opens a task listed both as a to-do and in the tree in both places at once", async () => {
@@ -607,12 +629,12 @@ it("opens a task listed both as a to-do and in the tree in both places at once",
   let settle!: (value: { ok: false; status: number; reason: string }) => void;
   runAction.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
   await act(async () => { pressables(renderer!, "P 的操作")[0]!.props.onPress(); });
-  await act(async () => { pressables(renderer!, "放回待规划 P")[0]!.props.onPress(); });
-  expect(pressables(renderer!, "P 正在放回待规划").map((node) => node.props.disabled)).toEqual([true, true]);
+  await act(async () => { pressables(renderer!, "待规划 P")[0]!.props.onPress(); });
+  expect(pressables(renderer!, "P 正在改为待规划").map((node) => node.props.disabled)).toEqual([true, true]);
   await act(async () => { settle({ ok: false, status: 409, reason: "busy" }); });
-  expect(text(renderer!).split("放回待规划失败：busy").length).toBe(3);
+  expect(text(renderer!).split("改为待规划失败：busy").length).toBe(3);
   await act(async () => { pressables(renderer!, "关闭 P 的错误")[1]!.props.onPress(); });
-  expect(text(renderer!)).not.toContain("放回待规划失败");
+  expect(text(renderer!)).not.toContain("改为待规划失败");
   expect(runAction).toHaveBeenCalledTimes(1);
   await act(async () => { renderer!.unmount(); });
 });
