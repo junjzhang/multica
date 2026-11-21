@@ -63,8 +63,8 @@ var errBadCondition = errors.New("invalid condition")
 var (
 	errPRSnapshotsUnavailable = errors.New("PR checks cannot be evaluated: GitHub snapshot refresh is unavailable on this server; ask the server administrator to configure the GitHub App snapshot client")
 	errPRNotLinked            = errors.New("No pull request is linked to this issue; link the PR to this issue (a parent issue's PR is not included), or wait for the linking webhook")
-	errPRSnapshotPending      = errors.New("PR check snapshot is not available yet; inspect this issue's pull-requests snapshot_available field and ask the server administrator to check snapshot refresh if it persists")
-	errPRConflictsUnsupported = errors.New("Merge conflicts can only be detected on GitHub pull requests; this issue links only self-hosted (Forgejo/Gitea/GitLab) pull requests")
+	errPRSnapshotPending      = errors.New("Waiting for a PR snapshot result on the current head. If this persists, ask the server administrator to check snapshot refresh")
+	errPRConflictsUnsupported = errors.New("Merge conflicts are supported on GitHub pull requests and TGit merge requests; this issue links neither")
 )
 
 func conditionDiagnostic(err error) bool {
@@ -326,16 +326,21 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 		// FAILURE, all passed (at least one) = SUCCESS, pending or none = not
 		// finished. PR numbers and shas can repeat across connections and
 		// repositories, so both the rollup and the fingerprint key on the PR id.
-		vcsLinked := 0
+		vcsLinked, tgitLinked := 0, false
+		var rememberedConflicts []string
 		vcsRows, err := tx.Query(ctx, `SELECT pr.id,pr.pr_number,pr.provider,pr.state,pr.head_sha,
 				COALESCE(SUM(CASE WHEN cs.state='failed' THEN 1 ELSE 0 END),0),
 				COALESCE(SUM(CASE WHEN cs.state='pending' THEN 1 ELSE 0 END),0),
-				COUNT(cs.state)
+				COUNT(cs.state),
+				CASE WHEN $2::text='conflicts' AND pr.provider='tgit' AND pr.head_sha<>''
+					AND pr.api_snapshot->>'head_sha'=pr.head_sha THEN
+					CASE pr.api_snapshot->'has_conflicts' WHEN 'true'::jsonb THEN true WHEN 'false'::jsonb THEN false END
+				END
 			FROM vcs_pull_request pr
 			JOIN issue_vcs_pull_request ipr ON ipr.pull_request_id=pr.id
 			LEFT JOIN vcs_commit_status cs ON cs.connection_id=pr.connection_id AND cs.sha=pr.head_sha AND pr.head_sha<>''
 			WHERE ipr.issue_id=$1
-			GROUP BY pr.id`, w.IssueID)
+			GROUP BY pr.id`, w.IssueID, c.Event)
 		if err != nil {
 			return false, "", nil, err
 		}
@@ -344,11 +349,13 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 			var number int32
 			var provider, state, head string
 			var failed, pending, total int64
-			if err = vcsRows.Scan(&id, &number, &provider, &state, &head, &failed, &pending, &total); err != nil {
+			var conflicts pgtype.Bool
+			if err = vcsRows.Scan(&id, &number, &provider, &state, &head, &failed, &pending, &total, &conflicts); err != nil {
 				vcsRows.Close()
 				return false, "", nil, err
 			}
 			vcsLinked++
+			tgitLinked = tgitLinked || provider == "tgit"
 			switch c.Event {
 			case "merged":
 				if state == "merged" {
@@ -367,31 +374,51 @@ func (s *IssueWakeupService) evaluateCondition(ctx context.Context, tx pgx.Tx, q
 					keys = append(keys, fmt.Sprintf("vcs:%s@%s:%s", util.UUIDToString(id), head, checks))
 					prs = append(prs, map[string]any{"number": number, "provider": provider, "head_sha": head, "checks": strings.ToLower(checks)})
 				}
+			case "conflicts":
+				if provider != "tgit" || (state != "open" && state != "draft") {
+					continue
+				}
+				key := fmt.Sprintf("vcs:%s@%s:conflicting", util.UUIDToString(id), head)
+				if !conflicts.Valid {
+					missingSnapshot = true
+					if previous[key] > 0 {
+						rememberedConflicts = append(rememberedConflicts, key)
+					}
+				} else if conflicts.Bool {
+					keys = append(keys, key)
+					prs = append(prs, map[string]any{"number": number, "provider": provider, "head_sha": head, "mergeable": "conflicting"})
+				}
 			}
 		}
 		vcsRows.Close()
 		if err = vcsRows.Err(); err != nil {
 			return false, "", nil, err
 		}
+		met := len(keys) > 0
+		keys = append(keys, rememberedConflicts...)
+		fingerprint := ""
+		if len(keys) > 0 {
+			sort.Strings(keys)
+			fingerprint = "pr:" + strings.Join(keys, ",")
+		}
 		// Any matching PR satisfies the rule; diagnostics only explain a wait.
-		if len(keys) == 0 {
+		if !met {
 			// GitHub-only (or unlinked) checks rules cannot progress without the
 			// snapshot client; a rule with VCS PRs waits for their statuses.
-			if !githubChecks && (linked > 0 || vcsLinked == 0) {
+			if !githubChecks && (linked > 0 || vcsLinked == 0) && !(c.Event == "conflicts" && tgitLinked) {
 				return false, "", nil, errPRSnapshotsUnavailable
 			}
 			if linked == 0 && vcsLinked == 0 {
 				return false, "", nil, errPRNotLinked
 			}
-			if c.Event == "conflicts" && linked == 0 {
+			if c.Event == "conflicts" && linked == 0 && !tgitLinked {
 				return false, "", nil, errPRConflictsUnsupported
 			}
 			if c.Event != "merged" && missingSnapshot {
-				return false, "", nil, errPRSnapshotPending
+				return false, fingerprint, nil, errPRSnapshotPending
 			}
 		}
-		sort.Strings(keys)
-		return len(keys) > 0, "pr:" + strings.Join(keys, ","), map[string]any{"pull_requests": prs}, nil
+		return met, fingerprint, map[string]any{"pull_requests": prs}, nil
 	case "other_issue":
 		var status string
 		var number int32
@@ -488,15 +515,13 @@ func (s *IssueWakeupService) pollCondition(ctx context.Context, tx pgx.Tx, q *db
 	}
 	// condition_state dedups a satisfied predicate; each new satisfaction
 	// gets its own receipt key.
-	state := w.ConditionState
-	if met {
-		if conditionNewlyMet(state, fingerprint) {
-			if err = recordConditionMet(ctx, q, w, observed, causes, now); err != nil {
-				return w.NextFireAt, err
-			}
+	state := fingerprint
+	if met && conditionNewlyMet(w.ConditionState, fingerprint) {
+		if err = recordConditionMet(ctx, q, w, observed, causes, now); err != nil {
+			return w.NextFireAt, err
 		}
-		state = fingerprint
-	} else {
+	}
+	if !met && !strings.HasPrefix(fingerprint, "pr:") {
 		state = ""
 	}
 	next := pgtype.Timestamptz{Time: now.Add(conditionPollInterval), Valid: true}
