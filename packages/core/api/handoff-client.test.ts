@@ -15,12 +15,30 @@ it("sends explicit leader and executor intents to different endpoints", async ()
     .mockResolvedValueOnce(new Response(JSON.stringify({ issue_id: "child", issue_revision: 2 })));
   vi.stubGlobal("fetch", fetchMock);
   const api = new ApiClient("https://example.test");
-  await api.handoffIssueLeadership("child", { ...request, expected_revision: 1 });
-  await api.handoffIssueExecutor("child", request);
+  const leadership = { ...request, expected_revision: 1, suppress_run: true };
+  const executor = { ...request, suppress_run: true };
+  await api.handoffIssueLeadership("child", leadership);
+  await api.handoffIssueExecutor("child", executor);
   expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
     "https://example.test/api/issues/child/task-leader/handoff",
     "https://example.test/api/issues/child/executor/handoff",
   ]);
+  expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([leadership, executor]);
+});
+
+it.each([
+  { value: true, expected: true },
+  { value: false, expected: false },
+  { value: undefined, expected: false },
+  { value: "true", expected: false },
+])("parses the handoff suppression echo: $value", async ({ value, expected }) => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ root_issue_id: "root", suppress_run: value })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ issue_id: "child", issue_revision: 2, suppress_run: value })));
+  vi.stubGlobal("fetch", fetchMock);
+  const api = new ApiClient("https://example.test");
+  await expect(api.handoffIssueLeadership("child", { ...request, expected_revision: 1 })).resolves.toMatchObject({ suppress_run: expected });
+  await expect(api.handoffIssueExecutor("child", request)).resolves.toMatchObject({ suppress_run: expected });
 });
 
 it.each([null, {}, { issue_id: "child" }, { issue_id: "", issue_revision: 2 }])(

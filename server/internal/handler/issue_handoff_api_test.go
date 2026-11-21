@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,6 +11,102 @@ import (
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/pkg/dbid"
 )
+
+func TestHandoffSuppressRun(t *testing.T) {
+	fixture := taskLeadershipFixture(t)
+	for _, path := range []struct {
+		action, endpoint string
+		handler          func(http.ResponseWriter, *http.Request)
+		leadership       bool
+	}{
+		{"executor_handoff", "/executor/handoff", testHandler.HandoffIssueExecutor, false},
+		{"leadership_handoff", "/task-leader/handoff", testHandler.HandoffIssueLeadership, true},
+	} {
+		for _, external := range []bool{true, false} {
+			for _, suppress := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s/external=%t/suppress=%t", path.action, external, suppress), func(t *testing.T) {
+					assigneeType, assigneeID := "agent", fixture.agent
+					if path.leadership {
+						assigneeType, assigneeID = "squad", fixture.squad
+					}
+					issue := dbfx.Issue(t, "Handoff dispatch", testutil.Cols{"assignee_type": assigneeType, "assignee_id": assigneeID, "status": "todo"})
+					cleanupDelegatedIssue(t, issue)
+					if path.leadership {
+						bindTaskLeadership(t, issue, fixture.squad, fixture.agent, fixture.a)
+					} else {
+						bindExternalSession(t, fixture.agent, fixture.a, issue)
+					}
+					originalReturn := dbfx.Insert(t, "issue_delegation_return", testutil.Cols{
+						"workspace_id": testWorkspaceID, "issue_id": issue, "dispatcher_agent_id": fixture.agent,
+						"return_kind": "external_session", "external_session_id": fixture.a, "is_current": true,
+					})
+					var revision int64
+					dbfx.QueryRow(t, "SELECT revision FROM issue WHERE id=$1", issue).Scan(&revision)
+					targetAgent, targetSession := fixture.defaultLeader, ""
+					if external {
+						targetAgent, targetSession = fixture.agent, fixture.b
+					}
+					requestID := uuidToString(dbid.NewV7())
+					body := map[string]any{
+						"client_request_id": requestID, "expected_revision": 1, "expected_issue_revision": revision,
+						"previous_agent_id": fixture.agent, "previous_session_id": fixture.a,
+						"agent_id": targetAgent, "session_id": targetSession, "reason": "Transfer responsibility",
+					}
+					if suppress {
+						body["suppress_run"] = true
+					}
+					call := func() *testutil.Response {
+						req := withURLParam(newRequest(http.MethodPost, "/api/issues/"+issue+path.endpoint, body), "id", issue)
+						return testutil.Call(t, path.handler, req)
+					}
+					for range 2 {
+						var result map[string]any
+						call().Want(200).JSON(&result)
+						if result["suppress_run"] != suppress || result["agent_id"] != targetAgent || result["issue_revision"] != float64(revision+1) {
+							t.Fatalf("unexpected handoff response: %v", result)
+						}
+						body["suppress_run"] = suppress
+					}
+					body["suppress_run"] = !suppress
+					if rec := call().Want(409); !strings.Contains(rec.Body.String(), "request id reused with different content") {
+						t.Fatalf("changed suppression should conflict: %s", rec.Body.String())
+					}
+					wantMailbox, wantQueue, wantBinding := 0, 0, 0
+					wantReturnSession := fixture.a
+					if external {
+						wantBinding, wantReturnSession = 1, fixture.b
+						if !suppress {
+							wantMailbox = 1
+						}
+					} else if !suppress {
+						wantQueue = 1
+					}
+					if count := dbfx.Count(t, "SELECT count(*) FROM agent_mailbox_message WHERE issue_id=$1 AND kind='issue_assignment'", issue); count != wantMailbox {
+						t.Fatalf("issue_assignment count=%d, want %d", count, wantMailbox)
+					}
+					if count := dbfx.Count(t, "SELECT count(*) FROM agent_task_queue WHERE issue_id=$1 AND agent_id=$2", issue, targetAgent); count != wantQueue {
+						t.Fatalf("new executor queue count=%d, want %d", count, wantQueue)
+					}
+					if count := dbfx.Count(t, "SELECT count(*) FROM external_agent_session_binding WHERE issue_id=$1 AND session_id=$2 AND revoked_at IS NULL", issue, fixture.b); count != wantBinding {
+						t.Fatalf("new binding count=%d, want %d", count, wantBinding)
+					}
+					if count := dbfx.Count(t, "SELECT count(*) FROM external_agent_session_binding WHERE issue_id=$1 AND session_id=$2 AND revoked_at IS NOT NULL", issue, fixture.a); count != 1 {
+						t.Fatalf("revoked previous binding count=%d, want 1", count)
+					}
+					var currentSession, frozenSession string
+					dbfx.QueryRow(t, "SELECT external_session_id FROM issue_delegation_return WHERE issue_id=$1 AND is_current", issue).Scan(&currentSession)
+					dbfx.QueryRow(t, "SELECT external_session_id FROM issue_delegation_return WHERE id=$1", originalReturn).Scan(&frozenSession)
+					if currentSession != wantReturnSession || frozenSession != fixture.a {
+						t.Fatalf("current/frozen return sessions=%s/%s, want %s/%s", currentSession, frozenSession, wantReturnSession, fixture.a)
+					}
+					if count := dbfx.Count(t, "SELECT count(*) FROM activity_log WHERE issue_id=$1 AND action=$2", issue, path.action); count != 1 {
+						t.Fatalf("handoff activity count=%d, want 1", count)
+					}
+				})
+			}
+		}
+	}
+}
 
 type handoffAPIFixture struct {
 	h                          *Handler

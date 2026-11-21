@@ -29,6 +29,7 @@ type leadershipRequest struct {
 	AgentID               string `json:"agent_id"`
 	SessionID             string `json:"session_id"`
 	Reason                string `json:"reason"`
+	SuppressRun           bool   `json:"suppress_run,omitempty"`
 }
 
 // projectTaskLeader fills the task-leader fields from the chain root. Subtasks
@@ -254,6 +255,7 @@ func (h *Handler) handoffIssue(w http.ResponseWriter, r *http.Request, executor 
 			writeError(w, 409, "request id reused with different content")
 			return
 		}
+		data["suppress_run"] = req.SuppressRun
 		writeJSON(w, 200, data)
 		return
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -315,11 +317,11 @@ func (h *Handler) handoffIssue(w http.ResponseWriter, r *http.Request, executor 
 		if sessionID.Valid {
 			recipient = &req.SessionID
 		}
-		if err = service.ExternalAssignment(r.Context(), q, updated, target, recipient, true, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
+		if err = service.ExternalAssignment(r.Context(), q, updated, target, recipient, !req.SuppressRun, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
 			writeError(w, 409, err.Error())
 			return
 		}
-		if agent.ExecutionKind == "managed" {
+		if agent.ExecutionKind == "managed" && !req.SuppressRun {
 			if queued, _, err = h.TaskService.EnqueueSquadLeaderTaskInTx(r.Context(), q, updated, agentID, squad.ID, pgtype.UUID{}, service.OriginDerived, returns, nil); err != nil {
 				writeError(w, 409, err.Error())
 				return
@@ -341,7 +343,7 @@ func (h *Handler) handoffIssue(w http.ResponseWriter, r *http.Request, executor 
 	for _, id := range affected {
 		contracts = append(contracts, uuidToString(id))
 	}
-	response := map[string]any{"root_issue_id": uuidToString(root.ID), "revision": updated.LeadershipRevision, "issue_revision": updated.Revision, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "agent_id": req.AgentID, "session_id": req.SessionID, "reason": req.Reason, "request_digest": digest, "stale_contract_ids": contracts, "advanced_returns": advancedReturns, "historical_results": "explicit_result_takeover_required"}
+	response := map[string]any{"root_issue_id": uuidToString(root.ID), "revision": updated.LeadershipRevision, "issue_revision": updated.Revision, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "agent_id": req.AgentID, "session_id": req.SessionID, "reason": req.Reason, "suppress_run": req.SuppressRun, "request_digest": digest, "stale_contract_ids": contracts, "advanced_returns": advancedReturns, "historical_results": "explicit_result_takeover_required"}
 	details, _ := json.Marshal(response)
 	if _, err = q.CreateActivity(r.Context(), db.CreateActivityParams{ID: requestID, WorkspaceID: root.WorkspaceID, IssueID: root.ID, ActorType: pgtype.Text{String: "member", Valid: true}, ActorID: member.UserID, Action: "leadership_handoff", Details: details}); err != nil {
 		writeError(w, 500, "record handoff failed")
@@ -392,6 +394,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 			writeError(w, 409, "request id reused with different content")
 			return
 		}
+		data["suppress_run"] = req.SuppressRun
 		writeJSON(w, 200, data)
 		return
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -446,11 +449,11 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 		if sessionID.Valid {
 			recipient = &req.SessionID
 		}
-		if err = service.ExternalAssignment(ctx, q, updated, service.AssignmentTarget{Agent: target}, recipient, true, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
+		if err = service.ExternalAssignment(ctx, q, updated, service.AssignmentTarget{Agent: target}, recipient, !req.SuppressRun, "member", requestUserID(r), requestUserID(r), h.cfg.AppURL); err != nil {
 			writeError(w, 409, err.Error())
 			return
 		}
-		if target.ExecutionKind == "managed" {
+		if target.ExecutionKind == "managed" && !req.SuppressRun {
 			queued, _, err = h.TaskService.EnqueueAssignedTaskInTx(ctx, q, updated, returns, nil)
 			if err != nil {
 				writeError(w, 409, err.Error())
@@ -464,7 +467,7 @@ func (h *Handler) handoffExternalExecutor(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	response := map[string]any{"issue_id": uuidToString(issue.ID), "issue_revision": updated.Revision, "agent_id": req.AgentID, "session_id": req.SessionID, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "reason": req.Reason, "request_digest": digest, "historical_results": "explicit_result_takeover_required"}
+	response := map[string]any{"issue_id": uuidToString(issue.ID), "issue_revision": updated.Revision, "agent_id": req.AgentID, "session_id": req.SessionID, "previous_agent_id": req.PreviousAgentID, "previous_session_id": req.PreviousSessionID, "reason": req.Reason, "suppress_run": req.SuppressRun, "request_digest": digest, "historical_results": "explicit_result_takeover_required"}
 	if currentReturn.Valid {
 		response["previous_return_id"] = uuidToString(previousReturn)
 		response["current_return_id"] = uuidToString(currentReturn)
