@@ -49,6 +49,8 @@
     "./issues/wakeups": "./issues/wakeups.ts",
     "./issues/contract": "./issues/contract.ts",
     "./api/issue-contract-schema": "./api/issue-contract-schema.ts",
+    "./api/issue-record-schema": "./api/issue-record-schema.ts",
+    "./issues/records": "./issues/records.ts",
     "./issues/environments": "./issues/environments.ts",
     "./issues/mutations": "./issues/mutations.ts",
     "./issues/timeline-sort": "./issues/timeline-sort.ts",

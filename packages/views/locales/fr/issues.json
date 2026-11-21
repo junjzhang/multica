@@ -2094,6 +2094,15 @@
     "restart_draft": "Abandonner le brouillon et recharger",
     "draft_changed": "L’accord a changé. Recommencez avec la dernière version."
   },
+  "records": {
+    "title": "Enregistrements",
+    "load_error": "Impossible de charger les enregistrements",
+    "retry": "Réessayer",
+    "kind_run": "Exécution",
+    "kind_decision": "Décision",
+    "supersedes": "corrige #{{seq}}",
+    "superseded_by": "corrigé par #{{seq}}"
+  },
   "views": {
     "builtin": {
       "my_issues": "Mes tâches",

@@ -2296,5 +2296,14 @@
     "authorization_note_help": "Las notas no conceden acceso. Se aplican los permisos existentes.",
     "restart_draft": "Descartar borrador y recargar",
     "draft_changed": "El acuerdo cambió. Empieza un nuevo borrador desde la última versión."
+  },
+  "records": {
+    "title": "Registros",
+    "load_error": "No se pueden cargar los registros",
+    "retry": "Reintentar",
+    "kind_run": "Ejecución",
+    "kind_decision": "Decisión",
+    "supersedes": "corrige #{{seq}}",
+    "superseded_by": "corregido por #{{seq}}"
   }
 }

@@ -2017,6 +2017,15 @@
     "restart_draft": "丢弃草稿并重新读取",
     "draft_changed": "约定已变更，请基于最新版本重新填写。"
   },
+  "records": {
+    "title": "记录",
+    "load_error": "无法加载记录",
+    "retry": "重试请求",
+    "kind_run": "运行",
+    "kind_decision": "决策",
+    "supersedes": "更正 #{{seq}}",
+    "superseded_by": "已由 #{{seq}} 更正"
+  },
   "views": {
     "builtin": {
       "my_issues": "我的任务",
