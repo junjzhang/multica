@@ -6,7 +6,7 @@
 
 import "./env";
 import pg from "pg";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 // `||` (not `??`) so an empty `NEXT_PUBLIC_API_URL=` in .env still falls
 // back to localhost. dotenv sets unset-vs-empty both as "" — treating them
@@ -616,6 +616,16 @@ export class TestApiClient {
     });
     if (!res.ok)
       throw new Error(`contract request: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  async addIssueRecord(issueId: string, record: Record<string, unknown>) {
+    const res = await this.authedFetch(`/api/issues/${issueId}/records`, {
+      method: "POST",
+      body: JSON.stringify({ client_request_id: randomUUID(), ...record }),
+    });
+    if (!res.ok)
+      throw new Error(`record request: ${res.status} ${await res.text()}`);
     return res.json();
   }
 

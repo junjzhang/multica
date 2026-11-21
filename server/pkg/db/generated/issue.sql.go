@@ -555,6 +555,9 @@ WITH target AS (
 cleared_contract AS (
  DELETE FROM issue_contract WHERE issue_id IN (SELECT target.id FROM target)
 ),
+cleared_records AS (
+ DELETE FROM issue_record WHERE issue_id IN (SELECT target.id FROM target)
+),
 cleared_wakeup_receipts AS (
  DELETE FROM issue_wakeup_receipt WHERE wakeup_id IN (SELECT id FROM issue_wakeup WHERE issue_id IN (SELECT target.id FROM target))
 ),

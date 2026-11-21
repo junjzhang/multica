@@ -18,6 +18,7 @@ import { clearWorkspaceStorage } from "../platform/storage-cleanup";
 import { defaultStorage } from "../platform/storage";
 import { getCurrentWsId, getCurrentSlug } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
+import { issueRecordsQueryKey } from "../issues/records";
 import { resultTakeoverKeys } from "../issues/result-takeover";
 import type { SidebarIssuesRequest } from "../issues/sidebar-list";
 import { refreshIssueUnread } from "../issues/unread";
@@ -101,6 +102,7 @@ import type {
   IssueCreatedPayload,
   IssueDeletedPayload,
   IssueAttachmentsChangedPayload,
+  IssueRecordCreatedPayload,
   IssueLabelsChangedPayload,
   IssueUnreadChangedPayload,
   IssueMetadataChangedPayload,
@@ -1192,7 +1194,7 @@ export function useRealtimeSync(
     // Event types handled by specific handlers below -- skip generic refresh
     const specificEvents = new Set([
       "workspace:updated",
-      "issue_mailbox:changed", "issue:updated", "issue:created", "issue:deleted", "issue_attachments:changed", "issue_labels:changed", "issue_unread:changed", "issue_metadata:changed", "issue_properties:changed", "property:created", "property:updated", "inbox:new",
+      "issue_mailbox:changed", "issue:updated", "issue:created", "issue:deleted", "issue_attachments:changed", "issue_record:created", "issue_labels:changed", "issue_unread:changed", "issue_metadata:changed", "issue_properties:changed", "property:created", "property:updated", "inbox:new",
       "comment:created", "comment:updated", "comment:deleted",
       "comment:resolved", "comment:unresolved",
       "activity:created",
@@ -1334,6 +1336,12 @@ export function useRealtimeSync(
     const unsubIssueUnreadChanged = ws.on("issue_unread:changed", (p) => {
       const { workspace_id } = p as IssueUnreadChangedPayload;
       if (workspace_id) void refreshIssueUnread(qc, workspace_id);
+    });
+
+    const unsubIssueRecordCreated = ws.on("issue_record:created", (p) => {
+      const { issue_id } = p as IssueRecordCreatedPayload;
+      const wsId = getCurrentWsId();
+      if (issue_id && wsId) qc.invalidateQueries({ queryKey: issueRecordsQueryKey(wsId, issue_id) });
     });
 
     const unsubIssueAttachmentsChanged = ws.on("issue_attachments:changed", (p) => {
@@ -2069,6 +2077,7 @@ export function useRealtimeSync(
       unsubIssueCreated();
       unsubIssueDeleted();
       unsubIssueAttachmentsChanged();
+      unsubIssueRecordCreated();
       unsubIssueLabelsChanged();
       unsubIssueUnreadChanged();
       unsubIssueMetadataChanged();

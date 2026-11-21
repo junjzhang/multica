@@ -297,6 +297,7 @@ import { createRequestId, createSafeId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
 import { parseWithFallback } from "./schema";
 import { ContractViewSchema, type ContractView, type ContractRequest } from "./issue-contract-schema";
+import { IssueRecordListSchema, type IssueRecord } from "./issue-record-schema";
 import { getApiRequestObserver } from "./request-observer";
 import {
   RuntimeProfileSchema,
@@ -1598,6 +1599,11 @@ export class ApiClient {
 
   async disableIssueWakeup(issueId: string, wakeupId: string): Promise<void> {
     await this.fetch(`/api/issues/${encodeURIComponent(issueId)}/wakeups/${encodeURIComponent(wakeupId)}/disable`, { method: "POST" });
+  }
+
+  async listIssueRecords(id: string): Promise<IssueRecord[]> {
+    const raw = await this.fetch<unknown>(`/api/issues/${encodeURIComponent(id)}/records`);
+    return parseWithFallback(raw, IssueRecordListSchema, { records: [] }, { endpoint: "GET /api/issues/:id/records" }).records;
   }
 
   async getIssueContract(id: string): Promise<ContractView> {

@@ -18,6 +18,7 @@ import { AppLink, useBackOrReplace } from "../../navigation";
 import { IssueDuplicateBanner, IssueDuplicatesSection, isDuplicateIssue } from "./issue-duplicates";
 import { IssueExternalCollaboration } from "./issue-external-collaboration";
 import { IssueContract } from "./issue-contract";
+import { IssueRecords } from "./issue-records";
 import {
   AlertTriangle,
   Archive,
@@ -3319,13 +3320,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
           </div>}
         </div>
     ),
-    // The delivery contract and external collaboration (coordinator, session
+    // The delivery contract, records and external collaboration (coordinator, session
     // bindings, mailbox deliveries) share the duplicates slot so it keeps its place without a
     // separate sidebar-settings entry.
     duplicates: (
       <>
         <IssueDuplicatesSection issueId={issue.id} />
         <IssueContract issueId={issue.id} />
+        <IssueRecords issueId={issue.id} />
         <IssueExternalCollaboration issue={issue} agents={agents} />
       </>
     ),
