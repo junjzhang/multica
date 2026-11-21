@@ -2017,6 +2017,15 @@
     "restart_draft": "下書きを破棄して再読込",
     "draft_changed": "合意が変更されました。最新バージョンから下書きを作成してください。"
   },
+  "records": {
+    "title": "記録",
+    "load_error": "記録を読み込めません",
+    "retry": "再試行",
+    "kind_run": "実行",
+    "kind_decision": "判断",
+    "supersedes": "#{{seq}} を訂正",
+    "superseded_by": "#{{seq}} で訂正済み"
+  },
   "views": {
     "builtin": {
       "my_issues": "マイタスク",

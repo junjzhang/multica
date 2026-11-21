@@ -14,6 +14,7 @@ export type WSEventType =
   | "issue:updated"
   | "issue_mailbox:changed"
   | "issue_attachments:changed"
+  | "issue_record:created"
   | "issue:deleted"
   | "comment:created"
   | "comment:updated"
@@ -146,6 +147,11 @@ export interface IssueLabelsChangedPayload {
   issue_id: string;
   labels: Label[];
   issue_revision?: number;
+}
+
+export interface IssueRecordCreatedPayload {
+  issue_id: string;
+  seq: number;
 }
 
 export interface IssueAttachmentsChangedPayload {
@@ -646,6 +652,7 @@ export interface WSEventPayloadMap {
   "issue_mailbox:changed": { issue_id: string };
   "issue:deleted": IssueDeletedPayload;
   "issue_attachments:changed": IssueAttachmentsChangedPayload;
+  "issue_record:created": IssueRecordCreatedPayload;
   "issue_labels:changed": IssueLabelsChangedPayload;
   "issue_unread:changed": IssueUnreadChangedPayload;
   "issue_properties:changed": IssuePropertiesChangedPayload;

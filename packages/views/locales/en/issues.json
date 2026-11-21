@@ -2094,6 +2094,15 @@
     "restart_draft": "Discard draft and reload",
     "draft_changed": "The agreement changed. Start a new draft from the latest version."
   },
+  "records": {
+    "title": "Records",
+    "load_error": "Unable to load records",
+    "retry": "Retry request",
+    "kind_run": "Run",
+    "kind_decision": "Decision",
+    "supersedes": "corrects #{{seq}}",
+    "superseded_by": "superseded by #{{seq}}"
+  },
   "views": {
     "builtin": {
       "my_issues": "My Issues",

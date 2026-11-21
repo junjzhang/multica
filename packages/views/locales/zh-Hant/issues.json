@@ -2210,5 +2210,14 @@
     "authorization_note_help": "說明不會授予權限，實際權限以現有授權為準。",
     "restart_draft": "捨棄草稿並重新載入",
     "draft_changed": "約定已變更，請依最新版本重新填寫。"
+  },
+  "records": {
+    "title": "記錄",
+    "load_error": "無法載入記錄",
+    "retry": "重試請求",
+    "kind_run": "執行",
+    "kind_decision": "決策",
+    "supersedes": "更正 #{{seq}}",
+    "superseded_by": "已由 #{{seq}} 更正"
   }
 }
