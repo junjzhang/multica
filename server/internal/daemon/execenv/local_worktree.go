@@ -1389,14 +1389,20 @@ func captureUserSnapshot(gitRoot, envRoot, headSHA string, logger *slog.Logger) 
 // stageWithoutRuntimeFiles preserves changes to paths present in the baseline,
 // while removing newly staged runtime files even when they were force-added.
 func stageWithoutRuntimeFiles(dir string, env []string, baseline string, excludes []string) (string, error) {
-	updateArgs := []string{"add", "-u", "--", "."}
-	for _, spec := range excludes {
-		if spec != ":(exclude,glob)**/.multica/**" {
-			updateArgs = append(updateArgs, spec)
-		}
+	tracked, err := runGitEnv(dir, env, "ls-files", "--cached", "-z")
+	if err != nil {
+		return tracked, err
 	}
-	if out, err := runGitEnv(dir, env, updateArgs...); err != nil {
-		return out, err
+	if tracked != "" {
+		updateArgs := []string{"add", "-u", "--", "."}
+		for _, spec := range excludes {
+			if spec != ":(exclude,glob)**/.multica/**" {
+				updateArgs = append(updateArgs, spec)
+			}
+		}
+		if out, err := runGitEnv(dir, env, updateArgs...); err != nil {
+			return out, err
+		}
 	}
 	args := append([]string{"add", "-A", "--", ".", ":(exclude,glob)**/.multica", ":(exclude,glob)**/.multica/**"}, excludes...)
 	if out, err := runGitEnv(dir, env, args...); err != nil {
