@@ -117,6 +117,9 @@ func buildDroidArgs(opts ExecOptions, logger *slog.Logger) ([]string, error) {
 }
 
 func (b *droidBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		return nil, fmt.Errorf("droid does not support Multica-managed MCP configuration; configure MCP in Droid itself")
 	}

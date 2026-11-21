@@ -581,7 +581,7 @@ function ContractSection({
                   ? t(($) => $.contract.revise)
                   : t(($) => $.contract.create)}
               </DialogTrigger>
-              <DialogContent className="max-h-[90dvh] overflow-y-auto">
+              <DialogContent>
                 <DialogHeader>
                   <DialogTitle>
                     {version
