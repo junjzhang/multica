@@ -237,6 +237,57 @@ describe("task trees", () => {
   });
 });
 
+describe("left-over tasks under a closed parent", () => {
+  const closedParent = () => ({ identifier: "WORK-1", title: "Parent", closed: true });
+  const openParent = { identifier: "WORK-1", title: "Parent", closed: false };
+
+  it.each([
+    ["blocked", { status: "blocked" }],
+    ["a failed run", { lastRunFailed: true }],
+    ["in review awaiting this session", { status: "in_review", contract: contract(SESSION) }],
+    ["recently active", { contract: contract(EXECUTOR), lastActivityAt: ago(1) }],
+  ] as [string, Partial<BoardIssue>][])("files a %s root under legacy with no to-do", (_name, overrides) => {
+    const scopes = ["session", "all"] as const;
+    for (const scope of scopes) {
+      const root = issue({ parentId: "gone", parent: closedParent(), ...overrides });
+      const child = issue({ parentId: root.id, contract: contract(USER) });
+      const board = buildBoard(data([root, child], [root.id], { scope }), NOW);
+      expect(board.sections.legacy.map((tree) => tree.issue.id)).toEqual([root.id]);
+      expect([...board.sections.attention, ...board.sections.active, ...board.sections.parked, ...board.sections.done]).toEqual([]);
+      expect(board.todos).toEqual([]);
+      expect(pillLabel(data([root, child], [root.id], { scope }), NOW).label).toBe(`${root.identifier} · 无待办`);
+    }
+  });
+
+  it("keeps the same task where it was while its parent is open or absent", () => {
+    for (const parent of [openParent, undefined]) {
+      const blocked = issue({ status: "blocked", ...(parent ? { parentId: "p", parent } : {}) });
+      const active = issue({ contract: contract(EXECUTOR), ...(parent ? { parentId: "p", parent } : {}) });
+      const board = buildBoard(data([blocked, active], [blocked.id, active.id]), NOW);
+      expect(board.sections.legacy).toEqual([]);
+      expect(board.sections.attention.map((tree) => tree.issue.id)).toEqual([blocked.id]);
+      expect(board.sections.active.map((tree) => tree.issue.id)).toEqual([active.id]);
+      expect(board.todos.map((todo) => [todo.kind, todo.issue.id])).toEqual([["anomaly", blocked.id]]);
+    }
+  });
+
+  it("does not treat a closed root or a child under its open board parent as left over", () => {
+    const closed = issue({ status: "done", statusCategory: "completed", parentId: "gone", parent: closedParent() });
+    const root = issue({ contract: contract(EXECUTOR) });
+    const child = issue({ parentId: root.id, parent: openParent, status: "blocked" });
+    const board = buildBoard(data([closed, root, child], [closed.id, root.id]), NOW);
+    expect(board.sections.legacy).toEqual([]);
+    expect(board.sections.done.map((tree) => tree.issue.id)).toEqual([closed.id]);
+    expect(board.todos.map((todo) => todo.issue.id)).toEqual([child.id]);
+  });
+
+  it("still counts real to-dos next to a left-over tree", () => {
+    const legacy = issue({ status: "blocked", parentId: "gone", parent: closedParent() });
+    const real = issue({ contract: contract(USER) });
+    expect(pillLabel(data([legacy, real], [legacy.id, real.id]), NOW).label).toBe(`${real.identifier} · 待办 1`);
+  });
+});
+
 describe("composer pill", () => {
   it("names the most urgent tree and counts to-dos on one line", () => {
     const root = issue({ identifier: "WORK-494", status: "backlog" });
