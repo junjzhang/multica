@@ -228,7 +228,8 @@ async function linkParents(board: BoardIssue[], loaded: Map<string, IssueWire>, 
     const parent = issue.parentId ? parents.get(issue.parentId) : undefined;
     if (!parent) continue;
     const url = issueUrl(issueBase, parent.identifier);
-    issue.parent = { identifier: parent.identifier, title: parent.title, ...(url ? { url } : {}) };
+    const closed = isTerminal({ status: parent.status, statusCategory: parent.status_category ?? "" });
+    issue.parent = { identifier: parent.identifier, title: parent.title, ...(url ? { url } : {}), closed };
   }
 }
 

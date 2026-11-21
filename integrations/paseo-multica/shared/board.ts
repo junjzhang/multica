@@ -64,8 +64,8 @@ const issueSchema = z.object({
   lastFailure: z.object({ summary: z.string(), at: z.string().optional(), taskId: z.string().optional() }).optional(),
   /** When the task last moved to blocked; set only while it is blocked. */
   blockedSince: z.string().optional(),
-  /** The parent task as a link target, whether or not the parent is on the board. */
-  parent: z.object({ identifier: z.string(), title: z.string(), url: z.string().optional() }).optional(),
+  /** The parent task as a link target, whether or not the parent is on the board; `closed` when it is done or cancelled. */
+  parent: z.object({ identifier: z.string(), title: z.string(), url: z.string().optional(), closed: z.boolean() }).optional(),
   pullRequests: z.array(pullRequestSchema),
   /** The external Paseo session executing this task; absent when execution is managed or the session cannot be opened. */
   executionSession: paseoSessionSchema.optional(),
@@ -107,7 +107,8 @@ export const boardDataSchema = z.discriminatedUnion("state", [
 ]);
 export type BoardData = z.infer<typeof boardDataSchema>;
 
-export type Section = "attention" | "active" | "parked" | "done";
+/** `legacy` holds open roots whose parent is closed: left over, not work in flight. */
+export type Section = "attention" | "active" | "parked" | "done" | "legacy";
 export type TodoKind = "approval" | "merge" | "user" | "acceptance" | "session" | "anomaly";
 /** To-dos only the user can clear; every other kind waits on this session. */
 const USER_TODOS = new Set<TodoKind>(["approval", "user"]);
@@ -270,6 +271,7 @@ export function buildBoard(data: Pick<ReadyBoardData, "issues" | "rootIds" | "vi
   }
 
   // A root that sits inside another root's subtree is shown only there.
+  // An open root under a closed parent is left over: its whole subtree is legacy and raises no to-do.
   const rootSet = new Set(data.rootIds.filter((id) => byId.has(id)));
   const nested = (id: string): boolean => {
     const seen = new Set<string>([id]);
@@ -279,9 +281,12 @@ export function buildBoard(data: Pick<ReadyBoardData, "issues" | "rootIds" | "vi
     }
     return false;
   };
-  const roots = [...rootSet].filter((id) => !nested(id)).map((id) => node(byId.get(id)!));
+  const roots = [...rootSet].filter((id) => !nested(id)).map((id) => {
+    const tree = node(byId.get(id)!);
+    return isLeftOver(tree.issue) ? { ...tree, section: "legacy" as const } : tree;
+  });
 
-  const sections: Record<Section, TreeNode[]> = { attention: [], active: [], parked: [], done: [] };
+  const sections: Record<Section, TreeNode[]> = { attention: [], active: [], parked: [], done: [], legacy: [] };
   for (const root of roots) sections[root.section].push(root);
   for (const list of Object.values(sections)) list.sort(compareNodes);
 
@@ -294,10 +299,14 @@ export function buildBoard(data: Pick<ReadyBoardData, "issues" | "rootIds" | "vi
     }
     for (const stage of tree.stages) stage.nodes.forEach(visit);
   };
-  roots.forEach(visit);
+  roots.filter((root) => root.section !== "legacy").forEach(visit);
   for (const root of sections.parked) parkedReasons[parkedReasonOf(root) ?? "other"] += 1;
   todos.sort((a, b) => TODO_ORDER.indexOf(a.kind) - TODO_ORDER.indexOf(b.kind) || (Date.parse(b.issue.lastActivityAt ?? "") || 0) - (Date.parse(a.issue.lastActivityAt ?? "") || 0));
   return { todos, sections, parkedReasons };
+}
+
+function isLeftOver(issue: BoardIssue): boolean {
+  return !!issue.parent?.closed && !isTerminal(issue);
 }
 
 function parkedReasonOf(tree: TreeNode): ParkedReason | undefined {
@@ -351,7 +360,7 @@ export function pillLabel(data: BoardData, now: number): PillSummary {
   if (data.state === "disconnected") return { label: "Multica · 未连接", title: data.reason };
   if (data.state === "unavailable") return { label: "Multica · 不可用", title: data.reason };
   const board = buildBoard(data, now);
-  const focus = [...board.sections.attention, ...board.sections.active, ...board.sections.parked][0];
+  const focus = [...board.sections.attention, ...board.sections.active, ...board.sections.parked, ...board.sections.legacy][0];
   const archivedCount = data.archivedDeliveries?.length ?? 0;
   if (!focus) {
     return archivedCount ? { label: `Multica · 待办 ${archivedCount}`, title: "投递失败：会话已归档" } : { label: "Multica · 无任务", title: "本会话没有 Multica 任务" };

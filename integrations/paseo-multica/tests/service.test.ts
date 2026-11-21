@@ -678,6 +678,8 @@ describe("session board service", () => {
     api.routes.set(`/api/issues/children?parent_ids=${OWNED},${ACCEPTING}`, { issues: [wireIssue(OPEN_CHILD, "WORK-5", { parent_issue_id: OWNED })] });
     api.routes.set(`/api/issues/children?parent_ids=${OPEN_CHILD}`, { issues: [] });
     api.routes.set(`/api/issues/${ACCEPTING}/task-runs`, []);
+    api.routes.set(`/api/issues/${DONE_CHILD}`, wireIssue(DONE_CHILD, "WORK-4", { status: "done", status_category: "completed" }));
+    api.routes.set(`/api/issues/${ACCEPTING}`, wireIssue(ACCEPTING, "WORK-2", { parent_issue_id: DONE_CHILD }));
     api.routes.set("/api/projects?limit=200", { projects: [{ id: "project-1", title: "Paseo" }] });
 
     const view = await service.board(SESSION_A, "all");
@@ -686,6 +688,10 @@ describe("session board service", () => {
     expect(view.rootIds).toEqual([OWNED, ACCEPTING]);
     expect(view.issues.map((issue) => issue.id).sort()).toEqual([OWNED, ACCEPTING, OPEN_CHILD].sort());
     expect(view.projects).toEqual([{ id: "project-1", name: "Paseo" }]);
+    // The parent read that links a task also says whether that parent is closed.
+    expect(view.issues.find((issue) => issue.id === ACCEPTING)?.parent).toMatchObject({ identifier: "WORK-4", closed: true });
+    expect(view.issues.find((issue) => issue.id === OPEN_CHILD)?.parent).toMatchObject({ identifier: "WORK-1", closed: false });
+    expect(api.gets.filter((path) => path === `/api/issues/${DONE_CHILD}`)).toHaveLength(1);
     expect(api.tasksCalls).toHaveLength(0);
     expect(api.registrations).toHaveLength(0);
   });
@@ -775,10 +781,10 @@ describe("session board service", () => {
     const byId = new Map(view.issues.map((issue) => [issue.id, issue]));
     expect(byId.get(OWNED)).toMatchObject({
       blockedSince: "2026-10-22T00:00:00Z",
-      parent: { identifier: "WORK-0", title: "Parent task", url: "https://app.multica.example/acme/issues/WORK-0" },
+      parent: { identifier: "WORK-0", title: "Parent task", url: "https://app.multica.example/acme/issues/WORK-0", closed: false },
       contract: { pendingName: "Reviewer" },
     });
-    expect(byId.get(OPEN_CHILD)?.parent).toEqual({ identifier: "WORK-1", title: "WORK-1", url: "https://app.multica.example/acme/issues/WORK-1" });
+    expect(byId.get(OPEN_CHILD)?.parent).toEqual({ identifier: "WORK-1", title: "WORK-1", url: "https://app.multica.example/acme/issues/WORK-1", closed: false });
     expect(byId.get(RETURNING)?.lastFailure).toEqual({ summary: "agent exited with [redacted]", at: "2026-10-24T00:00:00Z", taskId: "run-reviewer" });
     expect(byId.get(ACCEPTING)?.lastFailure).toBeUndefined();
     expect(byId.get(ACCEPTING)?.blockedSince).toBeUndefined();
