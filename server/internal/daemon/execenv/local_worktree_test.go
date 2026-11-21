@@ -1808,6 +1808,29 @@ func TestCaptureUserSnapshotExcludesMulticaSidecars(t *testing.T) {
 	}
 }
 
+func TestCaptureUserSnapshotStagesNewFilesWithEmptyIndex(t *testing.T) {
+	t.Parallel()
+	requireGit(t)
+	repo := t.TempDir()
+	gitRun(t, repo, "init", "-b", "main")
+	gitRun(t, repo, "-c", "user.name=Test User", "-c", "user.email=test@test.com", "-c", "maintenance.auto=false", "commit", "--allow-empty", "-m", "initial")
+	writeFile(t, filepath.Join(repo, "real.txt"), "the user's file\n")
+	writeFile(t, filepath.Join(repo, ".agent_context", "brief.md"), "another task's brief\n")
+	writeFile(t, filepath.Join(repo, "sub", ".multica", "state.json"), "{}\n")
+
+	head := gitRun(t, repo, "rev-parse", "HEAD")
+	snapshot, err := captureUserSnapshot(repo, t.TempDir(), head, worktreeTestLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitRun(t, repo, "ls-tree", "-r", "--name-only", snapshot); got != "real.txt" {
+		t.Fatalf("snapshot files = %q, want real.txt", got)
+	}
+	if got := gitRun(t, repo, "ls-files"); got != "" {
+		t.Fatalf("snapshot staged files in the original index: %q", got)
+	}
+}
+
 func TestAutomaticTreesExcludeUntrackedRuntimeFiles(t *testing.T) {
 	for _, snapshot := range []bool{false, true} {
 		t.Run(fmt.Sprintf("snapshot=%t", snapshot), func(t *testing.T) {

@@ -50,6 +50,9 @@ type devinBackend struct {
 var devinReaderDrainGrace = 2 * time.Second
 
 func (b *devinBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	execPath := b.cfg.ExecutablePath
 	if execPath == "" {
 		execPath = "devin"

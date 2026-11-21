@@ -88,6 +88,9 @@ func buildAmpArgs(opts ExecOptions, logger *slog.Logger) ([]string, error) {
 }
 
 func (b *ampBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	if hasManagedMcpConfig(opts.McpConfig) {
 		return nil, fmt.Errorf("amp does not support Multica-managed MCP configuration; configure MCP in Amp itself")
 	}
