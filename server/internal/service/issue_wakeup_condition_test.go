@@ -800,6 +800,85 @@ func TestWakeupConditionPullRequestCoversEveryVCSProvider(t *testing.T) {
 				t.Fatalf("merged PR started %d runs, want 1", n)
 			}
 		})
+		t.Run(provider+"/conflicts", func(t *testing.T) {
+			f, s, issue, agent := conditionFixture(t)
+			linkVCSPR(t, f, issue, newConnection(t, f), provider, 7, "head")
+			wakeup := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Instruction: "Resolve conflicts",
+				Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})})
+			got := wakeTick(t, f, s, wakeup.ID)
+			want := conditionDiagnosticPrefix + "Merge conflicts are supported on GitHub pull requests and TGit merge requests; this issue links neither"
+			if got.FireCount != 0 || !got.LastError.Valid || got.LastError.String != want {
+				t.Fatalf("unsupported provider: fire count=%d error=%+v, want %q", got.FireCount, got.LastError, want)
+			}
+		})
+	}
+}
+
+func TestWakeupConditionTGitConflictsUsesScheduledSnapshots(t *testing.T) {
+	f, s, issue, agent := conditionFixture(t)
+	ctx := context.Background()
+	workspace := parseTestUUID(t, f.WorkspaceID)
+	pr := linkVCSPR(t, f, issue, newConnection(t, f), "tgit", 7, "first")
+	wakeup := wakeCreate(t, f, s, issue, WakeupInput{AgentID: agent, Kind: "event", Mode: "continuous", Instruction: "Resolve conflicts",
+		Condition: condition(t, map[string]any{"type": "pull_request", "event": "conflicts"})})
+	if len(wakeup.EventTypes) != 0 || !wakeup.NextFireAt.Valid {
+		t.Fatalf("poll-only rule: events=%v next_fire_at=%+v", wakeup.EventTypes, wakeup.NextFireAt)
+	}
+	for _, step := range []struct {
+		name, state, head, snapshot string
+		wantRuns                    int
+		wantPending                 bool
+	}{
+		{"no snapshot", "open", "first", `{}`, 0, true},
+		{"clean", "open", "first", `{"head_sha":"first","has_conflicts":false}`, 0, false},
+		{"conflict after target moves", "open", "first", `{"head_sha":"first","has_conflicts":true}`, 1, false},
+		{"same conflict", "open", "first", `{"head_sha":"first","has_conflicts":true}`, 1, false},
+		{"unknown on the same head", "open", "first", `{"head_sha":"first","has_conflicts":null}`, 1, true},
+		{"recomputed same conflict", "open", "first", `{"head_sha":"first","has_conflicts":true}`, 1, false},
+		{"stale snapshot", "draft", "second", `{"head_sha":"first","has_conflicts":true}`, 1, true},
+		{"new head conflicts", "draft", "second", `{"head_sha":"second","has_conflicts":true}`, 2, false},
+		{"closed MR", "closed", "third", `{"head_sha":"third","has_conflicts":true}`, 2, false},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			before, err := f.q.LocklessWakeup(ctx, wakeup.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !before.NextFireAt.Valid {
+				t.Fatal("rule has no scheduled evaluation")
+			}
+			f.Exec(t, "UPDATE vcs_pull_request SET state=$2, head_sha=$3, api_snapshot=$4, snapshot_fetched_at=now() WHERE id=$1",
+				pr, step.state, step.head, step.snapshot)
+			f.Exec(t, "UPDATE issue_wakeup SET next_fire_at=now()-interval '1 second' WHERE id=$1", wakeup.ID)
+			if err := s.TickWorkspaces(ctx, workspace); err != nil {
+				t.Fatal(err)
+			}
+			got, err := f.q.LocklessWakeup(ctx, wakeup.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.NextFireAt.Valid || !got.NextFireAt.Time.After(before.NextFireAt.Time.Add(-conditionPollInterval)) {
+				t.Fatalf("rule did not schedule its next evaluation: %+v", got.NextFireAt)
+			}
+			if count := wakeRuns(t, f, wakeup.ID); count != step.wantRuns {
+				t.Fatalf("runs=%d, want %d", count, step.wantRuns)
+			}
+			if got.LastError.Valid != step.wantPending || step.wantPending && got.LastError.String != conditionDiagnosticPrefix+errPRSnapshotPending.Error() {
+				t.Fatalf("last error=%+v, want pending=%t", got.LastError, step.wantPending)
+			}
+			if got.FireCount > before.FireCount {
+				task, err := f.q.GetAgentTask(ctx, got.LastTaskID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, fact := range []string{`"provider":"tgit"`, `"mergeable":"conflicting"`, `"head_sha":"` + step.head + `"`} {
+					if !strings.Contains(task.HandoffNote.String, fact) {
+						t.Fatalf("missing %s from wakeup facts: %s", fact, task.HandoffNote.String)
+					}
+				}
+				f.Exec(t, "UPDATE agent_task_queue SET status='completed',completed_at=now() WHERE id=$1", got.LastTaskID)
+			}
+		})
 	}
 }
 

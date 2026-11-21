@@ -646,7 +646,7 @@ the scheduler evaluates:
 | `issue_field` | `field=label`, `label_id` | it has that label |
 | `issue_field` | `field=property`, `property_id`, `value` | the property's stored value equals `value` |
 | `children_done` | optional `stage` | every sub-issue (or every one up to that stage) is closed |
-| `pull_request` | `event=checks_finished`, `merged` or `conflicts` | a linked PR's checks finished on its current head, it merged, or an open GitHub PR is `CONFLICTING` on its current head |
+| `pull_request` | `event=checks_finished`, `merged` or `conflicts` | a linked PR's checks finished on its current head, it merged, or an open or draft GitHub PR or TGit MR has conflicts on its current head |
 | `other_issue` | `issue_id`, `state=done`, `ended`, `in_review` or `blocked` | another issue in the workspace reaches that state |
 
 A condition rule stays `kind=event`. Validation derives the same-issue events
@@ -666,13 +666,22 @@ never fires. Its key is `pr_id@head:conflicting` (PR numbers and heads repeat
 across forks). GitHub reports
 `UNKNOWN` while it recomputes mergeability; on the same head that keeps the
 previous verdict, so a continuous rule is not woken twice for one conflict.
-Self-hosted VCS rows store no mergeability; a rule linked only to them records
-a diagnostic. For every linked-PR condition, a run starts only when some PR
+For TGit, `conflicts` reads `vcs_pull_request.api_snapshot` and compares its
+`head_sha` with the row's current head. It requires `has_conflicts: true`.
+A missing verdict or a mismatched head leaves the condition pending. The rule
+remembers a previously reported conflict on the current head while it waits
+for a verdict. TGit uses the equivalent `vcs:pr_id@head:conflicting` key.
+`TGitSnapshotRefresher.apply` persists the snapshot through `ApplyTGitSnapshot`.
+The next due `issue_wakeup_dispatch` tick reads it through the normal
+condition poll.
+
+A rule linked only to Forgejo, Gitea or GitLab pull requests records an
+unsupported-provider diagnostic. For every linked-PR condition, a run starts only when some PR
 key occurs more often than in `condition_state` (checks and merged keys carry
 only the PR number, so same-numbered PRs from two repositories share one); a
 PR leaving the set (resolved, closed, unlinked) only updates
 `condition_state`, so it does not wake the agent again for the PRs that stayed. A base-branch move sends no event for the PR, so the snapshot
-pipeline keeps watched PRs (linked to an issue with an enabled `conflicts`
+pipeline keeps watched GitHub PRs (linked to an issue with an enabled `conflicts`
 rule) fresh: the 10-minute sweep re-fetches them once their snapshot is older
 than 5 minutes even when decided, rotating an address cursor like the
 undecided sweep so repeatedly failing fetches cannot starve the rest, and a merged `pull_request` webhook
