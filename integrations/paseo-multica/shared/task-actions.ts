@@ -23,7 +23,7 @@ export interface StatusChoice {
   status: ActionStatus;
   current: boolean;
   /** Why this status cannot be chosen now; the current status needs no reason. */
-  blocked?: string;
+  disabledReason?: string;
 }
 
 export interface TaskMenuModel {
@@ -42,7 +42,7 @@ export function taskMenu(issue: Pick<BoardIssue, "status" | "contract" | "lastRu
     ...(taskId ? { rerunTaskId: taskId } : {}),
     statuses: ACTION_STATUSES.map((status) => {
       const current = status === issue.status;
-      return { status, current, ...(!current && status === "done" && contractPending ? { blocked: CONTRACT_PENDING } : {}) };
+      return { status, current, ...(!current && status === "done" && contractPending ? { disabledReason: CONTRACT_PENDING } : {}) };
     }),
   };
 }
