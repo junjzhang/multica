@@ -9,6 +9,7 @@ const (
 	EventIssueDeleted            = "issue:deleted"
 	EventIssueMetadataChanged    = "issue_metadata:changed"
 	EventIssueAttachmentsChanged = "issue_attachments:changed"
+	EventIssueRecordCreated      = "issue_record:created"
 	// Personal: one member's unread mark on an issue changed (MUL-8438).
 	EventIssueUnreadChanged = "issue_unread:changed"
 

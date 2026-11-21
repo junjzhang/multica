@@ -1301,6 +1301,25 @@ type IssueReaction struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type IssueRecord struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	Seq             int32              `json:"seq"`
+	ClientRequestID pgtype.UUID        `json:"client_request_id"`
+	Kind            string             `json:"kind"`
+	Summary         string             `json:"summary"`
+	Rationale       string             `json:"rationale"`
+	Evidence        []byte             `json:"evidence"`
+	Verdict         string             `json:"verdict"`
+	Fields          []byte             `json:"fields"`
+	SupersedesSeq   pgtype.Int4        `json:"supersedes_seq"`
+	AuthorType      string             `json:"author_type"`
+	AuthorID        pgtype.UUID        `json:"author_id"`
+	ActorSessionID  pgtype.UUID        `json:"actor_session_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type IssueSourceContext struct {
 	ID               pgtype.UUID        `json:"id"`
 	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
