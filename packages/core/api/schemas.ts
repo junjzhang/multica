@@ -2035,6 +2035,7 @@ export const IssueLeadershipHandoffResponseSchema = z.object({
   root_issue_id: z.string(),
   revision: z.number().int().nonnegative().default(0),
   issue_revision: z.number().int().nonnegative().default(0),
+  suppress_run: z.boolean().default(false).catch(false),
   stale_contract_ids: z.array(z.string()).optional().catch(undefined),
   advanced_returns: z
     .array(
@@ -2052,6 +2053,7 @@ export const IssueLeadershipHandoffResponseSchema = z.object({
 export const IssueExecutorHandoffResponseSchema = z.object({
   issue_id: z.string().min(1),
   issue_revision: z.number().int().nonnegative(),
+  suppress_run: z.boolean().default(false).catch(false),
 }).loose();
 
 export const ListIssuesResponseSchema = z.object({

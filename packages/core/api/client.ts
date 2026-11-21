@@ -2128,12 +2128,12 @@ export class ApiClient {
     };
   }
 
-  async handoffIssueExecutor(issueId: string, data: Omit<IssueLeadershipHandoffRequest, "expected_revision">): Promise<{ issue_id: string; issue_revision: number }> {
+  async handoffIssueExecutor(issueId: string, data: Omit<IssueLeadershipHandoffRequest, "expected_revision">): Promise<{ issue_id: string; issue_revision: number; suppress_run: boolean }> {
     const raw = await this.fetch<unknown>(`/api/issues/${issueId}/executor/handoff`, {
       method: "POST",
       body: JSON.stringify(data),
     });
-    const parsed = parseWithFallback<{ issue_id: string; issue_revision: number } | null>(raw, IssueExecutorHandoffResponseSchema, null, {
+    const parsed = parseWithFallback<{ issue_id: string; issue_revision: number; suppress_run: boolean } | null>(raw, IssueExecutorHandoffResponseSchema, null, {
       endpoint: "POST /api/issues/{id}/executor/handoff",
     });
     if (!parsed) throw new Error("The server did not confirm this executor handoff.");

@@ -374,6 +374,7 @@ export interface IssueLeadershipHandoffRequest {
   /** Required for an external target, omitted for a managed one. */
   session_id?: string;
   reason: string;
+  suppress_run?: boolean;
 }
 
 export interface IssueLeadershipAdvancedReturn {
@@ -391,6 +392,7 @@ export interface IssueLeadershipHandoffResponse {
   root_issue_id: string;
   revision: number;
   issue_revision: number;
+  suppress_run: boolean;
   stale_contract_ids: string[];
   advanced_returns: IssueLeadershipAdvancedReturn[];
   historical_results: string;
