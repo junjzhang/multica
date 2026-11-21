@@ -184,9 +184,6 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if err != nil {
 		return false, false, err
 	}
-	if !contract.needsDispatcher(issue.Status, outcome.Status) {
-		return refuse(resultRefusal(ResultSuppressedNoAction))
-	}
 	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: address.DispatcherAgentID, WorkspaceID: address.WorkspaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return refuse(resultRefusal("recipient_missing"))

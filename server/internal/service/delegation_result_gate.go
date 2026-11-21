@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/issuecontract"
 	"github.com/multica-ai/multica/server/internal/issuestatus"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -14,7 +15,7 @@ import (
 )
 
 // ResultSuppressedNoAction marks a contracted run whose normal completion
-// needs nothing from the dispatcher: no submit, no failure, no hand-back.
+// needs nothing from the dispatcher: no submit, no hand-back.
 const ResultSuppressedNoAction = "suppressed_no_dispatcher_action"
 
 // resultContractState is the contract snapshot a result return carries so a
@@ -70,13 +71,36 @@ func executionChainIDs(ctx context.Context, q *db.Queries, outcome db.AgentTaskQ
 	return ids, nil
 }
 
-// needsDispatcher decides whether a run outcome on a contracted issue wakes
-// the dispatcher. Without a contract every outcome returns, as before. With
-// one, only a submit by this run, a failed run, or an explicit hand-back (the
-// issue left blocked) does. Custom statuses never carry blocked behavior, so
-// only the built-in key counts.
-func (c resultContractState) needsDispatcher(issueStatus, outcomeStatus string) bool {
-	return !c.present || c.submitted || outcomeStatus == "failed" || issueStatus == issuestatus.Blocked
+// settleProgressOnlyResults runs inside a completion transaction. On a
+// contracted issue, a run that neither submitted nor left the issue blocked
+// (the explicit hand-back) needs nothing from its dispatcher, so its returns
+// settle here instead of reaching the sweeper. Deciding at completion pins the
+// hand-back to this run: the next run on the issue cannot start before this
+// commit, so a later status change cannot hide or fake it. Failed runs and
+// uncontracted issues always return and never pass through here.
+func settleProgressOnlyResults(ctx context.Context, q *db.Queries, completed db.AgentTaskQueue) error {
+	if !completed.IssueID.Valid {
+		return nil
+	}
+	issue, err := q.GetIssue(ctx, completed.IssueID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Custom statuses never carry blocked behavior; only the built-in key hands back.
+	if issue.Status == issuestatus.Blocked {
+		return nil
+	}
+	contract, err := readResultContractState(ctx, q, issue, completed)
+	if err != nil || !contract.present || contract.submitted {
+		return err
+	}
+	return q.SettleTaskResultsWithoutNotification(ctx, db.SettleTaskResultsWithoutNotificationParams{
+		TaskID: completed.ID,
+		Reason: pgtype.Text{String: ResultSuppressedNoAction, Valid: true},
+	})
 }
 
 func (c resultContractState) addTo(payload map[string]any) {

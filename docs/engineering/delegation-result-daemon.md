@@ -182,8 +182,12 @@ Every delegated outcome that needs the dispatcher has one
 is `result:<outcome-task>:return:<return>`. Without a contract every outcome
 needs the dispatcher. On a contracted issue only a run that submitted a
 delivery (recorded as the delivery's `task_id`), a failed run, or a run that
-left the issue `blocked` does; any other outcome settles its obligation as
+left the issue `blocked` does. The completion transaction decides this, so a
+later run moving the status cannot hide or fake a hand-back; any other
+completed run settles its ordinary obligations there as
 `suppressed_no_dispatcher_action`, sends nothing and releases its resources.
+Takeover obligations are explicit user requests and are never suppressed.
+Cancelled runs return nothing, contract or not.
 Payloads on contracted issues add `contract_sequence` and
 `contract_delivery_count` from materialization time, so a dispatcher can order
 returns that arrive out of order.

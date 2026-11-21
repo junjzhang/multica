@@ -48,6 +48,7 @@ func TestContractedResultReturnsOnlyWhenDispatcherMustAct(t *testing.T) {
 		name     string
 		prepare  func(t *testing.T, result db.AgentTaskQueue)
 		finish   func(t *testing.T, result db.AgentTaskQueue)
+		after    func(t *testing.T, result db.AgentTaskQueue)
 		wantSent bool
 	}{
 		{name: "progress-only", prepare: func(t *testing.T, result db.AgentTaskQueue) {
@@ -56,12 +57,31 @@ func TestContractedResultReturnsOnlyWhenDispatcherMustAct(t *testing.T) {
 		{name: "earlier-delivery-by-another-run", prepare: func(t *testing.T, result db.AgentTaskQueue) {
 			storeResultContract(t, uuidToString(result.IssueID), 3, issuecontract.Delivery{ID: "earlier", Version: 1, TaskID: uuidToString(dbid.NewV7())})
 		}},
+		{name: "delivery-without-run", prepare: func(t *testing.T, result db.AgentTaskQueue) {
+			storeResultContract(t, uuidToString(result.IssueID), 2, issuecontract.Delivery{ID: "manual", Version: 1})
+		}},
+		{name: "blocked-only-after-the-run-ended", prepare: func(t *testing.T, result db.AgentTaskQueue) {
+			storeResultContract(t, uuidToString(result.IssueID), 1)
+		}, after: func(t *testing.T, result db.AgentTaskQueue) {
+			dbfx.Exec(t, `UPDATE issue SET status='blocked' WHERE id=$1`, result.IssueID)
+		}},
 		{name: "submitted-by-this-run", wantSent: true, prepare: func(t *testing.T, result db.AgentTaskQueue) {
 			storeResultContract(t, uuidToString(result.IssueID), 2, issuecontract.Delivery{ID: "this-run", Version: 1, TaskID: uuidToString(result.ID)})
+		}},
+		{name: "submitted-by-an-earlier-attempt", wantSent: true, prepare: func(t *testing.T, result db.AgentTaskQueue) {
+			attempt := dbfx.Task(t, uuidToString(result.AgentID), testutil.Cols{"issue_id": uuidToString(result.IssueID), "runtime_id": uuidToString(result.RuntimeID), "status": "failed"})
+			dbfx.Exec(t, `UPDATE agent_task_queue SET retry_of_task_id=$2 WHERE id=$1`, result.ID, attempt)
+			storeResultContract(t, uuidToString(result.IssueID), 2, issuecontract.Delivery{ID: "earlier-attempt", Version: 1, TaskID: attempt})
 		}},
 		{name: "handed-back-as-blocked", wantSent: true, prepare: func(t *testing.T, result db.AgentTaskQueue) {
 			dbfx.Exec(t, `UPDATE issue SET status='blocked' WHERE id=$1`, result.IssueID)
 			storeResultContract(t, uuidToString(result.IssueID), 1)
+		}},
+		{name: "hand-back-survives-the-next-run-moving-status", wantSent: true, prepare: func(t *testing.T, result db.AgentTaskQueue) {
+			dbfx.Exec(t, `UPDATE issue SET status='blocked' WHERE id=$1`, result.IssueID)
+			storeResultContract(t, uuidToString(result.IssueID), 1)
+		}, after: func(t *testing.T, result db.AgentTaskQueue) {
+			dbfx.Exec(t, `UPDATE issue SET status='in_progress' WHERE id=$1`, result.IssueID)
 		}},
 		{name: "failed-run", wantSent: true, prepare: func(t *testing.T, result db.AgentTaskQueue) {
 			storeResultContract(t, uuidToString(result.IssueID), 1)
@@ -77,6 +97,9 @@ func TestContractedResultReturnsOnlyWhenDispatcherMustAct(t *testing.T) {
 				tc.finish(t, result)
 			} else {
 				finishResultFixture(t, result)
+			}
+			if tc.after != nil {
+				tc.after(t, result)
 			}
 			reconcileResults(t)
 
