@@ -2647,12 +2647,12 @@ const TaskUsageSchema = z.object({
 }).loose();
 
 const ExternalResultNotificationStatusSchema = z.enum([
-  "pending", "leased", "delivered", "failed", "refused", "unknown",
+  "pending", "leased", "delivered", "failed", "refused", "suppressed", "unknown",
 ]).catch("unknown");
 
 const ManagedResultNotificationStatusSchema = z.enum([
   "pending", "queued", "deferred", "dispatched", "waiting_local_directory",
-  "running", "received", "cancelled", "refused", "unknown",
+  "running", "received", "cancelled", "refused", "suppressed", "unknown",
 ]).catch("unknown");
 
 export const ResultNotificationSchema = z.object({

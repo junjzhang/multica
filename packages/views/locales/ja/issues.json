@@ -991,6 +991,7 @@
     "received": "セッションで受信済み",
     "unknown": "受信状況が不明",
     "refused": "配信できません",
+    "suppressed": "未送信: 対応不要",
     "failed": "配信に失敗",
     "cancelled": "キャンセル済み",
     "error_details": "技術的な詳細",

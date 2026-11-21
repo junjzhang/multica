@@ -180,6 +180,10 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	if issuestatus.Category(ctx, q, issue.WorkspaceID, issue.Status) == issuestatus.CategoryClosed {
 		return refuse(resultRefusal("delegation_cancelled"))
 	}
+	contract, err := readResultContractState(ctx, q, issue, outcome)
+	if err != nil {
+		return false, false, err
+	}
 	agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: address.DispatcherAgentID, WorkspaceID: address.WorkspaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return refuse(resultRefusal("recipient_missing"))
@@ -197,14 +201,14 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	}
 	var handling db.AgentTaskQueue
 	if address.ReturnKind == string(delegation.KindExternalSession) {
-		err = materializeExternalResult(ctx, q, outcome, address, agent, issue, s.AppURL)
+		err = materializeExternalResult(ctx, q, outcome, address, agent, issue, contract, s.AppURL)
 	} else if sourceErr != nil {
 		if !errors.Is(sourceErr, pgx.ErrNoRows) {
 			return false, false, sourceErr
 		}
 		return refuse(resultRefusal("source_task_missing"))
 	} else {
-		handling, err = materializeManagedResult(ctx, q, outcome, address, agent, source, obligation)
+		handling, err = materializeManagedResult(ctx, q, outcome, address, agent, source, obligation, contract)
 	}
 	var unavailable resultRefusal
 	if errors.As(err, &unavailable) {
@@ -234,7 +238,7 @@ func (s *TaskService) materializeDelegationResult(ctx context.Context, taskID, r
 	return true, false, nil
 }
 
-func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, issue db.Issue, appURL string) error {
+func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, issue db.Issue, contract resultContractState, appURL string) error {
 	if agent.ExecutionKind != "external" {
 		return resultRefusal("recipient_kind_changed")
 	}
@@ -249,7 +253,7 @@ func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.Ag
 		return resultRefusal("external_session_owner_changed")
 	}
 	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(address.ID))
-	payload, err := json.Marshal(delegationResultPayload(outcome, address, ResolveDeliveryDisplay(ctx, q, issue, appURL)))
+	payload, err := json.Marshal(delegationResultPayload(outcome, address, contract, ResolveDeliveryDisplay(ctx, q, issue, appURL)))
 	if err != nil {
 		return err
 	}
@@ -274,13 +278,8 @@ func materializeExternalResult(ctx context.Context, q *db.Queries, outcome db.Ag
 // delegationResultPayload keeps the stable result references and adds the
 // reader-facing task context the daemon renders ahead of them. Field names
 // match the other external deliveries; a resolution miss only omits lines.
-func delegationResultPayload(outcome db.AgentTaskQueue, address db.IssueDelegationReturn, display DeliveryDisplay) map[string]any {
-	payload := map[string]any{
-		"result_task_id":       util.UUIDToString(outcome.ID),
-		"delegation_return_id": util.UUIDToString(address.ID),
-		"issue_id":             util.UUIDToString(address.IssueID),
-		"outcome":              outcome.Status,
-	}
+func delegationResultPayload(outcome db.AgentTaskQueue, address db.IssueDelegationReturn, contract resultContractState, display DeliveryDisplay) map[string]any {
+	payload := resultReferences(outcome, address, contract)
 	if display.Identifier != "" || display.Title != "" {
 		payload["issue_identifier"] = display.Identifier
 		payload["issue_title"] = display.Title
@@ -288,6 +287,20 @@ func delegationResultPayload(outcome db.AgentTaskQueue, address db.IssueDelegati
 	if display.URL != "" {
 		payload["issue_url"] = display.URL
 	}
+	return payload
+}
+
+// resultReferences are the stable result fields every return carries. On a
+// contracted issue they include the contract sequence and delivery count at
+// materialization; result_task_id names the run that produced the return.
+func resultReferences(outcome db.AgentTaskQueue, address db.IssueDelegationReturn, contract resultContractState) map[string]any {
+	payload := map[string]any{
+		"result_task_id":       util.UUIDToString(outcome.ID),
+		"delegation_return_id": util.UUIDToString(address.ID),
+		"issue_id":             util.UUIDToString(address.IssueID),
+		"outcome":              outcome.Status,
+	}
+	contract.addTo(payload)
 	return payload
 }
 
@@ -300,7 +313,7 @@ func StrictResultProviderSupported(provider string) bool {
 	}
 }
 
-func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, source db.AgentTaskQueue, incoming db.AgentTaskDelegationReturn) (db.AgentTaskQueue, error) {
+func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.AgentTaskQueue, address db.IssueDelegationReturn, agent db.Agent, source db.AgentTaskQueue, incoming db.AgentTaskDelegationReturn, contract resultContractState) (db.AgentTaskQueue, error) {
 	var empty db.AgentTaskQueue
 	if agent.ExecutionKind != "managed" || agent.RuntimeID != address.RuntimeID || source.AgentID != agent.ID {
 		return empty, resultRefusal("managed_recipient_identity_changed")
@@ -361,7 +374,7 @@ func materializeManagedResult(ctx context.Context, q *db.Queries, outcome db.Age
 	// The accepted relationship remains the idempotency key even if several
 	// versions on a coalesced outcome now deliver to the same physical address.
 	key := fmt.Sprintf("result:%s:return:%s", util.UUIDToString(outcome.ID), util.UUIDToString(incoming.DelegationReturnID))
-	payload, err := json.Marshal(map[string]string{"result_task_id": util.UUIDToString(outcome.ID), "delegation_return_id": util.UUIDToString(address.ID), "issue_id": util.UUIDToString(address.IssueID), "outcome": outcome.Status})
+	payload, err := json.Marshal(resultReferences(outcome, address, contract))
 	if err != nil {
 		return empty, err
 	}

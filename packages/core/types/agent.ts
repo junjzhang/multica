@@ -412,6 +412,7 @@ export interface ResultNotification {
     | "delivered"
     | "failed"
     | "refused"
+    | "suppressed"
     | "unknown";
   error?: string;
 }

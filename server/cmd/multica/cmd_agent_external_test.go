@@ -386,6 +386,27 @@ func TestRunAgentMailboxListUsesCursorAndLimit(t *testing.T) {
 	}
 }
 
+func TestRunAgentMailboxListTableShowsResultOrderingFacts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"messages":[` +
+			`{"id":"msg-1","kind":"delegation_result","payload":{"result_task_id":"run-1","outcome":"completed","contract_sequence":4,"contract_delivery_count":2},"delivery_status":"delivered","processing_status":"unread","issue_id":"issue-1","created_at":"2026-10-23T09:30:50Z"},` +
+			`{"id":"msg-2","kind":"delegation_result","payload":{"result_task_id":"run-2","outcome":"failed"},"delivery_status":"pending","processing_status":"unread","issue_id":"issue-2","created_at":"2026-10-23T09:31:50Z"}` +
+			`]}`))
+	}))
+	defer srv.Close()
+	setAgentExternalTestEnv(t, srv.URL)
+
+	cmd := newAgentMailboxListTestCmd()
+	_ = cmd.Flags().Set("output", "table")
+	out, err := captureStdout(t, func() error { return runAgentMailboxList(cmd, []string{"agent-1"}) })
+	if err != nil {
+		t.Fatalf("runAgentMailboxList: %v", err)
+	}
+	if !strings.Contains(out, "run=run-1 completed seq=4 deliveries=2") || !strings.Contains(out, "run=run-2 failed") || strings.Contains(out, "run=run-2 failed seq=") {
+		t.Fatalf("output = %s", out)
+	}
+}
+
 func TestRunAgentMailboxAckSendsState(t *testing.T) {
 	var body map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

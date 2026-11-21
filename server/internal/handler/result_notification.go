@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -37,6 +38,8 @@ func (h *Handler) hydrateResultNotifications(ctx context.Context, workspace, iss
 		}
 		note := ResultNotificationResponse{CurrentReturnID: uuidToString(row.CurrentReturnID), TakeoverID: uuidToString(row.TakeoverID), ReturnID: uuidToString(row.DelegationReturnID), RecipientAgentID: uuidToString(row.DispatcherAgentID), Kind: row.ReturnKind, DeliveryID: uuidToString(row.NotificationDeliveryID), HandlingTaskID: uuidToString(row.NotificationTaskID), Status: "pending"}
 		switch {
+		case row.NotificationError.String == service.ResultSuppressedNoAction:
+			note.Status = "suppressed"
 		case row.NotificationError.Valid:
 			note.Status, note.Error = "refused", row.NotificationError.String
 		case row.NotificationDeliveryID.Valid && !row.NotificationTaskID.Valid:

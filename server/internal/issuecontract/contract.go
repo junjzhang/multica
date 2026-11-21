@@ -28,12 +28,14 @@ type Version struct {
 }
 
 type Delivery struct {
-	ID        string    `json:"id"`
-	Version   int       `json:"version"`
-	Criteria  []int     `json:"criteria"`
-	Evidence  string    `json:"evidence"`
-	ChildIDs  []string  `json:"child_ids"`
-	Author    Actor     `json:"author"`
+	ID       string   `json:"id"`
+	Version  int      `json:"version"`
+	Criteria []int    `json:"criteria"`
+	Evidence string   `json:"evidence"`
+	ChildIDs []string `json:"child_ids"`
+	Author   Actor    `json:"author"`
+	// TaskID is the agent run that submitted, when the submit came from one.
+	TaskID    string    `json:"task_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 

@@ -92,6 +92,13 @@ UPDATE agent_task_delegation_return SET notification_error = @reason, materializ
 WHERE task_id = @task_id AND delegation_return_id = @delegation_return_id
   AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
 
+-- name: SettleTaskResultsWithoutNotification :exec
+-- Settles every unsent ordinary return of one run; takeover returns are
+-- explicit user requests and stay deliverable.
+UPDATE agent_task_delegation_return SET notification_error = @reason, materialized_at = now()
+WHERE task_id = @task_id AND takeover_id IS NULL
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL;
+
 -- name: CreateDelegationResultTask :one
 INSERT INTO agent_task_queue (
     id, agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,

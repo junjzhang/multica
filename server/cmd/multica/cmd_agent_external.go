@@ -62,8 +62,15 @@ var agentMailboxCmd = &cobra.Command{
 var agentMailboxListCmd = &cobra.Command{
 	Use:   "list <agent-id>",
 	Short: "List messages addressed to an agent",
-	Args:  exactArgs(1),
-	RunE:  runAgentMailboxList,
+	Long: `List messages addressed to an agent.
+
+A delegation_result payload names the run that produced it (result_task_id).
+On an issue with a contract it also carries contract_sequence and
+contract_delivery_count, taken when the return was saved. Returns can arrive
+out of order: the one with the higher contract_sequence is newer. The table
+output shows these in the RESULT column.`,
+	Args: exactArgs(1),
+	RunE: runAgentMailboxList,
 }
 
 var agentMailboxAckCmd = &cobra.Command{
@@ -469,10 +476,11 @@ func runAgentMailboxList(cmd *cobra.Command, args []string) error {
 			message.ProcessingStatus,
 			message.IssueID,
 			message.CreatedAt,
+			mailboxResultSummary(message),
 			lastError,
 		})
 	}
-	cli.PrintTable(os.Stdout, []string{"ID", "DELIVERY", "PROCESSING", "ISSUE", "CREATED", "LAST ERROR"}, rows)
+	cli.PrintTable(os.Stdout, []string{"ID", "DELIVERY", "PROCESSING", "ISSUE", "CREATED", "RESULT", "LAST ERROR"}, rows)
 	if result.NextCursor != nil && *result.NextCursor != "" {
 		fmt.Fprintf(os.Stderr, "Next cursor: %s\n", *result.NextCursor)
 	}
@@ -585,4 +593,27 @@ func flagBool(cmd *cobra.Command, name string) bool {
 func flagInt(cmd *cobra.Command, name string) int {
 	value, _ := cmd.Flags().GetInt(name)
 	return value
+}
+
+// mailboxResultSummary renders the ordering facts of a delegation result:
+// the producing run, its outcome and, on a contracted issue, the contract
+// sequence and delivery count when the return was saved.
+func mailboxResultSummary(message daemon.MailboxMessage) string {
+	if message.Kind != "delegation_result" || len(message.Payload) == 0 {
+		return ""
+	}
+	var result struct {
+		ResultTaskID          string `json:"result_task_id"`
+		Outcome               string `json:"outcome"`
+		ContractSequence      *int   `json:"contract_sequence"`
+		ContractDeliveryCount *int   `json:"contract_delivery_count"`
+	}
+	if json.Unmarshal(message.Payload, &result) != nil {
+		return ""
+	}
+	summary := fmt.Sprintf("run=%s %s", result.ResultTaskID, result.Outcome)
+	if result.ContractSequence != nil && result.ContractDeliveryCount != nil {
+		summary += fmt.Sprintf(" seq=%d deliveries=%d", *result.ContractSequence, *result.ContractDeliveryCount)
+	}
+	return summary
 }

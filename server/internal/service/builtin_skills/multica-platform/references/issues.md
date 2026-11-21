@@ -311,7 +311,7 @@ archived statuses remain readable via an explicit status filter.
   a coordinator the task explicitly authorizes verifies the evidence, records
   acceptance, and closes the accepted sub-issue; an implementer never accepts
   its own delivery. Acceptance does not deliver the parent, and merging needs its own grant. Saved outcomes use this run's `accepted_returns`; continuations carry the actual callers' upstream returns.
-  Do not add a mention to duplicate that return. Before an explicit acceptance handoff, refresh `accepted_returns` and verify the receiver.
+  Do not add a mention to duplicate that return. Before an explicit acceptance handoff, refresh `accepted_returns` and verify the receiver. With a contract, a run's outcome returns only if it submitted, failed, or left the issue `blocked` (hand back for a decision or blocker: set `blocked`, comment the need); others show `suppressed`. Higher `contract_sequence` in a return is newer.
   Missing means unknown, and `result_notifications=[]` does not prove no return is owed.
   `upstream_returns_unknown` remains unresolved even with `accepted_returns=[]`. Never guess that recipient or create a replacement notification.
 - **`cancelled`** is a terminal, user-driven decision to close the issue. Like

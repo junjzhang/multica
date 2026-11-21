@@ -1027,6 +1027,7 @@
     "received": "Received by session",
     "unknown": "Receipt unknown",
     "refused": "Cannot deliver",
+    "suppressed": "Not sent: no action needed",
     "failed": "Delivery failed",
     "cancelled": "Cancelled",
     "error_details": "Technical details",

@@ -1860,3 +1860,21 @@ func (q *Queries) SetTaskDelegationOutcomeFinal(ctx context.Context, arg SetTask
 	_, err := q.db.Exec(ctx, setTaskDelegationOutcomeFinal, arg.IsFinal, arg.ID)
 	return err
 }
+
+const settleTaskResultsWithoutNotification = `-- name: SettleTaskResultsWithoutNotification :exec
+UPDATE agent_task_delegation_return SET notification_error = $1, materialized_at = now()
+WHERE task_id = $2 AND takeover_id IS NULL
+  AND notification_task_id IS NULL AND notification_delivery_id IS NULL AND notification_error IS NULL
+`
+
+type SettleTaskResultsWithoutNotificationParams struct {
+	Reason pgtype.Text `json:"reason"`
+	TaskID pgtype.UUID `json:"task_id"`
+}
+
+// Settles every unsent ordinary return of one run; takeover returns are
+// explicit user requests and stay deliverable.
+func (q *Queries) SettleTaskResultsWithoutNotification(ctx context.Context, arg SettleTaskResultsWithoutNotificationParams) error {
+	_, err := q.db.Exec(ctx, settleTaskResultsWithoutNotification, arg.Reason, arg.TaskID)
+	return err
+}

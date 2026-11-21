@@ -72,6 +72,15 @@ describe("ResultNotifications", () => {
     expect(screen.queryByText("Received by session")).not.toBeInTheDocument();
   });
 
+  it("shows a suppressed progress-only return as neutral, not as a delivery failure", () => {
+    renderWithI18n(<ResultNotifications notifications={[note({ kind: "external_session", status: "suppressed" })]} />);
+    const item = screen.getByRole("listitem");
+    const label = within(item).getByText("Not sent: no action needed");
+    expect(label).toHaveClass("text-muted-foreground");
+    expect(within(item).queryByText("Cannot deliver")).not.toBeInTheDocument();
+    expect(screen.queryByText("Received by session")).not.toBeInTheDocument();
+  });
+
   it("does not turn unsupported semantics into a positive receipt", () => {
     renderWithI18n(<ResultNotifications notifications={[
       note({ kind: "unknown", status: "received" }),
