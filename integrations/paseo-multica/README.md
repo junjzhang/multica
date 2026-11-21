@@ -178,7 +178,9 @@ quick actions described above.
           or the executor's turn, not backlog, last_activity_at within STALE_AFTER_DAYS
 搁置:     every other open task, counted as Backlog, 7 天无动静, or 其他 when still fresh
 遗留:     an open root whose direct parent is done or cancelled, with its whole subtree;
-          it overrides the sections above and raises no to-do, in both views
+          it overrides the sections above and raises no to-do, in both views;
+          a child whose closed parent is itself on the board (a done task with an
+          open MR) stays in that parent's tree and is classified as usual
 no contract: in_review is this session's acceptance only when its coordinator is bound
              to this session; every other task counts as the executor's turn
 STALE_AFTER_DAYS = 7
