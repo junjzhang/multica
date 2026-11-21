@@ -35,9 +35,11 @@ func readResultContractState(ctx context.Context, q *db.Queries, issue db.Issue,
 	if err != nil {
 		return resultContractState{}, err
 	}
+	// An unreadable contract must neither block run completion nor hide a
+	// result: treat it as absent so every outcome returns, as without one.
 	var state issuecontract.State
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return resultContractState{}, err
+	if json.Unmarshal(raw, &state) != nil {
+		return resultContractState{}, nil
 	}
 	if state.Current() == nil {
 		return resultContractState{}, nil

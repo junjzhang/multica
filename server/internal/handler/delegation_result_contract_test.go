@@ -198,3 +198,20 @@ func TestContractSubmitRecordsOnlyTheExecutorsOwnRun(t *testing.T) {
 		t.Fatalf("another agent's run was credited with the submit: %+v", got)
 	}
 }
+
+func TestUnreadableContractStillReturnsTheResult(t *testing.T) {
+	if testHandler == nil {
+		t.Fatal("PostgreSQL required")
+	}
+	_, result, _ := resultFixture(t, "contract-gate-unreadable")
+	dbfx.Exec(t, `INSERT INTO issue_contract (issue_id, workspace_id, data) VALUES ($1, $2, '{"sequence":"broken"}')`, result.IssueID, testWorkspaceID)
+	dbfx.Cleanup(t, `DELETE FROM issue_contract WHERE issue_id=$1`, result.IssueID)
+	finishResultFixture(t, result)
+	reconcileResults(t)
+	var reason string
+	var sent bool
+	dbfx.QueryRow(t, `SELECT COALESCE(notification_error,''), notification_delivery_id IS NOT NULL FROM agent_task_delegation_return WHERE task_id=$1`, result.ID).Scan(&reason, &sent)
+	if reason != "" || !sent {
+		t.Fatalf("unreadable contract hid the result: reason=%q sent=%v", reason, sent)
+	}
+}
