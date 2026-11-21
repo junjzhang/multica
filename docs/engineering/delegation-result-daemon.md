@@ -177,8 +177,16 @@ metadata only; pruning them does not delete an execution directory.
 
 ## Mailbox consumption and wakeups
 
-Every delegated outcome has one `agent_mailbox_message`, including managed
-results. Its stable notification key is `result:<outcome-task>:return:<return>`.
+Every delegated outcome that needs the dispatcher has one
+`agent_mailbox_message`, including managed results. Its stable notification key
+is `result:<outcome-task>:return:<return>`. Without a contract every outcome
+needs the dispatcher. On a contracted issue only a run that submitted a
+delivery (recorded as the delivery's `task_id`), a failed run, or a run that
+left the issue `blocked` does; any other outcome settles its obligation as
+`suppressed_no_dispatcher_action`, sends nothing and releases its resources.
+Payloads on contracted issues add `contract_sequence` and
+`contract_delivery_count` from materialization time, so a dispatcher can order
+returns that arrive out of order.
 The delegation link records the result, frozen return, mailbox ID and optional
 managed wakeup task. It does not own a second processing state. Managed mailbox
 rows have no external target session and cannot enter the external delivery

@@ -23,6 +23,7 @@ function notificationPhase(notification: ResultNotification) {
     case "delivered":
       return "received";
     case "refused": return "refused";
+    case "suppressed": return "suppressed";
     case "failed": return "failed";
     case "cancelled": return "cancelled";
     default: return "unknown";
@@ -39,6 +40,7 @@ export function ResultNotifications({ notifications, issueId, task }: { notifica
     processing: t(($) => $.result_notifications.processing),
     received: t(($) => $.result_notifications.received),
     refused: t(($) => $.result_notifications.refused),
+    suppressed: t(($) => $.result_notifications.suppressed),
     failed: t(($) => $.result_notifications.failed),
     cancelled: t(($) => $.result_notifications.cancelled),
     unknown: t(($) => $.result_notifications.unknown),

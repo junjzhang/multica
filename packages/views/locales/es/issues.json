@@ -1010,6 +1010,7 @@
     "received": "Recibida por la sesión",
     "unknown": "Recepción desconocida",
     "refused": "No se puede entregar",
+    "suppressed": "No enviado: no requiere acción",
     "failed": "Error en la entrega",
     "cancelled": "Cancelada",
     "error_details": "Detalles técnicos",

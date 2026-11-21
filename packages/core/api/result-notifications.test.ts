@@ -45,12 +45,14 @@ describe("task result notifications at the API read boundary", () => {
     ["managed_task", "received"],
     ["managed_task", "cancelled"],
     ["managed_task", "refused"],
+    ["managed_task", "suppressed"],
     ["managed_task", "unknown"],
     ["external_session", "pending"],
     ["external_session", "leased"],
     ["external_session", "delivered"],
     ["external_session", "failed"],
     ["external_session", "refused"],
+    ["external_session", "suppressed"],
     ["external_session", "unknown"],
   ])("preserves %s notification state %s independently from the completed result", async (kind, status) => {
     const [task] = await readRuns([{

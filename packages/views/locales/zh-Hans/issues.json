@@ -991,6 +991,7 @@
     "received": "会话已接收",
     "unknown": "接收情况未知",
     "refused": "无法投递",
+    "suppressed": "未发送：无需处理",
     "failed": "投递失败",
     "cancelled": "已取消",
     "error_details": "技术详情",

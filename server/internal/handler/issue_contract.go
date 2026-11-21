@@ -541,7 +541,7 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 		if err := issuecontract.ValidateCriteria(req.Criteria, state.Remaining()); err != nil {
 			return "", contractFail(400, err.Error())
 		}
-		state.Deliveries = append(state.Deliveries, issuecontract.Delivery{ID: req.ClientRequestID, Version: v.Number, Criteria: req.Criteria, Evidence: req.Evidence, ChildIDs: append([]string{}, req.ChildIDs...), Author: actor, CreatedAt: now})
+		state.Deliveries = append(state.Deliveries, issuecontract.Delivery{ID: req.ClientRequestID, Version: v.Number, Criteria: req.Criteria, Evidence: req.Evidence, ChildIDs: append([]string{}, req.ChildIDs...), Author: actor, TaskID: h.submittingTaskID(r, issue, actor), CreatedAt: now})
 		return "in_review", nil
 	case "accept", "return":
 		if !contractActorMatches(ctx, q, issue, actor, v.Acceptor) || isContractExecutorIdentity(actor, v.Executor, representative) || pending != nil && sameContractEntity(actor, pending.Author) {
@@ -599,6 +599,20 @@ func (h *Handler) applyContractRequest(ctx context.Context, r *http.Request, q *
 	default:
 		return "", contractFail(400, fmt.Sprintf("unknown contract action %q", req.Action))
 	}
+}
+
+// submittingTaskID names the agent run behind a submit so its result return can
+// tell a delivering run from one that only made progress. The X-Task-ID header
+// counts only when that run belongs to the submitting agent on this issue.
+func (h *Handler) submittingTaskID(r *http.Request, issue db.Issue, actor issuecontract.Actor) string {
+	if actor.Type != "agent" {
+		return ""
+	}
+	task, ok := h.taskFromRequestHeader(r)
+	if !ok || task.IssueID != issue.ID || uuidToString(task.AgentID) != actor.ID {
+		return ""
+	}
+	return uuidToString(task.ID)
 }
 
 func contractStatusAllowed(ctx context.Context, q *db.Queries, issue db.Issue, status string) error {

@@ -1027,6 +1027,7 @@
     "received": "Reçue par la session",
     "unknown": "Réception inconnue",
     "refused": "Envoi impossible",
+    "suppressed": "Non envoyé : aucune action requise",
     "failed": "Échec de l’envoi",
     "cancelled": "Annulée",
     "error_details": "Détails techniques",
