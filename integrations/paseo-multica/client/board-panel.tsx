@@ -132,6 +132,7 @@ export function todoPhrase(todo: Todo, now: number): Phrase {
 }
 
 export function treePhrase(tree: TreeNode): Phrase | undefined {
+  if (tree.section === "legacy") return { text: "父任务已结束" };
   if (tree.total > 0) {
     const staged = tree.stages.filter((group) => group.stage !== undefined);
     const stage = currentStage(tree);
@@ -258,6 +259,7 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const [expandedIds, setExpandedIds] = useState<string[]>([]);
   const [expansionError, setExpansionError] = useState("");
   const [parkedOpen, setParkedOpen] = useState(false);
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const [actions, setActions] = useState<Record<string, ActionState>>({});
   const writes = useRef<Promise<unknown>>(Promise.resolve());
   const request = useRef(0);
@@ -301,7 +303,7 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   };
   const act = useCallback(async (issue: BoardIssue, action: TaskAction) => {
     const label = actionLabel(action);
-    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: `${label}失败：${reason}` } }));
+    const fail = (reason: string) => setActions((all) => ({ ...all, [issue.id]: { error: actionError(action, reason) } }));
     setActions((all) => ({ ...all, [issue.id]: { pending: label } }));
     try {
       const result = await runAction({ agentId, issueId: issue.id, action });
@@ -325,7 +327,7 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
   const todoIds = new Set([...yours, ...sessions].map((todo) => todo.issue.id));
   // A childless tree that needs you is fully described by its to-do row.
   const active = board ? [...board.sections.attention, ...board.sections.active].filter((tree) => tree.total > 0 || !todoIds.has(tree.issue.id)) : [];
-  const empty = board && todoIds.size === 0 && archivedDeliveries.length === 0 && active.length === 0 && board.sections.parked.length === 0;
+  const empty = board && todoIds.size === 0 && archivedDeliveries.length === 0 && active.length === 0 && board.sections.parked.length === 0 && board.sections.legacy.length === 0;
 
   return <View style={{ gap: SPACE.lg }}>
     <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingBottom: SPACE.md, borderBottomWidth: 1, borderBottomColor: colors.border }}>
@@ -352,6 +354,9 @@ function BoardContent({ agentId, theme, host, navigation, openTask }: Props) {
           : <Section title="进行中" colors={colors}>{active.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={0} row={row} />)}</Section>}
         {board.sections.parked.length > 0 ? <Section title="搁置" count={board.sections.parked.length} colors={colors} open={parkedOpen} onToggle={() => setParkedOpen(!parkedOpen)}>
           {board.sections.parked.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={0} row={row} />)}
+        </Section> : null}
+        {board.sections.legacy.length > 0 ? <Section title="遗留" count={board.sections.legacy.length} colors={colors} open={legacyOpen} onToggle={() => setLegacyOpen(!legacyOpen)}>
+          {board.sections.legacy.map((tree) => <TaskRow key={tree.issue.id} data={treeRow(tree)} depth={0} row={row} />)}
         </Section> : null}
         {ready.truncated ? <Text style={{ color: colors.foregroundMuted, fontSize: FONT.sm, paddingLeft: GUTTER + SPACE.sm }}>部分子任务未显示</Text> : null}
       </View>}
@@ -563,9 +568,14 @@ const EDGE = 8;
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
-/** What a write is called in its running state and its error: 重跑, or 改为 and the status's name. */
+/** What a running write is called: 重跑, or 改为 and the status's name. */
 export function actionLabel(action: TaskAction): string {
   return action.kind === "rerun" ? "重跑" : `改为${STATUS_LABEL[action.status]}`;
+}
+
+/** A failed write names what it tried the way the menu does: 重跑失败, or the status's name. */
+export function actionError(action: TaskAction, reason: string): string {
+  return `${action.kind === "rerun" ? "重跑失败" : STATUS_LABEL[action.status]}：${reason}`;
 }
 
 /** Every item is ITEM_H tall, so the menu's height is known before it renders: rerun and its separator, the statuses, and the separator before cancelled. */
@@ -610,9 +620,9 @@ function TaskMenu({ issue, row, rowHovered, onHover }: { issue: BoardIssue; row:
   const place = at ? menuPlacement(at, { width: MENU_W, height: menuHeight(menu) }, window) : undefined;
   const separator = <View style={{ height: 1, marginVertical: (SEPARATOR_H - 1) / 2, backgroundColor: colors.border }} />;
   const statusItem = (choice: StatusChoice, extra: Partial<MenuItemProps> = {}) => <MenuItem
-    key={choice.status} label={STATUS_LABEL[choice.status]} name={`${STATUS_LABEL[choice.status]} ${issue.identifier}${choice.blocked ? `，${choice.blocked}` : ""}`}
+    key={choice.status} label={STATUS_LABEL[choice.status]} name={`${STATUS_LABEL[choice.status]} ${issue.identifier}${choice.disabledReason ? `，${choice.disabledReason}` : ""}`}
     icon={<Icon icon={{ svg: STATUS_SVG[choice.status] }} size={14} color={choice.status === "cancelled" ? colors.statusDanger : statusColor(choice.status, colors)} />}
-    checked={choice.current} note={choice.blocked} disabled={choice.current || !!choice.blocked} colors={colors}
+    checked={choice.current} note={choice.disabledReason} disabled={choice.current || !!choice.disabledReason} colors={colors}
     onPress={() => run({ kind: "status", status: choice.status })} {...extra}
   />;
   return <>

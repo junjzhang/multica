@@ -267,7 +267,7 @@ it("leads every task with its status glyph and leaves finished work out", async 
 
 it("links the parent from a to-do row but not from a tree child sitting under it", async () => {
   const parent = { ...base, id: "p", identifier: "P", title: "总任务", status: "in_progress", url: "https://app.example/acme/issues/P" };
-  const kid = { ...base, id: "b", identifier: "B", title: "子任务 b", status: "blocked", statusCategory: "started", parentId: "p", parent: { identifier: "P", title: "总任务", url: "https://app.example/acme/issues/P" } };
+  const kid = { ...base, id: "b", identifier: "B", title: "子任务 b", status: "blocked", statusCategory: "started", parentId: "p", parent: { identifier: "P", title: "总任务", url: "https://app.example/acme/issues/P", closed: false } };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, kid], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
   await act(async () => { renderer = create(<BoardSection host={HOST} agentId="parent-link" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />); });
@@ -367,9 +367,9 @@ it("offers every status with the current one checked, done held back by an unacc
   const done = (extra: Partial<BoardIssue>) => menu(extra).statuses.find((choice) => choice.status === "done");
   expect(done({})).toEqual({ status: "done", current: false });
   expect(done({ contract: { accepted: true } })).toEqual({ status: "done", current: false });
-  expect(done({ contract: { accepted: false } })).toEqual({ status: "done", current: false, blocked: "需先验收合同" });
+  expect(done({ contract: { accepted: false } })).toEqual({ status: "done", current: false, disabledReason: "需先验收合同" });
   expect(done({ status: "done", contract: { accepted: false } })).toEqual({ status: "done", current: true });
-  expect(menu({ contract: { accepted: false } }).statuses.filter((choice) => choice.blocked).map((choice) => choice.status)).toEqual(["done"]);
+  expect(menu({ contract: { accepted: false } }).statuses.filter((choice) => choice.disabledReason).map((choice) => choice.status)).toEqual(["done"]);
   expect(menu({ lastRunFailed: true, lastFailure: { summary: "", taskId: "run-1" } }).rerunTaskId).toBe("run-1");
   // Without the failed run's id the server would rerun the assignee's own run, not the one that failed.
   expect(menu({ lastRunFailed: true }).rerunTaskId).toBeUndefined();
@@ -401,7 +401,7 @@ describe("a task row's ⋯ menu", () => {
   const failing: BoardIssue = {
     ...base, id: "fail", identifier: "WORK-60", title: "跑训练", status: "in_progress", url: "https://app.example/acme/issues/WORK-60",
     lastRunFailed: true, lastFailure: { summary: "OOM on rank 3", at: failedAt, taskId: "run-60" }, parentId: "parent-off-board",
-    parent: { identifier: "WORK-50", title: "feat(train): 训练总任务", url: "https://app.example/acme/issues/WORK-50" },
+    parent: { identifier: "WORK-50", title: "feat(train): 训练总任务", url: "https://app.example/acme/issues/WORK-50", closed: false },
     contract: { pendingActor: { type: "agent", id: "worker" }, pendingName: "开发 · Opus", accepted: false },
     pullRequests: [mr("61", "open", { ci: "failed" })], executionSession: { serverId: "srv_here", agentId: "worker" },
   };
@@ -568,16 +568,16 @@ describe("a task row's ⋯ menu", () => {
     await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
     await pressExact(renderer, "已完成 WORK-70");
     expect(runAction).toHaveBeenLastCalledWith({ agentId: "acts", issueId: "blk", action: { kind: "status", status: "done" } });
-    expect(text(renderer)).toContain("改为已完成失败：issue_contract_acceptance_required");
+    expect(text(renderer)).toContain("已完成：issue_contract_acceptance_required");
     expect(getBoard).not.toHaveBeenCalled();
     await pressExact(renderer, "关闭 WORK-70 的错误");
-    expect(text(renderer)).not.toContain("改为已完成失败");
+    expect(text(renderer)).not.toContain("已完成：");
     runAction.mockRejectedValueOnce(new Error("rpc unavailable"));
     await act(async () => { trigger(renderer, "WORK-70").props.onPress(); });
     await pressExact(renderer, "待规划 WORK-70");
-    expect(text(renderer)).toContain("改为待规划失败：rpc unavailable");
+    expect(text(renderer)).toContain("待规划：rpc unavailable");
     await pressExact(renderer, "刷新");
-    expect(text(renderer)).not.toContain("改为待规划失败");
+    expect(text(renderer)).not.toContain("待规划：");
     await act(async () => { renderer.unmount(); });
   });
 
@@ -617,6 +617,37 @@ describe("a task row's ⋯ menu", () => {
   });
 });
 
+it("folds left-over tasks under a closed parent into 遗留 after 搁置, out of the to-do blocks, with the menu still there", async () => {
+  const gone = { identifier: "WORK-40", title: "feat(x): 已结束的总任务", url: "https://app.example/acme/issues/WORK-40", closed: true };
+  const left: BoardIssue = { ...base, id: "left", identifier: "WORK-41", title: "遗留子任务", status: "blocked", parentId: "gone", parent: gone };
+  const review: BoardIssue = { ...base, id: "rev", identifier: "WORK-42", title: "遗留评审", status: "in_review", parentId: "gone", parent: gone, contract: { pendingActor: session, acceptor: session, accepted: false } };
+  const parked: BoardIssue = { ...base, id: "park", identifier: "WORK-43", title: "搁置任务", status: "backlog" };
+  getBoard.mockResolvedValueOnce({ ...ready("all"), issues: [left, review, parked], rootIds: ["left", "rev", "park"] });
+  const openTask = vi.fn();
+  let renderer: ReactTestRenderer;
+  await act(async () => { renderer = create(<BoardSection host={HOST} agentId="legacy" theme={{ colors: COLORS } as PluginAgentPanelProps["theme"]} openTask={openTask} />, { createNodeMock }); });
+  const heading = pressables(renderer!, "遗留")[0]!;
+  expect(heading.props.accessibilityState).toEqual({ expanded: false });
+  const before = text(renderer!);
+  expect(before).not.toMatch(/需要你|待本会话处理|进行中\n/);
+  expect(before.indexOf("搁置")).toBeLessThan(before.indexOf("遗留"));
+  expect(before).toMatch(/遗留\n2/);
+  expect(before).not.toContain("WORK-41");
+  expect(pressables(renderer!, "WORK-41 的操作")).toHaveLength(0);
+  await act(async () => { heading.props.onPress(); });
+  expect(pressables(renderer!, "遗留")[0]!.props.accessibilityState).toEqual({ expanded: true });
+  expect(pressables(renderer!, "WORK-41 阻塞 遗留子任务 父任务已结束")).toHaveLength(1);
+  expect(pressables(renderer!, "WORK-42 评审中 遗留评审 父任务已结束")).toHaveLength(1);
+  await pressExact(renderer!, "展开 WORK-41");
+  await pressExact(renderer!, "父任务 WORK-40 已结束的总任务");
+  expect(openTask).toHaveBeenLastCalledWith("https://app.example/acme/issues/WORK-40", "WORK-40");
+  await act(async () => { pressables(renderer!, "WORK-41 的操作")[0]!.props.onPress(); });
+  await pressExact(renderer!, "已完成 WORK-41");
+  expect(runAction).toHaveBeenLastCalledWith({ agentId: "legacy", issueId: "left", action: { kind: "status", status: "done" } });
+  await act(async () => { renderer!.unmount(); });
+  runAction.mockClear();
+});
+
 it("opens the menu below ⋯, or above it near the bottom, and keeps it inside the window", () => {
   const plain = taskMenu({ ...base, status: "in_progress" });
   const size = { width: 168, height: menuHeight(plain) };
@@ -636,7 +667,7 @@ it("opens the menu below ⋯, or above it near the bottom, and keeps it inside t
 
 it("opens a task listed both as a to-do and in the tree in both places at once", async () => {
   const parent: BoardIssue = { ...base, id: "p", identifier: "P", title: "父", status: "blocked" };
-  const child: BoardIssue = { ...base, id: "c", identifier: "C", title: "子", status: "in_progress", parentId: "p", parent: { identifier: "P", title: "父" } };
+  const child: BoardIssue = { ...base, id: "c", identifier: "C", title: "子", status: "in_progress", parentId: "p", parent: { identifier: "P", title: "父", closed: false } };
   getBoard.mockResolvedValueOnce({ ...ready("session"), issues: [parent, child], rootIds: ["p"] });
   let renderer: ReactTestRenderer;
   await act(async () => { renderer = create(<BoardSection host={HOST} agentId="both" theme={{ colors: {} } as PluginAgentPanelProps["theme"]} openTask={vi.fn()} />, { createNodeMock }); });
@@ -651,9 +682,9 @@ it("opens a task listed both as a to-do and in the tree in both places at once",
   await act(async () => { pressables(renderer!, "待规划 P")[0]!.props.onPress(); });
   expect(pressables(renderer!, "P 正在改为待规划").map((node) => node.props.disabled)).toEqual([true, true]);
   await act(async () => { settle({ ok: false, status: 409, reason: "busy" }); });
-  expect(text(renderer!).split("改为待规划失败：busy").length).toBe(3);
+  expect(text(renderer!).split("待规划：busy").length).toBe(3);
   await act(async () => { pressables(renderer!, "关闭 P 的错误")[1]!.props.onPress(); });
-  expect(text(renderer!)).not.toContain("改为待规划失败");
+  expect(text(renderer!)).not.toContain("待规划：");
   expect(runAction).toHaveBeenCalledTimes(1);
   await act(async () => { renderer!.unmount(); });
 });

@@ -243,6 +243,9 @@ func ProbeMuseAppReceptionist(ctx context.Context, endpoint, token string) (stri
 }
 
 func (b *museappBackend) Execute(ctx context.Context, prompt string, opts ExecOptions) (*Session, error) {
+	if err := requireStrictResume(opts); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(prompt) == "" {
 		return nil, fmt.Errorf("muse prompt must not be empty")
 	}

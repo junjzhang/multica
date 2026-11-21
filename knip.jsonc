@@ -57,6 +57,16 @@
       "entry": ["eslint.config.mjs"]
     },
 
+    "integrations/paseo-multica": {
+      "entry": [
+        "index.client.tsx",
+        "index.server.ts",
+        "tests/browser/fixture.tsx",
+        "tests/browser/native.tsx",
+        "tests/browser/rpc.tsx"
+      ]
+    },
+
     // The three shared packages export raw .ts/.tsx compiled by their
     // consumers (CLAUDE.md "Project Shape"), so `entry` names only the config
     // files knip would otherwise miss and the apps supply the real entry

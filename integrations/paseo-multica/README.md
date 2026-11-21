@@ -102,7 +102,9 @@ The panel has two parts:
   acceptance, its own pending turn, an unmerged MR of a closed task, and an
   anomaly. The to-do kinds are unchanged; only the two blocks and their titles
   differ. The pill counts both, since both are still open work.
-- **Task trees**, split into 需要处理 / 进行中 / 搁置, with 搁置 folded. Finished
+- **Task trees**, split into 需要处理 / 进行中 / 搁置 / 遗留, with 搁置 and 遗留
+  folded. 遗留 holds left-over trees whose parent is already closed; their rows
+  read 父任务已结束 and keep the ⋯ menu, so they can be closed in place. Finished
   work is left out: a closed tree is not listed, and a closed child with no open
   MR counts only in its parent's progress. Every task row leads with Multica's
   status glyph (dotted backlog, ring todo, half in progress, three quarters in
@@ -145,7 +147,8 @@ first press turns it into 确认取消？ and only the second runs it. Running a
 action closes the menu and ⋯ spins. An action's state belongs to its task, so a
 task open in two places shows the same running state in both; success reloads
 the board, and a refusal shows the server's reason (including a 409) as one line
-under the row, until dismissed or the next reload.
+under the row, until dismissed or the next reload. The line names the action the
+way the menu does: `已完成：<reason>` for a status, `重跑失败：<reason>` for a rerun.
 
 Actions are written with the plugin's owner profile, never the session's token:
 `PUT /api/issues/{id}` with `{"status": …}` for a status change and
@@ -174,6 +177,10 @@ quick actions described above.
 进行中:   an active run (queued, dispatched, running, waiting_local_directory, deferred)
           or the executor's turn, not backlog, last_activity_at within STALE_AFTER_DAYS
 搁置:     every other open task, counted as Backlog, 7 天无动静, or 其他 when still fresh
+遗留:     an open root whose direct parent is done or cancelled, with its whole subtree;
+          it overrides the sections above and raises no to-do, in both views;
+          a child whose closed parent is itself on the board (a done task with an
+          open MR) stays in that parent's tree and is classified as usual
 no contract: in_review is this session's acceptance only when its coordinator is bound
              to this session; every other task counts as the executor's turn
 STALE_AFTER_DAYS = 7
